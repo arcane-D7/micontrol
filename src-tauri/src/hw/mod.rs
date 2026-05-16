@@ -1,0 +1,11 @@
+pub mod battery;
+pub mod charging;
+pub mod discovery;
+pub mod display;
+pub mod fan;
+pub mod hotkeys;
+pub mod performance;
+pub mod startup;
+pub mod system_info;
+pub mod touchpad;
+pub mod update;

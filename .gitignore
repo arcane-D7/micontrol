@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+
+# Rust / Tauri build
+src-tauri/target/
+
+# Vite cache
+.vite/
+
+# TypeScript incremental cache
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+*.txt
+npm-debug.log*
+
+# Editor directories
+.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Tauri generated (kept in source control, but platform-specific):
+# Uncomment the lines below if you do NOT want generated schemas committed
+# src-tauri/gen/
