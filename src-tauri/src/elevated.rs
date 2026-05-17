@@ -167,6 +167,74 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        "set_touchpad_haptics_intensity" => {
+            let intensity: crate::hw::touchpad::HapticsIntensity =
+                match serde_json::from_value(cmd.args["intensity"].clone()) {
+                    Ok(v) => v,
+                    Err(e) => return make_err(format!("Bad intensity arg: {e}")),
+                };
+            match crate::hw::touchpad::set_touchpad_haptics_intensity(intensity) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_touchpad_gesture_screenshot" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::touchpad::set_touchpad_gesture_screenshot(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_touchpad_repress" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::touchpad::set_touchpad_repress(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_touchpad_edge_slide" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::touchpad::set_touchpad_edge_slide(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+
+        "set_refresh_rate" => {
+            let hz: u32 = match serde_json::from_value(cmd.args["hz"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad hz arg: {e}")),
+            };
+            match crate::hw::display::set_refresh_rate(hz) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_adaptive_refresh_rate" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::display::set_intel_drrs(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
         "run_hardware_discovery" => {
             let data_dir = std::env::var("APPDATA")
                 .ok()

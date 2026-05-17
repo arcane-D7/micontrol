@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <clipPath id="clip">
+      <rect width="512" height="512" rx="96"/>
+    </clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#141c2b"/>
+      <stop offset="100%" stop-color="#0d1117"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- All artwork clipped to the rounded-rect shape -->
+  <g clip-path="url(#clip)">
+
+    <!-- M letterform — bold, circuit-trace style -->
+    <!-- Left stem: top-left corner down -->
+    <!-- Left diagonal: top-left → center peak -->
+    <!-- Right diagonal: center peak → top-right -->
+    <!-- Right stem: top-right corner down -->
+    <polyline
+      points="76,400 76,90 256,226 436,90 436,400"
+      fill="none"
+      stroke="white"
+      stroke-width="56"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <!-- Circuit node dots at the M stem bases (periwinkle accent) -->
+    <circle cx="76"  cy="400" r="28" fill="#6875E8"/>
+    <circle cx="436" cy="400" r="28" fill="#6875E8"/>
+
+    <!-- Accent underbar — the "control" element -->
+    <line
+      x1="76" y1="452" x2="436" y2="452"
+      stroke="#6875E8"
+      stroke-width="28"
+      stroke-linecap="round"
+    />
+
+  </g>
+</svg>

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // ── Type definitions matching Rust structs ───────────────────────────────────
 
@@ -12,15 +12,30 @@ export type PerformanceMode =
   | "decepticon"
   | "smart_acceleration";
 
+export interface PerformanceResult {
+  success: boolean;
+  method: string;
+  mode: PerformanceMode;
+}
+
 export interface SystemInfo {
   cpu_name: string;
   cpu_cores: number;
   cpu_threads: number;
   cpu_usage: number;
   gpu_name: string;
+  gpu_usage: number;
+  vram_used_mb: number;
   ram_total_gb: number;
   ram_used_gb: number;
   os_version: string;
+}
+
+export interface ProcessInfo {
+  name: string;
+  pid: number;
+  cpu_percent: number;
+  memory_mb: number;
 }
 
 export interface BatteryInfo {
@@ -49,20 +64,47 @@ export interface DisplayInfo {
   brightness: number;
   hdr_enabled: boolean;
   refresh_rate_hz: number;
+  /** All Hz values supported at the current resolution. */
+  available_refresh_rates: number[];
+  /** True when current Hz is the max — Windows 11 DRR activates automatically. */
+  dynamic_refresh_rate_capable: boolean;
+  /** Intel PSR2 DRRS — driver-level automatic 60↔120 Hz switching. */
+  adaptive_refresh_rate: boolean;
   ai_brightness: boolean;
   ai_brightness_config: AiBrightnessConfig;
+  /** Current ambient illuminance from the light sensor (lux). Null when unavailable. */
+  ambient_lux: number | null;
 }
 
-export interface FanInfo {
-  mode: "auto" | "fixed" | "off";
+export interface FanInfo {  mode: "auto" | "fixed" | "off";
   speed_rpm: number;
   speed_percent: number;
   gpu_temp_celsius: number;
+  cpu_temp_celsius: number;
+  /** System package power from RAPL (\\Power Meter(_Total)\\Power). Null for ~1.5 s after launch. */
+  tdp_watts: number | null;
+}
+
+export interface AiPerfLogEntry {
+  /** ISO-8601 timestamp */
+  ts: string;
+  /** "smart" | "smart_acceleration" */
+  mode: string;
+  cpu_temp: number;
+  gpu_temp: number;
+  tdp_watts: number | null;
+  cpu_pct: number;
+  gpu_pct: number;
+  note?: string | null;
 }
 
 export interface TouchpadInfo {
   sensitivity: "low" | "medium" | "high";
   haptics_enabled: boolean;
+  haptics_intensity: "low" | "medium" | "high";
+  gesture_screenshot: boolean;
+  trackpad_repress: boolean;
+  edge_slide: boolean;
 }
 
 export interface BiosInfo {
@@ -135,6 +177,7 @@ export function useHardware() {
   const [touchpad, setTouchpad] = useState<TouchpadInfo | null>(null);
   const [performanceMode, setPerformanceModeState] =
     useState<PerformanceMode>("balance");
+  const [lastPerfResult, setLastPerfResult] = useState<PerformanceResult | null>(null);
   const [chargingThreshold, setChargingThresholdState] = useState<number>(80);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -143,8 +186,14 @@ export function useHardware() {
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfile | null>(null);
   const [loadingDiscovery, setLoadingDiscovery] = useState(false);
 
+  const hasLoadedOnce = useRef(false);
+  // Prevent the 2 s poll from overwriting optimistic touchpad state immediately
+  // after a user write. Cleared automatically once the lock expires.
+  const touchpadDirtyUntil = useRef<number>(0);
+  const touchpadRef = useRef<TouchpadInfo | null>(null);
+
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedOnce.current) setLoading(true);
     setError(null);
     try {
       const [sys, bat, disp, fanData, tp, pm, ct] = await Promise.allSettled([
@@ -160,25 +209,31 @@ export function useHardware() {
       if (bat.status === "fulfilled") setBattery(bat.value);
       if (disp.status === "fulfilled") setDisplay(disp.value);
       if (fanData.status === "fulfilled") setFan(fanData.value);
-      if (tp.status === "fulfilled") setTouchpad(tp.value);
+      // Only update touchpad from poll when no user write is in flight.
+      if (tp.status === "fulfilled" && Date.now() >= touchpadDirtyUntil.current)
+        setTouchpad(tp.value);
       if (pm.status === "fulfilled") setPerformanceModeState(pm.value);
       if (ct.status === "fulfilled") setChargingThresholdState(ct.value);
     } catch (e) {
       setError(String(e));
     } finally {
+      hasLoadedOnce.current = true;
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void refresh();
-    const interval = setInterval(() => void refresh(), 5000);
+    // Poll every 2 s so external hardware changes (Fn brightness keys,
+    // Windows power events, fan speed fluctuations) are reflected quickly.
+    const interval = setInterval(() => void refresh(), 2000);
     return () => clearInterval(interval);
   }, [refresh]);
 
   const setPerformanceMode = useCallback(async (mode: PerformanceMode) => {
-    await invoke("set_performance_mode", { mode });
-    setPerformanceModeState(mode);
+    const result = await invoke<PerformanceResult>("set_performance_mode", { mode });
+    setPerformanceModeState(result.mode);
+    setLastPerfResult(result);
   }, []);
 
   const setChargingThreshold = useCallback(async (threshold: number) => {
@@ -216,17 +271,103 @@ export function useHardware() {
     []
   );
 
+  // Keep a stable ref to current touchpad state so error-revert closures
+  // (with empty deps) can restore the previous snapshot.
+  useEffect(() => { touchpadRef.current = touchpad; }, [touchpad]);
+
   const setTouchpadSensitivity = useCallback(
     async (sensitivity: "low" | "medium" | "high") => {
-      await invoke("set_touchpad_sensitivity", { sensitivity });
-      setTouchpad((prev) => (prev ? { ...prev, sensitivity } : null));
+      const snap = touchpadRef.current;
+      touchpadDirtyUntil.current = Date.now() + 3000;
+      setTouchpad((s) => (s ? { ...s, sensitivity } : null));
+      try {
+        await invoke("set_touchpad_sensitivity", { sensitivity });
+      } catch (e) {
+        setTouchpad(snap);
+        console.error("[touchpad] set_touchpad_sensitivity failed:", e);
+        throw e;
+      }
     },
     []
   );
 
   const setTouchpadHaptics = useCallback(async (enabled: boolean) => {
-    await invoke("set_touchpad_haptics", { enabled });
-    setTouchpad((prev) => (prev ? { ...prev, haptics_enabled: enabled } : null));
+    const snap = touchpadRef.current;
+    touchpadDirtyUntil.current = Date.now() + 3000;
+    setTouchpad((s) => (s ? { ...s, haptics_enabled: enabled } : null));
+    try {
+      await invoke("set_touchpad_haptics", { enabled });
+    } catch (e) {
+      setTouchpad(snap);
+      console.error("[touchpad] set_touchpad_haptics failed:", e);
+      throw e;
+    }
+  }, []);
+
+  const setTouchpadHapticsIntensity = useCallback(async (intensity: "low" | "medium" | "high") => {
+    const snap = touchpadRef.current;
+    touchpadDirtyUntil.current = Date.now() + 3000;
+    setTouchpad((s) => (s ? { ...s, haptics_intensity: intensity } : null));
+    try {
+      await invoke("set_touchpad_haptics_intensity", { intensity });
+    } catch (e) {
+      setTouchpad(snap);
+      console.error("[touchpad] set_touchpad_haptics_intensity failed:", e);
+      throw e;
+    }
+  }, []);
+
+  const setTouchpadGestureScreenshot = useCallback(async (enabled: boolean) => {
+    const snap = touchpadRef.current;
+    touchpadDirtyUntil.current = Date.now() + 3000;
+    setTouchpad((s) => (s ? { ...s, gesture_screenshot: enabled } : null));
+    try {
+      await invoke("set_touchpad_gesture_screenshot", { enabled });
+    } catch (e) {
+      setTouchpad(snap);
+      console.error("[touchpad] set_touchpad_gesture_screenshot failed:", e);
+      throw e;
+    }
+  }, []);
+
+  const setTouchpadRepress = useCallback(async (enabled: boolean) => {
+    const snap = touchpadRef.current;
+    touchpadDirtyUntil.current = Date.now() + 3000;
+    setTouchpad((s) => (s ? { ...s, trackpad_repress: enabled } : null));
+    try {
+      await invoke("set_touchpad_repress", { enabled });
+    } catch (e) {
+      setTouchpad(snap);
+      console.error("[touchpad] set_touchpad_repress failed:", e);
+      throw e;
+    }
+  }, []);
+
+  const setTouchpadEdgeSlide = useCallback(async (enabled: boolean) => {
+    const snap = touchpadRef.current;
+    touchpadDirtyUntil.current = Date.now() + 3000;
+    setTouchpad((s) => (s ? { ...s, edge_slide: enabled } : null));
+    try {
+      await invoke("set_touchpad_edge_slide", { enabled });
+    } catch (e) {
+      setTouchpad(snap);
+      console.error("[touchpad] set_touchpad_edge_slide failed:", e);
+      throw e;
+    }
+  }, []);
+
+  const setRefreshRate = useCallback(async (hz: number) => {
+    await invoke("set_refresh_rate", { hz });
+    setDisplay((prev) => (prev ? { ...prev, refresh_rate_hz: hz } : null));
+  }, []);
+
+  const setAdaptiveRefreshRate = useCallback(async (enabled: boolean) => {
+    await invoke("set_adaptive_refresh_rate", { enabled });
+    setDisplay((prev) => (prev ? { ...prev, adaptive_refresh_rate: enabled } : null));
+  }, []);
+
+  const getProcessList = useCallback(async () => {
+    return invoke<ProcessInfo[]>("get_process_list");
   }, []);
 
   // Update status is NOT polled — fetched once on mount + manually
@@ -275,6 +416,19 @@ export function useHardware() {
     return invoke<string>("install_driver", { driverName });
   }, []);
 
+  // ── AI performance log commands ───────────────────────────────────────────
+  const writeAiPerfLog = useCallback(async (entry: AiPerfLogEntry) => {
+    await invoke("write_ai_perf_log", { entry });
+  }, []);
+
+  const readAiPerfLogs = useCallback(async (limit?: number) => {
+    return invoke<AiPerfLogEntry[]>("read_ai_perf_logs", { limit });
+  }, []);
+
+  const openAiLogsDir = useCallback(async () => {
+    await invoke("open_ai_logs_dir");
+  }, []);
+
   useEffect(() => {
     void refreshHardwareProfile();
   }, [refreshHardwareProfile]);
@@ -286,6 +440,7 @@ export function useHardware() {
     fan,
     touchpad,
     performanceMode,
+    lastPerfResult,
     chargingThreshold,
     loading,
     error,
@@ -299,6 +454,10 @@ export function useHardware() {
     setFanMode,
     setTouchpadSensitivity,
     setTouchpadHaptics,
+    setTouchpadHapticsIntensity,
+    setTouchpadGestureScreenshot,
+    setTouchpadRepress,
+    setTouchpadEdgeSlide,
     updateStatus,
     loadingUpdate,
     refreshUpdateStatus,
@@ -307,5 +466,11 @@ export function useHardware() {
     refreshHardwareProfile,
     runHardwareDiscovery,
     installDriver,
+    setRefreshRate,
+    setAdaptiveRefreshRate,
+    getProcessList,
+    writeAiPerfLog,
+    readAiPerfLogs,
+    openAiLogsDir,
   };
 }

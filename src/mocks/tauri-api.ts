@@ -21,6 +21,7 @@ let _performanceMode: PerformanceMode = "balance";
 let _chargingThreshold = 80;
 let _brightness = 72;
 let _hdr = false;
+let _adaptiveRefreshRate = true;
 let _aiBrightness = true;
 let _aiBrightnessConfig: AiBrightnessConfig = {
   enabled: true,
@@ -33,6 +34,10 @@ let _fanMode: "auto" | "fixed" | "off" = "auto";
 let _fanSpeedPercent = 0;
 let _touchpadSensitivity: "low" | "medium" | "high" = "high";
 let _touchpadHaptics = true;
+let _touchpadHapticsIntensity: "low" | "medium" | "high" = "medium";
+let _touchpadGestureScreenshot = false;
+let _touchpadRepress = false;
+let _touchpadEdgeSlide = false;
 let _autostart = false;
 
 // ── Mock data ────────────────────────────────────────────────────────────────
@@ -43,6 +48,8 @@ const SYSTEM_INFO: SystemInfo = {
   cpu_threads: 20,
   cpu_usage: 23.4,
   gpu_name: "NVIDIA GeForce RTX 3060 Laptop GPU",
+  gpu_usage: 12.5,
+  vram_used_mb: 1024,
   ram_total_gb: 16,
   ram_used_gb: 8.3,
   os_version: "Windows 11 Home 23H2 (26100.3915)",
@@ -148,6 +155,7 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return {
         ...SYSTEM_INFO,
         cpu_usage: Math.round(drift(23, 18) * 10) / 10,
+        gpu_usage: Math.round(drift(12, 10) * 10) / 10,
         ram_used_gb: Math.round(drift(8.3, 0.8) * 10) / 10,
       } as T;
 
@@ -164,12 +172,35 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         brightness: _brightness,
         hdr_enabled: _hdr,
         refresh_rate_hz: 120,
+        available_refresh_rates: [60, 120],
+        dynamic_refresh_rate_capable: true,
+        adaptive_refresh_rate: _adaptiveRefreshRate,
         ai_brightness: _aiBrightness,
         ai_brightness_config: { ..._aiBrightnessConfig },
+        ambient_lux: 342.0,
       } as T;
 
     case "set_brightness":
       _brightness = (args?.level as number) ?? _brightness;
+      return undefined as T;
+
+    case "get_available_refresh_rates":
+      return [60, 120] as T;
+
+    case "set_refresh_rate":
+      return undefined as T;
+
+    case "get_process_list":
+      return [
+        { name: "chrome", pid: 1234, cpu_percent: drift(8, 6), memory_mb: 512 },
+        { name: "Code", pid: 2345, cpu_percent: drift(3, 3), memory_mb: 256 },
+        { name: "Tauri", pid: 3456, cpu_percent: drift(1, 1), memory_mb: 128 },
+        { name: "explorer", pid: 456, cpu_percent: drift(0.5, 0.5), memory_mb: 64 },
+        { name: "System", pid: 4, cpu_percent: drift(0.3, 0.3), memory_mb: 32 },
+      ] as T;
+
+    case "set_adaptive_refresh_rate":
+      _adaptiveRefreshRate = (args?.enabled as boolean) ?? _adaptiveRefreshRate;
       return undefined as T;
 
     case "set_hdr":
@@ -212,6 +243,10 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return {
         sensitivity: _touchpadSensitivity,
         haptics_enabled: _touchpadHaptics,
+        haptics_intensity: _touchpadHapticsIntensity,
+        gesture_screenshot: _touchpadGestureScreenshot,
+        trackpad_repress: _touchpadRepress,
+        edge_slide: _touchpadEdgeSlide,
       } as T;
 
     case "set_touchpad_sensitivity":
@@ -220,6 +255,22 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
 
     case "set_touchpad_haptics":
       _touchpadHaptics = (args?.enabled as boolean) ?? _touchpadHaptics;
+      return undefined as T;
+
+    case "set_touchpad_haptics_intensity":
+      _touchpadHapticsIntensity = (args?.intensity as "low" | "medium" | "high") ?? _touchpadHapticsIntensity;
+      return undefined as T;
+
+    case "set_touchpad_gesture_screenshot":
+      _touchpadGestureScreenshot = (args?.enabled as boolean) ?? _touchpadGestureScreenshot;
+      return undefined as T;
+
+    case "set_touchpad_repress":
+      _touchpadRepress = (args?.enabled as boolean) ?? _touchpadRepress;
+      return undefined as T;
+
+    case "set_touchpad_edge_slide":
+      _touchpadEdgeSlide = (args?.enabled as boolean) ?? _touchpadEdgeSlide;
       return undefined as T;
 
     // ── Performance ────────────────────────────────────────────────────────

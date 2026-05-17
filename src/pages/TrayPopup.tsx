@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { t } from "../hooks/useI18n";
 import type { useHardware, PerformanceMode } from "../hooks/useHardware";
 import { BRIGHTNESS_PRESETS, getActivePreset } from "../lib/brightnessPresets";
@@ -34,6 +34,25 @@ export default function TrayPopup({ hardware }: Props) {
   const [showDisplay, setShowDisplay] = useState(false);
   const [showFan, setShowFan] = useState(false);
   const [localBrightness, setLocalBrightness] = useState(display?.brightness ?? 80);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Auto-resize the OS window to match content height, growing upward.
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    let rafId = 0;
+    const observer = new ResizeObserver((entries) => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        const h = entries[0]?.contentRect.height;
+        if (h && h > 0) {
+          void invoke("resize_tray_popup", { height: Math.ceil(h) });
+        }
+      });
+    });
+    observer.observe(el);
+    return () => { observer.disconnect(); cancelAnimationFrame(rafId); };
+  }, []);
 
   // Sync local brightness when hardware updates
   useEffect(() => {
@@ -45,7 +64,7 @@ export default function TrayPopup({ hardware }: Props) {
   };
 
   return (
-    <div className="tray-popup">
+    <div className="tray-popup" ref={rootRef}>
       <div className="tray-header">
         <span className="tray-title">MiControl</span>
         <button

@@ -3,6 +3,7 @@ import MainWindow from "./pages/MainWindow";
 import TrayPopup from "./pages/TrayPopup";
 import { useHardware } from "./hooks/useHardware";
 import { useLanguage } from "./hooks/useI18n";
+import { ToastProvider } from "./contexts/ToastContext";
 
 export type ThemeMode = "auto" | "light" | "dark";
 
@@ -34,17 +35,27 @@ export default function App() {
   // Subscribe to language changes so the entire tree re-renders on locale switch
   useLanguage();
 
+  useEffect(() => {
+    if (isTrayPopup) document.documentElement.classList.add("tray-window");
+  }, []);
+
   if (isTrayPopup) {
-    return <TrayPopup hardware={hardware} />;
+    return (
+      <ToastProvider>
+        <TrayPopup hardware={hardware} />
+      </ToastProvider>
+    );
   }
 
   return (
-    <MainWindow
-      hardware={hardware}
-      activeTab={activeTab}
-      onTabChange={setActiveTab}
-      themeMode={themeMode}
-      toggleTheme={toggleTheme}
-    />
+    <ToastProvider>
+      <MainWindow
+        hardware={hardware}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        themeMode={themeMode}
+        toggleTheme={toggleTheme}
+      />
+    </ToastProvider>
   );
 }

@@ -5,6 +5,7 @@ pub mod display;
 pub mod fan;
 pub mod hotkeys;
 pub mod performance;
+pub mod processes;
 pub mod startup;
 pub mod system_info;
 pub mod touchpad;

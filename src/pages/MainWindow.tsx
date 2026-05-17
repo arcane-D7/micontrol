@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import type { ThemeMode } from "../App";
 import { t } from "../hooks/useI18n";
 import type { useHardware } from "../hooks/useHardware";
 import TrayPopup from "./TrayPopup";
 import { useSettings } from "../hooks/useSettings";
 import PerformanceModeSelector from "../components/PerformanceModeSelector";
+import PerformanceMonitor from "../components/PerformanceMonitor";
 import BatteryInfoCard from "../components/BatteryInfo";
 import ChargingThreshold from "../components/ChargingThreshold";
 import DisplaySettings from "../components/DisplaySettings";
@@ -16,6 +17,7 @@ import UpdateManager from "../components/UpdateManager";
 import HardwareDiscovery from "../components/HardwareDiscovery";
 import AiAdvisor from "../components/AiAdvisor";
 import SettingsPage from "../components/SettingsPage";
+import { MiControlIcon } from "../components/MiControlIcon";
 
 type Hardware = ReturnType<typeof useHardware>;
 
@@ -58,7 +60,7 @@ function OverviewTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettings;
     <>
       <PageHeader title={t("overview.title")} />
       <div className="grid-2">
-        <SystemInfoCard info={hw.systemInfo} />
+        <SystemInfoCard info={hw.systemInfo} getProcessList={hw.getProcessList} />
         <BatteryInfoCard battery={hw.battery} />
       </div>
       <div className="card">
@@ -74,16 +76,147 @@ function OverviewTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettings;
   );
 }
 
-function PerformanceTab({ hw }: { hw: Hardware }) {
+function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettings; onOpenSettings: () => void }) {
+  const aiApiKeySet = !!ai.settings.openai_api_key;
+  const isAiMode = hw.performanceMode === "smart" || hw.performanceMode === "smart_acceleration";
+
+  // ── Background logger: write a snapshot every 30 s when an AI mode is active ──
+  // Uses refs to always read the latest hw values without re-registering the interval.
+  const fanRef = useRef(hw.fan);
+  const sysRef = useRef(hw.systemInfo);
+  const modeRef = useRef(hw.performanceMode);
+  fanRef.current = hw.fan;
+  sysRef.current = hw.systemInfo;
+  modeRef.current = hw.performanceMode;
+
+  useEffect(() => {
+    if (!isAiMode || !aiApiKeySet) return;
+    const writeEntry = () => {
+      const f = fanRef.current;
+      const s = sysRef.current;
+      if (!f && !s) return;
+      const entry = {
+        ts: new Date().toISOString().replace("T", " ").slice(0, 19),
+        mode: modeRef.current,
+        cpu_temp: f?.cpu_temp_celsius ?? 0,
+        gpu_temp: f?.gpu_temp_celsius ?? 0,
+        tdp_watts: f?.tdp_watts ?? null,
+        cpu_pct: s?.cpu_usage ?? 0,
+        gpu_pct: s?.gpu_usage ?? 0,
+        note: null,
+      };
+      void hw.writeAiPerfLog(entry);
+    };
+    writeEntry(); // immediate first entry
+    const id = setInterval(writeEntry, 30_000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAiMode, aiApiKeySet]);
+
+  // ── Log viewer state ──────────────────────────────────────────────────────
+  const [showLogs, setShowLogs] = useState(false);
+  const [logEntries, setLogEntries] = useState<import("../hooks/useHardware").AiPerfLogEntry[]>([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+
+  const loadLogs = useCallback(async () => {
+    setLoadingLogs(true);
+    try {
+      const entries = await hw.readAiPerfLogs(50);
+      setLogEntries(entries);
+    } catch { /* non-fatal */ }
+    finally { setLoadingLogs(false); }
+  }, [hw]);
+
+  useEffect(() => {
+    if (showLogs) void loadLogs();
+  }, [showLogs, loadLogs]);
+
   return (
     <>
       <PageHeader title={t("performance.title")} subtitle={t("performance.subtitle")} />
+      <PerformanceMonitor
+        fan={hw.fan}
+        systemInfo={hw.systemInfo}
+        currentMode={hw.performanceMode}
+        lastResult={hw.lastPerfResult}
+      />
       <div className="card">
         <PerformanceModeSelector
           current={hw.performanceMode}
           onChange={hw.setPerformanceMode}
           disabled={hw.loading}
+          aiApiKeySet={aiApiKeySet}
+          onOpenSettings={onOpenSettings}
         />
+      </div>
+
+      {/* AI log viewer — shown only when AI modes have been used */}
+      <div className="card">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showLogs ? 14 : 0 }}>
+          <div>
+            <div className="card-title" style={{ marginBottom: 2 }}>AI Mode Logs</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              {isAiMode && aiApiKeySet
+                ? "Logging active — snapshot every 30 s"
+                : aiApiKeySet
+                  ? "Configure a Smart mode to start logging"
+                  : "Configure AI API key in Settings to enable logging"}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn-secondary" style={{ fontSize: 12 }} onClick={() => { setShowLogs(v => !v); }}>
+              {showLogs ? "Hide" : "View Logs"}
+            </button>
+            <button className="btn-secondary" style={{ fontSize: 12 }} onClick={() => void hw.openAiLogsDir()} title="Open log folder in Explorer">
+              📂
+            </button>
+          </div>
+        </div>
+
+        {showLogs && (
+          <div>
+            {loadingLogs ? (
+              <div style={{ textAlign: "center", color: "var(--text-dim)", padding: "16px 0", fontSize: 13 }}>Loading…</div>
+            ) : logEntries.length === 0 ? (
+              <div style={{ textAlign: "center", color: "var(--text-dim)", padding: "16px 0", fontSize: 13 }}>
+                No log entries yet. Activate Smart or Smart Acceleration mode to start recording.
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ color: "var(--text-muted)", borderBottom: "1px solid var(--border)" }}>
+                      <th style={{ textAlign: "left", padding: "4px 8px", fontWeight: 500 }}>Time</th>
+                      <th style={{ textAlign: "left", padding: "4px 8px", fontWeight: 500 }}>Mode</th>
+                      <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 500 }}>CPU°C</th>
+                      <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 500 }}>GPU°C</th>
+                      <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 500 }}>TDP W</th>
+                      <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 500 }}>CPU%</th>
+                      <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 500 }}>GPU%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {logEntries.map((e, i) => (
+                      <tr key={i} style={{ borderBottom: "1px solid var(--border-faint, var(--border))" }}>
+                        <td style={{ padding: "4px 8px", fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>{e.ts.slice(11)}</td>
+                        <td style={{ padding: "4px 8px", color: "var(--accent)" }}>{e.mode}</td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", fontFamily: "var(--font-mono)" }}>{e.cpu_temp.toFixed(0)}</td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", fontFamily: "var(--font-mono)" }}>{e.gpu_temp.toFixed(0)}</td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", fontFamily: "var(--font-mono)" }}>{e.tdp_watts != null ? e.tdp_watts.toFixed(1) : "—"}</td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", fontFamily: "var(--font-mono)" }}>{e.cpu_pct.toFixed(0)}</td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", fontFamily: "var(--font-mono)" }}>{e.gpu_pct.toFixed(0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>Showing {logEntries.length} most recent entries</span>
+                  <button className="btn-secondary" style={{ fontSize: 11 }} onClick={() => void loadLogs()}>↻ Refresh</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </>
   );
@@ -113,6 +246,8 @@ function DisplayTab({ hw }: { hw: Hardware }) {
         onHdrChange={hw.setHdr}
         onAiBrightnessChange={hw.setAiBrightness}
         onAiBrightnessConfigChange={hw.setAiBrightnessConfig}
+        onRefreshRateChange={hw.setRefreshRate}
+        onAdaptiveRefreshRateChange={hw.setAdaptiveRefreshRate}
       />
     </>
   );
@@ -136,6 +271,10 @@ function TouchpadTab({ hw }: { hw: Hardware }) {
         capabilities={hw.hardwareProfile?.capabilities}
         onSensitivityChange={hw.setTouchpadSensitivity}
         onHapticsChange={hw.setTouchpadHaptics}
+        onHapticsIntensityChange={hw.setTouchpadHapticsIntensity}
+        onGestureScreenshotChange={hw.setTouchpadGestureScreenshot}
+        onRepressChange={hw.setTouchpadRepress}
+        onEdgeSlideChange={hw.setTouchpadEdgeSlide}
       />
     </>
   );
@@ -441,7 +580,7 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
   function renderTab() {
     switch (activeTab) {
       case "overview":   return <OverviewTab hw={hardware} ai={aiSettings} onOpenSettings={() => onTabChange("settings")} />;
-      case "performance": return <PerformanceTab hw={hardware} />;
+      case "performance": return <PerformanceTab hw={hardware} ai={aiSettings} onOpenSettings={() => onTabChange("settings")} />;
       case "battery":    return <BatteryTab hw={hardware} />;
       case "display":    return <DisplayTab hw={hardware} />;
       case "fan":        return <FanTab hw={hardware} />;
@@ -460,7 +599,7 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
     <div className="app-layout">
       <nav className="sidebar">
         <div className="sidebar-logo">
-          <span className="sidebar-logo-dot" />
+          <MiControlIcon size={22} />
           MiControl
         </div>
         {NAV_ITEMS.map((item) => (
@@ -489,7 +628,7 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
             <ThemeIcon mode={themeMode} />
             <span>{THEME_LABELS[themeMode]}</span>
           </button>
-          <button
+          {import.meta.env.DEV && <button
             className="theme-toggle"
             onClick={() => setShowTrayPreview(true)}
             title="Preview tray popup"
@@ -501,7 +640,7 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
               <line x1="7" y1="12.5" x2="7" y2="12.5" strokeWidth="2" />
             </svg>
             <span>Tray</span>
-          </button>
+          </button>}
         </div>
       </nav>
 

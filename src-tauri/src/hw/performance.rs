@@ -40,24 +40,39 @@ pub struct PerformanceResult {
     pub mode: PerformanceMode,
 }
 
-/// Set the performance mode via VHF device + registry.
-/// Falls back to registry-only if the VHF device cannot be opened.
+/// Set the performance mode via WMI (HQWmiCommonInterface) + registry + Windows power overlay.
+/// Falls back to VHF, then registry-only if WMI is unavailable.
 pub fn set_performance_mode(mode: PerformanceMode) -> Result<PerformanceResult> {
     // Always persist to registry
     persist_to_registry(mode)?;
 
-    // Attempt VHF device path
+    // Also sync the Windows 11 power overlay so the native power settings
+    // slider reflects the change (requires this process to be elevated).
+    set_windows_power_overlay(mode);
+
+    // Attempt WMI HQWmiCommonInterface first (real TDP control on Xiaomi Book Pro 14)
+    #[cfg(windows)]
+    match send_via_hq_wmi(mode) {
+        Ok(()) => return Ok(PerformanceResult {
+            success: true,
+            method: "hq_wmi+registry+overlay".to_string(),
+            mode,
+        }),
+        Err(e) => log::warn!("HQ WMI SetPerformanceMode failed, trying VHF: {e}"),
+    }
+
+    // Fall back to VHF device path
     match send_via_vhf(mode) {
         Ok(()) => Ok(PerformanceResult {
             success: true,
-            method: "vhf+registry".to_string(),
+            method: "vhf+registry+overlay".to_string(),
             mode,
         }),
         Err(e) => {
-            log::warn!("VHF send failed (using registry fallback): {e}");
+            log::warn!("VHF send failed (using registry+overlay fallback): {e}");
             Ok(PerformanceResult {
                 success: true,
-                method: "registry".to_string(),
+                method: "registry+overlay".to_string(),
                 mode,
             })
         }
@@ -65,54 +80,243 @@ pub fn set_performance_mode(mode: PerformanceMode) -> Result<PerformanceResult> 
 }
 
 /// Read current performance mode from registry.
+///
+/// Priority:
+///  1. Our own MI registry key — written by `set_performance_mode`, stores the
+///     **exact** mode including Silence (0), Smart (10), and SmartAcceleration (14)
+///     which all three Windows overlay GUIDs cannot distinguish on their own.
+///  2. Windows power overlay GUID — used as fallback to reflect external changes
+///     made by XiaomiPcManager or the Windows Settings power slider.
+///
+/// The previous approach (overlay first) meant that polling every 2 s would
+/// silently revert Silence → LongBattery, Smart → Balance, and
+/// SmartAcceleration → Turbo (because they share overlay GUIDs).
 pub fn get_performance_mode() -> Result<PerformanceMode> {
     #[cfg(windows)]
     {
-        use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
-        use windows::core::PCWSTR;
-        unsafe {
-            let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY).encode_wide().chain(Some(0)).collect();
-            let mut hkey = std::mem::zeroed();
-            let res = RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(key_w.as_ptr()),
-                0,
-                windows::Win32::System::Registry::KEY_READ,
-                &mut hkey,
-            );
-            if res.is_err() {
-                return Ok(PerformanceMode::Balance);
-            }
-            let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE).encode_wide().chain(Some(0)).collect();
-            let mut data: u32 = 0;
-            let mut data_size = 4u32;
-            let mut ty = REG_VALUE_TYPE::default();
-            let _ = RegQueryValueExW(
-                hkey,
-                PCWSTR(val_w.as_ptr()),
-                None,
-                Some(&mut ty),
-                Some((&mut data as *mut u32).cast()),
-                Some(&mut data_size),
-            );
-            let _ = RegCloseKey(hkey).ok();
-            Ok(match data {
-                0 => PerformanceMode::Silence,
-                1 => PerformanceMode::Balance,
-                2 => PerformanceMode::Turbo,
-                3 => PerformanceMode::Decepticon,
-                10 => PerformanceMode::Smart,
-                11 => PerformanceMode::LongBattery,
-                14 => PerformanceMode::SmartAcceleration,
-                _ => PerformanceMode::Balance,
-            })
+        // Prefer our own registry — contains exact mode value (0–14).
+        if let Some(mode) = read_mi_registry_mode() {
+            return Ok(mode);
         }
+        // Fallback: Windows power overlay (set by external apps).
+        if let Some(mode) = read_windows_power_overlay() {
+            return Ok(mode);
+        }
+        Ok(PerformanceMode::Balance)
     }
     #[cfg(not(windows))]
     { Ok(PerformanceMode::Balance) }
 }
 
-// ── Private helpers ──────────────────────────────────────────────────────────
+#[cfg(windows)]
+fn read_mi_registry_mode() -> Option<PerformanceMode> {
+    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE, KEY_READ};
+    use windows::core::PCWSTR;
+    unsafe {
+        let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY).encode_wide().chain(Some(0)).collect();
+        let mut hkey = std::mem::zeroed();
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key_w.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        ).is_err() {
+            return None;
+        }
+        let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE).encode_wide().chain(Some(0)).collect();
+        let mut data: u32 = 0;
+        let mut data_size = 4u32;
+        let mut ty = REG_VALUE_TYPE::default();
+        let ok = RegQueryValueExW(
+            hkey,
+            PCWSTR(val_w.as_ptr()),
+            None,
+            Some(&mut ty),
+            Some((&mut data as *mut u32).cast()),
+            Some(&mut data_size),
+        );
+        let _ = RegCloseKey(hkey).ok();
+        if ok.is_err() { return None; }
+        Some(match data {
+            0  => PerformanceMode::Silence,
+            1  => PerformanceMode::Balance,
+            2  => PerformanceMode::Turbo,
+            3  => PerformanceMode::Decepticon,
+            10 => PerformanceMode::Smart,
+            11 => PerformanceMode::LongBattery,
+            14 => PerformanceMode::SmartAcceleration,
+            _  => return None,
+        })
+    }
+}
+
+// ── Windows power overlay sync ───────────────────────────────────────────────
+//
+// Windows 11 stores the active "power mode" overlay as a GUID in:
+//   HKLM\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes
+//   Value: ActiveOverlayAcPowerScheme (REG_SZ, braces-formatted GUID)
+//
+// Three overlay GUIDs:
+//   Best Power Efficiency : 961cc777-2547-4f9d-8174-7d86181b8a7a
+//   Balanced              : 3af9b8d9-7c97-431d-ad78-34a8bfea439f
+//   Best Performance      : ded574b5-45a0-4f42-8737-46345c09c238
+//
+// We set this via PowerSetActiveOverlayScheme (requires elevation).
+// We read it via the registry (no elevation needed).
+
+const OVERLAY_REG_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes";
+
+const GUID_BEST_POWER_EFFICIENCY: &str = "{961cc777-2547-4f9d-8174-7d86181b8a7a}";
+const GUID_BALANCED:              &str = "{3af9b8d9-7c97-431d-ad78-34a8bfea439f}";
+const GUID_BEST_PERFORMANCE:      &str = "{ded574b5-45a0-4f42-8737-46345c09c238}";
+
+#[cfg(windows)]
+fn read_windows_power_overlay() -> Option<PerformanceMode> {
+    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    use windows::core::PCWSTR;
+
+    // Determine current power source: AC (plugged in) = 1, DC (battery) = 0
+    let on_ac = unsafe {
+        let mut sps = std::mem::zeroed::<SYSTEM_POWER_STATUS>();
+        GetSystemPowerStatus(&mut sps).is_ok() && sps.ACLineStatus == 1
+    };
+    let reg_value = if on_ac { "ActiveOverlayAcPowerScheme" } else { "ActiveOverlayDcPowerScheme" };
+
+    unsafe {
+        let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY).encode_wide().chain(Some(0)).collect();
+        let mut hkey = std::mem::zeroed();
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key_w.as_ptr()),
+            0,
+            windows::Win32::System::Registry::KEY_READ,
+            &mut hkey,
+        ).is_err() {
+            return None;
+        }
+        let val_w: Vec<u16> = OsStr::new(reg_value).encode_wide().chain(Some(0)).collect();
+        let mut buf = [0u16; 64];
+        let mut size = (buf.len() * 2) as u32;
+        let mut ty = REG_VALUE_TYPE::default();
+        if RegQueryValueExW(
+            hkey,
+            PCWSTR(val_w.as_ptr()),
+            None,
+            Some(&mut ty),
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        ).is_err() {
+            let _ = RegCloseKey(hkey).ok();
+            return None;
+        }
+        let _ = RegCloseKey(hkey).ok();
+        let len = (size / 2).saturating_sub(1) as usize;
+        let guid_str = String::from_utf16_lossy(&buf[..len]).to_lowercase();
+        Some(if guid_str.contains("961cc777") {
+            PerformanceMode::LongBattery
+        } else if guid_str.contains("ded574b5") {
+            PerformanceMode::Turbo
+        } else {
+            PerformanceMode::Balance
+        })
+    }
+}
+
+/// Called by the elevated process to also update the Windows power overlay.
+/// 1. Calls PowerSetActiveOverlayScheme (powrprof.dll) — updates the LIVE
+///    Windows power state so Settings / Task Manager reflect the change immediately.
+/// 2. Writes the GUID to BOTH ActiveOverlayAcPowerScheme and
+///    ActiveOverlayDcPowerScheme so the registry reflects the choice regardless
+///    of whether the device is on AC or DC power.
+#[cfg(windows)]
+pub fn set_windows_power_overlay(mode: PerformanceMode) {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegOpenKeyExW, RegSetValueExW, RegCloseKey, HKEY_LOCAL_MACHINE,
+        REG_SZ, KEY_SET_VALUE,
+    };
+
+    let guid_str = match mode {
+        PerformanceMode::Silence | PerformanceMode::LongBattery => GUID_BEST_POWER_EFFICIENCY,
+        PerformanceMode::Turbo | PerformanceMode::Decepticon | PerformanceMode::SmartAcceleration => GUID_BEST_PERFORMANCE,
+        _ => GUID_BALANCED,
+    };
+
+    // ── 1. Call PowerSetActiveOverlayScheme via powrprof.dll ─────────────────
+    // This updates the live Windows power state that Settings and Task Manager read.
+    // The function is not bound in windows-rs 0.58, so we load it dynamically.
+    #[repr(C)]
+    struct WinGuid { data1: u32, data2: u16, data3: u16, data4: [u8; 8] }
+
+    let guid_bytes: Option<WinGuid> = if guid_str.contains("961cc777") {
+        Some(WinGuid { data1: 0x961cc777, data2: 0x2547, data3: 0x4f9d, data4: [0x81,0x74,0x7d,0x86,0x18,0x1b,0x8a,0x7a] })
+    } else if guid_str.contains("ded574b5") {
+        Some(WinGuid { data1: 0xded574b5, data2: 0x45a0, data3: 0x4f42, data4: [0x87,0x37,0x46,0x34,0x5c,0x09,0xc2,0x38] })
+    } else {
+        Some(WinGuid { data1: 0x3af9b8d9, data2: 0x7c97, data3: 0x431d, data4: [0xad,0x78,0x34,0xa8,0xbf,0xea,0x43,0x9f] })
+    };
+
+    if let Some(guid) = guid_bytes {
+        unsafe {
+            use libloading::Library;
+            type FnSetOverlay = unsafe extern "system" fn(*const WinGuid) -> u32;
+            if let Ok(lib) = Library::new("powrprof.dll") {
+                if let Ok(f) = lib.get::<FnSetOverlay>(b"PowerSetActiveOverlayScheme\0") {
+                    let ret = f(&guid as *const WinGuid);
+                    log::debug!("PowerSetActiveOverlayScheme({mode:?}) → {ret}");
+                } else {
+                    log::warn!("PowerSetActiveOverlayScheme not found in powrprof.dll");
+                }
+            }
+        }
+    }
+
+    // ── 2. Persist to registry (both AC and DC) ──────────────────────────────
+    // Ensures get_performance_mode() reads the correct value regardless of
+    // whether the device is currently on AC or DC power.
+    let guid_with_braces = guid_str.to_string();
+    let val_utf16: Vec<u16> = guid_with_braces.encode_utf16().chain(Some(0)).collect();
+    let val_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(val_utf16.as_ptr().cast(), val_utf16.len() * 2)
+    };
+
+    let reg_values = ["ActiveOverlayAcPowerScheme", "ActiveOverlayDcPowerScheme"];
+
+    unsafe {
+        let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY).encode_wide().chain(Some(0)).collect();
+        let mut hkey = std::mem::zeroed();
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key_w.as_ptr()),
+            0,
+            KEY_SET_VALUE,
+            &mut hkey,
+        ).is_err() {
+            log::warn!("set_windows_power_overlay: cannot open registry key (needs elevation)");
+            return;
+        }
+        for val_name_str in &reg_values {
+            let val_name: Vec<u16> = OsStr::new(val_name_str).encode_wide().chain(Some(0)).collect();
+            let _ = RegSetValueExW(
+                hkey,
+                PCWSTR(val_name.as_ptr()),
+                0,
+                REG_SZ,
+                Some(val_bytes),
+            );
+        }
+        let _ = RegCloseKey(hkey).ok();
+    }
+    log::debug!("set_windows_power_overlay({mode:?}) → {guid_str} (AC+DC)");
+}
+
+#[cfg(not(windows))]
+pub fn set_windows_power_overlay(_mode: PerformanceMode) {}
+
+
 
 fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
     #[cfg(windows)]
@@ -141,6 +345,82 @@ fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
             let _ = RegCloseKey(hkey).ok();
         }
     }
+    Ok(())
+}
+
+/// Send performance mode via `HQWmiCommonInterface.SetPerformanceMode` in root\WMI.
+/// This is the primary TDP-level control channel on Xiaomi Book Pro 14
+/// (uses ACPI\PNP0C14\0 device, WmiMethodId=9).
+#[cfg(windows)]
+fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
+    use wmi::{COMLibrary, WMIConnection};
+    use windows::core::{BSTR, VARIANT};
+    use windows::Win32::System::Wmi::{
+        WBEM_FLAG_RETURN_WBEM_COMPLETE, WBEM_GENERIC_FLAG_TYPE,
+    };
+
+    let com = COMLibrary::without_security().context("HQ WMI: COM init")?;
+    let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com)
+        .context("HQ WMI: connect root\\WMI")?;
+
+    let mode_str = mode.to_hw_value().to_string();
+    let instance_path = BSTR::from(r#"HQWmiCommonInterface.InstanceName="ACPI\PNP0C14\0_0""#);
+    let method_name   = BSTR::from("SetPerformanceMode");
+
+    unsafe {
+        // Get the class definition to spawn a parameter object
+        let mut class_obj = None;
+        wmi.svc.GetObject(
+            &BSTR::from("HQWmiCommonInterface"),
+            WBEM_FLAG_RETURN_WBEM_COMPLETE,
+            None,
+            Some(&mut class_obj),
+            None,
+        ).context("HQ WMI: GetObject class")?;
+        let class_obj = class_obj.context("HQ WMI: class object is None")?;
+
+        // Get the in-params class for SetPerformanceMode
+        let mut in_sig: Option<windows::Win32::System::Wmi::IWbemClassObject> = None;
+        class_obj.GetMethod(
+            &method_name,
+            0,
+            &mut in_sig as *mut _,
+            std::ptr::null_mut(),
+        ).context("HQ WMI: GetMethod")?;
+        let in_sig = in_sig.context("HQ WMI: in-params class is None")?;
+
+        // Spawn an instance of the in-params class
+        let in_params = in_sig.SpawnInstance(0).context("HQ WMI: SpawnInstance")?;
+
+        // Set req = mode string (e.g. "1" for Balance)
+        let req_variant = VARIANT::from(BSTR::from(mode_str.as_str()));
+        in_params.Put(
+            &BSTR::from("req"),
+            0,
+            &req_variant,
+            0,
+        ).context("HQ WMI: Put req")?;
+
+        // Execute the method on the specific instance
+        let mut out_params = None;
+        wmi.svc.ExecMethod(
+            &instance_path,
+            &method_name,
+            WBEM_GENERIC_FLAG_TYPE(0),
+            None,
+            Some(&in_params),
+            Some(&mut out_params),
+            None,
+        ).context("HQ WMI: ExecMethod")?;
+
+        if let Some(out) = out_params {
+            let mut ret_v = VARIANT::default();
+            let _ = out.Get(&BSTR::from("ret"), 0, &mut ret_v, None, None);
+            let ret_str = BSTR::try_from(&ret_v).map(|b| b.to_string()).unwrap_or_default();
+            log::debug!("HQ WMI SetPerformanceMode({mode:?}) → {ret_str}");
+        }
+    }
+
     Ok(())
 }
 

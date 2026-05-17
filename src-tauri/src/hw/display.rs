@@ -1,13 +1,23 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, Ordering};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DisplayInfo {
     pub brightness: u8,
     pub hdr_enabled: bool,
     pub refresh_rate_hz: u32,
+    /// All Hz values supported by the primary display at its current resolution.
+    pub available_refresh_rates: Vec<u32>,
+    /// True when the user has selected the max available refresh rate.
+    pub dynamic_refresh_rate_capable: bool,
+    /// Intel PSR2 DRRS (Panel Self Refresh 2 Display Refresh Rate Switching).
+    /// Controlled via the Intel Arc driver registry key Psr2DrrsEnable.
+    pub adaptive_refresh_rate: bool,
     pub ai_brightness: bool,
     pub ai_brightness_config: AiBrightnessConfig,
+    /// Current ambient illuminance from the light sensor (lux). None when unavailable.
+    pub ambient_lux: Option<f32>,
 }
 
 const IGCL_DLL: &str = r"C:\Windows\System32\ControlLib.dll";
@@ -38,13 +48,75 @@ pub struct AiBrightnessConfig {
     pub smoothing: u8,
 }
 
+// ── User-override offset for the adaptive loop ────────────────────────────────
+//
+// When the user manually adjusts brightness while auto-brightness is active,
+// we compute the delta between their chosen value and what the loop would have
+// produced at the current lux level.  This offset is added to every future
+// loop iteration so the curve shifts to match the user's preference without
+// disabling automation entirely.
+//
+// The offset is:
+//   • stored as a signed integer in the range -100..=100
+//   • applied before the final clamp(min, max)
+//   • reset whenever the user disables auto-brightness or changes its config
+
+/// Last lux-based target (before offset) stored so we can compute the delta.
+static AUTO_LAST_TARGET: AtomicU8 = AtomicU8::new(50);
+/// Signed offset (percentage points) to add to the loop's raw target.
+static AUTO_OFFSET: AtomicI16 = AtomicI16::new(0);
+/// Whether the offset was explicitly set by the user (false = use 0).
+static AUTO_OFFSET_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Called by the `set_brightness` Tauri command when auto-brightness is on.
+/// Records the delta so future loop iterations honour the user's preference.
+pub fn record_user_brightness_override(user_value: u8) {
+    let last_target = AUTO_LAST_TARGET.load(Ordering::Relaxed);
+    let offset = user_value as i16 - last_target as i16;
+    AUTO_OFFSET.store(offset, Ordering::Relaxed);
+    AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
+    log::debug!(
+        "auto_brightness: user override {user_value}% \
+         (last_target={last_target}%, offset={offset:+})"
+    );
+}
+
+/// Reset the offset — call when auto-brightness is toggled or config changes.
+pub fn clear_user_brightness_override() {
+    AUTO_OFFSET.store(0, Ordering::Relaxed);
+    AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+}
+
+/// Read the current display brightness from WMI (ground truth) or IGCL.
+/// WmiMonitorBrightness.CurrentBrightness is what Windows Display Settings
+/// reads, so it is the correct source for "what Windows thinks the brightness is".
+fn read_current_brightness() -> Option<u8> {
+    get_brightness_wmi()
+        .or_else(|_| get_brightness_igcl())
+        .ok()
+}
+
 pub fn get_display_info() -> Result<DisplayInfo> {
-    let brightness = get_brightness_igcl().unwrap_or_else(|_| get_brightness_wmi().unwrap_or(80));
-    let hdr_enabled = false;
+    // WMI brightness = what Windows Display Settings slider shows (ground truth).
+    let brightness = get_brightness_wmi().unwrap_or_else(|_| get_brightness_igcl().unwrap_or(80));
+    let hdr_enabled = get_hdr_state();
     let refresh_rate_hz = get_refresh_rate().unwrap_or(120);
+    let available_refresh_rates = get_available_refresh_rates();
+    // DRR is active when the display is set to its highest supported refresh rate.
+    let dynamic_refresh_rate_capable = available_refresh_rates.last()
+        .map(|&max| max == refresh_rate_hz)
+        .unwrap_or(false);
+    let adaptive_refresh_rate = get_intel_drrs();
     let ai_brightness_config = get_ai_brightness_config();
     let ai_brightness = ai_brightness_config.enabled;
-    Ok(DisplayInfo { brightness, hdr_enabled, refresh_rate_hz, ai_brightness, ai_brightness_config })
+    let ambient_lux = get_ambient_lux().filter(|&v| v > 0.5);
+    Ok(DisplayInfo {
+        brightness, hdr_enabled, refresh_rate_hz,
+        available_refresh_rates, dynamic_refresh_rate_capable,
+        adaptive_refresh_rate,
+        ai_brightness, ai_brightness_config,
+        ambient_lux,
+    })
 }
 
 pub fn set_brightness(level: u8) -> Result<()> {
@@ -57,16 +129,21 @@ pub fn set_brightness(level: u8) -> Result<()> {
 }
 
 pub fn set_hdr(enabled: bool) -> Result<()> {
-    // IGCL ctlSetHDRSetting — not yet implemented, log for now
-    log::info!("HDR set to {enabled} (stub)");
-    Ok(())
+    set_hdr_ccd(enabled)
 }
 
 pub fn set_ai_brightness(enabled: bool) -> Result<()> {
     // Toggle the enabled flag while preserving all other config values.
     let mut cfg = get_ai_brightness_config();
     cfg.enabled = enabled;
-    set_ai_brightness_config(cfg)
+    set_ai_brightness_config(cfg)?;
+    if enabled {
+        // Windows has its own ALS-based adaptive brightness (ADAPTBRIGHT power plan setting).
+        // If both are active they fight over the same backlight knob, causing the 90% cap
+        // symptom. Disable Windows adaptive brightness while our loop is in charge.
+        disable_windows_adaptive_brightness();
+    }
+    Ok(())
 }
 
 // ── Adaptive brightness config ────────────────────────────────────────────────
@@ -139,15 +216,44 @@ fn get_ambient_lux() -> Option<f32> { None }
 pub async fn adaptive_brightness_loop() {
     let mut smoothed: Option<f32> = None;
     let mut no_sensor_warned = false;
+    // Last value we applied so we can detect external changes (Fn keys, OS).
+    let mut last_set: Option<u8> = None;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         let cfg = get_ai_brightness_config();
         if !cfg.enabled {
             smoothed = None;
+            last_set = None;
             continue;
         }
+
+        // ── Detect external brightness changes (Fn keys, Windows sliders) ──
+        // If the actual brightness differs from what we last set by ≥ 2 pp,
+        // someone else changed it.  Treat it as a user preference shift:
+        // compute a new offset so the loop keeps the adjusted baseline.
+        if let (Some(prev), Some(actual)) = (last_set, read_current_brightness()) {
+            let diff = (actual as i16 - prev as i16).abs();
+            if diff >= 2 {
+                let raw = AUTO_LAST_TARGET.load(Ordering::Relaxed);
+                let new_offset = actual as i16 - raw as i16;
+                AUTO_OFFSET.store(new_offset, Ordering::Relaxed);
+                AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
+                // Snap smoothed to actual so we don't animate back.
+                smoothed = Some(actual as f32);
+                log::debug!(
+                    "auto_brightness: external change detected \
+                     prev={prev}% actual={actual}% → offset={new_offset:+}"
+                );
+            }
+        }
+
         let lux = match get_ambient_lux() {
-            Some(v) => v,
+            // A reading ≤ 0 lux is physically impossible with the screen on; it
+            // means the sensor returned an invalid/uninitialised value (common at
+            // process startup on this hardware).  Treat it the same as "no sensor"
+            // so we never drive brightness to the floor from a bad initial read.
+            Some(v) if v > 0.5 => v,
+            Some(_) => continue,
             None => {
                 if !no_sensor_warned {
                     log::warn!("adaptive_brightness: no ambient light sensor found — loop idle");
@@ -162,14 +268,39 @@ pub async fn adaptive_brightness_loop() {
         // sensitivity=50  → reaches ceiling at 4000 lux  (less reactive)
         let max_lux = 2000.0_f32 * (100.0 / cfg.sensitivity.max(1) as f32);
         let range   = cfg.max_brightness as f32 - cfg.min_brightness as f32;
-        let target  = (cfg.min_brightness as f32 + (lux / max_lux) * range)
+        // CURVE_BOOST lifts the entire brightness curve by this many percentage
+        // points without changing the slope or the user-configurable min/max.
+        const CURVE_BOOST: f32 = 20.0;
+        let raw_target = (cfg.min_brightness as f32 + (lux / max_lux) * range + CURVE_BOOST)
             .clamp(cfg.min_brightness as f32, cfg.max_brightness as f32);
-        let current = smoothed.unwrap_or(target);
+
+        // Persist raw target so set_brightness can compute the correct offset.
+        AUTO_LAST_TARGET.store(raw_target.round() as u8, Ordering::Relaxed);
+
+        // Apply user-override offset: shifts the entire curve up/down so that
+        // when the user manually sets brightness the automation respects that
+        // preference and only adjusts relative to it as light changes.
+        let offset = if AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed) {
+            AUTO_OFFSET.load(Ordering::Relaxed) as f32
+        } else {
+            0.0
+        };
+        let target = (raw_target + offset)
+            .clamp(cfg.min_brightness as f32, cfg.max_brightness as f32);
+
+        let current = smoothed.unwrap_or_else(|| {
+            // First valid lux reading: seed the smoother from actual current
+            // brightness so we never jump immediately to the computed target.
+            read_current_brightness().map(|b| b as f32).unwrap_or(target)
+        });
         let sf      = cfg.smoothing.min(95) as f32 / 100.0;
         let next    = current + (target - current) * (1.0 - sf);
         smoothed = Some(next);
-        if let Err(e) = set_brightness(next.round() as u8) {
+        let value = next.round() as u8;
+        if let Err(e) = set_brightness(value) {
             log::warn!("adaptive_brightness: set_brightness error: {e}");
+        } else {
+            last_set = Some(value);
         }
     }
 }
@@ -187,11 +318,18 @@ mod igcl {
         pub flags: u32,
     }
 
+    /// Matches Intel IGCL `ctl_brightness_settings_t` (sizeof = 32).
+    /// Fields: Size(4) | Version(1) + 3-pad | TargetBrightness(8) |
+    ///         SmoothTransitionTargetBrightness(8) | SmoothTransitionTime(4) + 4-pad
     #[repr(C)]
     pub struct CtlBrightnessArgs {
         pub size: u32,
-        pub brightness_setting: f64,
-        pub brightness_type: u32, // 0 = absolute
+        pub version: u8,
+        // [3 bytes C-alignment padding before f64]
+        pub target_brightness: f64,
+        pub smooth_target_brightness: f64,
+        pub smooth_time_ms: u32,
+        // [4 bytes C-alignment trailing padding]
     }
 
     pub type CtlApiHandle = *mut c_void;
@@ -267,14 +405,16 @@ fn get_brightness_igcl() -> Result<u8> {
             lib.get(b"ctlGetBrightnessSetting\0").context("ctlGetBrightnessSetting")?;
         let mut args = CtlBrightnessArgs {
             size: std::mem::size_of::<CtlBrightnessArgs>() as u32,
-            brightness_setting: 0.0,
-            brightness_type: 0,
+            version: 0,
+            target_brightness: 0.0,
+            smooth_target_brightness: 0.0,
+            smooth_time_ms: 0,
         };
         let rc = get_brightness(device as CtlDeviceHandle, &mut args);
         if rc != 0 {
-            anyhow::bail!("ctlGetBrightnessSetting failed: {rc}");
+            anyhow::bail!("ctlGetBrightnessSetting failed: {rc:#x}");
         }
-        Ok(args.brightness_setting.clamp(0.0, 100.0) as u8)
+        Ok(args.target_brightness.clamp(0.0, 100.0) as u8)
     })
 }
 
@@ -289,11 +429,13 @@ fn set_brightness_igcl(level: u8) -> Result<()> {
             lib.get(b"ctlSetBrightnessSetting\0").context("ctlSetBrightnessSetting")?;
         let mut args = CtlBrightnessArgs {
             size: std::mem::size_of::<CtlBrightnessArgs>() as u32,
-            brightness_setting: level as f64,
-            brightness_type: 0,
+            version: 0,
+            target_brightness: level as f64,
+            smooth_target_brightness: level as f64,
+            smooth_time_ms: 0,
         };
         let rc = set_brightness(device as CtlDeviceHandle, &mut args);
-        if rc != 0 { anyhow::bail!("ctlSetBrightnessSetting failed: {rc}"); }
+        if rc != 0 { anyhow::bail!("ctlSetBrightnessSetting failed: {rc:#x}"); }
         Ok(())
     })
 }
@@ -327,27 +469,357 @@ fn get_brightness_wmi() -> Result<u8> {
 fn set_brightness_wmi(level: u8) -> Result<()> {
     #[cfg(windows)]
     {
-        use wmi::{COMLibrary, WMIConnection};
-        use std::collections::HashMap;
-
-        let com = COMLibrary::new().context("COM")?;
-        let wmi = WMIConnection::with_namespace_path("root\\WMI", com.into()).context("WMI")?;
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT * FROM WmiMonitorBrightnessMethods")
-            .context("WmiMonitorBrightnessMethods")?;
-        if let Some(_inst) = results.first() {
-            // Execute WMI method WmiMonitorBrightnessMethods.WmiSetBrightness
-            // Using exec_method_with_params would need wmi crate v0.13+ method support
-            // For now invoke via powershell as fallback
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command", &format!(
-                    "(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1,{})",
-                    level
-                )])
-                .output();
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // WmiSetBrightness requires:
+        //  1. Targeting a specific CIM *instance* (not just the class name)
+        //  2. Brightness typed as [byte] (UInt8), Timeout as [uint32]
+        // Using -ClassName without -InputObject returns "Invalid method Parameter(s)".
+        let cmd = format!(
+            "$i=Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods; \
+             Invoke-CimMethod -InputObject $i -MethodName WmiSetBrightness \
+             -Arguments @{{Timeout=[uint32]1;Brightness=[byte]{}}}",
+            level
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .context("PowerShell spawn for WmiSetBrightness")?;
+        if !status.success() {
+            anyhow::bail!("WmiSetBrightness exited with {status}");
         }
     }
     Ok(())
+}
+
+// ── Windows built-in adaptive brightness (ADAPTBRIGHT) ───────────────────────
+//
+// Windows has its own ALS-based adaptive brightness in the active power plan
+// (power setting ADAPTBRIGHT = fbd9aa66-9553-4097-ba44-ed6e9d65eab8).
+// When it is enabled it intercepts every brightness request and adjusts the
+// value based on its own sensor reading, producing the well-known "caps at 90%"
+// symptom where the user sets 100% but Windows immediately dials it back.
+// MiControl provides its own, better-calibrated loop, so the two must not run
+// concurrently.  This function silently disables ADAPTBRIGHT for the current
+// power scheme on both AC and DC.  It is best-effort (no error returned) — if
+// powercfg is unavailable the loop still works, just with occasional fighting.
+fn disable_windows_adaptive_brightness() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let scheme = "SCHEME_CURRENT";
+        let sub    = "SUB_VIDEO";
+        let guid   = "ADAPTBRIGHT";
+        for flag in ["/SETACVALUEINDEX", "/SETDCVALUEINDEX"] {
+            let _ = std::process::Command::new("powercfg")
+                .args([flag, scheme, sub, guid, "0"])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                .output();
+        }
+        // Activate the scheme so the change takes effect immediately.
+        let _ = std::process::Command::new("powercfg")
+            .args(["/setactive", scheme])
+            .creation_flags(0x08000000)
+            .output();
+        log::info!("adaptive_brightness: disabled Windows ADAPTBRIGHT (power plan)");
+    }
+}
+
+// ── HDR state via Windows CCD API ────────────────────────────────────────────
+//
+// Windows stores HDR (Advanced Color / Wide Color Gamut) state per-display
+// in the Connected Displays API (CCD).  We use the windows crate's typed
+// bindings for type-safety and correct struct layout.
+//
+// GetDisplayConfigBufferSizes → sizes → QueryDisplayConfig → paths[] →
+// DisplayConfigGetDeviceInfo(GET_ADVANCED_COLOR_INFO) → read bit 1 for HDR on
+// DisplayConfigSetDeviceInfo(SET_ADVANCED_COLOR_STATE) → write bit 0 to toggle
+//
+// None of these calls require administrator privileges.
+// A retry loop handles the rare race where display config changes between the
+// GetDisplayConfigBufferSizes and QueryDisplayConfig calls (ERROR_INSUFFICIENT_BUFFER).
+
+#[cfg(windows)]
+use windows::Win32::Devices::Display::{
+    DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo,
+    GetDisplayConfigBufferSizes, QueryDisplayConfig,
+    DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE,
+    QDC_ONLY_ACTIVE_PATHS,
+};
+#[cfg(windows)]
+use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+
+/// Call GetDisplayConfigBufferSizes + QueryDisplayConfig with retry on
+/// ERROR_INSUFFICIENT_BUFFER (display config may change between the two calls).
+#[cfg(windows)]
+unsafe fn query_display_config_retry(
+) -> anyhow::Result<(u32, u32, Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>)> {
+    for _ in 0..5 {
+        let mut np = 0u32;
+        let mut nm = 0u32;
+        let rc = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm);
+        if rc != ERROR_SUCCESS {
+            anyhow::bail!("GetDisplayConfigBufferSizes failed: {}", rc.0);
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize];
+        let rc = QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut np,
+            paths.as_mut_ptr(),
+            &mut nm,
+            modes.as_mut_ptr(),
+            None,
+        );
+        if rc == ERROR_INSUFFICIENT_BUFFER {
+            continue; // retry with fresh buffer sizes
+        }
+        if rc != ERROR_SUCCESS {
+            anyhow::bail!("QueryDisplayConfig failed: {}", rc.0);
+        }
+        return Ok((np, nm, paths, modes));
+    }
+    anyhow::bail!("QueryDisplayConfig: too many retries (display config keeps changing)")
+}
+
+/// Read the real HDR (Advanced Color) enabled state for the primary display.
+pub fn get_hdr_state() -> bool {
+    #[cfg(windows)]
+    unsafe {
+        let (np, _nm, paths, _modes) = match query_display_config_retry() {
+            Ok(x) => x,
+            Err(_) => return false,
+        };
+        for i in 0..np as usize {
+            let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
+            info.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                size: std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+                adapterId: paths[i].targetInfo.adapterId,
+                id: paths[i].targetInfo.id,
+            };
+            // Pass pointer to the header (= base of struct, same address since header is field 0)
+            let rc = DisplayConfigGetDeviceInfo(&mut info.header as *mut _);
+            if rc == 0 {
+                // Anonymous union: value field holds the bitfield
+                // bit 0 = advancedColorSupported, bit 1 = advancedColorEnabled
+                if info.Anonymous.value & 0x2 != 0 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Enable or disable HDR (Advanced Color) on the primary display.
+///
+/// Uses `DisplayConfigSetDeviceInfo` — operates on the current user's
+/// interactive session and does NOT require administrator privileges.
+fn set_hdr_ccd(enabled: bool) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    unsafe {
+        let (np, _nm, paths, _modes) =
+            query_display_config_retry().context("query display config")?;
+        let mut last_err = 0i32;
+        for i in 0..np as usize {
+            let mut state = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE::default();
+            state.header = DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
+                size: std::mem::size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32,
+                adapterId: paths[i].targetInfo.adapterId,
+                id: paths[i].targetInfo.id,
+            };
+            // bit 0 = enableAdvancedColor
+            state.Anonymous.value = enabled as u32;
+            let rc = DisplayConfigSetDeviceInfo(&state.header as *const _);
+            if rc != 0 {
+                last_err = rc;
+            }
+        }
+        if last_err != 0 {
+            anyhow::bail!("DisplayConfigSetDeviceInfo failed: {last_err:#x}");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        log::info!("set_hdr({enabled}) — stub on non-Windows");
+    }
+    Ok(())
+}
+
+// ── Intel PSR2 DRRS (Display Refresh Rate Switching) ─────────────────────────
+//
+// Intel's PSR2 DRRS is a driver-level feature distinct from the Windows 11
+// "Dynamic Refresh Rate" (DRR) API.  It lets the Intel Arc GPU driver
+// automatically switch the panel between 60 Hz (idle) and the max rate
+// (active content) without Windows involvement.
+//
+// The Xiaomi laptop BIOS/firmware marks this feature as supported.
+// Windows says "Variable refresh rate: Not Supported" because that refers to
+// the hardware VRR (FreeSync/G-Sync) capability — a different, faster mechanism.
+// PSR2 DRRS works on fixed-rate panels by switching between pre-defined modes.
+//
+// Controlled via the Intel Arc driver registry key:
+// HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-...}\####\Psr2DrrsEnable
+//
+// Writing requires elevation. Changes take effect after driver restart (brief
+// screen flash) or system reboot.
+
+const INTEL_GPU_CLASS: &str =
+    r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+const DRRS_REG_VALUE: &str = "Psr2DrrsEnable";
+
+#[cfg(windows)]
+fn find_intel_arc_driver_key() -> Option<String> {
+    use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
+    let class = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(INTEL_GPU_CLASS).ok()?;
+    for i in 0..=9u32 {
+        let name = format!("{:04}", i);
+        if let Ok(sub) = class.open_subkey(&name) {
+            if let Ok(desc) = sub.get_value::<String, _>("DriverDesc") {
+                let dl = desc.to_lowercase();
+                if dl.contains("intel") && (dl.contains("arc") || dl.contains("uhd") || dl.contains("iris")) {
+                    return Some(format!("{}\\{}", INTEL_GPU_CLASS, name));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read Intel PSR2 DRRS state from the Arc driver registry key.
+pub fn get_intel_drrs() -> bool {
+    #[cfg(windows)]
+    {
+        use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
+        if let Some(path) = find_intel_arc_driver_key() {
+            if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(&path) {
+                if let Ok(v) = key.get_value::<u32, _>(DRRS_REG_VALUE) {
+                    return v != 0;
+                }
+            }
+        }
+    }
+    true // default: assume enabled when registry is unreadable
+}
+
+/// Write Intel PSR2 DRRS state to the Arc driver registry key.
+/// Requires an elevated (admin) process — called from elevated.rs.
+/// Changes take effect after the display driver restarts or system reboots.
+pub fn set_intel_drrs(enabled: bool) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use winreg::{RegKey, enums::{HKEY_LOCAL_MACHINE, KEY_WRITE}};
+        let path = find_intel_arc_driver_key()
+            .ok_or_else(|| anyhow::anyhow!("Intel Arc driver registry key not found"))?;
+        let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey_with_flags(&path, KEY_WRITE)
+            .context("open Intel Arc driver key for write")?;
+        key.set_value(DRRS_REG_VALUE, &(enabled as u32))
+            .context("set Psr2DrrsEnable")?;
+    }
+    Ok(())
+}
+
+// ── Refresh rate ──────────────────────────────────────────────────────────────
+///
+/// Uses `EnumDisplaySettingsExW` (Win32 GDI) which is the same source the
+/// Windows Display Settings page uses when building the "Choose a refresh
+/// rate" dropdown.
+pub fn get_available_refresh_rates() -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Gdi::{
+            EnumDisplaySettingsExW, DEVMODEW,
+            ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE, ENUM_DISPLAY_SETTINGS_FLAGS,
+        };
+        use std::collections::HashSet;
+
+        unsafe {
+            let mut cur = DEVMODEW::default();
+            cur.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            // Query current mode to know the active resolution.
+            let _ = EnumDisplaySettingsExW(None, ENUM_CURRENT_SETTINGS, &mut cur, ENUM_DISPLAY_SETTINGS_FLAGS(0));
+            let (w, h, bpp) = (cur.dmPelsWidth, cur.dmPelsHeight, cur.dmBitsPerPel);
+
+            let mut seen: HashSet<u32> = HashSet::new();
+            let mut idx = 0u32;
+            loop {
+                let mut m = DEVMODEW::default();
+                m.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+                if !EnumDisplaySettingsExW(None, ENUM_DISPLAY_SETTINGS_MODE(idx), &mut m, ENUM_DISPLAY_SETTINGS_FLAGS(0)).as_bool() {
+                    break;
+                }
+                if m.dmPelsWidth == w && m.dmPelsHeight == h && m.dmBitsPerPel == bpp
+                    && m.dmDisplayFrequency > 0
+                {
+                    seen.insert(m.dmDisplayFrequency);
+                }
+                idx += 1;
+            }
+            let mut rates: Vec<u32> = seen.into_iter().collect();
+            rates.sort_unstable();
+            rates
+        }
+    }
+    #[cfg(not(windows))]
+    { vec![60, 120] }
+}
+
+/// Change the primary display's refresh rate.
+///
+/// `hz` must be one of the values returned by `get_available_refresh_rates()`.
+/// The change is persisted to the registry (`CDS_UPDATEREGISTRY`) so it
+/// survives reboots.  Returns an error if the rate is not supported or if
+/// Windows rejects the mode change.
+pub fn set_refresh_rate(hz: u32) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Gdi::{
+            ChangeDisplaySettingsExW, EnumDisplaySettingsExW,
+            CDS_TYPE, DEVMODEW, DEVMODE_FIELD_FLAGS, DISP_CHANGE,
+            ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
+        };
+
+        const DM_DISPLAYFREQUENCY: u32 = 0x00400000;
+        const CDS_UPDATEREGISTRY_VAL: u32 = 0x00000001;
+
+        unsafe {
+            let mut mode = DEVMODEW::default();
+            mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+            if !EnumDisplaySettingsExW(None, ENUM_CURRENT_SETTINGS, &mut mode, ENUM_DISPLAY_SETTINGS_FLAGS(0)).as_bool() {
+                anyhow::bail!("EnumDisplaySettingsExW(CURRENT) failed");
+            }
+            mode.dmDisplayFrequency = hz;
+            // Tell Windows we're only changing the refresh rate field.
+            mode.dmFields = DEVMODE_FIELD_FLAGS(DM_DISPLAYFREQUENCY);
+
+            let result = ChangeDisplaySettingsExW(
+                None,
+                Some(&mode),
+                None,
+                CDS_TYPE(CDS_UPDATEREGISTRY_VAL),
+                None,
+            );
+            if result == DISP_CHANGE(0) {
+                Ok(())
+            } else {
+                anyhow::bail!("ChangeDisplaySettingsExW failed ({result:?}); requested {hz} Hz may not be supported")
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        log::info!("set_refresh_rate({hz}) — stub on non-Windows");
+        Ok(())
+    }
 }
 
 fn get_refresh_rate() -> Result<u32> {

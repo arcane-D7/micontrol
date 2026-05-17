@@ -319,10 +319,23 @@ unsafe extern "system" fn keyboard_hook_proc(
         let kb = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
         let vk = kb.vkCode;
 
+        // The three Xiaomi-branded keys (AI, PCManager, Copilot) MUST always be
+        // consumed here — even if no action is configured — so that Windows
+        // never routes them to the default handler (which opens XiaomiPCManager).
+        let is_xiaomi_key = vk == VK_AI_KEY || vk == VK_XIAOMI_KEY || vk == VK_COPILOT;
+        if is_xiaomi_key {
+            if let Some(action) = resolve_action(vk) {
+                // Dispatch on a fresh OS thread — hook callback must return fast.
+                std::thread::spawn(move || dispatch_action(&action));
+            }
+            // Always suppress: returning non-zero prevents any window from
+            // receiving the key, stopping XiaomiPCManager from launching.
+            return windows::Win32::Foundation::LRESULT(1);
+        }
+
+        // For all other keys, only intercept if there is an explicit binding.
         if let Some(action) = resolve_action(vk) {
-            // Dispatch on a fresh OS thread — hook callback must return fast.
             std::thread::spawn(move || dispatch_action(&action));
-            // Returning non-zero suppresses the key (it never reaches any window).
             return windows::Win32::Foundation::LRESULT(1);
         }
     }
