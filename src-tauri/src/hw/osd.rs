@@ -11,12 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize,
 
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-    GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
-    MonitorFromPoint, RoundRect, SelectObject, SetBkMode, SetGraphicsMode, SetTextColor,
-    SetWorldTransform, TextOutW, XFORM,
+    GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    MonitorFromPoint, RoundRect, SelectObject, SetBkMode, SetGraphicsMode, SetTextAlign,
+    SetTextColor, SetWorldTransform, TextOutW, XFORM, TA_CENTER, TA_LEFT,
     CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, GM_ADVANCED, GM_COMPATIBLE,
     MONITOR_DEFAULTTOPRIMARY, MONITORINFO, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS,
     PAINTSTRUCT, TRANSPARENT,
@@ -24,9 +23,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, LoadCursorW,
-    PostMessageW, RegisterClassExW, SetLayeredWindowAttributes, SetTimer, ShowWindow,
-    TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, LWA_ALPHA, LWA_COLORKEY, MSG,
-    SW_HIDE, SW_SHOWNOACTIVATE, WNDCLASSEXW, WM_ERASEBKGND, WM_PAINT, WM_TIMER,
+    PostMessageW, RegisterClassExW, SetLayeredWindowAttributes, SetTimer, SetWindowPos,
+    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, LWA_ALPHA, LWA_COLORKEY,
+    MSG, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, WNDCLASSEXW,
+    WM_ERASEBKGND, WM_PAINT, WM_TIMER,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -39,8 +39,7 @@ static OSD_ALPHA:      AtomicU8    = AtomicU8::new(0);
 static OSD_SPIN_FRAME: AtomicU8    = AtomicU8::new(0);
 /// 0=hidden  1=entering(fade-in+spin)  2=showing  3=leaving(fade-out)
 static OSD_ANIM_PHASE: AtomicU8    = AtomicU8::new(0);
-/// Tracks mic mute state locally (toggled on each mic key press).
-/// Starts as false (unmuted). Self-corrects after one press if initial state is wrong.
+/// Tracks mic mute state locally.
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
 
 /// 0 = brightness  1 = mic-muted  2 = mic-active  3 = keyboard-light
@@ -48,12 +47,17 @@ static OSD_MODE:       AtomicU8    = AtomicU8::new(0);
 /// Unicode codepoint (u16 stored in u32) of the notification icon to draw.
 /// Used when OSD_MODE != 0.
 static OSD_NOTIF_ICON: AtomicU32   = AtomicU32::new(0);
+/// Current keyboard backlight level (0–10). 0xFF = unknown (not reported by this event path).
+static OSD_KBL_LEVEL:  AtomicU8    = AtomicU8::new(0xFF);
 
 // ── Layout constants (96-dpi logical pixels) ─────────────────────────────────
 
 const OSD_W:    i32 = 368;
 const OSD_H:    i32 = 92;   // double height × 1.15
 const CORNER_R: i32 = 46;   // = OSD_H/2 → perfect pill
+const NOTIF_W:  i32 = 420;  // notification pill width  (2.5× fonts)
+const NOTIF_H:  i32 = 150;  // notification pill height (2.5× fonts)
+const NOTIF_R:  i32 = NOTIF_H / 2; // = 75 → perfect pill corners
 const BAR_X:    i32 = 64;
 const BAR_END:  i32 = 354;  // OSD_W - 14
 const BAR_H:    i32 = 8;    // original 6 × 1.15 × 1.20
@@ -110,22 +114,33 @@ pub fn show_brightness_osd(level: u8) {
     unsafe { let _ = PostMessageW(hwnd, WM_OSD_SHOW, WPARAM(0), LPARAM(0)); }
 }
 
-/// Show mic mute OSD.
-/// Toggles tracked mute state and shows the appropriate icon and label.
+/// Show mic mute OSD with known mute state (e.g. from WMI event).
+/// Stores the state and shows the appropriate icon and label.
 /// Safe to call from any thread.
-pub fn show_mic_mute_osd() {
-    // Toggle local mic mute state on each keypress.
-    let muted = !MIC_MUTED.fetch_xor(true, Ordering::Relaxed);
+pub fn show_mic_mute_osd(muted: bool) {
+    MIC_MUTED.store(muted, Ordering::Relaxed);
     log::info!("[osd] Mic mute OSD: muted={}", muted);
     // Icon: U+E8D4 = MicOff (Segoe MDL2), U+E720 = Microphone (active)
     let (mode, icon) = if muted { (1u8, 0xE8D4u16) } else { (2u8, 0xE720u16) };
     show_notification_osd(mode, icon);
 }
 
-/// Show keyboard backlight OSD.
+/// Toggle mic mute state and show OSD.
+/// Use from Win32 HID consumer path where the resulting state is not known.
 /// Safe to call from any thread.
-pub fn show_keyboard_osd() {
-    log::info!("[osd] Keyboard backlight OSD");
+pub fn show_mic_mute_osd_toggle() {
+    let muted = !MIC_MUTED.fetch_xor(true, Ordering::Relaxed);
+    log::info!("[osd] Mic mute OSD (toggle): muted={}", muted);
+    let (mode, icon) = if muted { (1u8, 0xE8D4u16) } else { (2u8, 0xE720u16) };
+    show_notification_osd(mode, icon);
+}
+
+/// Show keyboard backlight OSD.
+/// `level`: 0–10 = current backlight level; 0xFF = level unknown.
+/// Safe to call from any thread.
+pub fn show_keyboard_osd(level: u8) {
+    OSD_KBL_LEVEL.store(level, Ordering::Relaxed);
+    log::info!("[osd] Keyboard backlight OSD: level={}", level);
     // Icon: U+E765 = Keyboard (Segoe MDL2)
     show_notification_osd(3, 0xE765);
 }
@@ -226,11 +241,13 @@ unsafe extern "system" fn wnd_proc(
         }
         _ if msg == WM_OSD_SHOW => {
             OSD_MODE.store(0, Ordering::Relaxed);  // ensure brightness mode
+            reposition_osd(hwnd, OSD_W, OSD_H);
             start_show_animation(hwnd);
             LRESULT(0)
         }
         _ if msg == WM_OSD_NOTIF => {
-            // Notification mode (mic / keyboard): skip spin, just fade-in.
+            // Notification mode (mic / keyboard): resize to bigger pill, then fade-in.
+            reposition_osd(hwnd, NOTIF_W, NOTIF_H);
             start_show_animation(hwnd);
             LRESULT(0)
         }
@@ -239,6 +256,18 @@ unsafe extern "system" fn wnd_proc(
 }
 
 // ── Animation helpers ────────────────────────────────────────────────────────────────
+
+/// Resize + reposition the OSD window to bottom-centre of the primary monitor.
+/// Safe to call even when the window is already at the requested size.
+unsafe fn reposition_osd(hwnd: HWND, w: i32, h: i32) {
+    let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let _ = GetMonitorInfoW(hmon, &mut mi);
+    let work = mi.rcWork;
+    let x = work.left + (work.right - work.left - w) / 2;
+    let y = work.bottom - h - 48;
+    let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+}
 
 unsafe fn start_show_animation(hwnd: HWND) {
     match OSD_ANIM_PHASE.load(Ordering::Relaxed) {
@@ -317,24 +346,54 @@ unsafe fn paint(hwnd: HWND) {
     }
 }
 
-/// Draw mic-mute or keyboard-backlight notification OSD.
-/// Layout: dark pill  |  [icon left]  [label text centred]  |
-unsafe fn paint_notification(hwnd: HWND) {
-    let mode      = OSD_MODE.load(Ordering::Relaxed);
-    let icon_cp   = OSD_NOTIF_ICON.load(Ordering::Relaxed) as u16;
+// ── GDI font helpers ──────────────────────────────────────────────────────────
 
-    // Label text per mode.
-    let label: Vec<u16> = match mode {
-        1 => "Microphone\u{0}".encode_utf16().collect::<Vec<_>>(), // mic muted
-        2 => "Microphone\u{0}".encode_utf16().collect::<Vec<_>>(), // mic active
-        3 => "Keyboard Light\u{0}".encode_utf16().collect::<Vec<_>>(),
-        _ => "Notification\u{0}".encode_utf16().collect::<Vec<_>>(),
-    };
-    let sublabel: Vec<u16> = match mode {
-        1 => "Muted\u{0}".encode_utf16().collect(),
-        2 => "On\u{0}".encode_utf16().collect(),
-        _ => vec![0u16],
-    };
+/// Create a Segoe MDL2 Assets icon font.  Positive `height` = cell height.
+unsafe fn new_mdl2_font(height: i32) -> HGDIOBJ {
+    HGDIOBJ(CreateFontW(
+        height, 0, 0, 0, 400, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, 4, 0,
+        w!("Segoe MDL2 Assets"),
+    ).0)
+}
+
+/// Create a Segoe UI text font.  Negative `height` = cap height; `weight` 400/600/700.
+unsafe fn new_segoe_font(height: i32, weight: i32) -> HGDIOBJ {
+    HGDIOBJ(CreateFontW(
+        height, 0, 0, 0, weight, 0, 0, 0,
+        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32, 5, 0,
+        w!("Segoe UI"),
+    ).0)
+}
+
+/// Map the raw firmware byte to `(bar_fill_pct, display_label)`.
+/// Firmware cycles: 0x00 (Off) → 0x05 (33%) → 0x0A (66%) → 0x80 (100%).
+fn keyboard_level_info(raw: u8) -> (i32, &'static str) {
+    match raw {
+        0      => (0,   "Off"),
+        1..=7  => (33,  "33%"),   // 0x05
+        8..=63 => (66,  "66%"),   // 0x0A
+        _      => (100, "100%"),  // 0x80
+    }
+}
+
+// ── Notification OSD painting ─────────────────────────────────────────────────
+
+/// Draw mic-mute (mode 1/2) or keyboard-backlight (mode 3) notification OSD.
+///
+/// Mic layout  (368 × 92 pill):
+///   [mic icon 40 px, coloured]   Microphone  (small, muted-gray)
+///                                Muted / Active  (large, bold, coloured)
+///
+/// Keyboard layout:
+///   [kbd icon 28 px, white]   Keyboard Light       (small, muted-gray)
+///                             [████████░░░░░░]  50% (bar + percentage)
+///                             Medium               (small, muted-gray)
+unsafe fn paint_notification(hwnd: HWND) {
+    let mode    = OSD_MODE.load(Ordering::Relaxed);
+    let icon_cp = OSD_NOTIF_ICON.load(Ordering::Relaxed) as u16;
 
     let mut ps = PAINTSTRUCT::default();
     let hdc: HDC = BeginPaint(hwnd, &mut ps);
@@ -344,91 +403,117 @@ unsafe fn paint_notification(hwnd: HWND) {
 
     // 1. Colorkey fill for transparent corners.
     let br_key = CreateSolidBrush(COLORKEY);
-    let _ = FillRect(hdc, &RECT { left: 0, top: 0, right: OSD_W, bottom: OSD_H }, br_key);
+    let _ = FillRect(hdc, &RECT { left: 0, top: 0, right: NOTIF_W, bottom: NOTIF_H }, br_key);
     let _ = DeleteObject(HGDIOBJ(br_key.0));
 
-    // 2. Dark pill background.
+    // 2. Dark pill background (NOTIF_R = NOTIF_H/2 → perfect half-circle ends).
     let br_bg  = CreateSolidBrush(BG);
     let old_br = SelectObject(hdc, HGDIOBJ(br_bg.0));
-    let _ = RoundRect(hdc, 0, 0, OSD_W, OSD_H, CORNER_R, CORNER_R);
+    let _ = RoundRect(hdc, 0, 0, NOTIF_W, NOTIF_H, NOTIF_R, NOTIF_R);
     SelectObject(hdc, old_br);
     let _ = DeleteObject(HGDIOBJ(br_bg.0));
 
-    // 3. Icon (Segoe MDL2 Assets, white, 26px).
-    const NOTIF_ICON_SZ: i32 = 26;
-    const NOTIF_ICON_X:  i32 = 16;
-    const NOTIF_ICON_Y:  i32 = (OSD_H - NOTIF_ICON_SZ) / 2;
-
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, ICON_CLR);
-    let hfont_icon = CreateFontW(
-        NOTIF_ICON_SZ, 0, 0, 0, 400, 0, 0, 0,
-        DEFAULT_CHARSET.0 as u32,
-        OUT_DEFAULT_PRECIS.0 as u32,
-        CLIP_DEFAULT_PRECIS.0 as u32,
-        4, // ANTIALIASED_QUALITY
-        0,
-        w!("Segoe MDL2 Assets"),
-    );
-    let old_font = SelectObject(hdc, HGDIOBJ(hfont_icon.0));
-    let icon_chars: Vec<u16> = vec![icon_cp];
-    let _ = TextOutW(hdc, NOTIF_ICON_X, NOTIF_ICON_Y, &icon_chars);
-    SelectObject(hdc, old_font);
-    let _ = DeleteObject(HGDIOBJ(hfont_icon.0));
+    let _ = SetTextAlign(hdc, TA_CENTER);  // centre all text horizontally at CX
+    const CX: i32 = NOTIF_W / 2;          // = 210
 
-    // 4. Primary label text ("Microphone" / "Keyboard Light").
-    const TEXT_X: i32 = 60;  // left edge of text column
-    const TEXT_W: i32 = OSD_W - TEXT_X - 12;
+    if mode == 1 || mode == 2 {
+        // ── Mic mute / active ─────────────────────────────────────────────────
+        // Side-by-side, space-evenly: 420 / 3 = 140 → icon at X=140, text at X=280.
+        // Both vertically centred — icon centre ≈ Y 74, text block centre ≈ Y 75.
+        const ICN_SZ: i32 = 67;
+        const CX_R:   i32 = 280;   // centre of right text zone
+        let accent = if mode == 1 { rgb(210, 80, 80) } else { rgb(60, 200, 110) };
 
-    SetTextColor(hdc, TEXT_CLR);
-    let hfont_label = CreateFontW(
-        -14, 0, 0, 0, 400, 0, 0, 0,
-        DEFAULT_CHARSET.0 as u32,
-        OUT_DEFAULT_PRECIS.0 as u32,
-        CLIP_DEFAULT_PRECIS.0 as u32,
-        5, // CLEARTYPE_QUALITY
-        0,
-        w!("Segoe UI"),
-    );
-    let old_font2 = SelectObject(hdc, HGDIOBJ(hfont_label.0));
-    // Measure text to vertically centre it.
-    let has_sublabel = sublabel.len() > 1;
-    let label_text: &[u16] = if label.last() == Some(&0) { &label[..label.len()-1] } else { &label };
-    let mut sz_label = SIZE::default();
-    let _ = GetTextExtentPoint32W(hdc, label_text, &mut sz_label);
-    let label_y = if has_sublabel {
-        OSD_H / 2 - sz_label.cy        // top of two-line block
+        // Icon — coloured, left third, vertically centred.
+        SetTextColor(hdc, accent);
+        let hf = new_mdl2_font(ICN_SZ);
+        let old_f = SelectObject(hdc, hf);
+        let _ = TextOutW(hdc, 140, (NOTIF_H - ICN_SZ) / 2, &[icon_cp]);
+        SelectObject(hdc, old_f);
+        let _ = DeleteObject(hf);
+
+        // "Microphone" — font -20, muted-gray, right column.
+        SetTextColor(hdc, TEXT2_CLR);
+        let hf2 = new_segoe_font(-20, 400);
+        let old_f2 = SelectObject(hdc, hf2);
+        let lbl: Vec<u16> = "Microphone".encode_utf16().collect();
+        let _ = TextOutW(hdc, CX_R, 42, &lbl);
+        SelectObject(hdc, old_f2);
+        let _ = DeleteObject(hf2);
+
+        // "Muted" / "Active" — font -37, bold, accent colour, right column.
+        SetTextColor(hdc, accent);
+        let hf3 = new_segoe_font(-37, 700);
+        let old_f3 = SelectObject(hdc, hf3);
+        let state: Vec<u16> = (if mode == 1 { "Muted" } else { "Active" }).encode_utf16().collect();
+        let _ = TextOutW(hdc, CX_R, 70, &state);
+        SelectObject(hdc, old_f3);
+        let _ = DeleteObject(hf3);
     } else {
-        (OSD_H - sz_label.cy) / 2      // vertically centred
-    };
-    let _ = TextOutW(hdc, TEXT_X, label_y, label_text);
-    SelectObject(hdc, old_font2);
-    let _ = DeleteObject(HGDIOBJ(hfont_label.0));
+        // ── Keyboard backlight ────────────────────────────────────────────────
+        // Icon: 70 px, white keyboard icon, vertically centred.
+        const ICN_SZ: i32 = 47;
+        // Icon — white, near top, centred at CX.
+        SetTextColor(hdc, ICON_CLR);
+        let hf = new_mdl2_font(ICN_SZ);
+        let old_f = SelectObject(hdc, hf);
+        let _ = TextOutW(hdc, CX, 16, &[icon_cp]);
+        SelectObject(hdc, old_f);
+        let _ = DeleteObject(hf);
 
-    // 5. Sub-label ("Muted" / "On") — larger, bold.
-    if has_sublabel {
-        let sublabel_text: &[u16] = if sublabel.last() == Some(&0) { &sublabel[..sublabel.len()-1] } else { &sublabel };
-        // Choose colour: muted = warm red-ish, active = blue accent.
-        let sub_clr = if mode == 1 { rgb(210, 80, 80) } else { BAR_FILL };
-        SetTextColor(hdc, sub_clr);
-        let hfont_sub = CreateFontW(
-            -18, 0, 0, 0, 700, 0, 0, 0,
-            DEFAULT_CHARSET.0 as u32,
-            OUT_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            5, 0,
-            w!("Segoe UI"),
-        );
-        let old_font3 = SelectObject(hdc, HGDIOBJ(hfont_sub.0));
-        let mut sz_sub = SIZE::default();
-        let _ = GetTextExtentPoint32W(hdc, sublabel_text, &mut sz_sub);
-        let sub_y = label_y + sz_label.cy + 2;
-        let sub_x = TEXT_X + (TEXT_W - sz_sub.cx) / 2;
-        let _ = TextOutW(hdc, sub_x.max(TEXT_X), sub_y, sublabel_text);
-        SelectObject(hdc, old_font3);
-        let _ = DeleteObject(HGDIOBJ(hfont_sub.0));
+        // Map raw byte to (bar_fill_pct, label).
+        let (pct, level_lbl) = keyboard_level_info(OSD_KBL_LEVEL.load(Ordering::Relaxed));
+
+        // "Keyboard Light" label — font -19, muted-gray, centred.
+        SetTextColor(hdc, TEXT2_CLR);
+        let hf2 = new_segoe_font(-19, 400);
+        let old_f2 = SelectObject(hdc, hf2);
+        let lbl: Vec<u16> = "Keyboard Light".encode_utf16().collect();
+        let _ = TextOutW(hdc, CX, 69, &lbl);
+        SelectObject(hdc, old_f2);
+        let _ = DeleteObject(hf2);
+
+        // Bar (centred, 256 px wide, 10 px tall).
+        const BAR_W:  i32 = 256;
+        const BAR_L:  i32 = CX - BAR_W / 2;   // = 82
+        const BAR_R:  i32 = CX + BAR_W / 2;   // = 338
+        const BAR_T:  i32 = 94;
+        const BAR_HT: i32 = 10;
+
+        // Bar track (unfilled, always drawn).
+        let br_track = CreateSolidBrush(BAR_TRACK);
+        let old_br2  = SelectObject(hdc, HGDIOBJ(br_track.0));
+        let _ = RoundRect(hdc, BAR_L, BAR_T, BAR_R, BAR_T + BAR_HT, BAR_HT, BAR_HT);
+        SelectObject(hdc, old_br2);
+        let _ = DeleteObject(HGDIOBJ(br_track.0));
+
+        // Fill — proportional to pct (0, 33, 66, 100).
+        let fill_w = pct * BAR_W / 100;
+        if fill_w >= BAR_HT {
+            let fill_clr = match pct {
+                1..=33  => rgb( 80, 140, 220),   // 33%  — dim blue
+                34..=66 => BAR_FILL,             // 66%  — accent blue
+                _       => rgb(255, 200,  80),   // 100% — amber/gold
+            };
+            let br_fill = CreateSolidBrush(fill_clr);
+            let old_br3 = SelectObject(hdc, HGDIOBJ(br_fill.0));
+            let _ = RoundRect(hdc, BAR_L, BAR_T, BAR_L + fill_w, BAR_T + BAR_HT, BAR_HT, BAR_HT);
+            SelectObject(hdc, old_br3);
+            let _ = DeleteObject(HGDIOBJ(br_fill.0));
+        }
+
+        // Level label — font -23, semi-bold, white, centred below bar.
+        SetTextColor(hdc, TEXT_CLR);
+        let hf3 = new_segoe_font(-23, 600);
+        let old_f3 = SelectObject(hdc, hf3);
+        let lvl_u16: Vec<u16> = level_lbl.encode_utf16().collect();
+        let _ = TextOutW(hdc, CX, 110, &lvl_u16);
+        SelectObject(hdc, old_f3);
+        let _ = DeleteObject(hf3);
     }
 
+    let _ = SetTextAlign(hdc, TA_LEFT);   // restore default alignment
     SelectObject(hdc, orig_pen);
     let _ = EndPaint(hwnd, &ps);
 }

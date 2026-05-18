@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod display;
 pub mod fan;
 pub mod hotkeys;
+pub mod mic;
 #[cfg(windows)]
 pub mod osd;
 pub mod performance;

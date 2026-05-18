@@ -335,10 +335,12 @@ function KeyBindingRow({
   const appPath = binding.action.type === "launch_app" ? binding.action.path : "";
 
   function setActionType(type: string) {
-    if (type === "none") onChange({ ...binding, action: { type: "none" } });
-    else if (type === "focus_micontrol") onChange({ ...binding, action: { type: "focus_micontrol" } });
-    else if (type === "open_url") onChange({ ...binding, action: { type: "open_url", url: urlValue } });
-    else if (type === "launch_app") onChange({ ...binding, action: { type: "launch_app", path: appPath, args: [] } });
+    // Auto-enable when choosing a real action; auto-disable when clearing to none.
+    const autoEnabled = type !== "none";
+    if (type === "none") onChange({ ...binding, enabled: false, action: { type: "none" } });
+    else if (type === "focus_micontrol") onChange({ ...binding, enabled: autoEnabled, action: { type: "focus_micontrol" } });
+    else if (type === "open_url") onChange({ ...binding, enabled: autoEnabled, action: { type: "open_url", url: urlValue } });
+    else if (type === "launch_app") onChange({ ...binding, enabled: autoEnabled, action: { type: "launch_app", path: appPath, args: [] } });
   }
 
   async function handleDetect() {

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useState, useEffect, useRef } from "react";
 import { t } from "../hooks/useI18n";
 import type { useHardware, PerformanceMode } from "../hooks/useHardware";
+import { useSettings } from "../hooks/useSettings";
 import { BRIGHTNESS_PRESETS, getActivePreset } from "../lib/brightnessPresets";
 
 type Hardware = ReturnType<typeof useHardware>;
@@ -10,11 +11,19 @@ interface Props {
   hardware: Hardware;
 }
 
-const QUICK_MODES: Array<{ key: PerformanceMode; label: string }> = [
-  { key: "silence", label: "🔇" },
-  { key: "balance", label: "⚖️" },
-  { key: "turbo", label: "⚡" },
-  { key: "smart", label: "🧠" },
+type ModeEntry = { key: PerformanceMode; label: string; i18nKey: string };
+
+const STANDARD_MODES: ModeEntry[] = [
+  { key: "silence",      label: "🔇", i18nKey: "silence" },
+  { key: "balance",      label: "⚖️", i18nKey: "balance" },
+  { key: "turbo",        label: "⚡", i18nKey: "turbo" },
+  { key: "long_battery", label: "🔋", i18nKey: "longBattery" },
+  { key: "decepticon",   label: "💥", i18nKey: "decepticon" },
+];
+
+const AI_MODES: ModeEntry[] = [
+  { key: "smart",              label: "🧠", i18nKey: "smart" },
+  { key: "smart_acceleration", label: "🚀", i18nKey: "smartAcceleration" },
 ];
 
 export default function TrayPopup({ hardware }: Props) {
@@ -35,6 +44,7 @@ export default function TrayPopup({ hardware }: Props) {
   const [showFan, setShowFan] = useState(false);
   const [localBrightness, setLocalBrightness] = useState(display?.brightness ?? 80);
   const rootRef = useRef<HTMLDivElement>(null);
+  const { isConfigured: hasAiApi } = useSettings();
 
   // Auto-resize the OS window to match content height, growing upward.
   useEffect(() => {
@@ -80,14 +90,33 @@ export default function TrayPopup({ hardware }: Props) {
         {/* Performance mode */}
         <div className="tray-section">
           <div className="tray-section-label">{t("tray.performance")}</div>
+          {/* Standard modes */}
           <div className="tray-mode-row">
-            {QUICK_MODES.map((m) => (
+            {STANDARD_MODES.map((m) => (
               <button
                 key={m.key}
                 className={`tray-mode-btn ${performanceMode === m.key ? "active" : ""}`}
                 onClick={() => void setPerformanceMode(m.key)}
                 disabled={loading}
-                title={t(`performance.modes.${m.key === "silence" ? "silence" : m.key === "balance" ? "balance" : m.key === "turbo" ? "turbo" : "smart"}` as Parameters<typeof t>[0])}
+                title={t(`performance.modes.${m.i18nKey}` as Parameters<typeof t>[0])}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+          {/* AI modes — disabled when no API key is configured */}
+          <div className="tray-mode-row" style={{ marginTop: 4, opacity: hasAiApi ? 1 : 0.4 }}>
+            {AI_MODES.map((m) => (
+              <button
+                key={m.key}
+                className={`tray-mode-btn ${performanceMode === m.key ? "active" : ""}`}
+                onClick={() => void setPerformanceMode(m.key)}
+                disabled={loading || !hasAiApi}
+                title={
+                  !hasAiApi
+                    ? "Configure API key in Settings to unlock AI modes"
+                    : t(`performance.modes.${m.i18nKey}` as Parameters<typeof t>[0])
+                }
               >
                 {m.label}
               </button>

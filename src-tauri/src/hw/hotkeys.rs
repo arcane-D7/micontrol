@@ -654,13 +654,13 @@ fn dispatch_consumer_usage(usage: u16) {
         // 0x0169 = AC Mute Microphone (newer standard, same function)
         0x00E2 | 0x00CF | 0x0169 => {
             log::info!("[hotkeys] Consumer: mic/audio mute key → show OSD");
-            std::thread::spawn(|| crate::hw::osd::show_mic_mute_osd());
+            std::thread::spawn(|| crate::hw::osd::show_mic_mute_osd_toggle());
         }
         // 0x0271 = Keyboard Backlight Brightness (HID usage)
         // 0x01BB = Keyboard Backlight toggle (Xiaomi specific, may vary)
         0x0271 | 0x01BB | 0x0073 => {
             log::info!("[hotkeys] Consumer: keyboard backlight key → show OSD");
-            std::thread::spawn(|| crate::hw::osd::show_keyboard_osd());
+            std::thread::spawn(|| crate::hw::osd::show_keyboard_osd(0xFF));
         }
         // 0x01B3 = AL Application Launch (generic app key, often AI/search)
         // 0x01B6 = AL Application Launch - Instant Messaging
@@ -819,6 +819,30 @@ fn dispatch_action(action: &HotkeyAction) {
 
 // ── WMI HID event listener ───────────────────────────────────────────────────
 
+/// Send a Win+<key> keyboard combo via SendInput.
+/// `vk` is the virtual-key code of the letter key (e.g. 0x50 for P, 0x49 for I).
+#[cfg(windows)]
+fn send_win_key_combo(vk: u16) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        VIRTUAL_KEY,
+    };
+    const KEY_DOWN: KEYBD_EVENT_FLAGS = KEYBD_EVENT_FLAGS(0);
+    const KEY_UP:   KEYBD_EVENT_FLAGS = KEYBD_EVENT_FLAGS(2); // KEYEVENTF_KEYUP
+    const VK_LWIN:  VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+
+    let inputs = [
+        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LWIN,        wScan: 0, dwFlags: KEY_DOWN, time: 0, dwExtraInfo: 0 } } },
+        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: KEY_DOWN, time: 0, dwExtraInfo: 0 } } },
+        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: KEY_UP,   time: 0, dwExtraInfo: 0 } } },
+        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LWIN,        wScan: 0, dwFlags: KEY_UP,   time: 0, dwExtraInfo: 0 } } },
+    ];
+    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32); }
+}
+
+#[cfg(not(windows))]
+fn send_win_key_combo(_vk: u16) {}
+
 /// Subscribe directly to IoTDriver.sys WMI events in root\WMI.
 ///
 /// IoTDriver.sys fires HID_EVENT20/21/22/23 when the Xiaomi special keys are
@@ -887,12 +911,11 @@ fn wmi_hid_event_thread(class_name: &str, class_idx: u32) -> anyhow::Result<()> 
 
 fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: &[u8]) {
     // detail[0] is always 0x01 (report ID / header). detail[1] is the unique key code.
-    // Confirmed mapping from detect-mode testing (2026-05-18) on Xiaomi laptop:
-    //   detail[1]=0x05 (byte[2]=0x0A) → Xiaomi logo key
-    //   detail[1]=0x21               → Fn+F4
-    //   detail[1]=0x23               → Fn+F7 (AI key)
-    //   detail[1]=0x24               → Fn+F10
-    // All come through HID_EVENT20; HID_EVENT21/22/23 not observed for these keys.
+    // Confirmed mapping from detect-mode testing on Xiaomi laptop (all via HID_EVENT20):
+    //   detail[1]=0x21  → Fn+F4   (mic mute);  detail[2] = new mic state (0=active, 1=muted)
+    //   detail[1]=0x23  → Fn+F7   (AI key)     press; 0x24 = release
+    //   detail[1]=0x25  → Xiaomi logo key press; 0x26 = release
+    //   detail[1]=0x05  → Fn+F10  (keyboard backlight); detail[2] = new level (0x00–0x0A)
     let distinguish_byte = detail.get(1).copied().unwrap_or(0) as u32;
 
     if DETECT_MODE.load(Ordering::Relaxed) {
@@ -911,6 +934,11 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
         return; // Only act on key-down events.
     }
 
+    // Log every active WMI key event regardless of what happens next.
+    log::info!(
+        "[hotkeys] WMI key: class={class_name} detail={detail:02X?}"
+    );
+
     // Debounce: IoTDriver may fire active=true repeatedly while the key is held.
     // Suppress re-triggers within 400 ms of the last dispatched action.
     let now = std::time::SystemTime::now()
@@ -919,23 +947,54 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
         .as_millis() as u64;
     let last = LAST_WMI_ACTION_MS.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 400 {
+        log::info!(
+            "[hotkeys] WMI key debounced ({} ms since last action)",
+            now.saturating_sub(last)
+        );
         return;
     }
 
     log::debug!("[hotkeys] WMI {class_name}: active detail={detail:02X?}");
 
-    // Route by (class, detail[1]).  All observed Xiaomi special keys use HID_EVENT20;
-    // detail[1] is the unique key identifier within that class.
-    //
-    // Key press/release encoding: each key fires Active=true TWICE — once on press and
-    // once on release — with consecutive detail[1] values (press=N, release=N+1).
-    // We match only the press byte; the release byte is unmatched → returns None.
-    //
-    // Confirmed mapping (detect-mode testing, 2026-05-18):
-    //   0x21 (single)      → Fn+F4
-    //   0x23 (press) / 0x24 (release) → Fn+F7 AI key
-    //   0x25 (press) / 0x26 (release) → Xiaomi logo key
-    //   0x05 (single)      → Fn+F10
+    // F4 and F10 have fixed OSD actions — not user-configurable.
+    // IoTDriver encodes the resulting state in detail[2] for these keys.
+    match (class_name, distinguish_byte) {
+        ("HID_EVENT20", 0x21) => {
+            // Fn+F4: mic mute.  detail[2]: 0x00 = muted, 0x01 = active.
+            // (IoTDriver reports the NEW mic state after the key toggles it.)
+            let muted = detail.get(2).copied().unwrap_or(1) == 0;
+            log::info!("[hotkeys] WMI Fn+F4 → mic mute OSD (muted={})", muted);
+            LAST_WMI_ACTION_MS.store(now, Ordering::Relaxed);
+            crate::hw::osd::show_mic_mute_osd(muted);
+            crate::hw::mic::set_system_mic_mute(muted);
+            return;
+        }
+        ("HID_EVENT20", 0x05) => {
+            // Fn+F10: keyboard backlight level cycle.  detail[2] = new level (0x00–0xFF).
+            let level = detail.get(2).copied().unwrap_or(0xFF);
+            log::info!("[hotkeys] WMI Fn+F10 → keyboard backlight OSD (raw=0x{:02X})", level);
+            LAST_WMI_ACTION_MS.store(now, Ordering::Relaxed);
+            crate::hw::osd::show_keyboard_osd(level);
+            return;
+        }
+        ("HID_EVENT20", 0x01) => {
+            // Fn+F8: Project / display mode  →  Win+P
+            log::info!("[hotkeys] WMI Fn+F8 → Win+P (project)");
+            LAST_WMI_ACTION_MS.store(now, Ordering::Relaxed);
+            send_win_key_combo(0x50); // VK 'P'
+            return;
+        }
+        ("HID_EVENT20", 0x1B) => {
+            // Fn+F9: Windows Settings  →  Win+I
+            log::info!("[hotkeys] WMI Fn+F9 → Win+I (settings)");
+            LAST_WMI_ACTION_MS.store(now, Ordering::Relaxed);
+            send_win_key_combo(0x49); // VK 'I'
+            return;
+        }
+        _ => {}
+    }
+
+    // Route configurable keys (ai_key, xiaomi_key) via HotkeyMap.
     let action_opt = HOTKEY_CONFIG.get().and_then(|arc| {
         arc.read().ok().and_then(|cfg| {
             let binding = match (class_name, distinguish_byte) {
@@ -946,12 +1005,17 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
             if binding.enabled && binding.action != HotkeyAction::None {
                 Some(binding.action.clone())
             } else {
+                log::info!(
+                    "[hotkeys] WMI key skipped — enabled={} action={:?}",
+                    binding.enabled, binding.action
+                );
                 None
             }
         })
     });
 
     if let Some(action) = action_opt {
+        log::info!("[hotkeys] WMI key dispatching action: {:?}", action);
         LAST_WMI_ACTION_MS.store(now, Ordering::Relaxed);
         dispatch_action(&action);
     }
