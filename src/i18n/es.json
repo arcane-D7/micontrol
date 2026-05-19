@@ -17,7 +17,9 @@
     "fanControl": "Control del Ventilador",
     "autoBrightness": "Brillo Automático",
     "brightnessPresets": "Preajustes",
-    "fanMode": "Modo de Ventilador"
+    "fanMode": "Modo de Ventilador",
+    "appearance": "Apariencia",
+    "opacity": "Opacidad"
   },
   "nav": {
     "overview": "Resumen",
@@ -126,6 +128,15 @@
         "decepticon": "Más allá del Turbo — requiere desbloqueo de firmware ACPI. Elimina todos los límites de TDP. Extremadamente ruidoso y caliente. Comando WMI: 3.",
         "smartAcceleration": "Smart + detección de picos transitorios. Detecta spikes repentinos y desbloquea temporalmente TDP cerca del Turbo por 15–30 s. Mejor para cargas mixtas. Comando WMI: 14. Requiere clave API de IA."
       }
+    },
+    "powerProfiles": {
+      "title": "Perfiles de Energía",
+      "subtitle": "Cambiar automáticamente el modo de rendimiento al conectar o desconectar el cargador",
+      "pluggedIn": "Con cargador conectado",
+      "onBattery": "Con batería",
+      "manual": "Manual (sin cambio automático)",
+      "currentlyPluggedIn": "Cargador conectado — perfil AC activo",
+      "currentlyOnBattery": "Con batería — perfil DC activo"
     }
   },
   "battery": {

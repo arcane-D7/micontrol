@@ -17,7 +17,9 @@
     "fanControl": "Controlo de Ventilação",
     "autoBrightness": "Brilho Automático",
     "brightnessPresets": "Predefinições",
-    "fanMode": "Modo de Ventilação"
+    "fanMode": "Modo de Ventilação",
+    "appearance": "Aparência",
+    "opacity": "Opacidade"
   },
   "nav": {
     "overview": "Visão Geral",
@@ -126,7 +128,16 @@
     "applying": "A aplicar modo...",
     "applied": "Modo aplicado",
     "error": "Falha ao aplicar modo de desempenho",
-    "currentMode": "Modo atual: {mode}"
+    "currentMode": "Modo atual: {mode}",
+    "powerProfiles": {
+      "title": "Perfis de Energia",
+      "subtitle": "Trocar automaticamente o modo de desempenho ao ligar ou desligar o carregador",
+      "pluggedIn": "Com carregador ligado",
+      "onBattery": "Na bateria",
+      "manual": "Manual (sem troca automática)",
+      "currentlyPluggedIn": "Carregador ligado — perfil AC ativo",
+      "currentlyOnBattery": "Na bateria — perfil DC ativo"
+    }
   },
   "battery": {
     "title": "Bateria",

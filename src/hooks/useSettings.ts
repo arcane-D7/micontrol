@@ -10,7 +10,8 @@ import type {
 
 // ── Persisted settings ────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "micontrol_settings_v1";
+const STORAGE_KEY = "micontrol_settings_v2";
+const STORAGE_KEY_V1 = "micontrol_settings_v1";
 
 export interface AppSettings {
   /** OpenAI (or compatible) API key */
@@ -19,17 +20,30 @@ export interface AppSettings {
   openai_base_url: string;
   /** Model name */
   openai_model: string;
+  /** Performance mode to auto-apply when plugged in. null = manual only. */
+  perf_mode_ac: PerformanceMode | null;
+  /** Performance mode to auto-apply when on battery. null = manual only. */
+  perf_mode_dc: PerformanceMode | null;
+  /** Whether to automatically switch performance mode on AC/DC state change. */
+  auto_switch_perf: boolean;
+  /** Tray popup window opacity (0.3 – 1.0). */
+  tray_opacity: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   openai_api_key: "",
   openai_base_url: "https://api.openai.com/v1",
   openai_model: "gpt-4o-mini",
+  perf_mode_ac: null,
+  perf_mode_dc: null,
+  auto_switch_perf: false,
+  tray_opacity: 1.0,
 };
 
 function loadSettings(): AppSettings {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    // Try v2 first, fall back to v1 (migrating AI keys across)
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(STORAGE_KEY_V1);
     return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
   } catch {
     return DEFAULT_SETTINGS;

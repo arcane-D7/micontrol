@@ -17,7 +17,9 @@
     "fanControl": "Fan Control",
     "autoBrightness": "Auto Brightness",
     "brightnessPresets": "Presets",
-    "fanMode": "Fan Mode"
+    "fanMode": "Fan Mode",
+    "appearance": "Appearance",
+    "opacity": "Opacity"
   },
   "nav": {
     "overview": "Overview",
@@ -126,7 +128,16 @@
     "applying": "Applying mode...",
     "applied": "Mode applied",
     "error": "Failed to apply performance mode",
-    "currentMode": "Current mode: {mode}"
+    "currentMode": "Current mode: {mode}",
+    "powerProfiles": {
+      "title": "Power Profiles",
+      "subtitle": "Automatically switch performance mode when plugging in or unplugging",
+      "pluggedIn": "When plugged in",
+      "onBattery": "On battery",
+      "manual": "Manual (no auto-switch)",
+      "currentlyPluggedIn": "Currently plugged in — AC profile active",
+      "currentlyOnBattery": "Currently on battery — DC profile active"
+    }
   },
   "battery": {
     "title": "Battery",

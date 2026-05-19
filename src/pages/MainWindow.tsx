@@ -81,6 +81,31 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
   const aiApiKeySet = !!ai.settings.openai_api_key;
   const isAiMode = hw.performanceMode === "smart" || hw.performanceMode === "smart_acceleration";
 
+  // ── Auto-switch performance mode on AC ↔ DC transition ───────────────────
+  // Reads settings via refs so we never need to re-register the effect.
+  const autoSwitchRef = useRef(ai.settings.auto_switch_perf);
+  const acModeRef     = useRef(ai.settings.perf_mode_ac);
+  const dcModeRef     = useRef(ai.settings.perf_mode_dc);
+  autoSwitchRef.current = ai.settings.auto_switch_perf;
+  acModeRef.current     = ai.settings.perf_mode_ac;
+  dcModeRef.current     = ai.settings.perf_mode_dc;
+
+  const prevPluggedRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    const plugged = hw.battery?.is_plugged ?? null;
+    if (plugged === null) return;
+    if (prevPluggedRef.current === null) {
+      prevPluggedRef.current = plugged; // initialise — don't apply on mount
+      return;
+    }
+    if (prevPluggedRef.current === plugged) return; // no change
+    prevPluggedRef.current = plugged;
+    if (!autoSwitchRef.current) return;
+    const targetMode = plugged ? acModeRef.current : dcModeRef.current;
+    if (targetMode) void hw.setPerformanceMode(targetMode);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hw.battery?.is_plugged]);
+
   // ── Background logger: write a snapshot every 30 s when an AI mode is active ──
   // Uses refs to always read the latest hw values without re-registering the interval.
   const fanRef = useRef(hw.fan);
@@ -151,7 +176,73 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
         />
       </div>
 
-      {/* AI log viewer — shown only when AI modes have been used */}
+      {/* Power Profiles — per-source preferred modes */}
+      <div className="card">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <div>
+            <div className="card-title" style={{ marginBottom: 2 }}>{t("performance.powerProfiles.title")}</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("performance.powerProfiles.subtitle")}</div>
+          </div>
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={ai.settings.auto_switch_perf}
+              onChange={(e) => ai.updateKey("auto_switch_perf", e.target.checked)}
+            />
+            <span className="toggle-track" />
+            <span className="toggle-knob" />
+          </label>
+        </div>
+        {ai.settings.auto_switch_perf && (
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            {/* Plugged in */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ fontSize: 13 }}>🔌 {t("performance.powerProfiles.pluggedIn")}</span>
+              <select
+                className="select-input"
+                style={{ minWidth: 160 }}
+                value={ai.settings.perf_mode_ac ?? ""}
+                onChange={(e) => ai.updateKey("perf_mode_ac", (e.target.value || null) as import("../hooks/useHardware").PerformanceMode | null)}
+              >
+                <option value="">{t("performance.powerProfiles.manual")}</option>
+                <option value="silence">{t("performance.modes.silence")}</option>
+                <option value="balance">{t("performance.modes.balance")}</option>
+                <option value="turbo">{t("performance.modes.turbo")}</option>
+                <option value="decepticon">{t("performance.modes.decepticon")}</option>
+                <option value="long_battery">{t("performance.modes.longBattery")}</option>
+                <option value="smart" disabled={!aiApiKeySet}>{t("performance.modes.smart")}{!aiApiKeySet ? " 🔒" : ""}</option>
+                <option value="smart_acceleration" disabled={!aiApiKeySet}>{t("performance.modes.smartAcceleration")}{!aiApiKeySet ? " 🔒" : ""}</option>
+              </select>
+            </div>
+            {/* On battery */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ fontSize: 13 }}>🔋 {t("performance.powerProfiles.onBattery")}</span>
+              <select
+                className="select-input"
+                style={{ minWidth: 160 }}
+                value={ai.settings.perf_mode_dc ?? ""}
+                onChange={(e) => ai.updateKey("perf_mode_dc", (e.target.value || null) as import("../hooks/useHardware").PerformanceMode | null)}
+              >
+                <option value="">{t("performance.powerProfiles.manual")}</option>
+                <option value="silence">{t("performance.modes.silence")}</option>
+                <option value="balance">{t("performance.modes.balance")}</option>
+                <option value="turbo">{t("performance.modes.turbo")}</option>
+                <option value="decepticon">{t("performance.modes.decepticon")}</option>
+                <option value="long_battery">{t("performance.modes.longBattery")}</option>
+                <option value="smart" disabled={!aiApiKeySet}>{t("performance.modes.smart")}{!aiApiKeySet ? " 🔒" : ""}</option>
+                <option value="smart_acceleration" disabled={!aiApiKeySet}>{t("performance.modes.smartAcceleration")}{!aiApiKeySet ? " 🔒" : ""}</option>
+              </select>
+            </div>
+            {/* Status hint */}
+            <div style={{ fontSize: 11, color: "var(--text-muted)", paddingTop: 4 }}>
+              {hw.battery?.is_plugged
+                ? `⚡ ${t("performance.powerProfiles.currentlyPluggedIn")}`
+                : `🔋 ${t("performance.powerProfiles.currentlyOnBattery")}`}
+            </div>
+          </div>
+        )}
+      </div>
+
       <div className="card">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showLogs ? 14 : 0 }}>
           <div>

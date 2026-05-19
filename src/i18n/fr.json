@@ -17,7 +17,9 @@
     "fanControl": "Contrôle du ventilateur",
     "autoBrightness": "Luminosité automatique",
     "brightnessPresets": "Préréglages",
-    "fanMode": "Mode ventilateur"
+    "fanMode": "Mode ventilateur",
+    "appearance": "Apparence",
+    "opacity": "Opacité"
   },
   "nav": {
     "overview": "Vue d'ensemble",
@@ -126,6 +128,15 @@
         "decepticon": "Au-delà du Turbo — nécessite un déverrouillage du firmware ACPI. Supprime toutes les limites TDP. Extrêmement bruyant et chaud. Commande WMI : 3.",
         "smartAcceleration": "Smart + détection de pics transitoires. Détecte les spikes soudains et déverrouille temporairement le TDP près du Turbo pendant 15–30 s. Idéal pour les charges mixtes. Commande WMI : 14. Nécessite une clé API IA."
       }
+    },
+    "powerProfiles": {
+      "title": "Profils d'alimentation",
+      "subtitle": "Changer automatiquement le mode de performance lors de la connexion ou déconnexion du chargeur",
+      "pluggedIn": "Branché sur secteur",
+      "onBattery": "Sur batterie",
+      "manual": "Manuel (sans changement automatique)",
+      "currentlyPluggedIn": "Branché sur secteur — profil CA actif",
+      "currentlyOnBattery": "Sur batterie — profil CC actif"
     }
   },
   "battery": {

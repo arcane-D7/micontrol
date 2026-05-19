@@ -40,7 +40,15 @@ export default function App() {
   }
 
   const hardware = useHardware();
-  const [activeTab, setActiveTab] = useState("overview");
+  const [activeTab, setActiveTab] = useState(
+    () => localStorage.getItem("micontrol_active_tab") ?? "overview"
+  );
+
+  function handleTabChange(tab: string) {
+    setActiveTab(tab);
+    localStorage.setItem("micontrol_active_tab", tab);
+  }
+
   const { themeMode, toggleTheme } = useTheme();
   // Subscribe to language changes so the entire tree re-renders on locale switch
   useLanguage();
@@ -62,7 +70,7 @@ export default function App() {
       <MainWindow
         hardware={hardware}
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         themeMode={themeMode}
         toggleTheme={toggleTheme}
       />

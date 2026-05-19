@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useState, useEffect, useRef } from "react";
 import { t } from "../hooks/useI18n";
 import type { useHardware, PerformanceMode } from "../hooks/useHardware";
@@ -44,7 +45,23 @@ export default function TrayPopup({ hardware }: Props) {
   const [showFan, setShowFan] = useState(false);
   const [localBrightness, setLocalBrightness] = useState(display?.brightness ?? 80);
   const rootRef = useRef<HTMLDivElement>(null);
-  const { isConfigured: hasAiApi } = useSettings();
+  const { isConfigured: hasAiApi, settings, updateKey } = useSettings();
+
+  // ── Tray window opacity ───────────────────────────────────────────────────
+  const [opacity, setOpacityState] = useState(() =>
+    Math.max(0.3, Math.min(1.0, settings.tray_opacity ?? 1.0))
+  );
+  // Apply stored opacity on mount
+  useEffect(() => {
+    void getCurrentWindow().setOpacity(opacity);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleOpacityChange(v: number) {
+    setOpacityState(v);
+    updateKey("tray_opacity", v);
+    void getCurrentWindow().setOpacity(v);
+  }
 
   // Auto-resize the OS window to match content height, growing upward.
   useEffect(() => {
@@ -276,6 +293,24 @@ export default function TrayPopup({ hardware }: Props) {
               </div>
             )}
 
+          </div>
+        </div>
+
+        {/* Appearance — opacity slider */}
+        <div className="tray-section">
+          <div className="tray-section-label">🎨 {t("tray.appearance")}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+              {t("tray.opacity")}: {Math.round(opacity * 100)}%
+            </span>
+            <input
+              type="range"
+              min={30}
+              max={100}
+              value={Math.round(opacity * 100)}
+              onChange={(e) => handleOpacityChange(Number(e.target.value) / 100)}
+              style={{ flex: 1 }}
+            />
           </div>
         </div>
       </div>
