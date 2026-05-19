@@ -97,6 +97,22 @@ static DETECTED_VK: AtomicU32 = AtomicU32::new(0);
 /// key-repeat events (IoTDriver fires active=true repeatedly while held).
 static LAST_WMI_ACTION_MS: AtomicU64 = AtomicU64::new(0);
 
+// ── RemapToKey state ─────────────────────────────────────────────────────────
+
+/// Marker stored in `KEYBDINPUT.dwExtraInfo` for all keys we inject via
+/// `SendInput`.  The LL keyboard hook checks for this value and passes injected
+/// keys straight through, preventing infinite re-trigger.
+const MICONTROL_INJECT_MAGIC: usize = 0xA4_EC_12_34;
+
+/// Virtual key of the physical source key currently held (0 = no remap active).
+static REMAP_SOURCE_VK: AtomicU32 = AtomicU32::new(0);
+
+/// Virtual key we are injecting as the remap target (0 = no remap active).
+static REMAP_TARGET_VK: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the remap target key needs `KEYEVENTF_EXTENDEDKEY` (right-side keys).
+static REMAP_TARGET_EXTENDED: AtomicBool = AtomicBool::new(false);
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// What happens when an intercepted key fires.
@@ -113,6 +129,13 @@ pub enum HotkeyAction {
     OpenUrl { url: String },
     /// Launch an executable (absolute path).
     LaunchApp { path: String, args: Vec<String> },
+    /// Remap this key to a different virtual key (hold behaviour).
+    ///
+    /// On key-down: releases the spurious Win+Shift modifiers that accompany
+    /// the Copilot key, then injects target-key-down.
+    /// On key-up  : injects target-key-up.
+    /// `extended` must be `true` for right-side keys (RCtrl=0xA3, RAlt=0xA5, …).
+    RemapToKey { vk: u32, extended: bool },
 }
 
 impl Default for HotkeyAction {
@@ -178,10 +201,10 @@ impl Default for HotkeyMap {
                 label: Some("Xiaomi Key (opens miControl)".into()),
             },
             copilot_key: KeyBinding {
-                // Copilot Key → toggle miControl tray popup
+                // Copilot Key → remap to Right Ctrl (same as AHK CopilotKeyRemap)
                 enabled: true,
-                action: HotkeyAction::FocusMicontrol,
-                label: Some("Copilot Key".into()),
+                action: HotkeyAction::RemapToKey { vk: 0xA3, extended: true },
+                label: Some("Copilot Key → Right Ctrl".into()),
             },
         }
     }
@@ -207,6 +230,7 @@ pub fn load_config() -> HotkeyMap {
 }
 
 /// Upgrade any `LaunchApp` action that points to our own executable to `FocusMicontrol`.
+/// Also upgrade the copilot key from the old `FocusMicontrol` default to `RemapToKey`.
 fn migrate_config(mut cfg: HotkeyMap) -> HotkeyMap {
     let our_exe = std::env::current_exe()
         .ok()
@@ -220,6 +244,14 @@ fn migrate_config(mut cfg: HotkeyMap) -> HotkeyMap {
                 binding.action = HotkeyAction::FocusMicontrol;
             }
         }
+    }
+    // One-time migration: if the copilot key was left at the old FocusMicontrol
+    // default, promote it to the new RemapToKey (Right Ctrl) default.
+    if cfg.copilot_key.action == HotkeyAction::FocusMicontrol
+        && cfg.copilot_key.label.as_deref() == Some("Copilot Key")
+    {
+        cfg.copilot_key.action = HotkeyAction::RemapToKey { vk: 0xA3, extended: true };
+        cfg.copilot_key.label  = Some("Copilot Key → Right Ctrl".into());
     }
     cfg
 }
@@ -684,12 +716,14 @@ fn dispatch_consumer_usage(usage: u16) {
 
 // ── Hook callback ─────────────────────────────────────────────────────────────
 
-/// Low-level keyboard hook procedure — suppression only.
+/// Low-level keyboard hook procedure — suppression + RemapToKey.
 ///
 /// Action dispatch and key detection are handled by `handle_keyboard_raw_input`
 /// via the Raw Input path (WM_INPUT / RIDEV_INPUTSINK), which is more reliable.
-/// This callback's sole job is to prevent bound keys from reaching Windows
-/// default handlers (e.g. the Copilot key opening the Copilot panel).
+/// This callback handles:
+///   1. Suppressing bound keys so Windows default handlers never see them.
+///   2. RemapToKey bindings: inject the target key on both keydown and keyup
+///      so the target key behaves exactly like a physical key (hold works).
 ///
 /// IMPORTANT: during detect mode we must NOT suppress, because returning
 /// LRESULT(1) without calling CallNextHookEx blocks the key from reaching both
@@ -702,7 +736,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     l_param: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_SYSKEYDOWN,
+        CallNextHookEx, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
 
     if n_code < 0 {
@@ -710,41 +744,109 @@ unsafe extern "system" fn keyboard_hook_proc(
     }
 
     let event_type = w_param.0 as u32;
+    let kb = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
+    let vk = kb.vkCode;
+
+    // ── Skip keys we injected ourselves ──────────────────────────────────────
+    // All our SendInput calls tag dwExtraInfo with MICONTROL_INJECT_MAGIC so
+    // we can identify and pass them straight through without re-processing.
+    if (kb.dwExtraInfo as usize) == MICONTROL_INJECT_MAGIC {
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+
     let is_keydown = event_type == WM_KEYDOWN || event_type == WM_SYSKEYDOWN;
+    let is_keyup   = event_type == WM_KEYUP   || event_type == WM_SYSKEYUP;
 
-    if is_keydown {
-        let kb = &*(l_param.0 as *const KBDLLHOOKSTRUCT);
-        let vk = kb.vkCode;
-
-        // ── Detect mode: record VK and let the key pass through ───────────────
-        // Suppressing here (returning 1) would prevent RegisterHotKey from
-        // receiving WM_HOTKEY AND prevent Raw Input from queuing WM_INPUT —
-        // both depend on the key reaching the normal processing pipeline.
-        if DETECT_MODE.load(Ordering::Relaxed) {
-            match vk {
-                // Skip pure modifier keys — they are useless as hotkey targets.
-                0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5 => {}
-                v => {
-                    log::info!("[hotkeys] DETECT(LL hook): VK={:#04X} (decimal={})", v, v);
-                    DETECTED_VK.store(v, Ordering::Relaxed);
-                }
+    // ── Detect mode: record VK and pass the key through ───────────────────────
+    if is_keydown && DETECT_MODE.load(Ordering::Relaxed) {
+        match vk {
+            0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5 => {}
+            v => {
+                log::info!("[hotkeys] DETECT(LL hook): VK={:#04X} (decimal={})", v, v);
+                DETECTED_VK.store(v, Ordering::Relaxed);
             }
-            // Pass key through — do NOT suppress during detect mode.
-            return CallNextHookEx(None, n_code, w_param, l_param);
+        }
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+
+    // ── Handle active RemapToKey key-up ───────────────────────────────────────
+    // When a remap is in progress, we need to release the target key when the
+    // physical source key is released.  Handle this BEFORE the keydown block
+    // so a very quick tap still gets both sides injected.
+    if is_keyup {
+        let src = REMAP_SOURCE_VK.load(Ordering::Relaxed);
+        if src != 0 && vk == src {
+            let target  = REMAP_TARGET_VK.load(Ordering::Relaxed);
+            let ext     = REMAP_TARGET_EXTENDED.load(Ordering::Relaxed);
+            // Clear state before injecting to prevent re-entrancy.
+            REMAP_SOURCE_VK.store(0, Ordering::Relaxed);
+            REMAP_TARGET_VK.store(0, Ordering::Relaxed);
+            do_remap_keyup(target, ext);
+            return windows::Win32::Foundation::LRESULT(1); // suppress source key-up
         }
 
-        // ── Normal mode: suppress Xiaomi-branded keys ─────────────────────────
-        // Always suppress the three Xiaomi-branded keys so Windows never routes
-        // them to a default handler (e.g. XiaomiPCManager or the Copilot panel).
-        let is_xiaomi_key = vk == VK_AI_KEY || vk == VK_XIAOMI_KEY || vk == VK_COPILOT;
-        if is_xiaomi_key {
-            return windows::Win32::Foundation::LRESULT(1);
+        // Also catch F23 key-up when it was the Copilot combo source.
+        if vk == 0x86 /* VK_F23 */ {
+            let src_f23 = REMAP_SOURCE_VK.load(Ordering::Relaxed);
+            if src_f23 == 0x86 {
+                let target = REMAP_TARGET_VK.load(Ordering::Relaxed);
+                let ext    = REMAP_TARGET_EXTENDED.load(Ordering::Relaxed);
+                REMAP_SOURCE_VK.store(0, Ordering::Relaxed);
+                REMAP_TARGET_VK.store(0, Ordering::Relaxed);
+                do_remap_keyup(target, ext);
+                return windows::Win32::Foundation::LRESULT(1);
+            }
         }
+    }
 
-        // Suppress any other key that has an explicit binding.
-        if resolve_action(vk).is_some() {
-            return windows::Win32::Foundation::LRESULT(1);
+    if !is_keydown {
+        return CallNextHookEx(None, n_code, w_param, l_param);
+    }
+
+    // ── Key-down path ─────────────────────────────────────────────────────────
+
+    // Suppress Xiaomi-branded keys so Windows never routes them to a default
+    // handler (XiaomiPCManager / Copilot panel).
+    let is_xiaomi_key = vk == VK_AI_KEY || vk == VK_XIAOMI_KEY || vk == VK_COPILOT;
+
+    // ── RemapToKey handling: VK_COPILOT (0xC3) path ───────────────────────────
+    if vk == VK_COPILOT {
+        if let Some(HotkeyAction::RemapToKey { vk: target, extended }) = resolve_action(vk) {
+            // Record which physical key is being remapped so keyup knows what to do.
+            REMAP_SOURCE_VK.store(VK_COPILOT, Ordering::Relaxed);
+            REMAP_TARGET_VK.store(target, Ordering::Relaxed);
+            REMAP_TARGET_EXTENDED.store(extended, Ordering::Relaxed);
+            do_remap_keydown(target, extended);
+            return windows::Win32::Foundation::LRESULT(1); // suppress source
         }
+    }
+
+    // ── RemapToKey handling: Win+Shift+F23 path ───────────────────────────────
+    // Some hardware / firmware revisions fire the raw Win+Shift+F23 sequence
+    // instead of synthesising VK 0xC3.  Intercept F23 when it arrives while
+    // LWin and LShift are physically held.
+    if vk == 0x86 /* VK_F23 */ {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        let lwin_down   = (GetAsyncKeyState(0x5B) as u16) & 0x8000 != 0; // VK_LWIN
+        let lshift_down = (GetAsyncKeyState(0xA0) as u16) & 0x8000 != 0; // VK_LSHIFT
+        if lwin_down && lshift_down {
+            if let Some(HotkeyAction::RemapToKey { vk: target, extended }) = resolve_action(VK_COPILOT) {
+                REMAP_SOURCE_VK.store(0x86, Ordering::Relaxed);
+                REMAP_TARGET_VK.store(target, Ordering::Relaxed);
+                REMAP_TARGET_EXTENDED.store(extended, Ordering::Relaxed);
+                do_remap_keydown(target, extended);
+                return windows::Win32::Foundation::LRESULT(1);
+            }
+        }
+    }
+
+    if is_xiaomi_key {
+        return windows::Win32::Foundation::LRESULT(1);
+    }
+
+    // Suppress any other key that has an explicit binding.
+    if resolve_action(vk).is_some() {
+        return windows::Win32::Foundation::LRESULT(1);
     }
 
     CallNextHookEx(None, n_code, w_param, l_param)
@@ -777,6 +879,11 @@ fn resolve_action(vk: u32) -> Option<HotkeyAction> {
 fn dispatch_action(action: &HotkeyAction) {
     match action {
         HotkeyAction::None => {}
+
+        // RemapToKey is handled entirely in keyboard_hook_proc (keydown + keyup).
+        // When this function is reached via Raw Input (WM_INPUT) the LL hook has
+        // already injected the correct keys — do nothing here to avoid doubling.
+        HotkeyAction::RemapToKey { .. } => {}
 
         HotkeyAction::FocusMicontrol => {
             if let Some(cb) = FOCUS_CALLBACK.get() {
@@ -848,6 +955,61 @@ fn send_win_key_combo(vk: u16) {
 
 #[cfg(not(windows))]
 fn send_win_key_combo(_vk: u16) {}
+
+// ── Key injection helper ──────────────────────────────────────────────────────
+
+/// Inject a single synthetic key event via `SendInput`, tagging it with
+/// `MICONTROL_INJECT_MAGIC` in `dwExtraInfo` so the LL hook ignores it.
+///
+/// * `vk`       – VIRTUAL_KEY code (e.g. 0xA3 = RCtrl, 0x5B = LWin).
+/// * `scan`     – hardware scan code (0 = let Windows derive it).
+/// * `is_up`    – `true` for key-up, `false` for key-down.
+/// * `extended` – `true` for right-side keys and navigation keys that require
+///               `KEYEVENTF_EXTENDEDKEY` (RCtrl, RAlt, RShift, Insert, Delete…).
+#[cfg(windows)]
+fn inject_key_event(vk: u16, scan: u16, is_up: bool, extended: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+    let mut flags = KEYBD_EVENT_FLAGS(0);
+    if is_up      { flags = KEYBD_EVENT_FLAGS(flags.0 | KEYEVENTF_KEYUP.0); }
+    if extended   { flags = KEYBD_EVENT_FLAGS(flags.0 | KEYEVENTF_EXTENDEDKEY.0); }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk:        VIRTUAL_KEY(vk),
+                wScan:      scan,
+                dwFlags:    flags,
+                time:       0,
+                dwExtraInfo: MICONTROL_INJECT_MAGIC,
+            },
+        },
+    };
+    unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32); }
+}
+
+#[cfg(not(windows))]
+fn inject_key_event(_vk: u16, _scan: u16, _is_up: bool, _extended: bool) {}
+
+/// Remap the Copilot key (or any key bound to `RemapToKey`) by:
+///   1. Releasing the spurious `LShift` and `LWin` that travel with it.
+///   2. Injecting the target key-down.
+/// The matching key-up is handled in the LL hook when the source key is released.
+fn do_remap_keydown(target_vk: u32, extended: bool) {
+    // Release the modifier keys that accompany the Copilot combo (Win+Shift+F23).
+    // These are no-ops when the key arrived as plain VK 0xC3 (no mods held),
+    // but they are essential when the firmware sends the raw Win+Shift+F23 path.
+    inject_key_event(0xA0, 0, true,  false); // LShift up
+    inject_key_event(0x5B, 0, true,  true);  // LWin up  (extended)
+    // Press the target key.
+    inject_key_event(target_vk as u16, 0, false, extended);
+}
+
+fn do_remap_keyup(target_vk: u32, extended: bool) {
+    inject_key_event(target_vk as u16, 0, true, extended);
+}
 
 /// Subscribe directly to IoTDriver.sys WMI events in root\WMI.
 ///

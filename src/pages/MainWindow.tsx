@@ -394,7 +394,8 @@ type HotkeyAction =
   | { type: "none" }
   | { type: "focus_micontrol" }
   | { type: "open_url"; url: string }
-  | { type: "launch_app"; path: string; args: string[] };
+  | { type: "launch_app"; path: string; args: string[] }
+  | { type: "remap_to_key"; vk: number; extended: boolean };
 
 interface KeyBinding {
   enabled: boolean;
@@ -425,14 +426,27 @@ function KeyBindingRow({
   const actionType = binding.action.type;
   const urlValue = binding.action.type === "open_url" ? binding.action.url : "";
   const appPath = binding.action.type === "launch_app" ? binding.action.path : "";
+  const remapVk = binding.action.type === "remap_to_key" ? binding.action.vk : 0xA3;
+
+  // Known remap targets (VK, extended, display label)
+  const REMAP_TARGETS: { vk: number; extended: boolean; label: string }[] = [
+    { vk: 0xA3, extended: true,  label: t("keyboard.remapRCtrl") },
+    { vk: 0xA5, extended: true,  label: t("keyboard.remapRAlt") },
+    { vk: 0xA1, extended: false, label: t("keyboard.remapRShift") },
+    { vk: 0x2E, extended: true,  label: t("keyboard.remapDelete") },
+    { vk: 0x2F, extended: false, label: t("keyboard.remapHelp") },
+  ];
 
   function setActionType(type: string) {
-    // Auto-enable when choosing a real action; auto-disable when clearing to none.
     const autoEnabled = type !== "none";
     if (type === "none") onChange({ ...binding, enabled: false, action: { type: "none" } });
     else if (type === "focus_micontrol") onChange({ ...binding, enabled: autoEnabled, action: { type: "focus_micontrol" } });
     else if (type === "open_url") onChange({ ...binding, enabled: autoEnabled, action: { type: "open_url", url: urlValue } });
     else if (type === "launch_app") onChange({ ...binding, enabled: autoEnabled, action: { type: "launch_app", path: appPath, args: [] } });
+    else if (type === "remap_to_key") {
+      const def = REMAP_TARGETS[0];
+      onChange({ ...binding, enabled: autoEnabled, action: { type: "remap_to_key", vk: def.vk, extended: def.extended } });
+    }
   }
 
   async function handleDetect() {
@@ -531,9 +545,27 @@ function KeyBindingRow({
         >
           <option value="none">{t("keyboard.actionNone")}</option>
           <option value="focus_micontrol">{t("keyboard.actionFocusMicontrol")}</option>
+          <option value="remap_to_key">{t("keyboard.actionRemapToKey")}</option>
           <option value="open_url">{t("keyboard.actionOpenUrl")}</option>
           <option value="launch_app">{t("keyboard.actionLaunchApp")}</option>
         </select>
+
+        {actionType === "remap_to_key" && (
+          <select
+            className="select-input"
+            value={remapVk}
+            onChange={(e) => {
+              const vk = Number(e.target.value);
+              const target = REMAP_TARGETS.find((rt) => rt.vk === vk) ?? REMAP_TARGETS[0];
+              onChange({ ...binding, action: { type: "remap_to_key", vk: target.vk, extended: target.extended } });
+            }}
+            style={{ fontSize: 12 }}
+          >
+            {REMAP_TARGETS.map((rt) => (
+              <option key={rt.vk} value={rt.vk}>{rt.label}</option>
+            ))}
+          </select>
+        )}
 
         {actionType === "open_url" && (
           <input
