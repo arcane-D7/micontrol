@@ -30,12 +30,22 @@ const windowType = new URLSearchParams(window.location.search).get("window");
 const isTrayPopup     = windowType === "tray";
 const isBrightnessOsd = windowType === "brightness-osd";
 
+// Apply window-type setup synchronously at module level (before any render/paint)
+// so the WebView2 compositor never sees an opaque background on frame 1.
+if (isBrightnessOsd) {
+  document.documentElement.style.background = "transparent";
+  document.body.style.background = "transparent";
+}
+if (isTrayPopup) {
+  document.documentElement.style.background = "transparent";
+  document.body.style.background = "transparent";
+  // Add class immediately so CSS overrides (solid surfaces, no blur) apply on frame 1.
+  document.documentElement.classList.add("tray-window");
+}
+
 export default function App() {
   // The brightness OSD window needs a transparent body — no providers needed.
   if (isBrightnessOsd) {
-    // Apply transparent background so the glass card floats over the desktop.
-    document.documentElement.style.background = "transparent";
-    document.body.style.background = "transparent";
     return <BrightnessOsd />;
   }
 
@@ -53,9 +63,7 @@ export default function App() {
   // Subscribe to language changes so the entire tree re-renders on locale switch
   useLanguage();
 
-  useEffect(() => {
-    if (isTrayPopup) document.documentElement.classList.add("tray-window");
-  }, []);
+  // tray-window class is already added synchronously above; useEffect is redundant.
 
   if (isTrayPopup) {
     return (

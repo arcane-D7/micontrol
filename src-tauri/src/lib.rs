@@ -143,19 +143,52 @@ pub fn run() {
 
             // Register focus callback: Xiaomi key / AI key / Copilot key fires this.
             // We toggle the tray quick-access popup, exactly like XiaomiPCManager did.
+            // WebviewWindow show/hide/set_focus are thread-safe in Tauri v2 (dispatched
+            // through the winit event loop internally), so we call them directly here.
+            // Do NOT wrap in run_on_main_thread — the WMI thread is NOT the main thread,
+            // but run_on_main_thread would queue the task and return before it executes,
+            // meaning the TRAY_SHOWN_AT_MS store and focus-loss guard race with each other.
             {
                 let app_handle = app.handle().clone();
                 crate::hw::hotkeys::set_focus_callback(Box::new(move || {
-                    if let Some(popup) = app_handle.get_webview_window("tray") {
-                        if popup.is_visible().unwrap_or(false) {
-                            let _ = popup.hide();
-                        } else {
-                            position_popup_at_tray(&popup);
-                            TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-                            let _ = popup.show();
-                            let _ = popup.set_focus();
+                    match app_handle.get_webview_window("tray") {
+                        None => log::warn!("[tray] focus_callback: popup window not found (tray pre-creation failed?)"),
+                        Some(popup) => {
+                            if popup.is_visible().unwrap_or(false) {
+                                log::info!("[tray] focus_callback: hiding popup");
+                                let _ = popup.hide();
+                            } else {
+                                log::info!("[tray] focus_callback: showing popup");
+                                position_popup_at_tray(&popup);
+                                TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
+                                if let Err(e) = popup.show() {
+                                    log::error!("[tray] popup.show() error: {e}");
+                                } else {
+                                    // Re-position after show: a hidden window may report a
+                                    // wrong scale_factor() / inner_size() before it's been
+                                    // associated with a monitor.  The second call uses the
+                                    // real values now that the window is visible.
+                                    position_popup_at_tray(&popup);
+                                    if let Ok(pos) = popup.outer_position() {
+                                        log::info!("[tray] focus_callback shown at outer_pos=({},{}) is_visible={}",
+                                            pos.x, pos.y, popup.is_visible().unwrap_or(false));
+                                    }
+                                    let _ = popup.set_focus();
+                                }
+                            }
                         }
                     }
+                }));
+            }
+
+            // Register open-main-window callback for the `OpenMainWindow` hotkey action.
+            {
+                let app_handle = app.handle().clone();
+                crate::hw::hotkeys::set_open_main_callback(Box::new(move || {
+                    let app = app_handle.clone();
+                    let _ = app_handle.run_on_main_thread(move || {
+                        open_window_sync(&app);
+                    });
                 }));
             }
 
@@ -192,6 +225,9 @@ pub fn run() {
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, position, .. } = event {
+                        // NOTE: on_tray_icon_event fires on the main thread in Tauri v2 (Windows
+                        // message pump).  Call toggle_tray_popup directly — do NOT wrap in
+                        // run_on_main_thread, that would deadlock the message pump.
                         let app = tray.app_handle();
                         toggle_tray_popup(app, &position);
                     }
@@ -201,7 +237,7 @@ pub fn run() {
             // Pre-create the tray popup window (hidden) so the first click is instant.
             // WebView2 initialisation takes 2-5 s; doing it eagerly at startup avoids
             // that cold-start delay when the user first clicks the tray icon.
-            let _ = tauri::WebviewWindowBuilder::new(
+            match tauri::WebviewWindowBuilder::new(
                 app,
                 "tray",
                 tauri::WebviewUrl::App("index.html?window=tray".into()),
@@ -215,7 +251,10 @@ pub fn run() {
             .always_on_top(true)
             .skip_taskbar(true)
             .visible(false)
-            .build();
+            .build() {
+                Ok(_)  => log::info!("[tray] pre-created tray popup OK"),
+                Err(e) => log::error!("[tray] FAILED to pre-create tray popup: {e}"),
+            }
 
             Ok(())
         })
@@ -236,6 +275,7 @@ pub fn run() {
                     //          (mouse-down steals focus before mouse-up fires Click).
                     if window.label() == "tray" {
                         let age = now_ms().saturating_sub(TRAY_SHOWN_AT_MS.load(Ordering::Relaxed));
+                        log::info!("[tray] Focused(false): age_since_shown={age}ms");
                         if age < 500 {
                             return; // too soon after show — ignore this focus-loss
                         }
@@ -308,9 +348,12 @@ fn open_window_sync(app: &tauri::AppHandle) {
 /// Toggle the tray quick-access popup near the taskbar.
 /// Left-click on the tray icon calls this; subsequent clicks toggle visibility.
 fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition<f64>) {
+    log::info!("[tray] toggle_tray_popup click=({:.0},{:.0})", click_pos.x, click_pos.y);
     // If popup exists and is visible, hide it (toggle off)
     if let Some(popup) = app.get_webview_window("tray") {
-        if popup.is_visible().unwrap_or(false) {
+        let visible = popup.is_visible().unwrap_or(false);
+        log::info!("[tray] popup found, is_visible={visible}");
+        if visible {
             let _ = popup.hide();
             return;
         }
@@ -320,17 +363,31 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
         // If hidden less than 300 ms ago, treat this click as a toggle-off and
         // do NOT re-show — the popup should stay closed.
         let elapsed = now_ms().saturating_sub(TRAY_HIDDEN_AT_MS.load(Ordering::Relaxed));
+        log::info!("[tray] elapsed_since_hidden={elapsed}ms");
         if elapsed < 300 {
+            log::info!("[tray] debounce active, aborting show");
             return;
         }
         // Exists but hidden long enough ago — reposition and show
         position_popup(&popup, click_pos);
         TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-        let _ = popup.show();
-        let _ = popup.set_focus();
+        match popup.show() {
+            Ok(_) => {
+                // Re-position after show: a hidden window may have reported a wrong
+                // scale_factor() / inner_size() before it was associated with a monitor.
+                position_popup(&popup, click_pos);
+                if let Ok(pos) = popup.outer_position() {
+                    log::info!("[tray] show() OK — outer_pos=({},{}) is_visible={}",
+                        pos.x, pos.y, popup.is_visible().unwrap_or(false));
+                }
+                let _ = popup.set_focus();
+            }
+            Err(e) => log::error!("[tray] show() FAILED: {e}"),
+        }
         return;
     }
 
+    log::warn!("[tray] popup window not found — creating on-demand (pre-creation must have failed)");
     // Fallback: pre-creation at startup failed — create the window now.
     let popup = match tauri::WebviewWindowBuilder::new(
         app,
@@ -350,15 +407,20 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
     {
         Ok(w) => w,
         Err(e) => {
-            log::error!("Failed to build tray popup: {e}");
+            log::error!("[tray] Failed to build tray popup on-demand: {e}");
             return;
         }
     };
 
     position_popup(&popup, click_pos);
     TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-    let _ = popup.show();
-    let _ = popup.set_focus();
+    match popup.show() {
+        Ok(_) => {
+            log::info!("[tray] on-demand show() OK — is_visible={}", popup.is_visible().unwrap_or(false));
+            let _ = popup.set_focus();
+        }
+        Err(e) => log::error!("[tray] on-demand show() FAILED: {e}"),
+    }
 }
 
 /// Position the popup window flush above the taskbar, centred on the tray icon.
@@ -371,8 +433,10 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
     const GAP: f64 = 8.0;         // logical px gap above taskbar
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
-    // Prefer the window's actual height so that expand/collapse state is preserved
-    let ph = window.inner_size().map(|s| s.height as f64).unwrap_or(POPUP_H_DEFAULT * scale);
+    // Guard: a hidden window may report height=0 before first render; fall back to default.
+    let ph = window.inner_size()
+        .map(|s| if s.height > 0 { s.height as f64 } else { POPUP_H_DEFAULT * scale })
+        .unwrap_or(POPUP_H_DEFAULT * scale);
     let gap = GAP * scale;
 
     // Get the work area (screen minus taskbar) in physical pixels for the
@@ -404,6 +468,7 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
     let x = (click_pos.x - pw / 2.0).max(0.0).min(work_right - pw).round() as i32;
     // Y: popup bottom sits at work-area bottom (top of taskbar) minus a small gap.
     let y = (work_bottom - ph - gap).max(0.0).round() as i32;
+    log::info!("[tray] position_popup: scale={scale:.2} pw={pw:.0} ph={ph:.0} work=({work_right:.0},{work_bottom:.0}) → pos=({x},{y})");
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
@@ -414,7 +479,10 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
     const GAP: f64 = 8.0;
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
-    let ph = window.inner_size().map(|s| s.height as f64).unwrap_or(460.0 * scale);
+    // Guard: a hidden window may report height=0 before first render; fall back to default.
+    let ph = window.inner_size()
+        .map(|s| if s.height > 0 { s.height as f64 } else { 460.0 * scale })
+        .unwrap_or(460.0 * scale);
     let gap = GAP * scale;
 
     #[cfg(windows)]
@@ -439,5 +507,6 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
     // Align popup bottom-right of the work area (system tray is bottom-right)
     let x = (work_right - pw - gap).max(0.0).round() as i32;
     let y = (work_bottom - ph - gap).max(0.0).round() as i32;
+    log::info!("[tray] position_popup_at_tray: scale={scale:.2} pw={pw:.0} ph={ph:.0} work=({work_right:.0},{work_bottom:.0}) → pos=({x},{y})");
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }

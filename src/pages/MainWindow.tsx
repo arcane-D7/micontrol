@@ -502,6 +502,7 @@ function StartupTab() {
 type HotkeyAction =
   | { type: "none" }
   | { type: "focus_micontrol" }
+  | { type: "open_main_window" }
   | { type: "open_url"; url: string }
   | { type: "launch_app"; path: string; args: string[] }
   | { type: "remap_to_key"; vk: number; extended: boolean };
@@ -550,6 +551,7 @@ function KeyBindingRow({
     const autoEnabled = type !== "none";
     if (type === "none") onChange({ ...binding, enabled: false, action: { type: "none" } });
     else if (type === "focus_micontrol") onChange({ ...binding, enabled: autoEnabled, action: { type: "focus_micontrol" } });
+    else if (type === "open_main_window") onChange({ ...binding, enabled: autoEnabled, action: { type: "open_main_window" } });
     else if (type === "open_url") onChange({ ...binding, enabled: autoEnabled, action: { type: "open_url", url: urlValue } });
     else if (type === "launch_app") onChange({ ...binding, enabled: autoEnabled, action: { type: "launch_app", path: appPath, args: [] } });
     else if (type === "remap_to_key") {
@@ -654,6 +656,7 @@ function KeyBindingRow({
         >
           <option value="none">{t("keyboard.actionNone")}</option>
           <option value="focus_micontrol">{t("keyboard.actionFocusMicontrol")}</option>
+          <option value="open_main_window">{t("keyboard.actionOpenMainWindow")}</option>
           <option value="remap_to_key">{t("keyboard.actionRemapToKey")}</option>
           <option value="open_url">{t("keyboard.actionOpenUrl")}</option>
           <option value="launch_app">{t("keyboard.actionLaunchApp")}</option>

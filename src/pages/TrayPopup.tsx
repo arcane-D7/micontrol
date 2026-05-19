@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useState, useEffect, useRef } from "react";
 import { t } from "../hooks/useI18n";
 import type { useHardware, PerformanceMode } from "../hooks/useHardware";
@@ -53,14 +52,14 @@ export default function TrayPopup({ hardware }: Props) {
   );
   // Apply stored opacity on mount
   useEffect(() => {
-    void getCurrentWindow().setOpacity(opacity);
+    document.documentElement.style.opacity = String(opacity);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleOpacityChange(v: number) {
     setOpacityState(v);
     updateKey("tray_opacity", v);
-    void getCurrentWindow().setOpacity(v);
+    document.documentElement.style.opacity = String(v);
   }
 
   // Auto-resize the OS window to match content height, growing upward.

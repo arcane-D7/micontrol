@@ -188,6 +188,16 @@ html, body, #root { width: 100%; height: 100%; overflow: hidden; }
 .tray-window #root {
   background: transparent !important;
   background-image: none !important;
+  /* backdrop-filter inside a transparent WebView2 window can cause elements to
+     render as completely invisible on some GPU/driver configurations (Intel Arc,
+     certain Nvidia/AMD setups).  Override blur tokens to 'none' so the popup
+     uses a plain opaque surface rather than a glass/blur effect.            */
+  --blur:      none;
+  --blur-sm:   none;
+  /* Use fully-opaque surface tokens: semi-transparent surfaces (alpha 0.68)
+     composited over a transparent backdrop can also appear invisible.        */
+  --surface:   var(--surface-solid);
+  --surface-2: var(--surface-solid);
 }
 
 body {

@@ -86,6 +86,10 @@ static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 /// the target resolves to our own executable.
 static FOCUS_CALLBACK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
+/// Optional callback registered by the Tauri app to show/focus the main
+/// MiControl application window.  Used by `OpenMainWindow` action.
+static OPEN_MAIN_CALLBACK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
 /// When `true` the hook logs every non-modifier key and stores its VK in
 /// `DETECTED_VK`.  Automatically cleared after 10 seconds.
 static DETECT_MODE: AtomicBool = AtomicBool::new(false);
@@ -123,8 +127,10 @@ static REMAP_TARGET_EXTENDED: AtomicBool = AtomicBool::new(false);
 pub enum HotkeyAction {
     /// Suppress the key and do nothing.
     None,
-    /// Show and focus the MiControl window (most useful default action).
+    /// Show and focus the MiControl tray popup window.
     FocusMicontrol,
+    /// Show and focus the full MiControl main application window.
+    OpenMainWindow,
     /// Open a URL in the system default browser.
     OpenUrl { url: String },
     /// Launch an executable (absolute path).
@@ -292,6 +298,13 @@ pub fn read_in_memory() -> HotkeyMap {
 /// Call this once during Tauri `setup`, after `start_hook()`.
 pub fn set_focus_callback(f: Box<dyn Fn() + Send + Sync>) {
     let _ = FOCUS_CALLBACK.set(f);
+}
+
+/// Register the callback that will be invoked to show/focus the MiControl main
+/// application window on `OpenMainWindow` actions.
+/// Call this once during Tauri `setup`, after `start_hook()`.
+pub fn set_open_main_callback(f: Box<dyn Fn() + Send + Sync>) {
+    let _ = OPEN_MAIN_CALLBACK.set(f);
 }
 
 /// Start key-detect mode: the hook will log and record every non-modifier key
@@ -890,6 +903,14 @@ fn dispatch_action(action: &HotkeyAction) {
                 cb();
             } else {
                 log::warn!("[hotkeys] FocusMicontrol: no focus callback registered");
+            }
+        }
+
+        HotkeyAction::OpenMainWindow => {
+            if let Some(cb) = OPEN_MAIN_CALLBACK.get() {
+                cb();
+            } else {
+                log::warn!("[hotkeys] OpenMainWindow: no open_main callback registered");
             }
         }
 
