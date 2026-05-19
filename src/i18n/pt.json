@@ -110,7 +110,19 @@
       "activation": "Ativação",
       "via": "via",
       "modeActive": "Modo ativo",
-      "failed": "Falhou"
+      "failed": "Falhou",
+      "gpuLoad": "Carga GPU",
+      "tdpRealLabel": "TDP Real",
+      "tdpEstLabel": "TDP Est.",
+      "tdpCapLine": "cap ~{value} W",
+      "tdpEstimated": "Estimado",
+      "tdpMeasured": "Medido",
+      "noWmiSensor": "sem sensor WMI",
+      "methodLabels": {
+        "hqWmi": "HQ WMI (TDP direto)",
+        "vhf": "VHF IOCTL",
+        "overlay": "Registro + Overlay"
+      }
     },
     "techDetails": {
       "title": "Detalhes Técnicos",
@@ -143,6 +155,22 @@
       "manual": "Manual (sem troca automática)",
       "currentlyPluggedIn": "Carregador ligado — perfil AC ativo",
       "currentlyOnBattery": "Na bateria — perfil DC ativo"
+    },
+    "channels": {
+      "title": "Diagnóstico de canais",
+      "subtitle": "Verifica quais canais de controlo de TDP estão disponíveis",
+      "checking": "Verificando…",
+      "checkNow": "Verificar agora",
+      "hqWmi": "HQ WMI (TDP direto)",
+      "functional": "Funcional",
+      "unavailable": "Indisponível",
+      "instance": "Instância",
+      "response": "Resposta",
+      "vhf": "VHF (canal secundário)",
+      "found": "Encontrado",
+      "notFound": "Não encontrado",
+      "registry": "Registro Mi",
+      "overlay": "Power Overlay"
     }
   },
   "battery": {

@@ -4,14 +4,18 @@ use std::sync::{Mutex, OnceLock};
 
 // ── CPU usage via PDH ─────────────────────────────────────────────────────────
 //
-// Task Manager's "CPU" % in the Performance tab uses the
-// "\Processor Information(_Total)\% Processor Utility" counter (Vista+).
-// This differs from the legacy "\Processor(_Total)\% Processor Time":
-//   - % Processor Time  = proportion of time NOT idle (raw scheduling %)
-//   - % Processor Utility = actual computational throughput / max possible,
-//     accounting for P-state frequency scaling.
-// On a laptop at 1.41 GHz with a 2.6 GHz base, % Processor Utility
-// tracks the REAL utilisation; % Processor Time under-reports it.
+// We use "\Processor Information(_Total)\% Processor Time", which measures the
+// proportion of time the scheduler finds the CPU busy (non-idle).  This matches
+// the intuitive number shown in Windows Task Manager Performance tab.
+//
+// NOTE: We deliberately do NOT use "% Processor Utility" because on Intel hybrid
+// architectures (Panther Lake, Meteor Lake, Arrow Lake — all with P-cores +
+// E-cores + LP-E-cores), that counter normalises by each core's max-turbo
+// frequency.  When LP-E-cores run background OS tasks at moderate clock speeds,
+// their per-core "utility" contribution inflates the _Total aggregate far above
+// the scheduling-based percentage — producing readings like 38% when Task Manager
+// shows 6%.  % Processor Time is immune to this because it only tracks idle vs
+// non-idle time, independent of P-state frequency.
 // We use the same background PDH poller pattern as the GPU.
 static CPU_USAGE_CACHE: OnceLock<Mutex<f64>> = OnceLock::new();
 static CPU_POLLER_STARTED: OnceLock<()> = OnceLock::new();
@@ -49,13 +53,12 @@ fn cpu_pdh_poller_thread() {
         let mut query: isize = 0;
         if open_q(std::ptr::null(), 0, &mut query) != 0 { return; }
 
-        // The _Total instance aggregates all logical processors.
-        // Using "% Processor Utility" not "% Processor Time" — matches Task Manager.
-        let path: Vec<u16> = "\\Processor Information(_Total)\\% Processor Utility\0"
+        // Primary: Processor Information provider (Vista+) — scheduling-based %.
+        let path: Vec<u16> = "\\Processor Information(_Total)\\% Processor Time\0"
             .encode_utf16().collect();
         let mut counter: isize = 0;
         if add_c(query, path.as_ptr(), 0, &mut counter) != 0 {
-            // Fallback: older Windows without "Processor Information" provider
+            // Fallback: legacy Processor provider (XP-era, always available)
             let path2: Vec<u16> = "\\Processor(_Total)\\% Processor Time\0"
                 .encode_utf16().collect();
             if add_c(query, path2.as_ptr(), 0, &mut counter) != 0 {
@@ -205,7 +208,14 @@ fn gpu_pdh_poller_thread() {
                 if !val.is_finite() || val < 0.0 {
                     continue;
                 }
-                // Filter: only count 3D-engine instances (matches Task Manager "GPU" column)
+                // Filter: only 3D-engine instances.
+                // PDH \GPU Engine(*)\Utilization Percentage has one instance per
+                // (PID × LUID × phys × eng × engtype).  Summing all PID instances
+                // for the same physical engine gives the correct total scheduling
+                // time for that engine \u2014 equivalent to Task Manager's "GPU" column.
+                // Each process gets a time-slice on the shared hardware engine; the
+                // sum of their slices = total engine busy time.  Values are clamped
+                // to 100 below so simultaneous use across engines never over-reports.
                 let name_ptr = usize::from_ne_bytes(buf[base..base + 8].try_into().unwrap_or([0; 8]));
                 let contains_3d = if name_ptr >= buf_base && name_ptr + 2 <= buf_base + buf.len() {
                     let off = name_ptr - buf_base;

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FanInfo {
@@ -11,9 +10,9 @@ pub struct FanInfo {
     pub speed_percent: u8,
     pub gpu_temp_celsius: f32,
     pub cpu_temp_celsius: f32,
-    /// System package power from the RAPL/ACPI Power Meter PDH counter
-    /// (\Power Meter(_Total)\Power), in watts.  None until the background
-    /// poller has completed its first successful sample (~1.5 s after launch).
+    /// CPU package power from Intel ESIF/DPTF (EsifDeviceInformation._0 Power
+    /// field), in watts. The raw WMI value is in deciwatts (×0.1 W). None when
+    /// the DPTF driver is absent or reports zero.
     pub tdp_watts: Option<f32>,
 }
 
@@ -29,98 +28,85 @@ const FAN_REG_KEY: &str = r"SOFTWARE\MI\FanControl";
 const FAN_REG_MODE: &str = "FanMode";
 const FAN_REG_SPEED: &str = "FixedSpeed";
 
-// ── TDP — RAPL via PDH \Power Meter(_Total)\Power ────────────────────────
+// ── ESIF thermal readings ─────────────────────────────────────────────────
 //
-// Win32_Fan does NOT expose CurrentReading on this hardware (Xiaomi Book Pro 14).
-// CPU load comes from Win32_PerfFormattedData_PerfOS_Processor in system_info.rs
-// and should be read from SystemInfo in the frontend to avoid duplication.
-// TDP is from the Windows ACPI Power Meter interface (RAPL), updated every ~1.5 s.
+// EsifDeviceInformation (ROOT\WMI) is populated by the Intel DPTF/ESIF driver.
+// Participants _0/_1/_2 track the CPU hotspot; _10 tracks the GPU/secondary SoC
+// domain. The Power field is in deciwatts (×0.1 W); Temperature is Celsius.
+// One WMI query returns all participants, so we read temps and TDP together.
 
-static TDP_WATTS_CACHE: OnceLock<Mutex<Option<f32>>> = OnceLock::new();
-static TDP_POLLER_STARTED: OnceLock<()> = OnceLock::new();
-
-fn ensure_tdp_poller() {
-    TDP_WATTS_CACHE.get_or_init(|| Mutex::new(None));
-    TDP_POLLER_STARTED.get_or_init(|| {
-        std::thread::Builder::new()
-            .name("tdp-pdh-poller".into())
-            .spawn(tdp_pdh_poller_thread)
-            .ok();
-    });
+struct EsifReadings {
+    cpu_temp: f32,
+    gpu_temp: f32,
+    tdp_watts: Option<f32>,
 }
 
-fn read_tdp_watts() -> Option<f32> {
-    TDP_WATTS_CACHE
-        .get()
-        .and_then(|m| m.lock().ok())
-        .and_then(|g| *g)
-}
-
-fn tdp_pdh_poller_thread() {
+fn get_esif_readings() -> Result<EsifReadings> {
     #[cfg(windows)]
-    unsafe {
-        use libloading::{Library, Symbol};
-        type FnOpenQuery  = unsafe extern "system" fn(*const std::ffi::c_void, usize, *mut isize) -> u32;
-        type FnAddCounter = unsafe extern "system" fn(isize, *const u16, usize, *mut isize) -> u32;
-        type FnCollect    = unsafe extern "system" fn(isize) -> u32;
-        type FnGetValue   = unsafe extern "system" fn(isize, u32, *mut u32, *mut u8) -> u32;
-        type FnClose      = unsafe extern "system" fn(isize) -> u32;
+    {
+        use wmi::{COMLibrary, WMIConnection};
+        use std::collections::HashMap;
+        let com = COMLibrary::new().context("COM")?;
+        let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com.into()).context("WMI")?;
+        let results: Vec<HashMap<String, wmi::Variant>> = wmi
+            .raw_query("SELECT InstanceName, Temperature, Power FROM EsifDeviceInformation")
+            .unwrap_or_default();
 
-        let lib: &'static Library = match Library::new("pdh.dll") {
-            Ok(l) => Box::leak(Box::new(l)),
-            Err(_) => return,
-        };
-        let open_q:  Symbol<'static, FnOpenQuery>  = match lib.get(b"PdhOpenQueryW\0")               { Ok(f) => f, Err(_) => return };
-        let add_c:   Symbol<'static, FnAddCounter> = match lib.get(b"PdhAddEnglishCounterW\0")       { Ok(f) => f, Err(_) => return };
-        let collect: Symbol<'static, FnCollect>    = match lib.get(b"PdhCollectQueryData\0")         { Ok(f) => f, Err(_) => return };
-        let get_val: Symbol<'static, FnGetValue>   = match lib.get(b"PdhGetFormattedCounterValue\0") { Ok(f) => f, Err(_) => return };
-        let close_q: Symbol<'static, FnClose>      = match lib.get(b"PdhCloseQuery\0")               { Ok(f) => f, Err(_) => return };
-
-        let mut query: isize = 0;
-        if open_q(std::ptr::null(), 0, &mut query) != 0 { return; }
-
-        // _Total aggregates all Power Meter instances (value is in milliwatts)
-        let path: Vec<u16> = "\\Power Meter(_Total)\\Power\0".encode_utf16().collect();
-        let mut counter: isize = 0;
-        if add_c(query, path.as_ptr(), 0, &mut counter) != 0 {
-            close_q(query);
-            return;
-        }
-
-        collect(query); // baseline
-
-        // PDH_FMT_COUNTERVALUE layout (x64):
-        //   offset 0 : CStatus  u32  (4 bytes)
-        //   offset 4 : padding       (4 bytes)
-        //   offset 8 : doubleValue f64 (8 bytes)
-        const PDH_FMT_DOUBLE: u32 = 0x00000200;
-        let mut val_buf = [0u8; 16];
-        let mut dummy_type: u32 = 0;
-
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            collect(query);
-            if get_val(counter, PDH_FMT_DOUBLE, &mut dummy_type, val_buf.as_mut_ptr()) != 0 { continue; }
-            let c_status = u32::from_ne_bytes(val_buf[0..4].try_into().unwrap_or([1; 4]));
-            if c_status > 1 { continue; }
-            let milliwatts = f64::from_ne_bytes(val_buf[8..16].try_into().unwrap_or([0; 8]));
-            if milliwatts.is_finite() && milliwatts > 0.0 {
-                if let Some(cache) = TDP_WATTS_CACHE.get() {
-                    if let Ok(mut g) = cache.lock() { *g = Some((milliwatts / 1000.0) as f32); }
-                }
+        let extract_int = |row: &HashMap<String, wmi::Variant>, key: &str| -> Option<i64> {
+            match row.get(key) {
+                Some(wmi::Variant::I4(v)) if *v > 0 => Some(*v as i64),
+                Some(wmi::Variant::UI4(v)) if *v > 0 => Some(*v as i64),
+                _ => None,
             }
-        }
+        };
+
+        let instance_suffix = |row: &HashMap<String, wmi::Variant>, suffix: &str| -> bool {
+            matches!(row.get("InstanceName"), Some(wmi::Variant::String(s)) if s.ends_with(suffix))
+        };
+
+        // CPU temp: max non-zero Temperature (participants _0/_1/_2 are hotspot)
+        let cpu_temp = results.iter()
+            .filter_map(|r| extract_int(r, "Temperature"))
+            .fold(f32::NEG_INFINITY, |acc, v| acc.max(v as f32));
+        let cpu_temp = if cpu_temp > 0.0 && cpu_temp.is_finite() {
+            cpu_temp.clamp(0.0, 120.0)
+        } else {
+            50.0
+        };
+
+        // GPU temp: prefer participant _10 (GPU/secondary SoC domain on Panther Lake)
+        let gpu_temp = results.iter()
+            .find(|r| instance_suffix(r, "_10"))
+            .and_then(|r| extract_int(r, "Temperature"))
+            .map(|v| (v as f32).clamp(0.0, 120.0))
+            .unwrap_or_else(|| {
+                // Fallback: package maximum (same die, valid under GPU load)
+                let m = results.iter()
+                    .filter_map(|r| extract_int(r, "Temperature"))
+                    .fold(f32::NEG_INFINITY, |acc, v| acc.max(v as f32));
+                if m > 0.0 && m.is_finite() { m.clamp(0.0, 120.0) } else { 45.0 }
+            });
+
+        // TDP: participant _0 is the highest-level DPTF power domain (CPU package/
+        // platform RAPL). Power is in deciwatts — divide by 10 to get watts.
+        let tdp_watts = results.iter()
+            .find(|r| instance_suffix(r, "_0"))
+            .and_then(|r| extract_int(r, "Power"))
+            .map(|v| (v as f32 / 10.0).clamp(0.0, 150.0));
+
+        return Ok(EsifReadings { cpu_temp, gpu_temp, tdp_watts });
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(EsifReadings { cpu_temp: 50.0, gpu_temp: 45.0, tdp_watts: None })
     }
 }
 
 pub fn get_fan_info() -> Result<FanInfo> {
-    ensure_tdp_poller();
     let speed_rpm = get_fan_rpm_wmi().unwrap_or(0);
-    let gpu_temp = get_gpu_temp_wmi().unwrap_or(45.0);
-    let cpu_temp = get_cpu_temp_wmi().unwrap_or(50.0);
+    let esif = get_esif_readings().unwrap_or(EsifReadings { cpu_temp: 50.0, gpu_temp: 45.0, tdp_watts: None });
     let (mode, speed_percent) = get_fan_mode_registry().unwrap_or((FanMode::Auto, 50));
 
-    // Estimate speed percent from rpm (max ~5000 rpm for this model)
     let speed_percent_actual = if speed_rpm > 0 {
         ((speed_rpm as f32 / 5000.0) * 100.0).clamp(0.0, 100.0) as u8
     } else {
@@ -131,11 +117,12 @@ pub fn get_fan_info() -> Result<FanInfo> {
         mode,
         speed_rpm,
         speed_percent: speed_percent_actual,
-        gpu_temp_celsius: gpu_temp,
-        cpu_temp_celsius: cpu_temp,
-        tdp_watts: read_tdp_watts(),
+        gpu_temp_celsius: esif.gpu_temp,
+        cpu_temp_celsius: esif.cpu_temp,
+        tdp_watts: esif.tdp_watts,
     })
 }
+
 
 pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> Result<()> {
     persist_fan_registry(&mode, speed_percent)?;
@@ -171,60 +158,6 @@ fn get_fan_rpm_wmi() -> Result<u32> {
     }
     #[cfg(not(windows))]
     { Ok(0) }
-}
-
-fn get_cpu_temp_wmi() -> Result<f32> {
-    #[cfg(windows)]
-    {
-        use wmi::{COMLibrary, WMIConnection};
-        use std::collections::HashMap;
-        let com = COMLibrary::new().context("COM")?;
-        let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com.into()).context("WMI")?;
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature")
-            .unwrap_or_default();
-        // All thermal zones — take the maximum (CPU package is hottest on Intel)
-        let max_temp = results.iter()
-            .filter_map(|row| {
-                match row.get("CurrentTemperature") {
-                    Some(wmi::Variant::UI4(v)) => Some((*v as f32 / 10.0) - 273.15),
-                    _ => None,
-                }
-            })
-            .fold(f32::NEG_INFINITY, f32::max);
-        if max_temp > f32::NEG_INFINITY {
-            return Ok(max_temp.clamp(0.0, 120.0));
-        }
-        Ok(50.0)
-    }
-    #[cfg(not(windows))]
-    { Ok(50.0) }
-}
-
-fn get_gpu_temp_wmi() -> Result<f32> {
-    #[cfg(windows)]
-    {
-        use wmi::{COMLibrary, WMIConnection};
-        use std::collections::HashMap;
-        let com = COMLibrary::new().context("COM")?;
-        let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com.into()).context("WMI")?;
-        // Try MSAcpi_ThermalZoneTemperature first
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature")
-            .unwrap_or_default();
-        if let Some(row) = results.first() {
-            match row.get("CurrentTemperature") {
-                Some(wmi::Variant::UI4(v)) => {
-                    // Kelvin * 10 -> Celsius
-                    return Ok((*v as f32 / 10.0) - 273.15);
-                }
-                _ => {}
-            }
-        }
-        Ok(45.0)
-    }
-    #[cfg(not(windows))]
-    { Ok(45.0) }
 }
 
 // ── Registry persistence ─────────────────────────────────────────────────────

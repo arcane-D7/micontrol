@@ -355,6 +355,23 @@ fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
 }
 
 /// Send performance mode via `HQWmiCommonInterface.SetPerformanceMode` in root\WMI.
+/// Query ROOT\WMI for the first active HQWmiCommonInterface instance name.
+/// Returns the raw InstanceName string (e.g. "ACPI\\PNP0C14\\0_0").
+#[cfg(windows)]
+fn find_hq_wmi_instance_name(wmi: &wmi::WMIConnection) -> Result<String> {
+    use std::collections::HashMap;
+    let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+        .raw_query("SELECT InstanceName FROM HQWmiCommonInterface WHERE Active = TRUE")
+        .context("WMI query HQWmiCommonInterface")?;
+    rows.into_iter()
+        .next()
+        .and_then(|row| match row.get("InstanceName") {
+            Some(wmi::Variant::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .context("No active HQWmiCommonInterface instance found in ROOT\\WMI")
+}
+
 /// This is the primary TDP-level control channel on Xiaomi Book Pro 14
 /// (uses ACPI\PNP0C14\0 device, WmiMethodId=9).
 #[cfg(windows)]
@@ -369,8 +386,20 @@ fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
     let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com)
         .context("HQ WMI: connect root\\WMI")?;
 
+    // Dynamically discover the active HQWmiCommonInterface instance name instead
+    // of hardcoding "ACPI\PNP0C14\0_0" — firmware revisions (Panther Lake, future
+    // Xiaomi hardware) may use a different ACPI path.
+    let instance_name = find_hq_wmi_instance_name(&wmi)
+        .context("HQ WMI: cannot find active HQWmiCommonInterface instance")?;
+
     let mode_str = mode.to_hw_value().to_string();
-    let instance_path = BSTR::from(r#"HQWmiCommonInterface.InstanceName="ACPI\PNP0C14\0_0""#);
+
+    // WMI object-path format requires backslashes in key values to be escaped as \\.
+    // e.g. InstanceName="ACPI\PNP0C14\0_0"  →  "ACPI\\PNP0C14\\0_0" in the path string.
+    let escaped = instance_name.replace('\\', "\\\\");
+    let instance_path = BSTR::from(
+        format!("HQWmiCommonInterface.InstanceName=\"{escaped}\"")
+    );
     let method_name   = BSTR::from("SetPerformanceMode");
 
     unsafe {
@@ -552,6 +581,126 @@ fn find_vhf_device_path() -> Result<String> {
 
         SetupDiDestroyDeviceInfoList(dev_info).ok();
         result
+    }
+}
+
+// ── Debug / diagnostic ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PerfDebugInfo {
+    /// Name discovered from HQWmiCommonInterface (null = class not found)
+    pub hq_wmi_instance: Option<String>,
+    /// Whether SetPerformanceMode("1") returned "Success" in a live test
+    pub hq_wmi_works: bool,
+    /// Return string from the test call (empty on failure)
+    pub hq_wmi_test_ret: String,
+    /// VHF device path from discovery cache (null = not found)
+    pub vhf_device_path: Option<String>,
+    /// Current mode as stored in our registry key
+    pub registry_mode: String,
+    /// Current Windows power overlay GUID (truncated)
+    pub overlay_mode: String,
+}
+
+pub fn get_perf_debug() -> PerfDebugInfo {
+    #[cfg(windows)]
+    {
+        use wmi::{COMLibrary, WMIConnection};
+        use windows::core::{BSTR, VARIANT};
+        use windows::Win32::System::Wmi::WBEM_GENERIC_FLAG_TYPE;
+
+        let mut info = PerfDebugInfo {
+            hq_wmi_instance: None,
+            hq_wmi_works: false,
+            hq_wmi_test_ret: String::new(),
+            vhf_device_path: None,
+            registry_mode: String::from("unknown"),
+            overlay_mode: String::from("unknown"),
+        };
+
+        // Registry mode
+        if let Some(mode) = read_mi_registry_mode() {
+            info.registry_mode = format!("{mode:?}");
+        }
+        // Overlay mode
+        if let Some(mode) = read_windows_power_overlay() {
+            info.overlay_mode = format!("{mode:?}");
+        }
+        // VHF path
+        info.vhf_device_path = crate::hw::discovery::global_profile()
+            .and_then(|p| p.vhf_device_path.clone());
+
+        // WMI check
+        let Ok(com) = COMLibrary::without_security() else { return info; };
+        let Ok(wmi) = WMIConnection::with_namespace_path("ROOT\\WMI", com) else { return info; };
+
+        if let Ok(name) = find_hq_wmi_instance_name(&wmi) {
+            info.hq_wmi_instance = Some(name.clone());
+
+            // Live test: call SetPerformanceMode("1") and capture return
+            let escaped = name.replace('\\', "\\\\");
+            let instance_path = BSTR::from(format!("HQWmiCommonInterface.InstanceName=\"{escaped}\""));
+            let method_name   = BSTR::from("SetPerformanceMode");
+
+            // Wrap in a closure so `?` propagates into anyhow::Result correctly.
+            let test_ok: anyhow::Result<String> = (|| -> anyhow::Result<String> { unsafe {
+                let mut class_obj = None;
+                wmi.svc.GetObject(
+                    &BSTR::from("HQWmiCommonInterface"),
+                    windows::Win32::System::Wmi::WBEM_FLAG_RETURN_WBEM_COMPLETE,
+                    None,
+                    Some(&mut class_obj),
+                    None,
+                ).context("GetObject")?;
+                let class_obj = class_obj.context("class obj none")?;
+
+                let mut in_sig: Option<windows::Win32::System::Wmi::IWbemClassObject> = None;
+                class_obj.GetMethod(&method_name, 0, &mut in_sig as *mut _, std::ptr::null_mut())
+                    .context("GetMethod")?;
+                let in_sig = in_sig.context("in_sig none")?;
+                let in_params = in_sig.SpawnInstance(0).context("SpawnInstance")?;
+
+                let req_v = VARIANT::from(BSTR::from("1"));
+                in_params.Put(&BSTR::from("req"), 0, &req_v, 0).context("Put req")?;
+
+                let mut out_params = None;
+                wmi.svc.ExecMethod(
+                    &instance_path, &method_name,
+                    WBEM_GENERIC_FLAG_TYPE(0), None,
+                    Some(&in_params), Some(&mut out_params), None,
+                ).context("ExecMethod")?;
+
+                let ret = out_params.and_then(|out| {
+                    let mut v = VARIANT::default();
+                    out.Get(&BSTR::from("ret"), 0, &mut v, None, None).ok()?;
+                    BSTR::try_from(&v).ok().map(|b| b.to_string())
+                }).unwrap_or_default();
+                Ok(ret)
+            } })();
+
+            match test_ok {
+                Ok(ret) => {
+                    info.hq_wmi_works = ret.to_lowercase().contains("success");
+                    info.hq_wmi_test_ret = ret;
+                }
+                Err(e) => {
+                    info.hq_wmi_test_ret = format!("ERROR: {e}");
+                }
+            }
+        }
+
+        info
+    }
+    #[cfg(not(windows))]
+    {
+        PerfDebugInfo {
+            hq_wmi_instance: None,
+            hq_wmi_works: false,
+            hq_wmi_test_ret: String::from("not Windows"),
+            vhf_device_path: None,
+            registry_mode: String::from("n/a"),
+            overlay_mode: String::from("n/a"),
+        }
     }
 }
 

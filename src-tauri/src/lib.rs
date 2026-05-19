@@ -5,7 +5,7 @@ pub mod elevated;
 mod elev_bridge;
 
 use commands::ai_logs::{write_ai_perf_log, read_ai_perf_logs, open_ai_logs_dir};
-use commands::hardware::{get_performance_mode, set_performance_mode, get_charging_threshold, set_charging_threshold};
+use commands::hardware::{get_performance_mode, set_performance_mode, get_charging_threshold, set_charging_threshold, get_perf_debug};
 use commands::hotkeys::{get_hotkey_config, set_hotkey_config, start_key_detect, get_detected_key, is_hook_active};
 use commands::system::{
     get_battery_info, get_display_info, set_brightness, set_hdr,
@@ -80,6 +80,7 @@ pub fn run() {
             set_performance_mode,
             get_charging_threshold,
             set_charging_threshold,
+            get_perf_debug,
             // System info
             get_system_info,
             // Battery

@@ -1,6 +1,6 @@
 use tauri::State;
 use crate::state::{AppState, PerformanceMode};
-use crate::hw::performance::{get_performance_mode as hw_get_perf, PerformanceResult};
+use crate::hw::performance::{get_performance_mode as hw_get_perf, PerformanceResult, PerfDebugInfo, get_perf_debug as hw_perf_debug};
 use crate::hw::charging::{get_charging_threshold as hw_get_charge, ChargingResult};
 use crate::elev_bridge;
 
@@ -44,4 +44,15 @@ pub async fn set_charging_threshold(
         .map_err(|e| format!("Unexpected elevated result: {e}"))?;
     *state.charging_threshold.lock().unwrap() = result.threshold;
     Ok(result)
+}
+
+/// Returns diagnostic information about the performance mode control channel:
+/// - which WMI instance was found
+/// - whether a live SetPerformanceMode call succeeds
+/// - current registry and overlay mode
+/// - VHF device path if discovered
+/// This runs in the main (non-elevated) process since it's read-only.
+#[tauri::command]
+pub async fn get_perf_debug() -> Result<PerfDebugInfo, String> {
+    Ok(hw_perf_debug())
 }

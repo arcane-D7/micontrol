@@ -110,7 +110,19 @@
       "activation": "Activation",
       "via": "via",
       "modeActive": "Mode active",
-      "failed": "Failed"
+      "failed": "Failed",
+      "gpuLoad": "GPU Load",
+      "tdpRealLabel": "Real TDP",
+      "tdpEstLabel": "Est. TDP",
+      "tdpCapLine": "cap ~{value} W",
+      "tdpEstimated": "Setpoint",
+      "tdpMeasured": "Measured",
+      "noWmiSensor": "no WMI sensor",
+      "methodLabels": {
+        "hqWmi": "HQ WMI (direct TDP)",
+        "vhf": "VHF IOCTL",
+        "overlay": "Registry + Overlay"
+      }
     },
     "techDetails": {
       "title": "Technical Details",
@@ -143,6 +155,22 @@
       "manual": "Manual (no auto-switch)",
       "currentlyPluggedIn": "Currently plugged in — AC profile active",
       "currentlyOnBattery": "Currently on battery — DC profile active"
+    },
+    "channels": {
+      "title": "Channel Diagnostics",
+      "subtitle": "Checks which TDP control channels are available",
+      "checking": "Checking…",
+      "checkNow": "Check now",
+      "hqWmi": "HQ WMI (direct TDP)",
+      "functional": "Functional",
+      "unavailable": "Unavailable",
+      "instance": "Instance",
+      "response": "Response",
+      "vhf": "VHF (secondary channel)",
+      "found": "Found",
+      "notFound": "Not found",
+      "registry": "Mi Registry",
+      "overlay": "Power Overlay"
     }
   },
   "battery": {

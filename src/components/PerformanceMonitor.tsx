@@ -8,10 +8,16 @@ interface Props {
   lastResult: PerformanceResult | null;
 }
 
-const METHOD_LABELS: Record<string, string> = {
-  "hq_wmi+registry+overlay": "HQ WMI (TDP direto)",
-  "vhf+registry+overlay": "VHF IOCTL",
-  "registry+overlay": "Registro + Overlay",
+// Nominal PL1 (sustained) TDP setpoints per mode, used when RAPL measurement
+// is unavailable. Panther Lake firmware returns 0 from the ACPI Power Meter.
+const TDP_SETPOINTS: Record<string, number> = {
+  silence:            7,
+  balance:           15,
+  turbo:             25,
+  decepticon:        35,
+  smart:             15,
+  long_battery:       6,
+  smart_acceleration: 20,
 };
 
 function tempColor(temp: number): string {
@@ -56,45 +62,71 @@ function Metric({ label, value, sub, bar }: MetricProps) {
   );
 }
 
-export default function PerformanceMonitor({ fan, systemInfo, lastResult }: Props) {
+export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastResult }: Props) {
   if (!fan && !systemInfo) return null;
+
+  // Build METHOD_LABELS inside component so t() reflects current locale
+  const METHOD_LABELS: Record<string, string> = {
+    "hq_wmi+registry+overlay": t("performance.monitor.methodLabels.hqWmi"),
+    "vhf+registry+overlay":    t("performance.monitor.methodLabels.vhf"),
+    "registry+overlay":        t("performance.monitor.methodLabels.overlay"),
+  };
 
   const cpuTemp = fan?.cpu_temp_celsius ?? 0;
   const gpuTemp = fan?.gpu_temp_celsius ?? 0;
   const fanRpm = fan?.speed_rpm ?? 0;
   const tdp = fan?.tdp_watts ?? null;
-  // Use the accurate Win32_PerfFormattedData value from SystemInfo (matches Task Manager)
   const cpuLoad = systemInfo?.cpu_usage ?? null;
+  const gpuLoad = systemInfo?.gpu_usage ?? null;
+
+  // Setpoint for current mode (used as cap reference and fallback when RAPL is null)
+  const setpoint = TDP_SETPOINTS[currentMode] ?? null;
+  const tdpEstimated = tdp === null ? setpoint : null;
+  const tdpDisplay   = tdp ?? tdpEstimated;
+  const tdpIsEstimated = tdp === null && tdpDisplay !== null;
+
+  const tdpLabel = tdpIsEstimated
+    ? t("performance.monitor.tdpEstLabel")
+    : t("performance.monitor.tdpRealLabel");
+  const tdpValueStr = tdpDisplay !== null
+    ? (tdpIsEstimated ? `~${tdpDisplay.toFixed(0)} W` : `${tdpDisplay.toFixed(1)} W`)
+    : null;
+  // Below the real TDP, show the configured setpoint for context
+  const tdpSub = !tdpIsEstimated && setpoint !== null
+    ? t("performance.monitor.tdpCapLine").replace("{value}", String(setpoint))
+    : undefined;
 
   return (
     <div className="card">
       <div className="card-title">{t("performance.monitor.title")}</div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "10px 14px", marginBottom: lastResult ? 16 : 0 }}>
-        {/* CPU Temp */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px 14px", marginBottom: lastResult ? 16 : 0 }}>
+        {/* CPU Temp + CPU Load */}
         <Metric
           label={t("performance.monitor.cpuTemp")}
           value={<span style={{ color: tempColor(cpuTemp) }}>{cpuTemp.toFixed(0)}°C</span>}
+          sub={cpuLoad !== null ? <span style={{ color: "var(--info)" }}>{cpuLoad.toFixed(0)}% {t("performance.monitor.cpuLoad")}</span> : undefined}
           bar={{ pct: tempPct(cpuTemp), cls: "temp" }}
         />
 
-        {/* GPU Temp */}
+        {/* GPU Temp + GPU Load */}
         <Metric
           label={t("performance.monitor.gpuTemp")}
           value={<span style={{ color: tempColor(gpuTemp) }}>{gpuTemp.toFixed(0)}°C</span>}
+          sub={gpuLoad !== null ? <span style={{ color: "var(--info)" }}>{gpuLoad.toFixed(0)}% {t("performance.monitor.gpuLoad")}</span> : undefined}
           bar={{ pct: tempPct(gpuTemp), cls: "gpu" }}
         />
 
         {/* TDP */}
         <Metric
-          label="TDP"
+          label={tdpLabel}
           value={
-            tdp !== null
-              ? <span style={{ color: tdpColor(tdp) }}>{tdp.toFixed(1)} W</span>
+            tdpValueStr !== null
+              ? <span style={{ color: tdpColor(tdpDisplay!) }}>{tdpValueStr}</span>
               : <span style={{ color: "var(--text-dim)", fontSize: 16 }}>—</span>
           }
-          sub={tdp !== null ? "RAPL" : "aguardando..."}
-          bar={tdp !== null ? { pct: Math.min((tdp / 45) * 100, 100), cls: "ram" } : undefined}
+          sub={tdpSub}
+          bar={tdpDisplay !== null ? { pct: Math.min((tdpDisplay / 45) * 100, 100), cls: "ram" } : undefined}
         />
 
         {/* Fan */}
@@ -105,18 +137,7 @@ export default function PerformanceMonitor({ fan, systemInfo, lastResult }: Prop
               ? <span style={{ color: "var(--text)" }}>{fanRpm.toLocaleString()}</span>
               : <span style={{ color: "var(--text-dim)", fontSize: 16 }}>N/A</span>
           }
-          sub={fanRpm > 0 ? t("performance.monitor.rpm") : "sem sensor WMI"}
-        />
-
-        {/* CPU Load */}
-        <Metric
-          label={t("performance.monitor.cpuLoad")}
-          value={
-            cpuLoad !== null
-              ? <span style={{ color: "var(--info)" }}>{cpuLoad.toFixed(0)}%</span>
-              : <span style={{ color: "var(--text-dim)", fontSize: 16 }}>—</span>
-          }
-          bar={cpuLoad !== null ? { pct: cpuLoad, cls: "cpu" } : undefined}
+          sub={fanRpm > 0 ? t("performance.monitor.rpm") : t("performance.monitor.noWmiSensor")}
         />
       </div>
 

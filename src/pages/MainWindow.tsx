@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { ThemeMode } from "../App";
 import { t } from "../hooks/useI18n";
 import type { useHardware } from "../hooks/useHardware";
@@ -21,6 +22,15 @@ import SettingsPage from "../components/SettingsPage";
 import { MiControlIcon } from "../components/MiControlIcon";
 
 type Hardware = ReturnType<typeof useHardware>;
+
+interface PerfDebugInfo {
+  hq_wmi_instance: string | null;
+  hq_wmi_works: boolean;
+  hq_wmi_test_ret: string;
+  vhf_device_path: string | null;
+  registry_mode: string;
+  overlay_mode: string;
+}
 
 interface Props {
   hardware: Hardware;
@@ -143,6 +153,23 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
   const [showLogs, setShowLogs] = useState(false);
   const [logEntries, setLogEntries] = useState<import("../hooks/useHardware").AiPerfLogEntry[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
+
+  // ── Perf channel debug ─────────────────────────────────────────────────────
+  const [debugInfo, setDebugInfo] = useState<PerfDebugInfo | null>(null);
+  const [loadingDebug, setLoadingDebug] = useState(false);
+
+  const runPerfDebug = useCallback(async () => {
+    setLoadingDebug(true);
+    try {
+      const info = await invoke<PerfDebugInfo>("get_perf_debug");
+      setDebugInfo(info);
+    } catch (e) {
+      setDebugInfo(null);
+      console.error("get_perf_debug failed", e);
+    } finally {
+      setLoadingDebug(false);
+    }
+  }, []);
 
   const loadLogs = useCallback(async () => {
     setLoadingLogs(true);
@@ -307,6 +334,88 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
                 </div>
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* Performance channel diagnostics */}
+      <div className="card">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div className="card-title" style={{ marginBottom: 2 }}>{t("performance.channels.title")}</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              {t("performance.channels.subtitle")}
+            </div>
+          </div>
+          <button
+            className="btn-secondary"
+            style={{ fontSize: 12 }}
+            onClick={() => void runPerfDebug()}
+            disabled={loadingDebug}
+          >
+            {loadingDebug ? t("performance.channels.checking") : t("performance.channels.checkNow")}
+          </button>
+        </div>
+
+        {debugInfo && (
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 8, fontSize: 13 }}>
+            {/* HQ WMI */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--text-muted)" }}>{t("performance.channels.hqWmi")}</span>
+              <span style={{
+                color: debugInfo.hq_wmi_works ? "var(--success, #4caf50)" : "var(--error, #f44336)",
+                fontWeight: 600
+              }}>
+                {debugInfo.hq_wmi_works
+                  ? `✓ ${t("performance.channels.functional")}`
+                  : `✗ ${t("performance.channels.unavailable")}`}
+              </span>
+            </div>
+            {debugInfo.hq_wmi_instance && (
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11 }}>
+                <span style={{ color: "var(--text-muted)" }}>{t("performance.channels.instance")}</span>
+                <code style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {debugInfo.hq_wmi_instance}
+                </code>
+              </div>
+            )}
+            {debugInfo.hq_wmi_test_ret && (
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11 }}>
+                <span style={{ color: "var(--text-muted)" }}>{t("performance.channels.response")}</span>
+                <code style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                  {debugInfo.hq_wmi_test_ret}
+                </code>
+              </div>
+            )}
+            {/* VHF */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--text-muted)" }}>{t("performance.channels.vhf")}</span>
+              <span style={{
+                color: debugInfo.vhf_device_path ? "var(--success, #4caf50)" : "var(--text-dim)",
+                fontWeight: 600
+              }}>
+                {debugInfo.vhf_device_path
+                  ? `✓ ${t("performance.channels.found")}`
+                  : `— ${t("performance.channels.notFound")}`}
+              </span>
+            </div>
+            {debugInfo.vhf_device_path && (
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11 }}>
+                <span style={{ color: "var(--text-muted)" }}>Path</span>
+                <code style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {debugInfo.vhf_device_path}
+                </code>
+              </div>
+            )}
+            {/* Registry + Overlay */}
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ color: "var(--text-muted)" }}>{t("performance.channels.registry")}</span>
+              <code style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{debugInfo.registry_mode}</code>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ color: "var(--text-muted)" }}>{t("performance.channels.overlay")}</span>
+              <code style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{debugInfo.overlay_mode}</code>
+            </div>
           </div>
         )}
       </div>
