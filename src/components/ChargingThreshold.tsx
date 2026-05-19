@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { t } from "../hooks/useI18n";
+import { useToast } from "../contexts/ToastContext";
 
 interface Props {
   threshold: number;
@@ -10,11 +11,15 @@ const LEVELS = [40, 50, 60, 70, 80] as const;
 
 export default function ChargingThreshold({ threshold, onThresholdChange }: Props) {
   const [saving, setSaving] = useState(false);
+  const { addToast } = useToast();
 
   const handleChange = async (level: number) => {
     setSaving(true);
     try {
       await onThresholdChange(level);
+      addToast(t("charging.applied"), "success");
+    } catch (e) {
+      addToast(`${t("charging.error")}: ${String(e)}`, "error");
     } finally {
       setSaving(false);
     }

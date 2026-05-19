@@ -374,7 +374,11 @@ export function useHardware() {
   const refreshUpdateStatus = useCallback(async () => {
     setLoadingUpdate(true);
     try {
-      const status = await invoke<UpdateStatus>("get_update_status");
+      // Run the scan and a minimum 2-second visual feedback delay in parallel.
+      const [status] = await Promise.all([
+        invoke<UpdateStatus>("get_update_status"),
+        new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+      ]);
       setUpdateStatus(status);
     } catch (e) {
       // non-fatal — update panel shows fallback

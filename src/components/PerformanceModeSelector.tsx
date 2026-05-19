@@ -1,5 +1,6 @@
 import { t } from "../hooks/useI18n";
 import type { PerformanceMode } from "../hooks/useHardware";
+import { useToast } from "../contexts/ToastContext";
 
 interface Props {
   current: PerformanceMode;
@@ -45,6 +46,16 @@ export default function PerformanceModeSelector({
 }: Props) {
   const spec = MODE_SPECS[current];
   const showSmartDiff = current === "smart" || current === "smart_acceleration";
+  const { addToast } = useToast();
+
+  async function handleModeChange(key: PerformanceMode) {
+    try {
+      await onChange(key);
+      addToast(t("performance.applied"), "success");
+    } catch (e) {
+      addToast(`${t("performance.error")}: ${String(e)}`, "error");
+    }
+  }
 
   return (
     <div>
@@ -57,7 +68,7 @@ export default function PerformanceModeSelector({
               className={`mode-btn ${current === m.key ? "active" : ""} ${aiLocked ? "ai-locked" : ""}`}
               onClick={() => {
                 if (aiLocked) { onOpenSettings?.(); return; }
-                void onChange(m.key);
+                void handleModeChange(m.key);
               }}
               disabled={disabled && !aiLocked}
               title={

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { t } from "../hooks/useI18n";
 import type { FanInfo } from "../hooks/useHardware";
+import { useToast } from "../contexts/ToastContext";
 
 interface Props {
   fan: FanInfo | null;
@@ -26,10 +27,16 @@ function FanSpeedVisual({ speedPct }: { speedPct: number }) {
 export default function FanControl({ fan, onModeChange }: Props) {
   const [speed, setSpeed] = useState(fan?.speed_percent ?? 50);
   const [mode, setMode] = useState<"auto" | "fixed" | "off">(fan?.mode ?? "auto");
+  const { addToast } = useToast();
 
   const handleModeChange = async (m: "auto" | "fixed" | "off") => {
     setMode(m);
-    await onModeChange(m, m === "fixed" ? speed : undefined);
+    try {
+      await onModeChange(m, m === "fixed" ? speed : undefined);
+      addToast(t("fan.applied"), "success");
+    } catch (e) {
+      addToast(`${t("fan.error")}: ${String(e)}`, "error");
+    }
   };
 
   if (!fan) {

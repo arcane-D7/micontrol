@@ -703,6 +703,27 @@ input[type="range"]:active::-webkit-slider-thumb {
   border-radius: var(--r-xs);
 }
 
+/* ── Form controls ───────────────────────────────────────────────────────── */
+.select-input,
+.text-input {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: var(--font);
+  outline: none;
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.select-input:focus,
+.text-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.select-input { cursor: pointer; }
+.text-input::placeholder { color: var(--text-dim); }
+
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 /* Base shape shared by all button variants */
 .btn,

@@ -55,7 +55,8 @@
     "hookInactive": "¡Hook no activo!",
     "save": "Guardar",
     "saving": "Guardando…",
-    "saved": "¡Guardado!"
+    "saved": "Configuración guardada",
+    "saveError": "Error al guardar configuración"
   },
   "overview": {
     "title": "Resumen del Sistema",
@@ -78,7 +79,7 @@
       "turbo": "Turbo",
       "smart": "Inteligente",
       "longBattery": "Batería Larga",
-      "decepticon": "Extremo (Desbloqueado)",
+      "decepticon": "Decepticon (Desbloqueado)",
       "smartAcceleration": "Aceleración Inteligente"
     },
     "descriptions": {
@@ -358,6 +359,9 @@
     "adminHint": "Consejo: Haz clic derecho en MiControl.exe → Ejecutar como administrador e inténtalo de nuevo.",
     "rescan": "Reanalizar Hardware",
     "scanning": "Analizando…",
+    "scanSuccess": "Análisis de hardware completado",
+    "scanFailed": "Error en el análisis de hardware",
+    "vhfNotRequired": "Los modos de rendimiento (Balance, Turbo, Decepticon…) funcionan vía servicio IoT — el controlador VHF no es necesario. Solo la ruta VHF IOCTL heredada no está disponible.",
     "lastScan": "Último análisis",
     "noProfile": "Perfil de hardware aún no cargado. Haz clic en Reanalizar Hardware para iniciar la detección."
   },

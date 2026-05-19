@@ -267,9 +267,15 @@ pub fn set_focus_callback(f: Box<dyn Fn() + Send + Sync>) {
 pub fn start_detect_mode() {
     DETECTED_VK.store(0, Ordering::Relaxed);
     DETECT_MODE.store(true, Ordering::Relaxed);
-    log::info!("[hotkeys] Key detect mode started (10 s window — press any key)");
+    log::info!("[hotkeys] Key detect mode started (10 s max — press any key)");
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        // Poll every 100 ms; exit early as soon as a key is detected.
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if DETECTED_VK.load(Ordering::Relaxed) != 0 {
+                break;
+            }
+        }
         DETECT_MODE.store(false, Ordering::Relaxed);
         log::info!("[hotkeys] Key detect mode ended, last VK: {:#04X}",
             DETECTED_VK.load(Ordering::Relaxed));

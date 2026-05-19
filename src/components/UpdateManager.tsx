@@ -50,7 +50,7 @@ export default function UpdateManager({ updateStatus, loadingUpdate, onRefreshUp
             disabled={loadingUpdate}
             style={{ fontSize: 12, padding: "4px 12px" }}
           >
-            {loadingUpdate ? t("common.loading") : ("u2935 " + t("updates.refresh"))}
+            {loadingUpdate ? t("common.loading") : ("\u2935 " + t("updates.refresh"))}
           </button>
         </div>
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { t } from "../hooks/useI18n";
 import type { HardwareProfile, MissingDriver } from "../hooks/useHardware";
+import { useToast } from "../contexts/ToastContext";
 
 interface Props {
   profile: HardwareProfile | null;
@@ -120,14 +121,17 @@ function DriverInstallCard({
 export default function HardwareDiscovery({ profile, loading, onRescan, onInstallDriver }: Props) {
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const { addToast } = useToast();
 
   async function handleRescan() {
     setScanning(true);
     setScanError(null);
     try {
       await onRescan();
+      addToast(t("discovery.scanSuccess"), "success");
     } catch (e) {
       setScanError(String(e));
+      addToast(`${t("discovery.scanFailed")}: ${String(e)}`, "error");
     } finally {
       setScanning(false);
     }
@@ -192,6 +196,19 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
           <div className="card">
             <div className="card-title">{t("discovery.capabilities")}</div>
             <BoolRow label={t("discovery.cap.vhfPerformance")} value={profile.capabilities.has_vhf_performance} />
+            {!profile.capabilities.has_vhf_performance && (
+              <div style={{
+                marginTop: 4, marginBottom: 6,
+                padding: "7px 10px",
+                borderRadius: "var(--r-xs)",
+                background: "oklch(from var(--accent) l c h / 0.07)",
+                border: "1px solid oklch(from var(--accent) l c h / 0.18)",
+                fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5,
+              }}>
+                <span style={{ color: "var(--accent)", fontWeight: 600 }}>ℹ </span>
+                {t("discovery.vhfNotRequired")}
+              </div>
+            )}
             <BoolRow label={t("discovery.cap.touchpadHid")} value={profile.capabilities.has_touchpad_hid} />
             <BoolRow label={t("discovery.cap.touchscreen")} value={profile.capabilities.has_touchscreen} />
             <BoolRow label={t("discovery.cap.stylus")} value={profile.capabilities.has_stylus} />

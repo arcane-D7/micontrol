@@ -55,7 +55,8 @@
     "hookInactive": "Hook not active!",
     "save": "Save",
     "saving": "Saving…",
-    "saved": "Saved!"
+    "saved": "Key bindings saved",
+    "saveError": "Failed to save key bindings"
   },
   "overview": {
     "title": "System Overview",
@@ -78,7 +79,7 @@
       "turbo": "Turbo",
       "smart": "Smart",
       "longBattery": "Long Battery",
-      "decepticon": "Extreme (Unlocked)",
+      "decepticon": "Decepticon (Unlocked)",
       "smartAcceleration": "Smart Acceleration"
     },
     "descriptions": {
@@ -358,6 +359,9 @@
     "adminHint": "Tip: Right-click MiControl.exe → Run as administrator, then try again.",
     "rescan": "Re-scan Hardware",
     "scanning": "Scanning…",
+    "scanSuccess": "Hardware scan complete",
+    "scanFailed": "Hardware scan failed",
+    "vhfNotRequired": "Performance modes (Balance, Turbo, Decepticon…) work via the IoT service — the VHF driver is not required for them to function. Only the legacy VHF IOCTL path is unavailable.",
     "lastScan": "Last scan",
     "noProfile": "Hardware profile not yet loaded. Click Re-scan Hardware to start discovery."
   },

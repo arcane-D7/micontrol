@@ -4,6 +4,7 @@ import { t } from "../hooks/useI18n";
 import type { useHardware } from "../hooks/useHardware";
 import TrayPopup from "./TrayPopup";
 import { useSettings } from "../hooks/useSettings";
+import { useToast } from "../contexts/ToastContext";
 import PerformanceModeSelector from "../components/PerformanceModeSelector";
 import PerformanceMonitor from "../components/PerformanceMonitor";
 import BatteryInfoCard from "../components/BatteryInfo";
@@ -356,46 +357,86 @@ function KeyBindingRow({
         setDetectedVk(`VK 0x${vk.toString(16).toUpperCase().padStart(2, "0")}`);
         setDetecting(false);
         clearInterval(poll);
-      } else if (tries >= 20) {
-        setDetectedVk(t("keyboard.actionNone").startsWith("—") ? "—" : "none");
+      } else if (tries >= 50) {
+        setDetectedVk("");
         setDetecting(false);
         clearInterval(poll);
       }
-    }, 500);
+    }, 200);
   }
 
+  function handleClear() {
+    onChange({ ...binding, enabled: false, action: { type: "none" } });
+    setDetectedVk("");
+  }
+
+  const hasAction = actionType !== "none";
+
   return (
-    <div className="card" style={{ marginBottom: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+    <div className="card" style={{ marginBottom: 10, padding: "14px 16px" }}>
+      {/* Header row: toggle + label + vk badge + detect + clear */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <label className="toggle-switch" style={{ flexShrink: 0 }}>
           <input
             type="checkbox"
             checked={binding.enabled}
             onChange={(e) => onChange({ ...binding, enabled: e.target.checked })}
           />
-          <span className="toggle-slider" />
+          <span className="toggle-track" />
+          <span className="toggle-knob" />
         </label>
-        <div style={{ flex: 1 }}>
-          <div className="card-title" style={{ margin: 0, fontSize: 14 }}>{label}</div>
-          <div style={{ fontSize: 12, opacity: 0.6, marginTop: 2 }}>{description}</div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="card-title" style={{ margin: 0, fontSize: 13.5 }}>{label}</div>
+          <div style={{ fontSize: 11.5, opacity: 0.55, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{description}</div>
         </div>
+
+        {detectedVk && !detecting && (
+          <span style={{
+            fontSize: 10.5, fontFamily: "var(--font-mono)", padding: "2px 8px",
+            borderRadius: 6, background: "var(--surface-2)", border: "1px solid var(--border)",
+            color: "var(--accent)", flexShrink: 0,
+          }}>{detectedVk}</span>
+        )}
+
         <button
           className="btn-secondary"
           onClick={handleDetect}
           disabled={detecting}
           style={{ fontSize: 11, padding: "3px 10px", flexShrink: 0 }}
-          title="Start 10 s capture: press the physical key to identify its VK code"
+          title="Press the physical key to detect its VK code (up to 10 s)"
         >
-          {detecting ? detectedVk || t("keyboard.detectKeyActive") : detectedVk || t("keyboard.detectKey")}
+          {detecting ? (detectedVk === "…" ? t("keyboard.detectKeyActive") : detectedVk) : t("keyboard.detectKey")}
         </button>
+
+        {hasAction && (
+          <button
+            onClick={handleClear}
+            title="Clear this key binding"
+            style={{
+              flexShrink: 0, background: "none", border: "1px solid var(--border)",
+              borderRadius: 6, padding: "3px 8px", cursor: "pointer",
+              fontSize: 11, color: "var(--color-warning, oklch(75% 0.18 55))",
+              opacity: 0.8, lineHeight: 1.4,
+            }}
+          >
+            ✕
+          </button>
+        )}
       </div>
 
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+      {/* Action row */}
+      <div style={{
+        display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center",
+        marginTop: 10,
+        paddingTop: 10,
+        borderTop: "1px solid var(--border)",
+      }}>
         <select
           className="select-input"
           value={actionType}
           onChange={(e) => setActionType(e.target.value)}
-          style={{ minWidth: 200 }}
+          style={{ minWidth: 200, fontSize: 12 }}
         >
           <option value="none">{t("keyboard.actionNone")}</option>
           <option value="focus_micontrol">{t("keyboard.actionFocusMicontrol")}</option>
@@ -412,7 +453,7 @@ function KeyBindingRow({
             onChange={(e) =>
               onChange({ ...binding, action: { type: "open_url", url: e.target.value } })
             }
-            style={{ flex: 1, minWidth: 200 }}
+            style={{ flex: 1, minWidth: 200, fontSize: 12 }}
           />
         )}
         {actionType === "launch_app" && (
@@ -427,7 +468,7 @@ function KeyBindingRow({
                 action: { type: "launch_app", path: e.target.value, args: [] },
               })
             }
-            style={{ flex: 1, minWidth: 200 }}
+            style={{ flex: 1, minWidth: 200, fontSize: 12 }}
           />
         )}
       </div>
@@ -440,6 +481,7 @@ function KeyboardTab() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [hookActive, setHookActive] = useState<boolean | null>(null);
+  const { addToast } = useToast();
 
   useEffect(() => {
     import("@tauri-apps/api/core").then(({ invoke }) => {
@@ -459,9 +501,11 @@ function KeyboardTab() {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("set_hotkey_config", { config });
       setSaved(true);
+      addToast(t("keyboard.saved"), "success");
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       console.error("set_hotkey_config", e);
+      addToast(`${t("keyboard.saveError")}: ${String(e)}`, "error");
     } finally {
       setSaving(false);
     }
@@ -701,7 +745,7 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
 
         {/* Watermark */}
         <div style={{
-          position: "absolute", bottom: 10, right: 14,
+          position: "fixed", bottom: 10, right: 14,
           fontSize: 10, color: "var(--color-text-muted, oklch(50% 0 0))",
           opacity: 0.55, userSelect: "none", pointerEvents: "none",
           display: "flex", alignItems: "center", gap: 4,
