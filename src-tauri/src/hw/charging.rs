@@ -17,12 +17,12 @@ pub struct ChargingResult {
     pub threshold: u8,
 }
 
-/// Valid charging threshold levels (percent).
-const VALID_THRESHOLDS: [u8; 5] = [40, 50, 60, 70, 80];
+/// Valid charging threshold levels (percent). 100 = no limit (charge to full).
+const VALID_THRESHOLDS: [u8; 6] = [40, 50, 60, 70, 80, 100];
 
 pub fn set_charging_threshold(threshold: u8) -> Result<ChargingResult> {
     if !VALID_THRESHOLDS.contains(&threshold) {
-        anyhow::bail!("Invalid threshold {threshold}. Must be one of: 40,50,60,70,80");
+        anyhow::bail!("Invalid threshold {threshold}. Must be one of: 40,50,60,70,80,100");
     }
 
     // Try named pipe first
@@ -72,7 +72,7 @@ struct IotIpcMsg {
 fn send_via_pipe(threshold: u8) -> Result<()> {
     #[cfg(windows)]
     {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::fs::OpenOptions;
 
         // Use the IoT pipe path discovered at startup; fall back to the default constant.
@@ -103,9 +103,9 @@ fn send_via_pipe(threshold: u8) -> Result<()> {
         };
         pipe.write_all(bytes).context("Write to IoT pipe")?;
 
-        // Read acknowledgment (up to 16 bytes)
-        let mut ack = [0u8; 16];
-        let _ = pipe.read(&mut ack);
+        // Do NOT block on a read here — IoTService does not send an
+        // acknowledgment for 0x1003 (set-charging-limit) messages.  A
+        // blocking pipe.read() would hang the elevated helper indefinitely.
     }
     #[cfg(not(windows))]
     {
@@ -191,6 +191,6 @@ fn read_threshold_registry() -> Option<Result<u8>> {
         if res.is_err() {
             return None;
         }
-        Some(Ok(data.clamp(40, 80) as u8))
+        Some(Ok(data.clamp(40, 100) as u8))
     }
 }

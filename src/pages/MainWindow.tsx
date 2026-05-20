@@ -18,8 +18,10 @@ import SystemInfoCard from "../components/SystemInfoCard";
 import UpdateManager from "../components/UpdateManager";
 import HardwareDiscovery from "../components/HardwareDiscovery";
 import AiAdvisor from "../components/AiAdvisor";
+import AiAnalysis from "../components/AiAnalysis";
 import SettingsPage from "../components/SettingsPage";
 import { MiControlIcon } from "../components/MiControlIcon";
+import { useAnalysisLogger } from "../hooks/useAnalysisLogger";
 
 type Hardware = ReturnType<typeof useHardware>;
 
@@ -51,6 +53,7 @@ const NAV_ITEMS = [
   { id: "updates", icon: "🔄", label: "nav.updates" },
   { id: "keyboard", icon: "⌨️", label: "nav.keyboard" },
   { id: "setup", icon: "🔍", label: "nav.setup" },
+  { id: "ai_analysis", icon: "🤖", label: "nav.aiAnalysis" },
   { id: "settings", icon: "⚙️", label: "nav.settings" },
   { id: "about", icon: "ℹ️", label: "nav.about" },
 ] as const;
@@ -237,8 +240,8 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
                 <option value="turbo">{t("performance.modes.turbo")}</option>
                 <option value="decepticon">{t("performance.modes.decepticon")}</option>
                 <option value="long_battery">{t("performance.modes.longBattery")}</option>
-                <option value="smart" disabled={!aiApiKeySet}>{t("performance.modes.smart")}{!aiApiKeySet ? " 🔒" : ""}</option>
-                <option value="smart_acceleration" disabled={!aiApiKeySet}>{t("performance.modes.smartAcceleration")}{!aiApiKeySet ? " 🔒" : ""}</option>
+                <option value="smart">{t("performance.modes.smart")}</option>
+                <option value="smart_acceleration">{t("performance.modes.smartAcceleration")}</option>
               </select>
             </div>
             {/* On battery */}
@@ -256,8 +259,8 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
                 <option value="turbo">{t("performance.modes.turbo")}</option>
                 <option value="decepticon">{t("performance.modes.decepticon")}</option>
                 <option value="long_battery">{t("performance.modes.longBattery")}</option>
-                <option value="smart" disabled={!aiApiKeySet}>{t("performance.modes.smart")}{!aiApiKeySet ? " 🔒" : ""}</option>
-                <option value="smart_acceleration" disabled={!aiApiKeySet}>{t("performance.modes.smartAcceleration")}{!aiApiKeySet ? " 🔒" : ""}</option>
+                <option value="smart">{t("performance.modes.smart")}</option>
+                <option value="smart_acceleration">{t("performance.modes.smartAcceleration")}</option>
               </select>
             </div>
             {/* Status hint */}
@@ -902,9 +905,21 @@ function ThemeIcon({ mode }: { mode: ThemeMode }) {
 
 const THEME_LABELS: Record<ThemeMode, string> = { auto: "Auto", light: "Light", dark: "Dark" };
 
+function AiAnalysisTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettings; onOpenSettings: () => void }) {
+  return (
+    <>
+      <PageHeader title={t("aiAnalysis.title")} subtitle={t("aiAnalysis.subtitle")} />
+      <AiAnalysis hw={hw} ai={ai} onOpenSettings={onOpenSettings} />
+    </>
+  );
+}
+
 export default function MainWindow({ hardware, activeTab, onTabChange, themeMode, toggleTheme }: Props) {
   const aiSettings = useSettings();
   const [showTrayPreview, setShowTrayPreview] = useState(false);
+
+  // Background logger — runs regardless of active tab
+  useAnalysisLogger(hardware, aiSettings);
 
   function renderTab() {
     switch (activeTab) {
@@ -918,6 +933,7 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
       case "updates":    return <UpdatesTab hw={hardware} />;
       case "keyboard":   return <KeyboardTab />;
       case "setup":      return <SetupTab hw={hardware} />;
+      case "ai_analysis": return <AiAnalysisTab hw={hardware} ai={aiSettings} onOpenSettings={() => onTabChange("settings")} />;
       case "settings":   return <SettingsTab ai={aiSettings} />;
       case "about":      return <AboutTab />;
       default:           return <OverviewTab hw={hardware} ai={aiSettings} onOpenSettings={() => onTabChange("settings")} />;

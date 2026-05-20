@@ -33,6 +33,7 @@
     "setup": "Device Setup",
     "keyboard": "Key Remapper",
     "settings": "Settings",
+    "aiAnalysis": "AI Analysis",
     "about": "About"
   },
   "keyboard": {
@@ -89,16 +90,24 @@
       "smart": "Smart",
       "longBattery": "Long Battery",
       "decepticon": "Decepticon (Unlocked)",
-      "smartAcceleration": "Smart Acceleration"
+      "smartAcceleration": "Smart Acceleration",
+      "overdrive": "Overdrive",
+      "overdriveHigh": "Overdrive+",
+      "overdriveMax": "Overdrive MAX",
+      "smartAdaptive": "Smart Adaptive"
     },
     "descriptions": {
-      "silence": "Silent fan, ~7 W TDP. Best for light tasks on battery.",
-      "balance": "~15 W sustained. Adaptive fan. Recommended for most use.",
-      "turbo": "~25 W sustained, up to 45 W burst. Loud fan. Maximum power.",
-      "smart": "AI-adaptive 7–25 W. Learns workload patterns over time.",
-      "longBattery": "~6 W TDP. Fan stopped. Extends battery 20–40% vs Balance.",
-      "decepticon": "~35 W+ sustained. Requires firmware unlock. Extreme heat.",
-      "smartAcceleration": "AI-adaptive + burst to ~40 W on sudden load spikes."
+      "silence": "~65 W burst (~34 s) / ~35 W sustained. Longest PL2 window of all modes. Fan at max during burst.",
+      "balance": "~60 W burst (~11 s) / ~35 W sustained. Adaptive fan. Recommended for most workloads.",
+      "turbo": "~62 W burst (~5 s) / ~15 W sustained. Short PL2 spike, then conservative PL1.",
+      "smart": "AI-adaptive. ~62 W burst (~5 s) / ~15 W base. Learns workload patterns over time.",
+      "longBattery": "~60 W peak burst / ~42 W sustained. Moderate long-session power. Fan stays quiet.",
+      "decepticon": "~35-40 W flat (no burst phase, stable 88°C). Requires firmware unlock.",
+      "smartAcceleration": "AI + burst detection. ~65 W burst (~12 s) / ~38 W base. Reacts to sudden load spikes.",
+      "overdrive": "Hidden firmware mode (ODV1=4). Measured: ~65-83 W burst (~17 s) / ~50 W sustained. Experimental.",
+      "overdriveHigh": "Hidden firmware mode (ODV1=5). Measured: ~62-67 W sustained (uncapped PL1). Experimental.",
+      "overdriveMax": "Hidden firmware mode (ODV1=6). Measured: ~60-77 W sustained (uncapped PL1). Experimental.",
+      "smartAdaptive": "EC-driven auto-scaling. ~65-73 W burst (~13 s) / ~35 W base. The embedded controller adjusts TDP dynamically."
     },
     "monitor": {
       "title": "Live Monitor",
@@ -135,13 +144,17 @@
       "requiresApiKey": "Requires AI API key",
       "smartDiff": "Both use AI to adapt TDP, but differ in reactivity. Smart adjusts gradually to sustained load (learns patterns over minutes); Smart Acceleration adds transient spike detection — reacts within seconds to sudden demands with a power burst before returning to the adaptive baseline. Use Smart for stable workloads; Smart Acceleration for mixed workflows with occasional intense loads.",
       "modes": {
-        "silence": "Severely limits PL1/PL2. CPU boost is nearly disabled and GPU is capped at ~12 W. Sends WMI command 0 to HQWmiCommonInterface, instructing the EC to apply the most conservative firmware power limits. Best on battery for reading, video playback, or light office work.",
-        "balance": "Default mode. CPU can briefly boost to PL2 before settling at PL1. Fan responds gently to load. Covers most workloads without noticeable heat or noise. WMI command: 1.",
-        "turbo": "Unlocks high sustained TDP. CPU runs at full boost while thermals permit. GPU reaches max clock. Expect audible fan and warm surfaces. The EC sets maximum ACPI power limits. WMI command: 2.",
-        "smart": "Xiaomi AI engine analyzes CPU/GPU history over time and continuously adjusts PL1/PL2 between Silence and Turbo levels. Transitions are smooth and gradual — the system learns sustained patterns before increasing power. Does not react to sudden spikes. WMI command: 10. Requires AI API key to enable in MiControl.",
-        "longBattery": "Most aggressive power-saving mode. CPU is locked to base clock. GPU is minimized. Combined with Windows Power Saver, expect 20–40 % more battery vs Balance, with heavy tasks noticeably slower. WMI command: 11.",
-        "decepticon": "Beyond Turbo — requires ACPI firmware unlock. Removes all platform TDP caps. Maximum thermal budget is used. Extremely loud, hot, and may cause thermal throttling without active cooling. WMI command: 3.",
-        "smartAcceleration": "Smart + transient spike detection. Unlike Smart (which only adapts to sustained load), Smart Acceleration detects sudden spikes — opening apps, brief compiles, game load phases — and temporarily unlocks TDP near Turbo for 15–30 s before returning to the adaptive baseline. Best for mixed workloads. WMI command: 14. Requires AI API key."
+        "silence": "Longest PL2 burst window of all modes (~34 s at ~65 W), then drops sharply to ~35 W PL1 (same sustained budget as Balance). Peak 99°C during burst, drops to ~80-83°C in PL1 phase. Despite the name, the fan runs at full speed during the burst. The extra-long PL2 Tau avoids burst-throttle oscillations — good for workloads that need a sustained spike longer than Balance (~11 s) but do not require permanent high TDP. WMI command: 0.",
+        "balance": "Default mode. CPU bursts to ~60 W for about 11 seconds (PL2), then settles to ~35 W sustained (PL1). Fan responds adaptively to load. Covers most workloads without excessive heat or noise. WMI command: 1.",
+        "turbo": "Short PL2 window (~5-6 s) at ~62 W, then drops sharply to ~15 W PL1. Peak CPU temp: 95°C. Despite the name, Turbo does NOT provide the highest sustained performance — Overdrive modes exceed it significantly. WMI command: 2.",
+        "smart": "Xiaomi AI engine analyzes CPU/GPU history and continuously adjusts between Silence and Turbo levels. Measured power profile matches Turbo: ~62 W burst (~5 s) / ~15 W sustained. Transitions are gradual — learns patterns before increasing power. WMI command: 10. Requires AI API key.",
+        "longBattery": "Unusual power profile: brief ~60 W burst (~2 s) then sustains ~42 W throughout. Peak temp 91°C. Does NOT cap to ultra-low power — sustained draw is moderate. WMI command: 11.",
+        "decepticon": "Flat sustained power with NO burst phase: ~35-40 W constant, peaking at only 88°C. Most thermally stable profile. Despite the dramatic name, it runs COOLER and more consistently than Balance or Turbo. Requires ACPI firmware unlock. WMI command: 3.",
+        "smartAcceleration": "Smart + transient spike detection. Burst profile: ~65 W for ~12 s, then sustains ~38 W. Unlike Smart (which only adapts to sustained load), detects sudden spikes and temporarily unlocks TDP near peak before returning to the adaptive baseline. WMI command: 14. Requires AI API key.",
+        "overdrive": "Hidden firmware profile ODV1=4. Measured: ~65-83 W burst (~17 s) / ~50 W sustained (100°C). Significantly higher sustained TDP than Turbo. Long PL2 window before settling to ~50 W PL1. WMI command: 4.",
+        "overdriveHigh": "Hidden firmware profile ODV1=5. Measured: ~62-67 W SUSTAINED throughout (no PL1 throttle detected in 25 s window). PL1 ≈ PL2 ≈ 62 W — effectively uncapped burst. Peak 99°C. The most consistent high-performance profile. WMI command: 5.",
+        "overdriveMax": "Hidden firmware profile ODV1=6 — highest DPTF index. Measured: ~60-77 W sustained throughout (uncapped PL1, 100°C). Nearly identical to Overdrive+ with slightly higher peak variance. WMI command: 6.",
+        "smartAdaptive": "EC-driven adaptive mode. QFAN=9 instructs the embedded controller to read the SMMT sub-register and auto-scale across the full ODV1 range. Measured: ~65-73 W burst (~13 s) / ~35 W sustained. Unlike Smart (fixed at ODV1=2), this auto-selects the power table. WMI command: 9."
       }
     },
     "applying": "Applying mode...",
@@ -191,15 +204,40 @@
     "full": "Fully Charged",
     "unknown": "Unknown",
     "timeRemaining": "Time remaining",
+    "chargeRate": "Input Power",
+    "dischargeRate": "Discharge Rate",
     "hours": "h",
     "minutes": "m",
     "mah": "mAh",
+    "wh": "Wh",
     "celsius": "°C",
-    "volts": "V"
+    "volts": "V",
+    "voltageUnit": "V",
+    "infoModal": {
+      "title": "Battery Information",
+      "levelLabel": "Battery Level (%)",
+      "levelDesc": "Percentage of energy remaining relative to the current full-charge capacity.",
+      "healthLabel": "Battery Health (%)",
+      "healthDesc": "Ratio of the current full-charge capacity to the original designed capacity. Values \u226580% are normal for daily use.",
+      "capacitySection": "Capacity & Cycles",
+      "capacityLabel": "Designed / Full Capacity",
+      "capacityDesc": "Capacity is reported by ACPI in mWh (milliwatt-hours). Wh = mWh \u00f7 1,000. mAh is estimated from the current voltage and may vary slightly with temperature.",
+      "cyclesLabel": "Charge Cycles",
+      "cyclesDesc": "One full discharge (0\u2192100%) counts as one cycle. Partial charges accumulate proportionally. Most lithium cells last 500\u20131,000 cycles before significant capacity loss.",
+      "powerSection": "Power Flow",
+      "chargeRateLabel": "Charge / Discharge Rate",
+      "chargeRateDesc": "Measured by the battery driver in mW (milliwatts). Positive = power entering the battery. Reflects what the cell is actually accepting \u2014 which may be less than the charger\u2019s rated output.",
+      "timeLabel": "Time Remaining",
+      "timeDesc": "Instantaneous estimate: remaining energy divided by the current discharge rate. Fluctuates significantly with varying workload."
+    }
   },
   "charging": {
     "title": "Charging Control",
     "subtitle": "Limit maximum charge to extend battery lifespan",
+    "enableToggle": "Charge Limit",
+    "limitEnabled": "Charge limit enabled",
+    "limitDisabled": "Charge limit disabled",
+    "noLimit": "No limit — charging to 100%",
     "threshold": "Charge Limit",
     "protectMode": "Battery Protection Mode",
     "protectModeDesc": "Limits charging to 80% to extend battery lifespan",
@@ -208,11 +246,22 @@
     "applied": "Setting applied",
     "error": "Failed to set charging threshold",
     "levels": {
-      "40": "40% — Maximum protection",
+      "40": "40% \u2014 Maximum protection",
       "50": "50%",
       "60": "60%",
       "70": "70%",
-      "80": "80% — Recommended"
+      "80": "80% \u2014 Recommended"
+    },
+    "infoModal": {
+      "title": "How Charging Control Works",
+      "functionLabel": "What it does",
+      "functionDesc": "Sends a threshold command via named pipe to the Xiaomi IoTService, which forwards it to the IoTDriver.sys kernel driver. The driver instructs the embedded controller (EC) to stop charging once the battery reaches the configured percentage.",
+      "requiresLabel": "Requirements",
+      "requiresDesc": "Requires IoTDriver.sys (Xiaomi) to be installed and IoTService to be running. If the pipe connection fails, the value is stored in the registry and only takes effect when the service restarts.",
+      "behaviorLabel": "Behaviour",
+      "behaviorDesc": "This is a charge ceiling \u2014 it does not discharge the battery. If you are already above the configured limit, the limit applies on the next charge cycle (discharge below the limit, then plug in).",
+      "warningLabel": "\u26a0\ufe0f Note:",
+      "warningDesc": "This feature was reverse-engineered from the Xiaomi IoTService binary (message type 0x1003). Values 40\u201380 are interpreted as charge limit percentages, but on some firmware variants the same command may control the charging current rate instead. If you observe the battery consistently charging past your configured limit, the IoTDriver may not be active on your device."
     }
   },
   "display": {
@@ -342,7 +391,9 @@
     "settings": "Settings",
     "percent": "%",
     "watts": "W",
-    "unknown": "Unknown"
+    "unknown": "Unknown",
+    "show": "Show",
+    "hide": "Hide"
   },
   "updates": {
     "title": "Drivers & BIOS",
@@ -443,5 +494,58 @@
     "analyzing": "Analysing…",
     "analyzingHint": "Sending hardware data to the AI model…",
     "clear": "Clear"
+  },
+  "aiAnalysis": {
+    "title": "AI Analysis",
+    "subtitle": "Continuous performance logging with scheduled AI reviews",
+    "settings": {
+      "title": "Logger Settings",
+      "subtitle": "Enable to collect performance snapshots in the background",
+      "toastEnabled": "AI Analysis logging enabled",
+      "toastDisabled": "AI Analysis logging disabled",
+      "pollInterval": "Snapshot Interval",
+      "pollIntervalDesc": "How often to capture CPU/GPU/battery data",
+      "dailyAnalyses": "Daily AI Reviews",
+      "dailyAnalysesDesc": "How many times per day logs are sent to the AI",
+      "timesPerDay": "{n}× / day",
+      "logCount": "Logs collected",
+      "span": "Time span",
+      "clearLogs": "Clear Logs",
+      "disabledHint": "Enable logging above to start collecting performance snapshots.",
+      "modelHint": "Using model: {model}"
+    },
+    "charts": {
+      "title": "Live Charts",
+      "subtitle": "Last {n} snapshots ({span})",
+      "noData": "No data yet",
+      "waitingForData": "Waiting for data…",
+      "enableHint": "Enable logging in the settings card above",
+      "temperature": "Temperature",
+      "tdp": "Package Power (TDP)",
+      "usage": "CPU / GPU Usage",
+      "cpuTemp": "CPU Temp",
+      "gpuTemp": "GPU Temp",
+      "topProcesses": "Top Processes (latest snapshot)"
+    },
+    "analysis": {
+      "title": "AI Review",
+      "trigger": "Analyze Now",
+      "analyzing": "Analyzing…",
+      "lastAt": "Last review on {time} ({n} snapshots)",
+      "neverRun": "No analysis yet. Click Analyze Now to run your first review.",
+      "noResultYet": "Run an analysis to see recommendations here.",
+      "nextIn": "Next auto-review in",
+      "due": "Due now",
+      "notEnoughData": "Not enough data yet. Collect at least 2 snapshots first.",
+      "success": "Analysis complete"
+    },
+    "logs": {
+      "title": "Raw Log Viewer",
+      "entries": "entries",
+      "noEntries": "No log entries yet.",
+      "time": "Time",
+      "mode": "Mode",
+      "loadMore": "Load more"
+    }
   }
 }

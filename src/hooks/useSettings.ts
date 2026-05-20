@@ -28,6 +28,12 @@ export interface AppSettings {
   auto_switch_perf: boolean;
   /** Tray popup window opacity (0.3 – 1.0). */
   tray_opacity: number;
+  /** Whether the AI Analysis background logger is active. */
+  ai_analysis_enabled: boolean;
+  /** How often (in seconds) to collect a performance snapshot. */
+  ai_poll_interval_sec: number;
+  /** How many times per day to automatically send logs to AI for analysis. */
+  ai_daily_analyses: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -38,6 +44,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   perf_mode_dc: null,
   auto_switch_perf: false,
   tray_opacity: 1.0,
+  ai_analysis_enabled: false,
+  ai_poll_interval_sec: 60,
+  ai_daily_analyses: 2,
 };
 
 function loadSettings(): AppSettings {
@@ -81,7 +90,7 @@ OS: ${sys?.os_version ?? "Unknown"}
 Level: ${bat?.level ?? "?"}%  |  Charging: ${bat?.is_charging ? "yes" : "no"}
 Health: ${bat?.health_percent ?? "?"}%  |  Cycles: ${bat?.cycle_count ?? "?"}
 Temperature: ${bat?.temperature_celsius != null ? bat.temperature_celsius + "°C" : "unavailable"}
-Capacity: ${bat?.full_capacity_mah ?? "?"} mAh (designed: ${bat?.designed_capacity_mah ?? "?"} mAh)
+Capacity: ${bat?.full_capacity_mwh ?? "?"} mWh (designed: ${bat?.designed_capacity_mwh ?? "?"} mWh)
 
 == PERFORMANCE ==
 Current mode: ${ctx.performanceMode ?? "unknown"}
@@ -190,12 +199,138 @@ export function useSettings() {
     }
   }
 
+  /**
+   * Sends a structured log summary to the AI and returns the analysis text.
+   * The AI is instructed to respond in the given language code (en/pt/es/fr).
+   */
+  async function analyzeWithLogs(
+    logs: AnalysisLogEntry[],
+    hwCtx: SystemContext,
+    language: string,
+  ): Promise<string> {
+    if (!settings.openai_api_key.trim()) throw new Error("api_key_missing");
+    if (logs.length === 0) throw new Error("no_logs");
+
+    const langNames: Record<string, string> = {
+      en: "English", pt: "Portuguese", es: "Spanish", fr: "French",
+    };
+    const langName = langNames[language] ?? "English";
+
+    // Compute statistics from logs
+    const n = logs.length;
+    const avg = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / arr.length;
+    const max = (arr: number[]) => Math.max(...arr);
+
+    const cpuTemps = logs.map((l) => l.cpu_temp);
+    const gpuTemps = logs.map((l) => l.gpu_temp);
+    const tdps = logs.filter((l) => l.tdp_watts != null).map((l) => l.tdp_watts as number);
+    const cpuPcts = logs.map((l) => l.cpu_pct);
+    const gpuPcts = logs.map((l) => l.gpu_pct);
+    const batLevels = logs.filter((l) => l.battery_level != null).map((l) => l.battery_level as number);
+
+    const first = logs[0];
+    const last = logs[n - 1];
+    const spanMin = Math.round(
+      (new Date(last.ts).getTime() - new Date(first.ts).getTime()) / 60000,
+    );
+
+    // Top processes from last snapshot
+    const topProcs = (last.top_processes ?? [])
+      .sort((a, b) => b.cpu_pct - a.cpu_pct)
+      .slice(0, 6)
+      .map((p) => `  - ${p.name}: ${p.cpu_pct.toFixed(1)}% CPU, ${p.memory_mb.toFixed(0)} MB RAM`)
+      .join("\n");
+
+    const batterySection =
+      batLevels.length > 1
+        ? `**Battery:** ${batLevels[0].toFixed(0)}% → ${batLevels[batLevels.length - 1].toFixed(0)}% (${last.is_charging ? "charging" : "discharging"})`
+        : "";
+
+    const prompt = `Respond in ${langName}.
+
+You are a hardware optimization assistant for a Xiaomi laptop. Analyze the following performance data.
+
+## Performance Log Summary (${n} snapshots over ${spanMin} min)
+
+**CPU Temperature:** avg ${avg(cpuTemps).toFixed(1)}°C, peak ${max(cpuTemps).toFixed(1)}°C
+**GPU Temperature:** avg ${avg(gpuTemps).toFixed(1)}°C, peak ${max(gpuTemps).toFixed(1)}°C
+**TDP (Package Power):** ${tdps.length ? `avg ${avg(tdps).toFixed(1)} W, peak ${max(tdps).toFixed(1)} W` : "unavailable"}
+**CPU Usage:** avg ${avg(cpuPcts).toFixed(1)}%, peak ${max(cpuPcts).toFixed(1)}%
+**GPU Usage:** avg ${avg(gpuPcts).toFixed(1)}%, peak ${max(gpuPcts).toFixed(1)}%
+${batterySection}
+**Performance Mode:** ${last.mode}
+
+**Top Processes (latest snapshot):**
+${topProcs || "  - No process data available"}
+
+**Current System:**
+- Device: ${hwCtx.deviceModel ?? "Xiaomi Laptop"}
+- CPU: ${hwCtx.systemInfo?.cpu_name ?? "Unknown"} (${hwCtx.systemInfo?.cpu_cores ?? "?"} cores)
+- RAM: ${hwCtx.systemInfo?.ram_used_gb?.toFixed(1) ?? "?"} / ${hwCtx.systemInfo?.ram_total_gb ?? "?"} GB used
+
+## Analysis Tasks
+1. **Thermal:** Are temperatures healthy? Any throttling risk?
+2. **Performance:** Is the current mode optimal for the observed workload?
+3. **Battery:** Is consumption normal? Any drain concerns?
+4. **Top Processes:** Any resource-heavy process worth investigating?
+5. **Recommendation:** Best performance mode for this usage pattern?
+
+Be concise. Use short paragraphs with emoji section headers. Max 300 words.`;
+
+    const baseUrl = settings.openai_base_url.replace(/\/+$/, "");
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${settings.openai_api_key.trim()}`,
+      },
+      body: JSON.stringify({
+        model: settings.openai_model || "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a hardware optimization assistant for Xiaomi laptops. Always respond in ${langName}.`,
+          },
+          { role: "user", content: prompt },
+        ],
+        max_tokens: 800,
+        temperature: 0.4,
+      }),
+    });
+
+    if (!res.ok) {
+      let detail = "";
+      try { const err = await res.json(); detail = err?.error?.message ?? JSON.stringify(err); }
+      catch { detail = await res.text(); }
+      throw new Error(`API ${res.status}: ${detail}`);
+    }
+
+    const json = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+    return json.choices?.[0]?.message?.content?.trim() ?? "No response from model.";
+  }
+
   return {
     settings,
     saveSettings,
     updateKey,
     analyzeSystem,
+    analyzeWithLogs,
     testConnection,
     isConfigured: Boolean(settings.openai_api_key.trim()),
   };
+}
+
+// ── Shared log entry type for AI Analysis module ──────────────────────────────
+
+export interface AnalysisLogEntry {
+  ts: string;
+  mode: string;
+  cpu_temp: number;
+  gpu_temp: number;
+  tdp_watts: number | null;
+  cpu_pct: number;
+  gpu_pct: number;
+  battery_level: number | null;
+  is_charging: boolean;
+  top_processes: Array<{ name: string; cpu_pct: number; memory_mb: number }>;
 }

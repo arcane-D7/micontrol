@@ -10,7 +10,11 @@ export type PerformanceMode =
   | "smart"
   | "long_battery"
   | "decepticon"
-  | "smart_acceleration";
+  | "smart_acceleration"
+  | "overdrive"
+  | "overdrive_high"
+  | "overdrive_max"
+  | "smart_adaptive";
 
 export interface PerformanceResult {
   success: boolean;
@@ -44,12 +48,16 @@ export interface BatteryInfo {
   is_plugged: boolean;
   health_percent: number;
   cycle_count: number;
-  designed_capacity_mah: number;
-  full_capacity_mah: number;
+  designed_capacity_mwh: number;
+  full_capacity_mwh: number;
   manufacturer: string;
   device_name: string;
   temperature_celsius: number | null;
   time_remaining_minutes: number | null;
+  /** Positive = charge rate in mW; negative = discharge rate in mW; 0 = unknown */
+  charge_rate_mw: number;
+  /** Current battery voltage in millivolts. 0 = unavailable. */
+  voltage_mv: number;
 }
 
 export interface AiBrightnessConfig {

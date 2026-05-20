@@ -61,12 +61,14 @@ const BATTERY_INFO: BatteryInfo = {
   is_plugged: true,
   health_percent: 94,
   cycle_count: 412,
-  designed_capacity_mah: 70000,
-  full_capacity_mah: 65800,
+  designed_capacity_mwh: 70000,
+  full_capacity_mwh: 65800,
   manufacturer: "Xiaomi",
   device_name: "LP-L9N80V",
   temperature_celsius: 32.5,
   time_remaining_minutes: 187,
+  charge_rate_mw: 0,
+  voltage_mv: 11400,
 };
 
 const HARDWARE_CAPABILITIES: HardwareCapabilities = {

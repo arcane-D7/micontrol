@@ -24,20 +24,28 @@ const MODES: Array<{
   { key: "balance",            icon: "⚖️", labelKey: "balance",            descKey: "balance",            detailKey: "balance" },
   { key: "turbo",              icon: "⚡", labelKey: "turbo",              descKey: "turbo",              detailKey: "turbo" },
   { key: "decepticon",         icon: "💥", labelKey: "decepticon",         descKey: "decepticon",         detailKey: "decepticon" },
-  { key: "smart",              icon: "🧠", labelKey: "smart",              descKey: "smart",              detailKey: "smart",              requiresAi: true },
+  { key: "smart",              icon: "🧠", labelKey: "smart",              descKey: "smart",              detailKey: "smart" },
   { key: "long_battery",       icon: "🍃", labelKey: "longBattery",        descKey: "longBattery",        detailKey: "longBattery" },
-  { key: "smart_acceleration", icon: "🚀", labelKey: "smartAcceleration",  descKey: "smartAcceleration",  detailKey: "smartAcceleration",  requiresAi: true },
+  { key: "smart_acceleration", icon: "🚀", labelKey: "smartAcceleration",  descKey: "smartAcceleration",  detailKey: "smartAcceleration" },
+  { key: "overdrive",          icon: "🔥", labelKey: "overdrive",          descKey: "overdrive",          detailKey: "overdrive" },
+  { key: "overdrive_high",     icon: "🌋", labelKey: "overdriveHigh",      descKey: "overdriveHigh",      detailKey: "overdriveHigh" },
+  { key: "overdrive_max",      icon: "☠️", labelKey: "overdriveMax",       descKey: "overdriveMax",       detailKey: "overdriveMax" },
+  { key: "smart_adaptive",     icon: "🎯", labelKey: "smartAdaptive",      descKey: "smartAdaptive",      detailKey: "smartAdaptive" },
 ];
 
 /** Hardware constants per mode (not translated — numbers / proper nouns) */
 const MODE_SPECS: Record<PerformanceMode, { tdp: string; fan: string; windowsOverlay: string; accentColor: string }> = {
-  silence:            { tdp: "~7 W PL1 / ~10 W PL2",         fan: "Off or <2 000 RPM",       windowsOverlay: "Power Saver",     accentColor: "var(--info)" },
-  balance:            { tdp: "~15 W PL1 / ~25 W PL2",        fan: "Adaptive 2 000–3 500 RPM", windowsOverlay: "Balanced",        accentColor: "var(--success)" },
-  turbo:              { tdp: "~25 W PL1 / ~45 W PL2",        fan: "Aggressive 4 000–5 500 RPM",windowsOverlay: "Best Performance", accentColor: "var(--warning)" },
-  smart:              { tdp: "7–25 W (AI-adaptive, gradual)", fan: "Variable — follows load",  windowsOverlay: "Balanced",        accentColor: "var(--accent)" },
-  long_battery:       { tdp: "~6 W PL1 / ~8 W PL2",         fan: "Off or very slow",         windowsOverlay: "Power Saver",     accentColor: "var(--success)" },
-  decepticon:         { tdp: "~35 W PL1 / ~55 W+ PL2",      fan: "Max 5 500+ RPM",           windowsOverlay: "Best Performance", accentColor: "var(--error)" },
-  smart_acceleration: { tdp: "7–25 W base + burst ~40 W",    fan: "Reactive — spikes on demand",windowsOverlay: "Balanced",       accentColor: "var(--accent)" },
+  silence:            { tdp: "~65 W burst (~34 s) / ~35 W sust.",       fan: "Max RPM (thermal)",          windowsOverlay: "Power Saver",     accentColor: "var(--info)" },
+  balance:            { tdp: "~60 W burst (~11 s) / ~35 W sust.",     fan: "Adaptive 2 000–4 500 RPM",   windowsOverlay: "Balanced",        accentColor: "var(--success)" },
+  turbo:              { tdp: "~62 W burst (~5 s) / ~15 W sust.",      fan: "Aggressive 4 000–5 500 RPM", windowsOverlay: "Best Performance", accentColor: "var(--warning)" },
+  smart:              { tdp: "~62 W burst (~5 s) / ~15 W sust. (AI)", fan: "Variable — follows load",    windowsOverlay: "Balanced",        accentColor: "var(--accent)" },
+  long_battery:       { tdp: "~60 W burst (~2 s) / ~42 W sust.",      fan: "Moderate 2 000–3 500 RPM",   windowsOverlay: "Power Saver",     accentColor: "var(--success)" },
+  decepticon:         { tdp: "~35-40 W flat (no burst phase)",         fan: "Steady ~3 500 RPM",          windowsOverlay: "Best Performance", accentColor: "var(--error)" },
+  smart_acceleration: { tdp: "~65 W burst (~12 s) / ~38 W sust. (AI)",fan: "Reactive — spikes on demand",windowsOverlay: "Balanced",        accentColor: "var(--accent)" },
+  overdrive:          { tdp: "~65-83 W burst (~17 s) / ~50 W sust.",  fan: "Max 5 000–5 500 RPM",        windowsOverlay: "Best Performance", accentColor: "#ff6a00" },
+  overdrive_high:     { tdp: "~62-67 W sustained (uncapped PL1)",      fan: "Max 5 000–5 500 RPM",        windowsOverlay: "Best Performance", accentColor: "#ff3300" },
+  overdrive_max:      { tdp: "~60-77 W sustained (uncapped PL1)",      fan: "Max 5 000–5 500+ RPM",       windowsOverlay: "Best Performance", accentColor: "#cc0000" },
+  smart_adaptive:     { tdp: "~65-73 W burst (~13 s) / ~35 W sust.",  fan: "Variable — EC-controlled",   windowsOverlay: "Balanced",        accentColor: "#00b4d8" },
 };
 
 

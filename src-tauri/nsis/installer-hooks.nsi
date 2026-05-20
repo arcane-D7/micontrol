@@ -112,11 +112,15 @@ FunctionEnd
   Pop $0
 
   ; ── Scheduled task for elevated hardware operations (no UAC on use) ────────
-  ; Created with RunLevel=Highest so hardware SET commands can run without
-  ; prompting the user for elevation on every use.
+  ; Registered via XML so we can set MultipleInstancesPolicy=StopExisting and
+  ; ExecutionTimeLimit=PT30S, preventing the task from getting stuck in "Queued"
+  ; state if a previous elevated helper is still running.
   DetailPrint "Registando tarefa MiControlElevated..."
-  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /create /tn "MiControlElevated" /tr "\"$INSTDIR\micontrol.exe\" --elevated" /sc ONCE /sd 01/01/2000 /st 00:00 /rl HIGHEST /f'
+  WriteFile "$TEMP\MCElev.xml" '<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT30S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>"$INSTDIR\micontrol.exe"</Command><Arguments>--elevated</Arguments></Exec></Actions></Task>'
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "MiControlElevated" /f'
+  nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /create /tn "MiControlElevated" /xml "$TEMP\MCElev.xml" /f'
   Pop $0
+  Delete "$TEMP\MCElev.xml"
   DetailPrint "MiControlElevated task: $0"
 
   DetailPrint "Configuração de hardware concluída."

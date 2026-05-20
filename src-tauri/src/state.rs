@@ -19,6 +19,15 @@ pub enum PerformanceMode {
     LongBattery,
     Decepticon,
     SmartAcceleration,
+    /// Hidden DPTF profile ODV1=4 — unique firmware profile not used by any stock mode.
+    Overdrive,
+    /// Hidden DPTF profile ODV1=5 — unique firmware profile.
+    OverdriveHigh,
+    /// Hidden DPTF profile ODV1=6 — highest known DPTF profile in the firmware.
+    OverdriveMax,
+    /// EC SMMT-driven adaptive mode — the EC updates the sub-mode register dynamically
+    /// based on workload and feeds it to NTDP, providing true auto-scaling.
+    SmartAdaptive,
 }
 
 impl PerformanceMode {
@@ -29,6 +38,10 @@ impl PerformanceMode {
             Self::Balance => 1,
             Self::Turbo => 2,
             Self::Decepticon => 3,
+            Self::Overdrive => 4,
+            Self::OverdriveHigh => 5,
+            Self::OverdriveMax => 6,
+            Self::SmartAdaptive => 9,
             Self::Smart => 10,
             Self::LongBattery => 11,
             Self::SmartAcceleration => 14,

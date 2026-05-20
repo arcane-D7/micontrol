@@ -33,6 +33,7 @@
     "setup": "Configuración",
     "keyboard": "Remapeo",
     "settings": "Ajustes",
+    "aiAnalysis": "Análisis por IA",
     "about": "Sobre"
   },
   "keyboard": {
@@ -89,16 +90,24 @@
       "smart": "Inteligente",
       "longBattery": "Batería Larga",
       "decepticon": "Decepticon (Desbloqueado)",
-      "smartAcceleration": "Aceleración Inteligente"
+      "smartAcceleration": "Aceleración Inteligente",
+      "overdrive": "Overdrive",
+      "overdriveHigh": "Overdrive+",
+      "overdriveMax": "Overdrive MAX",
+      "smartAdaptive": "Smart Adaptativo"
     },
     "descriptions": {
-      "silence": "Funcionamiento silencioso, rendimiento reducido. Ideal para tareas ligeras.",
-      "balance": "Equilibrio entre rendimiento y batería. Recomendado para uso general.",
-      "turbo": "Rendimiento máximo. Temperaturas y ruido de ventilador más altos.",
-      "smart": "Se ajusta automáticamente según la carga de trabajo.",
-      "longBattery": "Extiende significativamente la duración de la batería con rendimiento reducido.",
-      "decepticon": "Requiere desbloqueo de firmware. Rendimiento máximo sin límites.",
-      "smartAcceleration": "Aumenta temporalmente el rendimiento cuando es necesario."
+      "silence": "~65 W burst (~34 s) / ~35 W sostenido. Ventana PL2 más larga de todos los modos. Ventilador al máximo durante el burst.",
+      "balance": "~60 W burst (~11 s) / ~35 W sostenido. Ventilador adaptativo. Recomendado para uso general.",
+      "turbo": "~62 W burst (~5 s) / ~15 W sostenido. Pico PL2 corto, luego PL1 conservador.",
+      "smart": "IA adaptativa. ~62 W burst (~5 s) / ~15 W base. Aprende patrones de carga.",
+      "longBattery": "~60 W pico burst / ~42 W sostenido. Consumo moderado para sesiones largas.",
+      "decepticon": "~35-40 W plano (sin fase de burst, estable a 88°C). Requiere desbloqueo de firmware.",
+      "smartAcceleration": "IA + detección de picos. ~65 W burst (~12 s) / ~38 W base.",
+      "overdrive": "Modo oculto del firmware (ODV1=4). Medido: ~65-83 W burst (~17 s) / ~50 W sostenido. Experimental.",
+      "overdriveHigh": "Modo oculto del firmware (ODV1=5). Medido: ~62-67 W sostenido (PL1 sin límite). Experimental.",
+      "overdriveMax": "Modo oculto del firmware (ODV1=6). Medido: ~60-77 W sostenido (PL1 sin límite). Experimental.",
+      "smartAdaptive": "Autoescalado por el EC. ~65-73 W burst (~13 s) / ~35 W base. Ajusta TDP dinámicamente."
     },
     "applying": "Aplicando modo...",
     "applied": "Modo aplicado",
@@ -139,13 +148,17 @@
       "requiresApiKey": "Requiere clave API de IA",
       "smartDiff": "Ambos usan IA para adaptar el TDP, pero difieren en reactividad. Smart ajusta gradualmente la carga sostenida (aprende patrones en minutos); Smart Acceleration añade detección de picos transitorios — reacciona en segundos a demandas repentinas con un aumento de potencia antes de volver al nivel adaptativo. Usa Smart para cargas estables; Smart Acceleration para flujos de trabajo mixtos.",
       "modes": {
-        "silence": "Limita severamente PL1/PL2. El boost de CPU está casi desactivado y la GPU limitada a ~12 W. Envía el comando WMI 0 a HQWmiCommonInterface. Mejor para lectura, vídeo o trabajo ofimático ligero con batería.",
-        "balance": "Modo predeterminado. La CPU puede hacer boost brevemente a PL2 antes de estabilizarse en PL1. El ventilador responde suavemente. Cubre la mayoría de cargas sin calor ni ruido notables. Comando WMI: 1.",
-        "turbo": "Desbloquea TDP sostenido alto. La CPU funciona a boost completo mientras los térmicos lo permitan. La GPU alcanza clock máximo. Espera ventilador audible y superficies calientes. Comando WMI: 2.",
-        "smart": "El motor IA de Xiaomi analiza el historial de CPU/GPU y ajusta PL1/PL2 continuamente. Las transiciones son suaves. No reacciona a picos repentinos. Comando WMI: 10. Requiere clave API de IA.",
-        "longBattery": "Modo de ahorro más agresivo. CPU bloqueada al clock base. GPU minimizada. Con Windows Power Saver, espera 20–40% más de batería vs Balance. Comando WMI: 11.",
-        "decepticon": "Más allá del Turbo — requiere desbloqueo de firmware ACPI. Elimina todos los límites de TDP. Extremadamente ruidoso y caliente. Comando WMI: 3.",
-        "smartAcceleration": "Smart + detección de picos transitorios. Detecta spikes repentinos y desbloquea temporalmente TDP cerca del Turbo por 15–30 s. Mejor para cargas mixtas. Comando WMI: 14. Requiere clave API de IA."
+        "silence": "Ventana PL2 más larga de todos los modos (~34 s a ~65 W), luego caída brusca a ~35 W PL1 (mismo presupuesto sostenido que Balance). Pico de 99°C durante el burst; baja a ~80-83°C en fase PL1. La larga ventana Tau evita oscilaciones burst-throttle — ideal para cargas que necesitan un pico sostenido más largo que Balance (~11 s) sin TDP permanentemente alto. Comando WMI: 0.",
+        "balance": "Modo predeterminado. CPU en burst hasta ~60 W por ~11 s (PL2), luego cae a ~35 W sostenido (PL1). Ventilador adaptativo. Cubre la mayoría de cargas. Comando WMI: 1.",
+        "turbo": "Ventana PL2 corta (~5-6 s) a ~62 W, luego cae bruscamente a ~15 W PL1. Temp. pico CPU: 95°C. A pesar del nombre, Turbo NO ofrece el mayor rendimiento sostenido — los modos Overdrive lo superan ampliamente. Comando WMI: 2.",
+        "smart": "Motor IA de Xiaomi analiza historial de CPU/GPU. Perfil medido igual al Turbo: ~62 W burst (~5 s) / ~15 W sostenido. Transiciones suaves y graduales. No reacciona a picos. Comando WMI: 10. Requiere clave API de IA.",
+        "longBattery": "Perfil inusual: burst breve ~60 W (~2 s), luego sostiene ~42 W. Temp. pico 91°C. NO limita a ultra-bajo consumo. Comando WMI: 11.",
+        "decepticon": "Consumo plano y sostenido SIN fase de burst: ~35-40 W constante, alcanzando solo 88°C. Perfil térmicamente más estable. A pesar del nombre dramático, opera más FRÍO y consistente que Balance o Turbo. Requiere desbloqueo de firmware ACPI. Comando WMI: 3.",
+        "smartAcceleration": "Smart + detección de picos. Perfil burst: ~65 W por ~12 s, luego sostiene ~38 W. Detecta picos repentinos y desbloquea TDP temporalmente. Comando WMI: 14. Requiere clave API de IA.",
+        "overdrive": "Perfil oculto ODV1=4. Medido: ~65-83 W burst (~17 s) / ~50 W sostenido (100°C). TDP sostenido significativamente mayor que Turbo. Comando WMI: 4.",
+        "overdriveHigh": "Perfil oculto ODV1=5. Medido: ~62-67 W SOSTENIDO (sin throttle PL1 detectado en 25 s). PL1 ≈ PL2 ≈ 62 W — burst efectivamente sin límite. Pico 99°C. Comando WMI: 5.",
+        "overdriveMax": "Perfil oculto ODV1=6 — mayor índice DPTF. Medido: ~60-77 W sostenido (PL1 sin límite, 100°C). Casi idéntico a Overdrive+ con ligeramente mayor variación de pico. Comando WMI: 6.",
+        "smartAdaptive": "Modo adaptativo real del EC. QFAN=9 instruye al EC a leer el sub-registro SMMT y escalar automáticamente por el rango ODV1. Medido: ~65-73 W burst (~13 s) / ~35 W sostenido. Comando WMI: 9."
       }
     },
     "powerProfiles": {
@@ -195,7 +208,28 @@
     "minutes": "m",
     "mah": "mAh",
     "celsius": "°C",
-    "volts": "V"
+    "volts": "V",
+    "chargeRate": "Potencia de Entrada",
+    "dischargeRate": "Tasa de Descarga",
+    "wh": "Wh",
+    "voltageUnit": "V",
+    "infoModal": {
+      "title": "Información de la Batería",
+      "levelLabel": "Nivel de Batería (%)",
+      "levelDesc": "Porcentaje de energía restante respecto a la capacidad de carga completa actual.",
+      "healthLabel": "Salud de la Batería (%)",
+      "healthDesc": "Razón entre la capacidad de carga completa actual y la capacidad de diseño original. Valores ≥80% son normales para uso diario.",
+      "capacitySection": "Capacidad y Ciclos",
+      "capacityLabel": "Capacidad Diseñada / Completa",
+      "capacityDesc": "La capacidad es reportada por ACPI en mWh (milivatios-hora). Wh = mWh ÷ 1.000. mAh se estima a partir del voltaje actual y puede variar con la temperatura.",
+      "cyclesLabel": "Ciclos de Carga",
+      "cyclesDesc": "Una descarga completa (0→100%) cuenta como un ciclo. Las cargas parciales se acumulan proporcionalmente. La mayoría de células de litio duran 500–1.000 ciclos antes de perder capacidad significativa.",
+      "powerSection": "Flujo de Energía",
+      "chargeRateLabel": "Tasa de Carga / Descarga",
+      "chargeRateDesc": "Medido por el controlador de batería en mW (milivatios). Positivo = energía entrando en la batería. Refleja lo que la célula realmente acepta — puede ser menor que la potencia nominal del cargador.",
+      "timeLabel": "Tiempo Restante",
+      "timeDesc": "Estimación instantánea: energía restante dividida entre la tasa de descarga actual. Varía con la carga de trabajo."
+    }
   },
   "charging": {
     "title": "Control de Carga",
@@ -213,6 +247,21 @@
       "60": "60%",
       "70": "70%",
       "80": "80% — Recomendado"
+    },
+    "enableToggle": "Límite de Carga",
+    "limitEnabled": "Límite de carga activado",
+    "limitDisabled": "Límite de carga desactivado",
+    "noLimit": "Sin límite — cargando al 100%",
+    "infoModal": {
+      "title": "Cómo Funciona el Control de Carga",
+      "functionLabel": "Qué hace",
+      "functionDesc": "Envía un comando de umbral por named pipe al Xiaomi IoTService, que lo reenvía al driver de kernel IoTDriver.sys. El driver ordena al controlador integrado (EC) que deje de cargar cuando la batería alcance el porcentaje configurado.",
+      "requiresLabel": "Requisitos",
+      "requiresDesc": "Requiere que IoTDriver.sys (Xiaomi) esté instalado y que IoTService esté en ejecución. Si la conexión por pipe falla, el valor se guarda en el registro y solo tiene efecto al reiniciar el servicio.",
+      "behaviorLabel": "Comportamiento",
+      "behaviorDesc": "Este es un límite máximo de carga — no descarga la batería. Si ya estás por encima del límite configurado, se aplica en el siguiente ciclo de carga.",
+      "warningLabel": "⚠️ Nota:",
+      "warningDesc": "Esta función fue obtenida por ingeniería inversa del binario Xiaomi IoTService (tipo de mensaje 0x1003). Los valores 40–80 se interpretan como porcentajes de límite de carga, pero en algunas variantes de firmware el mismo comando puede controlar la tasa de corriente de carga. Si la batería se carga consistentemente más allá del límite configurado, el IoTDriver puede no estar activo en su dispositivo."
     }
   },
   "display": {
@@ -342,7 +391,9 @@
     "settings": "Ajustes",
     "percent": "%",
     "watts": "W",
-    "unknown": "Desconocido"
+    "unknown": "Desconocido",
+    "show": "Mostrar",
+    "hide": "Ocultar"
   },
   "updates": {
     "title": "Controladores y BIOS",
@@ -443,5 +494,58 @@
     "analyzing": "Analizando…",
     "analyzingHint": "Enviando datos de hardware al modelo de IA…",
     "clear": "Limpiar"
+  },
+  "aiAnalysis": {
+    "title": "Análisis por IA",
+    "subtitle": "Registro continuo de rendimiento con revisiones periódicas de IA",
+    "settings": {
+      "title": "Configuración del Logger",
+      "subtitle": "Activa para recopilar snapshots de rendimiento en segundo plano",
+      "pollInterval": "Intervalo de Snapshot",
+      "pollIntervalDesc": "Con qué frecuencia capturar datos de CPU/GPU/batería",
+      "dailyAnalyses": "Revisiones por Día",
+      "dailyAnalysesDesc": "Cuántas veces al día se envían los logs a la IA",
+      "timesPerDay": "{n}× / día",
+      "logCount": "Logs recopilados",
+      "span": "Período",
+      "clearLogs": "Borrar Logs",
+      "disabledHint": "Activa el registro arriba para empezar a recopilar snapshots.",
+      "modelHint": "Usando modelo: {model}",
+      "toastEnabled": "Registro de Análisis IA activado",
+      "toastDisabled": "Registro de Análisis IA desactivado"
+    },
+    "charts": {
+      "title": "Gráficos en Vivo",
+      "subtitle": "Últimos {n} snapshots ({span})",
+      "noData": "Sin datos todavía",
+      "waitingForData": "Esperando datos…",
+      "enableHint": "Activa el registro en la tarjeta de configuración de arriba",
+      "temperature": "Temperatura",
+      "tdp": "Potencia del Paquete (TDP)",
+      "usage": "Uso CPU / GPU",
+      "cpuTemp": "Temp. CPU",
+      "gpuTemp": "Temp. GPU",
+      "topProcesses": "Principales Procesos (último snapshot)"
+    },
+    "analysis": {
+      "title": "Revisión por IA",
+      "trigger": "Analizar Ahora",
+      "analyzing": "Analizando…",
+      "lastAt": "Última revisión el {time} ({n} snapshots)",
+      "neverRun": "Sin análisis todavía. Haz clic en \"Analizar Ahora\" para la primera revisión.",
+      "noResultYet": "Ejecuta un análisis para ver recomendaciones aquí.",
+      "nextIn": "Próxima revisión automática en",
+      "due": "Ahora",
+      "notEnoughData": "Datos insuficientes. Recopila al menos 2 snapshots primero.",
+      "success": "Análisis completado"
+    },
+    "logs": {
+      "title": "Visor de Logs",
+      "entries": "entradas",
+      "noEntries": "Sin entradas todavía.",
+      "time": "Hora",
+      "mode": "Modo",
+      "loadMore": "Cargar más"
+    }
   }
 }

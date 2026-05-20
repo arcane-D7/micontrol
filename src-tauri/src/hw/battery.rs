@@ -8,12 +8,16 @@ pub struct BatteryInfo {
     pub is_plugged: bool,
     pub health_percent: f64,
     pub cycle_count: u32,
-    pub designed_capacity_mah: u32,
-    pub full_capacity_mah: u32,
+    pub designed_capacity_mwh: u32,
+    pub full_capacity_mwh: u32,
     pub manufacturer: String,
     pub device_name: String,
     pub temperature_celsius: Option<f64>,
     pub time_remaining_minutes: Option<i32>,
+    /// Positive = charge rate mW, negative = discharge rate mW. Zero when unknown.
+    pub charge_rate_mw: i32,
+    /// Current battery voltage in millivolts (mV). Zero if unavailable.
+    pub voltage_mv: u32,
 }
 
 #[cfg(windows)]
@@ -62,6 +66,7 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
         _ => false,
     };
 
+    // Note: WMI DesignedCapacity / FullChargedCapacity / RemainingCapacity are in mWh, not mAh.
     let designed_mah = match statics.get("DesignedCapacity") {
         Some(wmi::Variant::UI4(v)) => *v,
         _ => 68224,
@@ -119,12 +124,17 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
         is_plugged,
         health_percent,
         cycle_count,
-        designed_capacity_mah: designed_mah,
-        full_capacity_mah: full_cap_mah,
+        designed_capacity_mwh: designed_mah,
+        full_capacity_mwh: full_cap_mah,
         manufacturer,
         device_name,
         temperature_celsius,
         time_remaining_minutes,
+        charge_rate_mw: charging_rate,
+        voltage_mv: match status.get("Voltage") {
+            Some(wmi::Variant::UI4(v)) => *v,
+            _ => 0,
+        },
     })
 }
 
@@ -136,12 +146,14 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
         is_plugged: false,
         health_percent: 98.0,
         cycle_count: 42,
-        designed_capacity_mah: 68224,
-        full_capacity_mah: 66800,
+        designed_capacity_mwh: 68224,
+        full_capacity_mwh: 66800,
         manufacturer: "COSMX".to_string(),
         device_name: "BX70".to_string(),
         temperature_celsius: Some(28.5),
         time_remaining_minutes: Some(240),
+        charge_rate_mw: 0,
+        voltage_mv: 11400,
     })
 }
 

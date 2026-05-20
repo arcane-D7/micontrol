@@ -143,6 +143,10 @@ fn read_mi_registry_mode() -> Option<PerformanceMode> {
             1  => PerformanceMode::Balance,
             2  => PerformanceMode::Turbo,
             3  => PerformanceMode::Decepticon,
+            4  => PerformanceMode::Overdrive,
+            5  => PerformanceMode::OverdriveHigh,
+            6  => PerformanceMode::OverdriveMax,
+            9  => PerformanceMode::SmartAdaptive,
             10 => PerformanceMode::Smart,
             11 => PerformanceMode::LongBattery,
             14 => PerformanceMode::SmartAcceleration,
@@ -241,7 +245,8 @@ pub fn set_windows_power_overlay(mode: PerformanceMode) {
 
     let guid_str = match mode {
         PerformanceMode::Silence | PerformanceMode::LongBattery => GUID_BEST_POWER_EFFICIENCY,
-        PerformanceMode::Turbo | PerformanceMode::Decepticon | PerformanceMode::SmartAcceleration => GUID_BEST_PERFORMANCE,
+        PerformanceMode::Turbo | PerformanceMode::Decepticon | PerformanceMode::SmartAcceleration
+        | PerformanceMode::Overdrive | PerformanceMode::OverdriveHigh | PerformanceMode::OverdriveMax => GUID_BEST_PERFORMANCE,
         _ => GUID_BALANCED,
     };
 
@@ -715,6 +720,10 @@ mod tests {
         assert_eq!(PerformanceMode::Balance.to_hw_value(), 1);
         assert_eq!(PerformanceMode::Turbo.to_hw_value(), 2);
         assert_eq!(PerformanceMode::Decepticon.to_hw_value(), 3);
+        assert_eq!(PerformanceMode::Overdrive.to_hw_value(), 4);
+        assert_eq!(PerformanceMode::OverdriveHigh.to_hw_value(), 5);
+        assert_eq!(PerformanceMode::OverdriveMax.to_hw_value(), 6);
+        assert_eq!(PerformanceMode::SmartAdaptive.to_hw_value(), 9);
         assert_eq!(PerformanceMode::Smart.to_hw_value(), 10);
         assert_eq!(PerformanceMode::LongBattery.to_hw_value(), 11);
         assert_eq!(PerformanceMode::SmartAcceleration.to_hw_value(), 14);
@@ -729,6 +738,10 @@ mod tests {
             PerformanceMode::Smart,
             PerformanceMode::LongBattery,
             PerformanceMode::SmartAcceleration,
+            PerformanceMode::Overdrive,
+            PerformanceMode::OverdriveHigh,
+            PerformanceMode::OverdriveMax,
+            PerformanceMode::SmartAdaptive,
         ] {
             let json = serde_json::to_string(&mode).expect("serialize");
             let back: PerformanceMode = serde_json::from_str(&json).expect("deserialize");

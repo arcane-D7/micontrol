@@ -105,12 +105,54 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
         }
 
         if start.elapsed() > timeout {
-            let _ = tokio::fs::remove_file(&cmd_path).await;
-            return Err(format!(
-                "Elevated process timed out after 15 s. \
-                 Ensure the '{}' scheduled task is registered.",
-                TASK_NAME
-            ));
+            // The scheduled task ran but produced no result.  This usually means
+            // the task is registered without the `--elevated` argument (so the
+            // full GUI launched instead of the helper).  Try the UAC fallback
+            // as a self-healing one-shot before giving up.
+            #[cfg(windows)]
+            {
+                // Re-write the command file in case the bad task process
+                // consumed or deleted it.
+                let _ = tokio::fs::write(&cmd_path, payload.to_string()).await;
+                if let Err(e) = launch_elevated_via_uac() {
+                    let _ = tokio::fs::remove_file(&cmd_path).await;
+                    return Err(format!(
+                        "Elevated process timed out after 15 s and UAC fallback \
+                         failed: {e}. Reinstall MiControl to fix the scheduled task."
+                    ));
+                }
+                // UAC helper ran synchronously; result should be present now.
+                if result_path.exists() {
+                    let content = tokio::fs::read_to_string(&result_path)
+                        .await
+                        .map_err(|e| format!("Cannot read elevated result: {e}"))?;
+                    let _ = tokio::fs::remove_file(&result_path).await;
+                    let v: Value = serde_json::from_str(&content)
+                        .map_err(|e| format!("Invalid result JSON: {e}"))?;
+                    return if v["ok"].as_bool().unwrap_or(false) {
+                        Ok(v["data"].clone())
+                    } else {
+                        Err(v["error"]
+                            .as_str()
+                            .unwrap_or("elevated process failed")
+                            .to_string())
+                    };
+                }
+                return Err(
+                    "Elevated process timed out after 15 s. UAC fallback ran \
+                     but produced no result."
+                        .to_string(),
+                );
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = tokio::fs::remove_file(&cmd_path).await;
+                return Err(format!(
+                    "Elevated process timed out after 15 s. \
+                     Ensure the '{}' scheduled task is registered.",
+                    TASK_NAME
+                ));
+            }
         }
     }
 }
