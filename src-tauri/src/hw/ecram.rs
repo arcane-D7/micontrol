@@ -28,6 +28,8 @@ use anyhow::{Context, Result};
 
 /// Physical base address of the ACPI ERAM region (SystemMemory at 0xFE0B0300, size 0x100).
 pub const ERAM_BASE: u64 = 0xFE0B0300;
+/// Size of the ACPI ERAM region.
+pub const ERAM_SIZE: usize = 0x100;
 /// Byte offset within ERAM of the ADPW field (AC adapter wattage, 1 byte, in whole Watts).
 pub const ERAM_ADPW_OFFSET: usize = 0x81;
 /// Physical address of ADPW: ERAM_BASE + ERAM_ADPW_OFFSET = 0xFE0B0381.
@@ -37,12 +39,23 @@ pub const ADPW_ADDR: u64 = ERAM_BASE + ERAM_ADPW_OFFSET as u64;
 /// Physical base of the IoTDevice state block (WiFi/bind status — not power data).
 #[allow(dead_code)]
 pub const ECRAM_BASE: u64 = 0xFE0B0F00;
+/// Physical base of the ACPI SMA2 region (charger / EC sideband area, meaning not decoded yet).
+pub const SMA2_BASE: u64 = 0xFE0B0A00;
+/// Size of the ACPI SMA2 region.
+pub const SMA2_SIZE: usize = 0x100;
+/// Physical base of the 8-byte IoTDriver status block.
+pub const IOT_STATUS_BASE: u64 = 0xFE0B0F00;
+/// Size of the 8-byte IoTDriver status block.
+pub const IOT_STATUS_SIZE: usize = 0x08;
 /// Physical address of the 0x78-byte IoTDevice state block.
 pub const ECRAM_SENSOR_BLOCK: u64 = 0xFE0B0F08;
 /// Size of the IoTDevice state block.
 pub const ECRAM_SENSOR_SIZE: usize = 0x78;
 /// IOCTL code for ECRAM read.
 const IOCTL_ECRAM_READ: u32 = 0x22E000;
+/// IOCTL code for ECRAM write.
+#[allow(dead_code)]
+const IOCTL_ECRAM_WRITE: u32 = 0x22E004;
 /// IoT driver device interface GUID: {AB7924A1-3162-4010-B33B-837E87E25FBC}
 #[cfg(windows)]
 const IOT_GUID: windows::core::GUID = windows::core::GUID {
@@ -101,7 +114,19 @@ pub fn read_ecram(phys_addr: u64, byte_count: usize) -> Result<Vec<u8>> {
 /// Convenience: read the full 256-byte ACPI ERAM block (contains ADPW, BTCT, BTVT, etc.).
 #[allow(dead_code)]
 pub fn read_eram() -> Result<Vec<u8>> {
-    read_ecram(ERAM_BASE, 0x100)
+    read_ecram(ERAM_BASE, ERAM_SIZE)
+}
+
+/// Convenience: read the full 256-byte ACPI SMA2 block.
+#[allow(dead_code)]
+pub fn read_sma2() -> Result<Vec<u8>> {
+    read_ecram(SMA2_BASE, SMA2_SIZE)
+}
+
+/// Convenience: read the 8-byte IoT status block.
+#[allow(dead_code)]
+pub fn read_iot_status_block() -> Result<Vec<u8>> {
+    read_ecram(IOT_STATUS_BASE, IOT_STATUS_SIZE)
 }
 
 /// Convenience: read the 0x78-byte IoTDevice state block at 0xFE0B0F08 (WiFi/bind status).
@@ -114,8 +139,8 @@ pub fn read_sensor_block() -> Result<Vec<u8>> {
 /// Returns ERAM (0xFE0B0300, 256 bytes) followed by IoTDevice block (0xFE0B0F08, 0x78 bytes).
 #[allow(dead_code)]
 pub fn read_all() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(0x100 + ECRAM_SENSOR_SIZE);
-    buf.extend_from_slice(&read_ecram(ERAM_BASE, 0x100)?);
+    let mut buf = Vec::with_capacity(ERAM_SIZE + ECRAM_SENSOR_SIZE);
+    buf.extend_from_slice(&read_ecram(ERAM_BASE, ERAM_SIZE)?);
     buf.extend_from_slice(&read_ecram(ECRAM_SENSOR_BLOCK, ECRAM_SENSOR_SIZE)?);
     Ok(buf)
 }
@@ -441,38 +466,95 @@ pub fn deploy_ecram_shim() -> Result<std::path::PathBuf> {
 pub fn read_ecram_via_shim(phys_addr: u64, byte_count: usize) -> Result<Vec<u8>> {
     #[cfg(windows)]
     {
-        let shim_path = deploy_ecram_shim().context("deploy ecram_shim")?;
-
-        let output = std::process::Command::new(&shim_path)
-            .arg(format!("{phys_addr:#010x}"))
-            .arg(format!("{byte_count}"))
-            .output()
-            .with_context(|| format!("Failed to spawn ecram_shim at {shim_path:?}"))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let v: serde_json::Value = serde_json::from_str(stdout.trim())
-            .with_context(|| format!("Invalid shim output: {stdout}"))?;
-
-        if !v["ok"].as_bool().unwrap_or(false) {
-            let err = v["error"].as_str().unwrap_or("unknown shim error");
-            anyhow::bail!("ecram_shim: {err}");
-        }
-
-        let hex_str = v["data"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing data field in shim output"))?;
-
-        (0..hex_str.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).map_err(Into::into))
-            .collect::<Result<Vec<u8>>>()
-            .context("Hex decode of shim output")
+        let v = run_ecram_shim([
+            "read".to_string(),
+            format!("{phys_addr:#010x}"),
+            format!("{byte_count}"),
+        ])?;
+        decode_shim_hex_payload(&v)
     }
     #[cfg(not(windows))]
     {
         let _ = (phys_addr, byte_count);
         anyhow::bail!("read_ecram_via_shim is only supported on Windows")
     }
+}
+
+/// Read a named IoT region through the deployed shim.
+///
+/// Supported regions: `ERAM`, `SMA2`, `IOT_STATUS`, `IOT_SENSORS`.
+#[allow(dead_code)]
+pub fn read_named_region_via_shim(region: &str) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        let v = run_ecram_shim(["read-region".to_string(), region.to_string()])?;
+        decode_shim_hex_payload(&v)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = region;
+        anyhow::bail!("read_named_region_via_shim is only supported on Windows")
+    }
+}
+
+/// Write bytes into EC RAM through the deployed shim.
+#[allow(dead_code)]
+pub fn write_ecram_via_shim(phys_addr: u64, data: &[u8]) -> Result<()> {
+    #[cfg(windows)]
+    {
+        anyhow::ensure!(
+            !data.is_empty() && data.len() <= 0x100,
+            "write_ecram_via_shim expects 1..256 bytes"
+        );
+
+        let hex_data: String = data.iter().map(|b| format!("{b:02x}")).collect();
+        let _ = run_ecram_shim([
+            "write".to_string(),
+            format!("{phys_addr:#010x}"),
+            hex_data,
+        ])?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (phys_addr, data);
+        anyhow::bail!("write_ecram_via_shim is only supported on Windows")
+    }
+}
+
+#[cfg(windows)]
+fn run_ecram_shim(args: impl IntoIterator<Item = String>) -> Result<serde_json::Value> {
+    let shim_path = deploy_ecram_shim().context("deploy ecram_shim")?;
+
+    let output = std::process::Command::new(&shim_path)
+        .args(args)
+        .output()
+        .with_context(|| format!("Failed to spawn ecram_shim at {shim_path:?}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("Invalid shim output: stdout={stdout} stderr={stderr}"))?;
+
+    if !v["ok"].as_bool().unwrap_or(false) {
+        let err = v["error"].as_str().unwrap_or("unknown shim error");
+        anyhow::bail!("ecram_shim: {err}");
+    }
+
+    Ok(v)
+}
+
+#[cfg(windows)]
+fn decode_shim_hex_payload(v: &serde_json::Value) -> Result<Vec<u8>> {
+    let hex_str = v["data"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing data field in shim output"))?;
+
+    (0..hex_str.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).map_err(Into::into))
+        .collect::<Result<Vec<u8>>>()
+        .context("Hex decode of shim output")
 }
 
 /// Enable `SeRestorePrivilege` on the current process token so that

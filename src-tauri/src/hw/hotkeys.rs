@@ -683,7 +683,20 @@ fn handle_hotkey_message(id: i32) {
     }
 
     if let Some(action) = resolve_action(vk) {
-        std::thread::spawn(move || dispatch_action(&action));
+        match action {
+            HotkeyAction::RemapToKey { vk: target, extended } => {
+                log::info!(
+                    "[hotkeys] WM_HOTKEY remap source={:#04X} target={:#04X} extended={}",
+                    vk,
+                    target,
+                    extended
+                );
+                start_hotkey_remap(vk, target, extended);
+            }
+            other => {
+                std::thread::spawn(move || dispatch_action(&other));
+            }
+        }
     }
 }
 
@@ -794,6 +807,7 @@ unsafe extern "system" fn keyboard_hook_proc(
             // Clear state before injecting to prevent re-entrancy.
             REMAP_SOURCE_VK.store(0, Ordering::Relaxed);
             REMAP_TARGET_VK.store(0, Ordering::Relaxed);
+            REMAP_TARGET_EXTENDED.store(false, Ordering::Relaxed);
             do_remap_keyup(target, ext);
             return windows::Win32::Foundation::LRESULT(1); // suppress source key-up
         }
@@ -806,6 +820,7 @@ unsafe extern "system" fn keyboard_hook_proc(
                 let ext    = REMAP_TARGET_EXTENDED.load(Ordering::Relaxed);
                 REMAP_SOURCE_VK.store(0, Ordering::Relaxed);
                 REMAP_TARGET_VK.store(0, Ordering::Relaxed);
+                REMAP_TARGET_EXTENDED.store(false, Ordering::Relaxed);
                 do_remap_keyup(target, ext);
                 return windows::Win32::Foundation::LRESULT(1);
             }
@@ -1096,6 +1111,62 @@ fn do_remap_keydown(target_vk: u32, extended: bool) {
 
 fn do_remap_keyup(target_vk: u32, extended: bool) {
     inject_key_event(target_vk as u16, 0, true, extended);
+}
+
+/// Start a RemapToKey sequence from the WM_HOTKEY path.
+///
+/// Unlike the LL hook path, WM_HOTKEY gives us a key-down notification without a
+/// matching key-up callback. We therefore inject the remapped key-down here and
+/// watch the physical source state with `GetAsyncKeyState`; when the source is
+/// released we emit the target key-up. If Windows never exposes the source as
+/// pressed, we fall back to a short tap so the key never gets stuck down.
+fn start_hotkey_remap(source_vk: u32, target_vk: u32, extended: bool) {
+    REMAP_SOURCE_VK.store(source_vk, Ordering::Relaxed);
+    REMAP_TARGET_VK.store(target_vk, Ordering::Relaxed);
+    REMAP_TARGET_EXTENDED.store(extended, Ordering::Relaxed);
+    do_remap_keydown(target_vk, extended);
+
+    #[cfg(windows)]
+    std::thread::spawn(move || {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+
+        let started = std::time::Instant::now();
+        let mut saw_pressed = false;
+
+        loop {
+            let source_down = unsafe {
+                let primary_down = ((GetAsyncKeyState(source_vk as i32) as u16) & 0x8000) != 0;
+                let f23_down = source_vk == VK_COPILOT
+                    && ((GetAsyncKeyState(0x86) as u16) & 0x8000) != 0;
+                primary_down || f23_down
+            };
+
+            saw_pressed |= source_down;
+
+            if saw_pressed && !source_down {
+                break;
+            }
+
+            if !saw_pressed && started.elapsed() >= std::time::Duration::from_millis(40) {
+                break;
+            }
+
+            if started.elapsed() >= std::time::Duration::from_secs(5) {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+
+        if REMAP_SOURCE_VK
+            .compare_exchange(source_vk, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            REMAP_TARGET_VK.store(0, Ordering::Relaxed);
+            REMAP_TARGET_EXTENDED.store(false, Ordering::Relaxed);
+            do_remap_keyup(target_vk, extended);
+        }
+    });
 }
 
 /// Subscribe directly to IoTDriver.sys WMI events in root\WMI.

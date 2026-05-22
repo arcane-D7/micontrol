@@ -71,3 +71,15 @@ pub async fn get_ecram_map() -> Result<crate::hw::ecram::EramMap, String> {
         .map_err(|e| format!("blocking task panicked: {e}"))?
         .map_err(|e| e.to_string())
 }
+
+/// Read a named IoT region through the DriverStore shim and return it as hex.
+///
+/// Supported values: `ERAM`, `SMA2`, `IOT_STATUS`, `IOT_SENSORS`.
+#[tauri::command]
+pub async fn get_iot_region_hex(region: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || crate::hw::ecram::read_named_region_via_shim(&region))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect())
+        .map_err(|e| e.to_string())
+}

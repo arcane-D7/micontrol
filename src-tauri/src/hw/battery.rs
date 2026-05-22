@@ -196,14 +196,14 @@ mod tests {
         assert!(info.health_percent <= 110.0, "Health out of range: {}", info.health_percent);
         assert!(!info.manufacturer.is_empty(), "Manufacturer should not be empty");
         assert!(!info.device_name.is_empty(), "Device name should not be empty");
-        assert!(info.designed_capacity_mah > 0, "Designed capacity should be > 0");
-        assert!(info.full_capacity_mah > 0, "Full capacity should be > 0");
+        assert!(info.designed_capacity_mwh > 0, "Designed capacity should be > 0");
+        assert!(info.full_capacity_mwh > 0, "Full capacity should be > 0");
     }
 
     #[test]
     fn battery_capacity_ratio_sane() {
         let info = get_battery_info().expect("get_battery_info should succeed");
-        let ratio = info.full_capacity_mah as f64 / info.designed_capacity_mah as f64;
+        let ratio = info.full_capacity_mwh as f64 / info.designed_capacity_mwh as f64;
         assert!(ratio <= 1.1, "Full capacity exceeds 110% of designed: {ratio}");
         assert!(ratio > 0.0, "Full capacity must be positive");
     }
