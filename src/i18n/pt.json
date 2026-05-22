@@ -323,8 +323,9 @@
     "edgeSlideDesc": "Deslizar a borda esquerda para brilho; borda direita para volume",
     "levels": {
       "low": "Baixa",
-      "medium": "M├⌐dia",
-      "high": "Alta"
+      "medium": "Média",
+      "high": "Alta",
+      "very_high": "Muito Alta"
     },
     "applying": "A aplicar...",
     "applied": "Defini├º├úo guardada",

@@ -381,7 +381,7 @@ mod igcl {
 }
 
 #[cfg(windows)]
-fn with_igcl_device<F, T>(f: F) -> Result<T>
+pub fn with_igcl_device_pub<F, T>(f: F) -> Result<T>
 where
     F: FnOnce(*mut std::ffi::c_void, &libloading::Library) -> Result<T>,
 {
@@ -433,7 +433,7 @@ where
 #[cfg(windows)]
 fn get_brightness_igcl() -> Result<u8> {
     use igcl::*;
-    with_igcl_device(|device, lib| unsafe {
+    with_igcl_device_pub(|device, lib| unsafe {
         let get_brightness: libloading::Symbol<FnCtlGetBrightnessSetting> =
             lib.get(b"ctlGetBrightnessSetting\0").context("ctlGetBrightnessSetting")?;
         let mut args = CtlBrightnessArgs {
@@ -457,7 +457,7 @@ fn get_brightness_igcl() -> Result<u8> { anyhow::bail!("IGCL not on non-Windows"
 #[cfg(windows)]
 fn set_brightness_igcl(level: u8) -> Result<()> {
     use igcl::*;
-    with_igcl_device(|device, lib| unsafe {
+    with_igcl_device_pub(|device, lib| unsafe {
         let set_brightness: libloading::Symbol<FnCtlSetBrightnessSetting> =
             lib.get(b"ctlSetBrightnessSetting\0").context("ctlSetBrightnessSetting")?;
         let mut args = CtlBrightnessArgs {

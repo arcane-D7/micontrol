@@ -232,16 +232,126 @@ fn get_fan_mode_registry() -> Result<(FanMode, u8)> {
     { Ok((FanMode::Auto, 50)) }
 }
 
-// ── IGCL stubs ───────────────────────────────────────────────────────────────
+// ── IGCL fan control ─────────────────────────────────────────────────────────
+//
+// Intel IGCL (ControlLib.dll) exposes fan handles via ctlEnumFans.
+// On laptops with only integrated graphics (no dGPU), ctlEnumFans typically
+// returns 0 handles — the laptop fan is controlled by the EC/firmware and
+// responds to performance mode changes, not IGCL.  The code below is real and
+// will work on any machine where IGCL reports ≥1 fan handle.
+//
+// C layouts:
+//   ctl_fan_speed_units_t: 0 = PERCENT, 1 = RPM
+//   ctl_fan_speed_t { size:u32, version:u8, [3-pad], units:u32, value:i32 }
+
+#[cfg(windows)]
+mod igcl_fan {
+    use std::ffi::c_void;
+
+    pub type CtlDeviceHandle = *mut c_void;
+    pub type CtlFanHandle    = *mut c_void;
+    pub type CtlResult       = u32;
+
+    #[repr(C)]
+    pub struct CtlFanSpeed {
+        pub size:    u32,
+        pub version: u8,
+        pub _pad:    [u8; 3],
+        pub units:   u32,   // 0 = PERCENT, 1 = RPM
+        pub value:   i32,
+    }
+
+    pub type FnCtlEnumFans =
+        unsafe extern "C" fn(CtlDeviceHandle, *mut u32, *mut CtlFanHandle) -> CtlResult;
+    pub type FnCtlFanSetDefaultMode =
+        unsafe extern "C" fn(CtlFanHandle) -> CtlResult;
+    pub type FnCtlFanSetFixedSpeedMode =
+        unsafe extern "C" fn(CtlFanHandle, *const CtlFanSpeed) -> CtlResult;
+}
+
+/// Run `f` for every IGCL fan handle on the first enumerated device.
+/// Returns `Ok(0)` (no fans found, nothing done) if the device has no IGCL-
+/// accessible fans — expected on integrated-only platforms where the EC
+/// firmware manages the fan as a function of the active performance mode.
+#[cfg(windows)]
+fn with_igcl_fans<F>(f: F) -> Result<usize>
+where
+    F: Fn(igcl_fan::CtlFanHandle, &libloading::Library) -> Result<()>,
+{
+    use igcl_fan::*;
+
+    crate::hw::display::with_igcl_device_pub(|device, lib| unsafe {
+        let ctl_enum_fans: libloading::Symbol<FnCtlEnumFans> =
+            lib.get(b"ctlEnumFans\0").context("ctlEnumFans")?;
+
+        let mut count: u32 = 0;
+        ctl_enum_fans(device, &mut count, std::ptr::null_mut());
+        if count == 0 {
+            log::debug!("[fan] ctlEnumFans: no IGCL fan handles (EC-managed fan — OK)");
+            return Ok(0usize);
+        }
+
+        let mut handles = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
+        let rc = ctl_enum_fans(device, &mut count, handles.as_mut_ptr());
+        if rc != 0 {
+            anyhow::bail!("ctlEnumFans failed: {rc:#x}");
+        }
+
+        for &fan in &handles[..count as usize] {
+            f(fan, &*lib)?;
+        }
+        Ok(count as usize)
+    })
+}
+
+#[cfg(not(windows))]
+fn with_igcl_fans<F>(_f: F) -> Result<usize>
+where F: Fn(*mut std::ffi::c_void, &libloading::Library) -> Result<()> {
+    Ok(0)
+}
 
 fn set_fan_auto_igcl() -> Result<()> {
-    // IGCL ctlFanSetDefaultMode — requires ctlEnumFans first.
-    // Stubbed: actual IGCL fan API requires ctl_fan_handle_t enumeration.
-    log::info!("Fan auto mode via IGCL (stub)");
+    #[cfg(windows)]
+    {
+        use igcl_fan::*;
+        let n = with_igcl_fans(|fan, lib| unsafe {
+            let set_default: libloading::Symbol<FnCtlFanSetDefaultMode> =
+                lib.get(b"ctlFanSetDefaultMode\0").context("ctlFanSetDefaultMode")?;
+            let rc = set_default(fan);
+            if rc != 0 { anyhow::bail!("ctlFanSetDefaultMode: {rc:#x}"); }
+            log::info!("[fan] IGCL ctlFanSetDefaultMode OK");
+            Ok(())
+        })?;
+        if n == 0 {
+            log::debug!("[fan] Auto mode: no IGCL fans — performance mode controls EC fan");
+        }
+    }
     Ok(())
 }
 
 fn set_fan_fixed_igcl(speed_percent: u8) -> Result<()> {
-    log::info!("Fan fixed speed {speed_percent}% via IGCL (stub)");
+    #[cfg(windows)]
+    {
+        use igcl_fan::*;
+        let clamped = speed_percent.clamp(20, 100) as i32;
+        let n = with_igcl_fans(|fan, lib| unsafe {
+            let set_fixed: libloading::Symbol<FnCtlFanSetFixedSpeedMode> =
+                lib.get(b"ctlFanSetFixedSpeedMode\0").context("ctlFanSetFixedSpeedMode")?;
+            let speed = CtlFanSpeed {
+                size:    std::mem::size_of::<CtlFanSpeed>() as u32,
+                version: 0,
+                _pad:    [0; 3],
+                units:   0,         // PERCENT
+                value:   clamped,
+            };
+            let rc = set_fixed(fan, &speed);
+            if rc != 0 { anyhow::bail!("ctlFanSetFixedSpeedMode {clamped}%: {rc:#x}"); }
+            log::info!("[fan] IGCL ctlFanSetFixedSpeedMode {clamped}% OK");
+            Ok(())
+        })?;
+        if n == 0 {
+            log::debug!("[fan] Fixed {clamped}%: no IGCL fans — only perf mode affects EC fan");
+        }
+    }
     Ok(())
 }

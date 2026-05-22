@@ -26,6 +26,28 @@ const TASK_NAME: &str = "MiControlElevated";
 /// `cmd` must match one of the branches in `elevated::dispatch()`.
 /// `args` is the JSON arguments object (use `serde_json::json!({...})`).
 pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, String> {
+    // ── Fast path: already elevated ──────────────────────────────────────────
+    // When this process is running as an administrator (dev mode or installed
+    // with admin manifest), dispatch the privileged operation directly in a
+    // blocking thread.  This eliminates the ~15 s scheduled-task round-trip.
+    #[cfg(windows)]
+    if is_admin() {
+        let args2 = args.clone();
+        return tokio::task::spawn_blocking(move || {
+            let result = crate::elevated::dispatch_cmd(cmd, args2);
+            if result["ok"].as_bool().unwrap_or(false) {
+                Ok(result["data"].clone())
+            } else {
+                Err(result["error"]
+                    .as_str()
+                    .unwrap_or("elevated dispatch failed")
+                    .to_string())
+            }
+        })
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?;
+    }
+
     let dir = crate::elevated::elev_dir();
     let cmd_path = dir.join("elev_cmd.json");
     let result_path = dir.join("elev_result.json");
@@ -202,4 +224,12 @@ fn launch_elevated_via_uac() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Returns true if the current process token has the Administrators group enabled
+/// (i.e. the process is running elevated / as administrator).
+#[cfg(windows)]
+fn is_admin() -> bool {
+    use windows::Win32::UI::Shell::IsUserAnAdmin;
+    unsafe { IsUserAnAdmin().as_bool() }
 }

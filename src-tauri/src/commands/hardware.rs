@@ -56,3 +56,18 @@ pub async fn set_charging_threshold(
 pub async fn get_perf_debug() -> Result<PerfDebugInfo, String> {
     Ok(hw_perf_debug())
 }
+
+/// Read all ACPI ERAM fields via IoTDriver (direct or shim path).
+///
+/// On first call the shim (`ecram_shim.exe`) is deployed to the IoTDriver
+/// DriverStore directory using SeRestorePrivilege.  Subsequent calls skip
+/// deployment if the binary is already current.
+///
+/// Returns the decoded `EramMap` with all known register fields.
+#[tauri::command]
+pub async fn get_ecram_map() -> Result<crate::hw::ecram::EramMap, String> {
+    tokio::task::spawn_blocking(crate::hw::ecram::read_eram_map)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}

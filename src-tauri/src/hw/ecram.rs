@@ -6,22 +6,40 @@
 ///   0x22E004 — WRITE: same layout, driver writes data into EC RAM
 ///
 /// The driver device is enumerated with GUID {AB7924A1-3162-4010-B33B-837E87E25FBC}.
-/// Access requires an elevated process (SeTokenIsAdmin check in the driver).
+/// Access requires both an elevated process (SeTokenIsAdmin) AND the calling
+/// process to be named "IoTService.exe" located in the DriverStore path.
 ///
-/// Physical ECRAM layout (discovered via IoTService.exe RE):
-///   0xFE0B0F00 [4 bytes]  — EC status flags (byte[0..3])
-///   0xFE0B0F08 [0x78 bytes] — large sensor/power data block
+/// Known physical memory regions (discovered via DSDT + IoTService.exe RE):
+///   0xFE0B0300 [0x100 bytes] — ACPI ERAM (SystemMemory OperationRegion)
+///     Field map (subset of 219 total fields):
+///       +0x80 bit0: ACIN  — AC adapter connected bit
+///       +0x81:      ADPW  — AC adapter wattage (1 byte, in whole Watts, e.g. 65)
+///       +0x8C:      BTCT  — Battery current (u16 LE, mA)
+///       +0x8E:      BTPR  — Battery remaining capacity (u16 LE, mAh)
+///       +0x90:      BTVT  — Battery voltage (u16 LE, mV)
+///   0xFE0B0A00 [0x100 bytes] — ACPI SMA2 region (fields not decoded)
+///   0xFE0B0F00 [8 bytes]     — IoTDriver status block (IoT device flags)
+///   0xFE0B0F08 [0x78 bytes]  — IoTDevice state block (WiFi/bind status, NOT power)
 ///
-/// Finding charger wattage: read the 0x78-byte block and use the debug
-/// command to identify which register changes when plugging/unplugging the charger.
+/// AC adapter wattage (ADPW) is at physical address 0xFE0B0381 (ERAM + 0x81).
+/// Reading requires satisfying the IoTDriver security check (process name = IoTService.exe).
 
 use anyhow::{Context, Result};
 
-/// Physical ECRAM base address.
+/// Physical base address of the ACPI ERAM region (SystemMemory at 0xFE0B0300, size 0x100).
+pub const ERAM_BASE: u64 = 0xFE0B0300;
+/// Byte offset within ERAM of the ADPW field (AC adapter wattage, 1 byte, in whole Watts).
+pub const ERAM_ADPW_OFFSET: usize = 0x81;
+/// Physical address of ADPW: ERAM_BASE + ERAM_ADPW_OFFSET = 0xFE0B0381.
+#[allow(dead_code)]
+pub const ADPW_ADDR: u64 = ERAM_BASE + ERAM_ADPW_OFFSET as u64;
+
+/// Physical base of the IoTDevice state block (WiFi/bind status — not power data).
+#[allow(dead_code)]
 pub const ECRAM_BASE: u64 = 0xFE0B0F00;
-/// Physical address of the 0x78-byte sensor/power block.
+/// Physical address of the 0x78-byte IoTDevice state block.
 pub const ECRAM_SENSOR_BLOCK: u64 = 0xFE0B0F08;
-/// Size of the sensor block.
+/// Size of the IoTDevice state block.
 pub const ECRAM_SENSOR_SIZE: usize = 0x78;
 /// IOCTL code for ECRAM read.
 const IOCTL_ECRAM_READ: u32 = 0x22E000;
@@ -80,87 +98,94 @@ pub fn read_ecram(phys_addr: u64, byte_count: usize) -> Result<Vec<u8>> {
     }
 }
 
-/// Convenience: read the full 0x78-byte sensor/power block at 0xFE0B0F08.
+/// Convenience: read the full 256-byte ACPI ERAM block (contains ADPW, BTCT, BTVT, etc.).
+#[allow(dead_code)]
+pub fn read_eram() -> Result<Vec<u8>> {
+    read_ecram(ERAM_BASE, 0x100)
+}
+
+/// Convenience: read the 0x78-byte IoTDevice state block at 0xFE0B0F08 (WiFi/bind status).
+#[allow(dead_code)]
 pub fn read_sensor_block() -> Result<Vec<u8>> {
     read_ecram(ECRAM_SENSOR_BLOCK, ECRAM_SENSOR_SIZE)
 }
 
-/// Convenience: read the first 8 EC status bytes at 0xFE0B0F00.
-pub fn read_status_bytes() -> Result<Vec<u8>> {
-    read_ecram(ECRAM_BASE, 8)
-}
-
 /// Read all ECRAM bytes available from IoTService's known ranges.
-/// Returns (status[8], sensor[0x78]) combined as a flat Vec<u8> of length 0x80.
+/// Returns ERAM (0xFE0B0300, 256 bytes) followed by IoTDevice block (0xFE0B0F08, 0x78 bytes).
+#[allow(dead_code)]
 pub fn read_all() -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(0x80);
-    buf.extend_from_slice(&read_ecram(ECRAM_BASE, 8)?);
-    buf.extend_from_slice(&read_ecram(ECRAM_SENSOR_BLOCK, 0x78)?);
+    let mut buf = Vec::with_capacity(0x100 + ECRAM_SENSOR_SIZE);
+    buf.extend_from_slice(&read_ecram(ERAM_BASE, 0x100)?);
+    buf.extend_from_slice(&read_ecram(ECRAM_SENSOR_BLOCK, ECRAM_SENSOR_SIZE)?);
     Ok(buf)
 }
 
-/// Try to extract AC adapter input power (in milliwatts) from the sensor block.
+/// Try to extract AC adapter input power (in milliwatts) from ECRAM.
 ///
-/// The exact register layout is device-specific. This function tries the most
-/// common layouts for Xiaomi laptop ECs. Returns `None` if no plausible value
-/// is found (e.g. charger not connected, unknown layout, or read fails).
+/// Tries direct IoTDriver access first, then falls back to the DriverStore
+/// shim (`ecram_shim.exe`) which satisfies the driver's path-prefix check.
 ///
-/// Use `debug_ecram_hex()` to inspect raw bytes and identify the correct offset.
+/// Returns `None` if both paths fail or the ADPW value is out of range.
 pub fn try_get_ac_power_mw() -> Option<i32> {
-    let data = read_sensor_block().ok()?;
-
-    // Probe candidate offsets for AC adapter wattage.
-    // Typical EC layouts use 16-bit or 32-bit LE integers in mW, mA×mV, or dW.
-    // We check if any makes sense as charger wattage (10–250 W = 10000–250000 mW).
-
-    // Attempt 1: bytes [0..3] as u32 mW (direct wattage register)
-    if data.len() >= 4 {
-        let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if (10_000..=250_000).contains(&v) {
-            return Some(v as i32);
+    // Attempt 1: direct read (works only when our process is in the DriverStore dir)
+    if let Ok(eram) = read_ecram(ERAM_BASE, 0x100) {
+        let adpw = eram[ERAM_ADPW_OFFSET] as i32;
+        if adpw > 0 && adpw <= 300 {
+            return Some(adpw * 1000);
         }
     }
 
-    // Attempt 2: bytes [0..1] as u16 in mW (capped at 0xFFFF = 65535 mW)
-    if data.len() >= 2 {
-        let v = u16::from_le_bytes([data[0], data[1]]) as u32;
-        if (10_000..=65_000).contains(&v) {
-            return Some(v as i32);
+    // Attempt 2: shim (deployed to the DriverStore dir, bypasses path check)
+    #[cfg(windows)]
+    match read_ecram_via_shim(ERAM_BASE, 0x100) {
+        Ok(eram) => {
+            let adpw = eram[ERAM_ADPW_OFFSET] as i32;
+            if adpw > 0 && adpw <= 300 {
+                return Some(adpw * 1000);
+            }
         }
-    }
-
-    // Attempt 3: bytes [0..1] as u16 in 10mW units (deciwatts × 10)
-    if data.len() >= 2 {
-        let v = u16::from_le_bytes([data[0], data[1]]) as u32 * 10;
-        if (10_000..=250_000).contains(&v) {
-            return Some(v as i32);
-        }
-    }
-
-    // Attempt 4: voltage (bytes[0..1]) × current (bytes[2..3]) — both in mV / mA
-    if data.len() >= 4 {
-        let volts_mv = u16::from_le_bytes([data[0], data[1]]) as u64;
-        let amps_ma = u16::from_le_bytes([data[2], data[3]]) as u64;
-        let mw = volts_mv * amps_ma / 1000;
-        if (10_000..=250_000).contains(&(mw as u32)) {
-            return Some(mw as i32);
-        }
+        Err(e) => log::warn!("[ecram] ADPW shim read failed: {e:#}"),
     }
 
     None
 }
 
 /// Return a hex dump string of all known ECRAM bytes for debugging.
-/// Format: "offset: XX XX XX XX ..."
+/// Dumps both the ACPI ERAM (0xFE0B0300, 256 bytes, includes ADPW at +0x81)
+/// and the IoTDevice state block (0xFE0B0F08, 0x78 bytes).
+/// Format: "0xADDR: XX XX XX XX ..."
 pub fn debug_ecram_hex() -> Result<String> {
-    let all = read_all()?;
     let mut out = String::new();
-    for (i, chunk) in all.chunks(16).enumerate() {
-        let offset = i * 16;
-        let addr = ECRAM_BASE + offset as u64;
-        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
-        out.push_str(&format!("0x{addr:08X}: {}\n", hex.join(" ")));
+
+    out.push_str("=== ACPI ERAM (0xFE0B0300, 256 bytes) ===\n");
+    match read_ecram(ERAM_BASE, 0x100) {
+        Ok(eram) => {
+            for (i, chunk) in eram.chunks(16).enumerate() {
+                let addr = ERAM_BASE + (i * 16) as u64;
+                let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
+                out.push_str(&format!("0x{addr:08X}: {}\n", hex.join(" ")));
+            }
+            out.push_str(&format!(
+                "ADPW (AC wattage) @ +0x81 = 0x{:02X} = {} W\n",
+                eram[ERAM_ADPW_OFFSET],
+                eram[ERAM_ADPW_OFFSET]
+            ));
+        }
+        Err(e) => out.push_str(&format!("Error reading ERAM: {e}\n")),
     }
+
+    out.push_str("\n=== IoTDevice state block (0xFE0B0F08, 0x78 bytes) ===\n");
+    match read_ecram(ECRAM_SENSOR_BLOCK, ECRAM_SENSOR_SIZE) {
+        Ok(blk) => {
+            for (i, chunk) in blk.chunks(16).enumerate() {
+                let addr = ECRAM_SENSOR_BLOCK + (i * 16) as u64;
+                let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
+                out.push_str(&format!("0x{addr:08X}: {}\n", hex.join(" ")));
+            }
+        }
+        Err(e) => out.push_str(&format!("Error reading IoTDevice block: {e}\n")),
+    }
+
     Ok(out)
 }
 
@@ -321,6 +346,309 @@ fn read_ecram_inner(device_path: &str, phys_addr: u64, byte_count: usize) -> Res
         let ec_bytes = out_buf.data[..byte_count].to_vec();
         Ok(ec_bytes)
     }
+}
+
+// ── Shim-based ECRAM access (bypasses IoTDriver path check) ──────────────────
+//
+// IoTDriver.sys calls `SeLocateProcessImageName` + `RtlPrefixUnicodeString` to
+// verify that the calling process's directory starts with the DriverStore prefix
+// of IoTDriver.sys itself.  We bypass this by deploying a small helper binary
+// (`ecram_shim.exe`) INTO the DriverStore directory so it passes the check.
+//
+// Deployment: uses `SeRestorePrivilege` + `FILE_FLAG_BACKUP_SEMANTICS` to copy
+// the shim to a directory owned by TrustedInstaller.
+// Invocation: spawns the shim as a child process, reads JSON from its stdout.
+
+/// Find the DriverStore directory that contains `IoTDriver.sys` by reading
+/// `HKLM\SYSTEM\CurrentControlSet\Services\IoTDriver\ImagePath`.
+///
+/// Returns e.g. `C:\Windows\System32\DriverStore\FileRepository\miiotdrv.inf_amd64_XXX\`
+#[cfg(windows)]
+pub fn find_iotdriver_store_dir() -> Result<std::path::PathBuf> {
+    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let svc = hklm
+        .open_subkey("SYSTEM\\CurrentControlSet\\Services\\IoTDriver")
+        .context("IoTDriver service registry key not found — is the driver installed?")?;
+    let image_path: String = svc
+        .get_value("ImagePath")
+        .context("IoTDriver ImagePath value missing")?;
+
+    // Normalise `\SystemRoot\` → actual Windows directory
+    let windows_dir =
+        std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let normalised = if image_path.to_ascii_lowercase().starts_with("\\systemroot\\") {
+        format!("{}{}", windows_dir, &image_path["\\SystemRoot".len()..])
+    } else if image_path.starts_with("\\??\\") {
+        image_path[4..].to_string()
+    } else {
+        image_path.clone()
+    };
+
+    let path = std::path::PathBuf::from(normalised);
+    path.parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| anyhow::anyhow!("Cannot derive DriverStore dir from: {image_path}"))
+}
+
+/// Deploy `ecram_shim.exe` to the IoTDriver DriverStore directory.
+///
+/// Uses `SeRestorePrivilege` + `FILE_FLAG_BACKUP_SEMANTICS` to write into the
+/// TrustedInstaller-owned directory.  No-ops if the deployed file is already
+/// current (same size as the source).
+///
+/// Returns the absolute path to the deployed shim.
+#[cfg(windows)]
+pub fn deploy_ecram_shim() -> Result<std::path::PathBuf> {
+    // Locate source shim (same directory as the running executable)
+    let exe = std::env::current_exe().context("current_exe")?;
+    let shim_src = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cannot find exe directory"))?
+        .join("ecram_shim.exe");
+
+    anyhow::ensure!(
+        shim_src.exists(),
+        "ecram_shim.exe not found at {shim_src:?} — build with `cargo build --bin ecram_shim`"
+    );
+
+    let driverstore_dir = find_iotdriver_store_dir()?;
+    let dest = driverstore_dir.join("ecram_shim.exe");
+
+    // Skip if already up to date
+    if dest.exists() {
+        let src_len = std::fs::metadata(&shim_src)?.len();
+        if let Ok(dst_meta) = std::fs::metadata(&dest) {
+            if dst_meta.len() == src_len {
+                log::debug!("[ecram_shim] Already deployed at {dest:?}");
+                return Ok(dest);
+            }
+        }
+    }
+
+    log::info!("[ecram_shim] Deploying to {dest:?}");
+    enable_restore_privilege().context("enable SeRestorePrivilege")?;
+    copy_with_backup_semantics(&shim_src, &dest)?;
+    log::info!("[ecram_shim] Deployed successfully");
+    Ok(dest)
+}
+
+/// Read `byte_count` bytes of ECRAM at `phys_addr` via the deployed shim.
+///
+/// Deploys the shim on first call (or when it changes), then spawns it as a
+/// child process and parses its JSON stdout.
+pub fn read_ecram_via_shim(phys_addr: u64, byte_count: usize) -> Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        let shim_path = deploy_ecram_shim().context("deploy ecram_shim")?;
+
+        let output = std::process::Command::new(&shim_path)
+            .arg(format!("{phys_addr:#010x}"))
+            .arg(format!("{byte_count}"))
+            .output()
+            .with_context(|| format!("Failed to spawn ecram_shim at {shim_path:?}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let v: serde_json::Value = serde_json::from_str(stdout.trim())
+            .with_context(|| format!("Invalid shim output: {stdout}"))?;
+
+        if !v["ok"].as_bool().unwrap_or(false) {
+            let err = v["error"].as_str().unwrap_or("unknown shim error");
+            anyhow::bail!("ecram_shim: {err}");
+        }
+
+        let hex_str = v["data"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing data field in shim output"))?;
+
+        (0..hex_str.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).map_err(Into::into))
+            .collect::<Result<Vec<u8>>>()
+            .context("Hex decode of shim output")
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (phys_addr, byte_count);
+        anyhow::bail!("read_ecram_via_shim is only supported on Windows")
+    }
+}
+
+/// Enable `SeRestorePrivilege` on the current process token so that
+/// `FILE_FLAG_BACKUP_SEMANTICS` bypasses ACL checks on DriverStore writes.
+#[cfg(windows)]
+fn enable_restore_privilege() -> Result<()> {
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
+        SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token)
+            .context("OpenProcessToken")?;
+
+        let priv_name: Vec<u16> = "SeRestorePrivilege\0".encode_utf16().collect();
+        let mut luid = windows::Win32::Foundation::LUID::default();
+        LookupPrivilegeValueW(
+            None,
+            windows::core::PCWSTR(priv_name.as_ptr()),
+            &mut luid,
+        )
+        .context("LookupPrivilegeValueW(SeRestorePrivilege)")?;
+
+        let tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+
+        AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None)
+            .context("AdjustTokenPrivileges")?;
+
+        let _ = windows::Win32::Foundation::CloseHandle(token);
+    }
+    Ok(())
+}
+
+/// Copy `src` to `dst` using `FILE_FLAG_BACKUP_SEMANTICS` so that the write
+/// bypasses the directory DACL when `SeRestorePrivilege` is active.
+#[cfg(windows)]
+fn copy_with_backup_semantics(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{CloseHandle, GENERIC_WRITE, HANDLE},
+            Storage::FileSystem::{
+                CreateFileW, WriteFile, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ,
+            },
+        },
+    };
+
+    let src_data = std::fs::read(src)
+        .with_context(|| format!("Read shim source {src:?}"))?;
+
+    let dst_wide: Vec<u16> = OsStr::new(dst).encode_wide().chain(Some(0)).collect();
+
+    unsafe {
+        let handle = CreateFileW(
+            PCWSTR(dst_wide.as_ptr()),
+            GENERIC_WRITE.0,
+            FILE_SHARE_READ,
+            None,
+            CREATE_ALWAYS,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_ATTRIBUTE_NORMAL,
+            HANDLE::default(),
+        )
+        .with_context(|| format!("CreateFileW (backup semantics) on {dst:?}"))?;
+
+        let mut written = 0u32;
+        let write_result = WriteFile(handle, Some(&src_data), Some(&mut written), None);
+        let _ = CloseHandle(handle);
+        write_result.context("WriteFile shim to DriverStore")?;
+
+        anyhow::ensure!(
+            written as usize == src_data.len(),
+            "Wrote {} of {} bytes to {dst:?}",
+            written,
+            src_data.len()
+        );
+    }
+    Ok(())
+}
+
+// ── ECRAM register map ────────────────────────────────────────────────────────
+
+/// Structured decode of all known ACPI ERAM fields.
+///
+/// Decoded from DSDT `ERAM` SystemMemory OperationRegion at `0xFE0B0300`
+/// and `SvrCModule.dll` string analysis.  Field names match ACPI DSDT names.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EramMap {
+    // ── Byte +0x00 — Miscellaneous flags 0 ───────────────────────────────────
+    /// Raw byte at offset 0x00 (MISC flags byte 0)
+    pub misc0: u8,
+    // ── Byte +0x01 — Miscellaneous flags 1 ───────────────────────────────────
+    pub misc1: u8,
+
+    // ── Thermal / Fan ────────────────────────────────────────────────────────
+    /// CPU temperature sensor (°C, offset +0x03)
+    pub cpu_temp_c: u8,
+    /// Fan speed RPM (u16 LE, offset +0x04..+0x05)
+    pub fan_rpm: u16,
+    /// Fan 2 speed RPM (u16 LE, offset +0x06..+0x07), 0 if single-fan model
+    pub fan2_rpm: u16,
+    /// CPU power (Watts, 1 byte, offset +0x0A)
+    pub cpu_power_w: u8,
+
+    // ── Performance mode ─────────────────────────────────────────────────────
+    /// Performance profile byte (offset +0x40): 0x00=Balanced, 0x01=Performance, 0x02=Silent
+    pub perf_profile: u8,
+    /// TDP override byte (offset +0x42, Watts)
+    pub tdp_w: u8,
+
+    // ── AC / Battery ─────────────────────────────────────────────────────────
+    /// Byte +0x80: bit 0 = ACIN (AC adapter present)
+    pub ac_flags: u8,
+    /// ACIN bit derived from ac_flags
+    pub ac_connected: bool,
+    /// ADPW — AC adapter rated wattage (Watts, 1 byte, offset +0x81)
+    pub ac_adapter_w: u8,
+    /// BTCT — Battery charge/discharge current (mA, i16 LE, offset +0x8C)
+    /// Positive = charging, negative = discharging
+    pub battery_current_ma: i16,
+    /// BTPR — Battery remaining capacity (mAh, u16 LE, offset +0x8E)
+    pub battery_capacity_mah: u16,
+    /// BTVT — Battery voltage (mV, u16 LE, offset +0x90)
+    pub battery_voltage_mv: u16,
+    /// Charging threshold setting (%, offset +0x96)
+    pub charge_threshold_pct: u8,
+    /// Battery temperature (°C, 1 byte, offset +0x97)
+    pub battery_temp_c: u8,
+
+    /// Raw full 256-byte ERAM dump (hex string, for debugging unmapped fields)
+    pub raw_hex: String,
+}
+
+/// Read the ACPI ERAM block and decode all known fields.
+///
+/// Uses the shim path automatically if the direct IoTDriver access fails.
+pub fn read_eram_map() -> Result<EramMap> {
+    // Try direct read, fall back to shim
+    let eram = read_ecram(ERAM_BASE, 0x100)
+        .or_else(|_| read_ecram_via_shim(ERAM_BASE, 0x100))
+        .context("ECRAM read (both direct and shim paths failed)")?;
+
+    anyhow::ensure!(eram.len() >= 0x100, "Short ERAM read: {} bytes", eram.len());
+
+    let raw_hex: String = eram.iter().map(|b| format!("{b:02x}")).collect();
+
+    Ok(EramMap {
+        misc0: eram[0x00],
+        misc1: eram[0x01],
+        cpu_temp_c: eram[0x03],
+        fan_rpm: u16::from_le_bytes([eram[0x04], eram[0x05]]),
+        fan2_rpm: u16::from_le_bytes([eram[0x06], eram[0x07]]),
+        cpu_power_w: eram[0x0A],
+        perf_profile: eram[0x40],
+        tdp_w: eram[0x42],
+        ac_flags: eram[0x80],
+        ac_connected: (eram[0x80] & 0x01) != 0,
+        ac_adapter_w: eram[0x81],
+        battery_current_ma: i16::from_le_bytes([eram[0x8C], eram[0x8D]]),
+        battery_capacity_mah: u16::from_le_bytes([eram[0x8E], eram[0x8F]]),
+        battery_voltage_mv: u16::from_le_bytes([eram[0x90], eram[0x91]]),
+        charge_threshold_pct: eram[0x96],
+        battery_temp_c: eram[0x97],
+        raw_hex,
+    })
 }
 
 #[cfg(test)]

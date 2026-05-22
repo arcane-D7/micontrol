@@ -5,7 +5,7 @@ pub mod elevated;
 mod elev_bridge;
 
 use commands::ai_logs::{write_ai_perf_log, read_ai_perf_logs, open_ai_logs_dir};
-use commands::hardware::{get_performance_mode, set_performance_mode, get_charging_threshold, set_charging_threshold, get_perf_debug};
+use commands::hardware::{get_performance_mode, set_performance_mode, get_charging_threshold, set_charging_threshold, get_perf_debug, get_ecram_map};
 use commands::hotkeys::{get_hotkey_config, set_hotkey_config, start_key_detect, get_detected_key, is_hook_active};
 use commands::system::{
     get_battery_info, get_display_info, set_brightness, set_hdr,
@@ -82,6 +82,7 @@ pub fn run() {
             get_charging_threshold,
             set_charging_threshold,
             get_perf_debug,
+            get_ecram_map,
             // System info
             get_system_info,
             // Battery
@@ -264,9 +265,14 @@ pub fn run() {
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // Hide to tray instead of closing
-                    window.hide().ok();
-                    api.prevent_close();
+                    // In dev mode: allow the window to close so the process exits when
+                    // the Vite dev server stops (Ctrl+C). Without this the Tauri binary
+                    // stays alive as a zombie and the next `tauri dev` spawns a duplicate.
+                    if cfg!(not(debug_assertions)) {
+                        // Production: hide to tray instead of closing.
+                        window.hide().ok();
+                        api.prevent_close();
+                    }
                 }
                 tauri::WindowEvent::Focused(false) => {
                     // Auto-hide tray popup when it loses focus.

@@ -236,10 +236,14 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
               >
                 <option value="">{t("performance.powerProfiles.manual")}</option>
                 <option value="silence">{t("performance.modes.silence")}</option>
+                <option value="long_battery">{t("performance.modes.longBattery")}</option>
                 <option value="balance">{t("performance.modes.balance")}</option>
                 <option value="turbo">{t("performance.modes.turbo")}</option>
                 <option value="decepticon">{t("performance.modes.decepticon")}</option>
-                <option value="long_battery">{t("performance.modes.longBattery")}</option>
+                <option value="overdrive">{t("performance.modes.overdrive")}</option>
+                <option value="overdrive_high">{t("performance.modes.overdriveHigh")}</option>
+                <option value="overdrive_max">{t("performance.modes.overdriveMax")}</option>
+                <option value="smart_adaptive">{t("performance.modes.smartAdaptive")}</option>
                 <option value="smart">{t("performance.modes.smart")}</option>
                 <option value="smart_acceleration">{t("performance.modes.smartAcceleration")}</option>
               </select>
@@ -255,10 +259,14 @@ function PerformanceTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSettin
               >
                 <option value="">{t("performance.powerProfiles.manual")}</option>
                 <option value="silence">{t("performance.modes.silence")}</option>
+                <option value="long_battery">{t("performance.modes.longBattery")}</option>
                 <option value="balance">{t("performance.modes.balance")}</option>
                 <option value="turbo">{t("performance.modes.turbo")}</option>
                 <option value="decepticon">{t("performance.modes.decepticon")}</option>
-                <option value="long_battery">{t("performance.modes.longBattery")}</option>
+                <option value="overdrive">{t("performance.modes.overdrive")}</option>
+                <option value="overdrive_high">{t("performance.modes.overdriveHigh")}</option>
+                <option value="overdrive_max">{t("performance.modes.overdriveMax")}</option>
+                <option value="smart_adaptive">{t("performance.modes.smartAdaptive")}</option>
                 <option value="smart">{t("performance.modes.smart")}</option>
                 <option value="smart_acceleration">{t("performance.modes.smartAcceleration")}</option>
               </select>
@@ -497,8 +505,6 @@ function StartupTab() {
 // Option A: 3 fixed Xiaomi laptop keys (AI key, PCManager key, Copilot key).
 // TODO (Option B — Full Keyboard Remapping Module):
 //   - Replace 3 fixed rows with a dynamic list from get_hotkey_config()
-//   - Add "Press to detect key" button that calls a detect_key_mode() command
-//   - Add more action types: SetPerformanceMode, ToggleAiBrightness, MediaControl, Script
 //   - Add modifier key support (Ctrl+VK, Alt+VK, Win+VK)
 //   - Add conflict detection warnings for system-reserved keys
 
@@ -508,7 +514,11 @@ type HotkeyAction =
   | { type: "open_main_window" }
   | { type: "open_url"; url: string }
   | { type: "launch_app"; path: string; args: string[] }
-  | { type: "remap_to_key"; vk: number; extended: boolean };
+  | { type: "remap_to_key"; vk: number; extended: boolean }
+  | { type: "set_performance_mode"; mode: string }
+  | { type: "toggle_ai_brightness" }
+  | { type: "media_control"; action: string }
+  | { type: "script"; interpreter: string; path: string; args: string[] };
 
 interface KeyBinding {
   enabled: boolean;
@@ -540,6 +550,10 @@ function KeyBindingRow({
   const urlValue = binding.action.type === "open_url" ? binding.action.url : "";
   const appPath = binding.action.type === "launch_app" ? binding.action.path : "";
   const remapVk = binding.action.type === "remap_to_key" ? binding.action.vk : 0xA3;
+  const perfMode = binding.action.type === "set_performance_mode" ? binding.action.mode : "balance";
+  const mediaAction = binding.action.type === "media_control" ? binding.action.action : "volume_up";
+  const scriptInterp = binding.action.type === "script" ? (binding.action.interpreter || "") : "";
+  const scriptPath = binding.action.type === "script" ? binding.action.path : "";
 
   // Known remap targets (VK, extended, display label)
   const REMAP_TARGETS: { vk: number; extended: boolean; label: string }[] = [
@@ -548,6 +562,20 @@ function KeyBindingRow({
     { vk: 0xA1, extended: false, label: t("keyboard.remapRShift") },
     { vk: 0x2E, extended: true,  label: t("keyboard.remapDelete") },
     { vk: 0x2F, extended: false, label: t("keyboard.remapHelp") },
+  ];
+
+  const PERFORMANCE_MODES = [
+    { value: "silence", label: t("performance.modes.silence") },
+    { value: "long_battery", label: t("performance.modes.longBattery") },
+    { value: "balance", label: t("performance.modes.balance") },
+    { value: "turbo", label: t("performance.modes.turbo") },
+    { value: "decepticon", label: t("performance.modes.decepticon") },
+    { value: "overdrive", label: t("performance.modes.overdrive") },
+    { value: "overdrive_high", label: t("performance.modes.overdriveHigh") },
+    { value: "overdrive_max", label: t("performance.modes.overdriveMax") },
+    { value: "smart_adaptive", label: t("performance.modes.smartAdaptive") },
+    { value: "smart", label: t("performance.modes.smart") },
+    { value: "smart_acceleration", label: t("performance.modes.smartAcceleration") },
   ];
 
   function setActionType(type: string) {
@@ -560,6 +588,14 @@ function KeyBindingRow({
     else if (type === "remap_to_key") {
       const def = REMAP_TARGETS[0];
       onChange({ ...binding, enabled: autoEnabled, action: { type: "remap_to_key", vk: def.vk, extended: def.extended } });
+    } else if (type === "set_performance_mode") {
+      onChange({ ...binding, enabled: autoEnabled, action: { type: "set_performance_mode", mode: "balance" } });
+    } else if (type === "toggle_ai_brightness") {
+      onChange({ ...binding, enabled: autoEnabled, action: { type: "toggle_ai_brightness" } });
+    } else if (type === "media_control") {
+      onChange({ ...binding, enabled: autoEnabled, action: { type: "media_control", action: "play_pause" } });
+    } else if (type === "script") {
+      onChange({ ...binding, enabled: autoEnabled, action: { type: "script", interpreter: "powershell", path: "", args: [] } });
     }
   }
 
@@ -661,8 +697,12 @@ function KeyBindingRow({
           <option value="focus_micontrol">{t("keyboard.actionFocusMicontrol")}</option>
           <option value="open_main_window">{t("keyboard.actionOpenMainWindow")}</option>
           <option value="remap_to_key">{t("keyboard.actionRemapToKey")}</option>
+          <option value="set_performance_mode">{t("keyboard.actionSetPerformanceMode")}</option>
+          <option value="toggle_ai_brightness">{t("keyboard.actionToggleAiBrightness")}</option>
+          <option value="media_control">{t("keyboard.actionMediaControl")}</option>
           <option value="open_url">{t("keyboard.actionOpenUrl")}</option>
           <option value="launch_app">{t("keyboard.actionLaunchApp")}</option>
+          <option value="script">{t("keyboard.actionScript")}</option>
         </select>
 
         {actionType === "remap_to_key" && (
@@ -679,6 +719,39 @@ function KeyBindingRow({
             {REMAP_TARGETS.map((rt) => (
               <option key={rt.vk} value={rt.vk}>{rt.label}</option>
             ))}
+          </select>
+        )}
+
+        {actionType === "set_performance_mode" && (
+          <select
+            className="select-input"
+            value={perfMode}
+            onChange={(e) =>
+              onChange({ ...binding, action: { type: "set_performance_mode", mode: e.target.value } })
+            }
+            style={{ fontSize: 12 }}
+          >
+            {PERFORMANCE_MODES.map((m) => (
+              <option key={m.value} value={m.value}>{m.label}</option>
+            ))}
+          </select>
+        )}
+
+        {actionType === "media_control" && (
+          <select
+            className="select-input"
+            value={mediaAction}
+            onChange={(e) =>
+              onChange({ ...binding, action: { type: "media_control", action: e.target.value } })
+            }
+            style={{ fontSize: 12 }}
+          >
+            <option value="volume_up">{t("keyboard.mediaVolUp")}</option>
+            <option value="volume_down">{t("keyboard.mediaVolDown")}</option>
+            <option value="mute">{t("keyboard.mediaMute")}</option>
+            <option value="play_pause">{t("keyboard.mediaPlayPause")}</option>
+            <option value="next">{t("keyboard.mediaNext")}</option>
+            <option value="prev">{t("keyboard.mediaPrev")}</option>
           </select>
         )}
 
@@ -705,6 +778,32 @@ function KeyBindingRow({
                 ...binding,
                 action: { type: "launch_app", path: e.target.value, args: [] },
               })
+            }
+            style={{ flex: 1, minWidth: 200, fontSize: 12 }}
+          />
+        )}
+        {actionType === "script" && (
+          <select
+            className="select-input"
+            value={scriptInterp}
+            onChange={(e) =>
+              onChange({ ...binding, action: { type: "script", interpreter: e.target.value, path: scriptPath, args: [] } })
+            }
+            style={{ fontSize: 12 }}
+          >
+            <option value="">{t("keyboard.scriptInterpreterDirect")}</option>
+            <option value="powershell">{t("keyboard.scriptInterpreterPowershell")}</option>
+            <option value="cmd">{t("keyboard.scriptInterpreterCmd")}</option>
+          </select>
+        )}
+        {actionType === "script" && (
+          <input
+            className="text-input"
+            type="text"
+            placeholder={t("keyboard.scriptPathPlaceholder")}
+            value={scriptPath}
+            onChange={(e) =>
+              onChange({ ...binding, action: { type: "script", interpreter: scriptInterp, path: e.target.value, args: [] } })
             }
             style={{ flex: 1, minWidth: 200, fontSize: 12 }}
           />

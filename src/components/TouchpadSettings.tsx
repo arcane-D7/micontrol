@@ -4,7 +4,7 @@ import type { TouchpadInfo, HardwareCapabilities } from "../hooks/useHardware";
 interface Props {
   touchpad: TouchpadInfo | null;
   capabilities?: HardwareCapabilities;
-  onSensitivityChange: (s: "low" | "medium" | "high") => Promise<void>;
+  onSensitivityChange: (s: "low" | "medium" | "high" | "very_high") => Promise<void>;
   onHapticsChange: (enabled: boolean) => Promise<void>;
   onHapticsIntensityChange: (i: "low" | "medium" | "high") => Promise<void>;
   onGestureScreenshotChange: (enabled: boolean) => Promise<void>;
@@ -12,7 +12,8 @@ interface Props {
   onEdgeSlideChange: (enabled: boolean) => Promise<void>;
 }
 
-const SENSITIVITY_LEVELS: Array<"low" | "medium" | "high"> = ["low", "medium", "high"];
+const SENSITIVITY_LEVELS: Array<"low" | "medium" | "high" | "very_high"> = ["low", "medium", "high", "very_high"];
+const HAPTICS_LEVELS: Array<"low" | "medium" | "high"> = ["low", "medium", "high"];
 
 export default function TouchpadSettings({
   touchpad,
@@ -84,7 +85,7 @@ export default function TouchpadSettings({
         <div style={{ marginBottom: 20, marginTop: 4, paddingLeft: 4 }}>
           <div className="stat-label" style={{ marginBottom: 10 }}>{t("touchpad.hapticsIntensity")}</div>
           <div className="threshold-options">
-            {SENSITIVITY_LEVELS.map((level) => (
+            {HAPTICS_LEVELS.map((level) => (
               <button
                 key={level}
                 className={`threshold-btn ${touchpad.haptics_intensity === level ? "active" : ""}`}

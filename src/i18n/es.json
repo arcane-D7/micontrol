@@ -336,7 +336,8 @@
     "levels": {
       "low": "Baja",
       "medium": "Media",
-      "high": "Alta"
+      "high": "Alta",
+      "very_high": "Muy Alta"
     },
     "applying": "Aplicando...",
     "applied": "Ajuste guardado",

@@ -336,7 +336,8 @@
     "levels": {
       "low": "Faible",
       "medium": "Moyen",
-      "high": "Élevé"
+      "high": "Élevé",
+      "very_high": "Très Élevé"
     },
     "applying": "Application...",
     "applied": "Paramètre enregistré",

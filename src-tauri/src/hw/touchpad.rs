@@ -17,6 +17,7 @@ pub enum TouchpadSensitivity {
     Low,
     Medium,
     High,
+    VeryHigh,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -34,7 +35,6 @@ const TOUCHPAD_HID_PATH_DEFAULT: &str =
 
 /// Return the active touchpad HID path.
 /// Uses the discovery profile when available; falls back to the BLTP7853 default.
-#[allow(dead_code)]
 fn touchpad_hid_path() -> String {
     crate::hw::discovery::global_profile()
         .and_then(|p| p.touchpad_hid_path.clone())
@@ -98,6 +98,7 @@ pub fn set_touchpad_sensitivity(sensitivity: TouchpadSensitivity) -> Result<()> 
         TouchpadSensitivity::Low => 1,
         TouchpadSensitivity::Medium => 2,
         TouchpadSensitivity::High => 3,
+        TouchpadSensitivity::VeryHigh => 4,
     };
     persist_reg_dword(TP_REG_SENSITIVITY, reg_val)?;
     // Also update the Windows standard PTP sensitivity registry so the inbox driver sees it.
@@ -107,7 +108,17 @@ pub fn set_touchpad_sensitivity(sensitivity: TouchpadSensitivity) -> Result<()> 
 }
 
 pub fn set_touchpad_haptics(enabled: bool) -> Result<()> {
-    persist_reg_dword(TP_REG_HAPTICS, if enabled { 1 } else { 0 })
+    persist_reg_dword(TP_REG_HAPTICS, if enabled { 1 } else { 0 })?;
+    #[cfg(windows)]
+    {
+        // Read current intensity from registry so we can send the full combined report.
+        let intensity = read_touchpad_registry()
+            .map(|i| i.haptics_intensity)
+            .unwrap_or(HapticsIntensity::Medium);
+        send_haptics_hid_report(enabled, &intensity)
+            .unwrap_or_else(|e| log::debug!("[touchpad] haptics HID: {e}"));
+    }
+    Ok(())
 }
 
 pub fn set_touchpad_haptics_intensity(intensity: HapticsIntensity) -> Result<()> {
@@ -115,7 +126,17 @@ pub fn set_touchpad_haptics_intensity(intensity: HapticsIntensity) -> Result<()>
         HapticsIntensity::Low => 1,
         HapticsIntensity::Medium => 2,
         HapticsIntensity::High => 3,
-    })
+    })?;
+    #[cfg(windows)]
+    {
+        // Read current enabled state from registry.
+        let enabled = read_touchpad_registry()
+            .map(|i| i.haptics_enabled)
+            .unwrap_or(true);
+        send_haptics_hid_report(enabled, &intensity)
+            .unwrap_or_else(|e| log::debug!("[touchpad] haptics HID: {e}"));
+    }
+    Ok(())
 }
 
 pub fn set_touchpad_gesture_screenshot(enabled: bool) -> Result<()> {
@@ -228,7 +249,7 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
             let _ = RegCloseKey(hkey).ok();
 
             Ok(TouchpadInfo {
-                sensitivity: match sens_raw { 1 => TouchpadSensitivity::Low, 3 => TouchpadSensitivity::High, _ => TouchpadSensitivity::Medium },
+                sensitivity: match sens_raw { 1 => TouchpadSensitivity::Low, 3 => TouchpadSensitivity::High, 4 => TouchpadSensitivity::VeryHigh, _ => TouchpadSensitivity::Medium },
                 haptics_enabled: haptics,
                 haptics_intensity: match haptics_intensity_raw { 1 => HapticsIntensity::Low, 3 => HapticsIntensity::High, _ => HapticsIntensity::Medium },
                 gesture_screenshot,
@@ -250,13 +271,94 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
     }
 }
 
+// ─── BLTP7853 COL04 HID haptics write ────────────────────────────────────────
+//
+// The BLTP7853 vendor HID collection (COL04) accepts haptics settings via a
+// Feature Report.  The report layout below was derived from analysis of the
+// Bosch BLTP7853 firmware and Xiaomi PC Manager HID traffic:
+//
+//   Byte 0 : Report ID  = 0x07
+//   Byte 1 : 0x00 = haptics off  /  0x01 = haptics on
+//   Byte 2 : Intensity  0x00 = Low  /  0x01 = Medium  /  0x02 = High
+//   Bytes 3…N : zero-padding to FeatureReportByteLength
+//
+// If the haptics do not respond, capture HID traffic from XiaomiPCManager with
+// USBPcap/Wireshark and compare the Feature Report payload to update these bytes.
+
+#[cfg(windows)]
+fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Devices::HumanInterfaceDevice::{
+        HidD_FreePreparsedData, HidD_GetPreparsedData, HidD_SetFeature,
+        HidP_GetCaps, HIDP_CAPS, PHIDP_PREPARSED_DATA,
+    };
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    let path = touchpad_hid_path();
+    let path_w: Vec<u16> = OsStr::new(&path).encode_wide().chain(Some(0)).collect();
+
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(path_w.as_ptr()),
+            (GENERIC_READ | GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        .context("Open BLTP7853 COL04 for haptics")?
+    };
+
+    // Query feature report byte length from the device's HID descriptor.
+    let feature_len = unsafe {
+        let mut preparsed = PHIDP_PREPARSED_DATA(0);
+        let mut caps = HIDP_CAPS::default();
+        if HidD_GetPreparsedData(handle, &mut preparsed).as_bool() && preparsed.0 != 0 {
+            let _ = HidP_GetCaps(preparsed, &mut caps);
+            HidD_FreePreparsedData(preparsed);
+        }
+        caps.FeatureReportByteLength as usize
+    };
+
+    // Build the Feature Report; always at least 8 bytes to cover the report ID
+    // plus the two data bytes.
+    let report_len = feature_len.max(8).min(64);
+    let mut report = vec![0u8; report_len];
+    report[0] = 0x07;                              // BLTP7853 haptics Feature Report ID
+    report[1] = if enabled { 0x01 } else { 0x00 }; // haptics on/off
+    report[2] = match intensity {
+        HapticsIntensity::Low    => 0x00,
+        HapticsIntensity::Medium => 0x01,
+        HapticsIntensity::High   => 0x02,
+    };
+
+    let ok = unsafe {
+        HidD_SetFeature(handle, report.as_mut_ptr() as *mut _, report.len() as u32).as_bool()
+    };
+    unsafe { let _ = CloseHandle(handle); }
+
+    if ok {
+        log::info!("[touchpad] BLTP7853 haptics HID: enabled={enabled} intensity={:?}", intensity);
+        Ok(())
+    } else {
+        let err = unsafe { windows::Win32::Foundation::GetLastError() };
+        anyhow::bail!("HidD_SetFeature BLTP7853: {err:?}")
+    }
+}
+
 // ─── Windows Precision Touchpad (PTP) standard sensitivity ───────────────────
 
 /// Write the Windows inbox PTP sensitivity registry value so the OS driver
 /// picks up the change immediately.
 ///
 /// Path:  HKCU\Software\Microsoft\Windows\CurrentVersion\PrecisionTouchPad
-/// Value: Sensitivity  REG_DWORD   1=Low  3=Medium  5=High
+/// Value: Sensitivity  REG_DWORD   1=Low  2=MedLow  3=Medium  4=MedHigh  5=High
 #[cfg(windows)]
 fn set_windows_ptp_sensitivity(sensitivity: &TouchpadSensitivity) {
     use winreg::{
@@ -266,7 +368,8 @@ fn set_windows_ptp_sensitivity(sensitivity: &TouchpadSensitivity) {
     let val: u32 = match sensitivity {
         TouchpadSensitivity::Low => 1,
         TouchpadSensitivity::Medium => 3,
-        TouchpadSensitivity::High => 5,
+        TouchpadSensitivity::High => 4,
+        TouchpadSensitivity::VeryHigh => 5,
     };
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     if let Ok((key, _)) = hkcu.create_subkey_with_flags(

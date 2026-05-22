@@ -7,6 +7,14 @@ edition = "2021"
 name = "micontrol_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "micontrol"
+path = "src/main.rs"
+
+[[bin]]
+name = "ecram_shim"
+path = "src/bin/ecram_shim.rs"
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-shell = "2"
@@ -44,6 +52,7 @@ windows = { version = "0.58", features = [
   "Devices_Sensors",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
+  "Win32_Security",
 ] }
 wmi = "0.13"
 winreg = "0.52"

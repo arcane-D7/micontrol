@@ -258,6 +258,16 @@ fn dispatch(cmd: ElevCmd) -> Value {
     }
 }
 
+/// Public in-process dispatch: called by `elev_bridge::run_elevated` when the
+/// main process is already running as an administrator.  Avoids the scheduled-
+/// task round-trip entirely.
+pub fn dispatch_cmd(cmd: &str, args: Value) -> Value {
+    dispatch(ElevCmd {
+        cmd: cmd.to_string(),
+        args,
+    })
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Returns `%LOCALAPPDATA%\MiControl`, creating it if needed.

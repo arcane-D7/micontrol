@@ -14,16 +14,10 @@
 //! 1. Replace `HotkeyMap` (3 fixed keys) with `Vec<CustomHotkey>` where each entry
 //!    has its own `vk_code: u32`, `scan_code: u32`, and `display_name: String`.
 //!
-//! 2. Add "detect key" mode: a temporary WH_KEYBOARD_LL hook that captures the next
-//!    key pressed and reports its VK + scan code back to the frontend via a Tauri
-//!    event (`app_handle.emit("hotkey://detected", vk_code)`).
-//!    Frontend shows a "Press any key…" modal that records the keypress.
+//! 2. Add "detect key" mode: DONE — `start_detect_mode` / `get_detected_vk` implemented.
 //!
-//! 3. Add more `HotkeyAction` variants:
-//!    - `SetPerformanceMode { mode: String }` — call set_performance_mode directly
-//!    - `ToggleAiBrightness` — flip AI adaptive brightness on/off
-//!    - `MediaControl { action: String }` — "volume_up", "volume_down", "play_pause"
-//!    - `Script { interpreter: String, path: String }` — run PowerShell / cmd script
+//! 3. New `HotkeyAction` variants: DONE — `SetPerformanceMode`, `ToggleAiBrightness`,
+//!    `MediaControl`, `Script` all implemented.
 //!
 //! 4. Add modifier key support (e.g. Ctrl+VK, Alt+VK, Win+VK combos).
 //!    Use the `flags` field of KBDLLHOOKSTRUCT to check extended/injected bits.
@@ -39,9 +33,6 @@
 //! 7. Add key-sequence / chord support (press two keys in sequence to trigger an action).
 //!
 //! 8. Per-Windows-user profile storage (multi-user session awareness).
-//!
-//! 9. Frontend: visual key-capture widget — a button labeled "Click then press key"
-//!    that triggers detect-key mode and auto-fills the VK field.
 //! ─────────────────────────────────────────────────────────────────────────────
 
 use std::os::windows::process::CommandExt;
@@ -120,8 +111,6 @@ static REMAP_TARGET_EXTENDED: AtomicBool = AtomicBool::new(false);
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// What happens when an intercepted key fires.
-///
-/// Extend this enum for Option B (see module-level TODO list).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HotkeyAction {
@@ -142,6 +131,17 @@ pub enum HotkeyAction {
     /// On key-up  : injects target-key-up.
     /// `extended` must be `true` for right-side keys (RCtrl=0xA3, RAlt=0xA5, …).
     RemapToKey { vk: u32, extended: bool },
+    /// Immediately switch to the named performance mode.
+    /// `mode` must be a snake_case variant of `PerformanceMode`, e.g. "turbo".
+    SetPerformanceMode { mode: String },
+    /// Toggle AI adaptive brightness on or off.
+    ToggleAiBrightness,
+    /// Inject a media/system key.
+    /// `action`: "volume_up" | "volume_down" | "mute" | "play_pause" | "next" | "prev"
+    MediaControl { action: String },
+    /// Run a script or executable without a visible window.
+    /// `interpreter`: "" (direct) | "powershell" | "cmd"
+    Script { interpreter: String, path: String, args: Vec<String> },
 }
 
 impl Default for HotkeyAction {
@@ -946,6 +946,72 @@ fn dispatch_action(action: &HotkeyAction) {
                 .spawn();
             if let Err(e) = result {
                 log::warn!("[hotkeys] LaunchApp failed for '{path}': {e}");
+            }
+        }
+
+        HotkeyAction::SetPerformanceMode { mode } => {
+            use crate::state::PerformanceMode;
+            // Parse the snake_case mode name into the enum by round-tripping JSON.
+            let quoted = format!("\"{}\"", mode);
+            match serde_json::from_str::<PerformanceMode>(&quoted) {
+                Ok(pm) => {
+                    match crate::hw::performance::set_performance_mode(pm) {
+                        Ok(res) => log::info!("[hotkeys] SetPerformanceMode {:?}: {:?}", pm, res),
+                        Err(e) => log::warn!("[hotkeys] SetPerformanceMode {:?} failed: {e}", pm),
+                    }
+                }
+                Err(_) => log::warn!("[hotkeys] SetPerformanceMode: unknown mode '{mode}'"),
+            }
+        }
+
+        HotkeyAction::ToggleAiBrightness => {
+            let current = crate::hw::display::get_ai_brightness_config().enabled;
+            match crate::hw::display::set_ai_brightness(!current) {
+                Ok(()) => log::info!("[hotkeys] ToggleAiBrightness → {}", !current),
+                Err(e) => log::warn!("[hotkeys] ToggleAiBrightness failed: {e}"),
+            }
+        }
+
+        HotkeyAction::MediaControl { action } => {
+            // VK codes for media/volume keys.
+            let vk: Option<u16> = match action.as_str() {
+                "volume_up"   => Some(0xAF),
+                "volume_down" => Some(0xAE),
+                "mute"        => Some(0xAD),
+                "play_pause"  => Some(0xB3),
+                "next"        => Some(0xB0),
+                "prev"        => Some(0xB1),
+                _ => {
+                    log::warn!("[hotkeys] MediaControl: unknown action '{action}'");
+                    None
+                }
+            };
+            if let Some(vk) = vk {
+                inject_key_event(vk, 0, false, false);
+                inject_key_event(vk, 0, true, false);
+                log::info!("[hotkeys] MediaControl '{action}' VK={:#04X}", vk);
+            }
+        }
+
+        HotkeyAction::Script { interpreter, path, args } => {
+            let result = match interpreter.as_str() {
+                "powershell" => std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-File", path.as_str()])
+                    .args(args)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn(),
+                "cmd" => std::process::Command::new("cmd")
+                    .args(["/C", path.as_str()])
+                    .args(args)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn(),
+                _ => std::process::Command::new(path)
+                    .args(args)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn(),
+            };
+            if let Err(e) = result {
+                log::warn!("[hotkeys] Script failed for '{path}': {e}");
             }
         }
     }

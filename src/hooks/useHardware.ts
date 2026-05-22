@@ -112,7 +112,7 @@ export interface AiPerfLogEntry {
 }
 
 export interface TouchpadInfo {
-  sensitivity: "low" | "medium" | "high";
+  sensitivity: "low" | "medium" | "high" | "very_high";
   haptics_enabled: boolean;
   haptics_intensity: "low" | "medium" | "high";
   gesture_screenshot: boolean;
@@ -289,7 +289,7 @@ export function useHardware() {
   useEffect(() => { touchpadRef.current = touchpad; }, [touchpad]);
 
   const setTouchpadSensitivity = useCallback(
-    async (sensitivity: "low" | "medium" | "high") => {
+    async (sensitivity: "low" | "medium" | "high" | "very_high") => {
       const snap = touchpadRef.current;
       touchpadDirtyUntil.current = Date.now() + 3000;
       setTouchpad((s) => (s ? { ...s, sensitivity } : null));
