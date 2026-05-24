@@ -211,6 +211,41 @@ export interface EramMap {
   raw_hex: string;
 }
 
+export interface HardwareRefreshErrors {
+  system_info: string | null;
+  battery: string | null;
+  display: string | null;
+  fan: string | null;
+  touchpad: string | null;
+  performance_mode: string | null;
+  charging_threshold: string | null;
+}
+
+const EMPTY_REFRESH_ERRORS: HardwareRefreshErrors = {
+  system_info: null,
+  battery: null,
+  display: null,
+  fan: null,
+  touchpad: null,
+  performance_mode: null,
+  charging_threshold: null,
+};
+
+function formatInvokeError(reason: unknown): string {
+  if (reason instanceof Error) return reason.message;
+  return String(reason);
+}
+
+const REFRESH_ERROR_LABELS: Record<keyof HardwareRefreshErrors, string> = {
+  system_info: "system",
+  battery: "battery",
+  display: "display",
+  fan: "fan",
+  touchpad: "touchpad",
+  performance_mode: "performance",
+  charging_threshold: "charging",
+};
+
 // ── Hardware hook ────────────────────────────────────────────────────────────
 
 export function useHardware() {
@@ -225,6 +260,8 @@ export function useHardware() {
   const [chargingThreshold, setChargingThresholdState] = useState<number>(80);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshErrors, setRefreshErrors] =
+    useState<HardwareRefreshErrors>(EMPTY_REFRESH_ERRORS);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [loadingUpdate, setLoadingUpdate] = useState(false);
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfile | null>(null);
@@ -238,32 +275,55 @@ export function useHardware() {
 
   const refresh = useCallback(async () => {
     if (!hasLoadedOnce.current) setLoading(true);
-    setError(null);
-    try {
-      const [sys, bat, disp, fanData, tp, pm, ct] = await Promise.allSettled([
-        invoke<SystemInfo>("get_system_info"),
-        invoke<BatteryInfo>("get_battery_info"),
-        invoke<DisplayInfo>("get_display_info"),
-        invoke<FanInfo>("get_fan_info"),
-        invoke<TouchpadInfo>("get_touchpad_info"),
-        invoke<PerformanceMode>("get_performance_mode"),
-        invoke<number>("get_charging_threshold"),
-      ]);
-      if (sys.status === "fulfilled") setSystemInfo(sys.value);
-      if (bat.status === "fulfilled") setBattery(bat.value);
-      if (disp.status === "fulfilled") setDisplay(disp.value);
-      if (fanData.status === "fulfilled") setFan(fanData.value);
-      // Only update touchpad from poll when no user write is in flight.
-      if (tp.status === "fulfilled" && Date.now() >= touchpadDirtyUntil.current)
-        setTouchpad(tp.value);
-      if (pm.status === "fulfilled") setPerformanceModeState(pm.value);
-      if (ct.status === "fulfilled") setChargingThresholdState(ct.value);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      hasLoadedOnce.current = true;
-      setLoading(false);
+    const [sys, bat, disp, fanData, tp, pm, ct] = await Promise.allSettled([
+      invoke<SystemInfo>("get_system_info"),
+      invoke<BatteryInfo>("get_battery_info"),
+      invoke<DisplayInfo>("get_display_info"),
+      invoke<FanInfo>("get_fan_info"),
+      invoke<TouchpadInfo>("get_touchpad_info"),
+      invoke<PerformanceMode>("get_performance_mode"),
+      invoke<number>("get_charging_threshold"),
+    ]);
+
+    const nextErrors: HardwareRefreshErrors = { ...EMPTY_REFRESH_ERRORS };
+
+    if (sys.status === "fulfilled") setSystemInfo(sys.value);
+    else nextErrors.system_info = formatInvokeError(sys.reason);
+
+    if (bat.status === "fulfilled") setBattery(bat.value);
+    else nextErrors.battery = formatInvokeError(bat.reason);
+
+    if (disp.status === "fulfilled") setDisplay(disp.value);
+    else nextErrors.display = formatInvokeError(disp.reason);
+
+    if (fanData.status === "fulfilled") setFan(fanData.value);
+    else nextErrors.fan = formatInvokeError(fanData.reason);
+
+    // Only update touchpad from poll when no user write is in flight.
+    if (tp.status === "fulfilled" && Date.now() >= touchpadDirtyUntil.current) {
+      setTouchpad(tp.value);
+    } else if (tp.status === "rejected") {
+      nextErrors.touchpad = formatInvokeError(tp.reason);
     }
+
+    if (pm.status === "fulfilled") setPerformanceModeState(pm.value);
+    else nextErrors.performance_mode = formatInvokeError(pm.reason);
+
+    if (ct.status === "fulfilled") setChargingThresholdState(ct.value);
+    else nextErrors.charging_threshold = formatInvokeError(ct.reason);
+
+    setRefreshErrors(nextErrors);
+    const failedSubsystems = Object.entries(nextErrors)
+      .filter(([, value]) => Boolean(value))
+      .map(([key]) => REFRESH_ERROR_LABELS[key as keyof HardwareRefreshErrors]);
+    setError(
+      failedSubsystems.length
+        ? `Refresh failed for: ${failedSubsystems.join(", ")}`
+        : null
+    );
+
+    hasLoadedOnce.current = true;
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -516,6 +576,7 @@ export function useHardware() {
     chargingThreshold,
     loading,
     error,
+    refreshErrors,
     refresh,
     setPerformanceMode,
     setChargingThreshold,

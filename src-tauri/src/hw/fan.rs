@@ -44,8 +44,8 @@ struct EsifReadings {
 fn get_esif_readings() -> Result<EsifReadings> {
     #[cfg(windows)]
     {
-        use wmi::{COMLibrary, WMIConnection};
         use std::collections::HashMap;
+        use wmi::{COMLibrary, WMIConnection};
         let com = COMLibrary::new().context("COM")?;
         let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com.into()).context("WMI")?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi
@@ -65,7 +65,8 @@ fn get_esif_readings() -> Result<EsifReadings> {
         };
 
         // CPU temp: max non-zero Temperature (participants _0/_1/_2 are hotspot)
-        let cpu_temp = results.iter()
+        let cpu_temp = results
+            .iter()
             .filter_map(|r| extract_int(r, "Temperature"))
             .fold(f32::NEG_INFINITY, |acc, v| acc.max(v as f32));
         let cpu_temp = if cpu_temp > 0.0 && cpu_temp.is_finite() {
@@ -75,36 +76,55 @@ fn get_esif_readings() -> Result<EsifReadings> {
         };
 
         // GPU temp: prefer participant _10 (GPU/secondary SoC domain on Panther Lake)
-        let gpu_temp = results.iter()
+        let gpu_temp = results
+            .iter()
             .find(|r| instance_suffix(r, "_10"))
             .and_then(|r| extract_int(r, "Temperature"))
             .map(|v| (v as f32).clamp(0.0, 120.0))
             .unwrap_or_else(|| {
                 // Fallback: package maximum (same die, valid under GPU load)
-                let m = results.iter()
+                let m = results
+                    .iter()
                     .filter_map(|r| extract_int(r, "Temperature"))
                     .fold(f32::NEG_INFINITY, |acc, v| acc.max(v as f32));
-                if m > 0.0 && m.is_finite() { m.clamp(0.0, 120.0) } else { 45.0 }
+                if m > 0.0 && m.is_finite() {
+                    m.clamp(0.0, 120.0)
+                } else {
+                    45.0
+                }
             });
 
         // TDP: participant _0 is the highest-level DPTF power domain (CPU package/
         // platform RAPL). Power is in deciwatts — divide by 10 to get watts.
-        let tdp_watts = results.iter()
+        let tdp_watts = results
+            .iter()
             .find(|r| instance_suffix(r, "_0"))
             .and_then(|r| extract_int(r, "Power"))
             .map(|v| (v as f32 / 10.0).clamp(0.0, 150.0));
 
-        return Ok(EsifReadings { cpu_temp, gpu_temp, tdp_watts });
+        return Ok(EsifReadings {
+            cpu_temp,
+            gpu_temp,
+            tdp_watts,
+        });
     }
     #[cfg(not(windows))]
     {
-        Ok(EsifReadings { cpu_temp: 50.0, gpu_temp: 45.0, tdp_watts: None })
+        Ok(EsifReadings {
+            cpu_temp: 50.0,
+            gpu_temp: 45.0,
+            tdp_watts: None,
+        })
     }
 }
 
 pub fn get_fan_info() -> Result<FanInfo> {
     let speed_rpm = get_fan_rpm_wmi().unwrap_or(0);
-    let esif = get_esif_readings().unwrap_or(EsifReadings { cpu_temp: 50.0, gpu_temp: 45.0, tdp_watts: None });
+    let esif = get_esif_readings().unwrap_or(EsifReadings {
+        cpu_temp: 50.0,
+        gpu_temp: 45.0,
+        tdp_watts: None,
+    });
     let (mode, speed_percent) = get_fan_mode_registry().unwrap_or((FanMode::Auto, 50));
 
     let speed_percent_actual = if speed_rpm > 0 {
@@ -123,13 +143,14 @@ pub fn get_fan_info() -> Result<FanInfo> {
     })
 }
 
-
 pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> Result<()> {
     persist_fan_registry(&mode, speed_percent)?;
 
     match mode {
         FanMode::Auto => set_fan_auto_igcl().unwrap_or_else(|e| log::warn!("IGCL fan auto: {e}")),
-        FanMode::Fixed => set_fan_fixed_igcl(speed_percent).unwrap_or_else(|e| log::warn!("IGCL fan fixed: {e}")),
+        FanMode::Fixed => {
+            set_fan_fixed_igcl(speed_percent).unwrap_or_else(|e| log::warn!("IGCL fan fixed: {e}"))
+        }
         FanMode::Off => log::warn!("Fan off mode not directly supported — using minimum speed"),
     }
     Ok(())
@@ -140,8 +161,8 @@ pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> Result<()> {
 fn get_fan_rpm_wmi() -> Result<u32> {
     #[cfg(windows)]
     {
-        use wmi::{COMLibrary, WMIConnection};
         use std::collections::HashMap;
+        use wmi::{COMLibrary, WMIConnection};
         let com = COMLibrary::new().context("COM")?;
         let wmi = WMIConnection::new(com.into()).context("WMI")?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi
@@ -157,7 +178,9 @@ fn get_fan_rpm_wmi() -> Result<u32> {
         Ok(0)
     }
     #[cfg(not(windows))]
-    { Ok(0) }
+    {
+        Ok(0)
+    }
 }
 
 // ── Registry persistence ─────────────────────────────────────────────────────
@@ -167,26 +190,62 @@ fn persist_fan_registry(mode: &FanMode, speed_percent: u8) -> Result<()> {
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
         use windows::Win32::System::Registry::{
             RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD,
             REG_OPTION_NON_VOLATILE,
         };
-        use windows::core::PCWSTR;
         unsafe {
-            let key_w: Vec<u16> = OsStr::new(FAN_REG_KEY).encode_wide().chain(Some(0)).collect();
+            let key_w: Vec<u16> = OsStr::new(FAN_REG_KEY)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let mut hkey = std::mem::zeroed();
             RegCreateKeyExW(
-                HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), 0, None,
-                REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hkey, None,
-            ).ok().context("Create fan reg key")?;
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(key_w.as_ptr()),
+                0,
+                None,
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                None,
+                &mut hkey,
+                None,
+            )
+            .ok()
+            .context("Create fan reg key")?;
 
-            let mode_val: u32 = match mode { FanMode::Auto => 0, FanMode::Fixed => 1, FanMode::Off => 2 };
-            let mode_w: Vec<u16> = OsStr::new(FAN_REG_MODE).encode_wide().chain(Some(0)).collect();
-            let _ = RegSetValueExW(hkey, PCWSTR(mode_w.as_ptr()), 0, REG_DWORD, Some(&mode_val.to_le_bytes())).ok();
+            let mode_val: u32 = match mode {
+                FanMode::Auto => 0,
+                FanMode::Fixed => 1,
+                FanMode::Off => 2,
+            };
+            let mode_w: Vec<u16> = OsStr::new(FAN_REG_MODE)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let _ = RegSetValueExW(
+                hkey,
+                PCWSTR(mode_w.as_ptr()),
+                0,
+                REG_DWORD,
+                Some(&mode_val.to_le_bytes()),
+            )
+            .ok();
 
             let speed_val = speed_percent as u32;
-            let speed_w: Vec<u16> = OsStr::new(FAN_REG_SPEED).encode_wide().chain(Some(0)).collect();
-            let _ = RegSetValueExW(hkey, PCWSTR(speed_w.as_ptr()), 0, REG_DWORD, Some(&speed_val.to_le_bytes())).ok();
+            let speed_w: Vec<u16> = OsStr::new(FAN_REG_SPEED)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let _ = RegSetValueExW(
+                hkey,
+                PCWSTR(speed_w.as_ptr()),
+                0,
+                REG_DWORD,
+                Some(&speed_val.to_le_bytes()),
+            )
+            .ok();
 
             let _ = RegCloseKey(hkey).ok();
         }
@@ -199,37 +258,71 @@ fn get_fan_mode_registry() -> Result<(FanMode, u8)> {
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
         use windows::Win32::System::Registry::{
             RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, REG_VALUE_TYPE,
         };
-        use windows::core::PCWSTR;
         unsafe {
-            let key_w: Vec<u16> = OsStr::new(FAN_REG_KEY).encode_wide().chain(Some(0)).collect();
+            let key_w: Vec<u16> = OsStr::new(FAN_REG_KEY)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let mut hkey = std::mem::zeroed();
-            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), 0,
-                windows::Win32::System::Registry::KEY_READ, &mut hkey).is_err() {
+            if RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(key_w.as_ptr()),
+                0,
+                windows::Win32::System::Registry::KEY_READ,
+                &mut hkey,
+            )
+            .is_err()
+            {
                 return Ok((FanMode::Auto, 50));
             }
 
             let mut mode_val: u32 = 0;
             let mut size = 4u32;
             let mut ty = REG_VALUE_TYPE::default();
-            let mode_w: Vec<u16> = OsStr::new(FAN_REG_MODE).encode_wide().chain(Some(0)).collect();
-            let _ = RegQueryValueExW(hkey, PCWSTR(mode_w.as_ptr()), None, Some(&mut ty),
-                Some((&mut mode_val as *mut u32).cast()), Some(&mut size));
+            let mode_w: Vec<u16> = OsStr::new(FAN_REG_MODE)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let _ = RegQueryValueExW(
+                hkey,
+                PCWSTR(mode_w.as_ptr()),
+                None,
+                Some(&mut ty),
+                Some((&mut mode_val as *mut u32).cast()),
+                Some(&mut size),
+            );
 
             let mut speed_val: u32 = 50;
-            let speed_w: Vec<u16> = OsStr::new(FAN_REG_SPEED).encode_wide().chain(Some(0)).collect();
-            let _ = RegQueryValueExW(hkey, PCWSTR(speed_w.as_ptr()), None, Some(&mut ty),
-                Some((&mut speed_val as *mut u32).cast()), Some(&mut size));
+            let speed_w: Vec<u16> = OsStr::new(FAN_REG_SPEED)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let _ = RegQueryValueExW(
+                hkey,
+                PCWSTR(speed_w.as_ptr()),
+                None,
+                Some(&mut ty),
+                Some((&mut speed_val as *mut u32).cast()),
+                Some(&mut size),
+            );
 
             let _ = RegCloseKey(hkey).ok();
-            let mode = match mode_val { 1 => FanMode::Fixed, 2 => FanMode::Off, _ => FanMode::Auto };
+            let mode = match mode_val {
+                1 => FanMode::Fixed,
+                2 => FanMode::Off,
+                _ => FanMode::Auto,
+            };
             Ok((mode, speed_val.clamp(20, 100) as u8))
         }
     }
     #[cfg(not(windows))]
-    { Ok((FanMode::Auto, 50)) }
+    {
+        Ok((FanMode::Auto, 50))
+    }
 }
 
 // ── IGCL fan control ─────────────────────────────────────────────────────────
@@ -249,22 +342,21 @@ mod igcl_fan {
     use std::ffi::c_void;
 
     pub type CtlDeviceHandle = *mut c_void;
-    pub type CtlFanHandle    = *mut c_void;
-    pub type CtlResult       = u32;
+    pub type CtlFanHandle = *mut c_void;
+    pub type CtlResult = u32;
 
     #[repr(C)]
     pub struct CtlFanSpeed {
-        pub size:    u32,
+        pub size: u32,
         pub version: u8,
-        pub _pad:    [u8; 3],
-        pub units:   u32,   // 0 = PERCENT, 1 = RPM
-        pub value:   i32,
+        pub _pad: [u8; 3],
+        pub units: u32, // 0 = PERCENT, 1 = RPM
+        pub value: i32,
     }
 
     pub type FnCtlEnumFans =
         unsafe extern "C" fn(CtlDeviceHandle, *mut u32, *mut CtlFanHandle) -> CtlResult;
-    pub type FnCtlFanSetDefaultMode =
-        unsafe extern "C" fn(CtlFanHandle) -> CtlResult;
+    pub type FnCtlFanSetDefaultMode = unsafe extern "C" fn(CtlFanHandle) -> CtlResult;
     pub type FnCtlFanSetFixedSpeedMode =
         unsafe extern "C" fn(CtlFanHandle, *const CtlFanSpeed) -> CtlResult;
 }
@@ -306,7 +398,9 @@ where
 
 #[cfg(not(windows))]
 fn with_igcl_fans<F>(_f: F) -> Result<usize>
-where F: Fn(*mut std::ffi::c_void, &libloading::Library) -> Result<()> {
+where
+    F: Fn(*mut std::ffi::c_void, &libloading::Library) -> Result<()>,
+{
     Ok(0)
 }
 
@@ -315,10 +409,13 @@ fn set_fan_auto_igcl() -> Result<()> {
     {
         use igcl_fan::*;
         let n = with_igcl_fans(|fan, lib| unsafe {
-            let set_default: libloading::Symbol<FnCtlFanSetDefaultMode> =
-                lib.get(b"ctlFanSetDefaultMode\0").context("ctlFanSetDefaultMode")?;
+            let set_default: libloading::Symbol<FnCtlFanSetDefaultMode> = lib
+                .get(b"ctlFanSetDefaultMode\0")
+                .context("ctlFanSetDefaultMode")?;
             let rc = set_default(fan);
-            if rc != 0 { anyhow::bail!("ctlFanSetDefaultMode: {rc:#x}"); }
+            if rc != 0 {
+                anyhow::bail!("ctlFanSetDefaultMode: {rc:#x}");
+            }
             log::info!("[fan] IGCL ctlFanSetDefaultMode OK");
             Ok(())
         })?;
@@ -335,17 +432,20 @@ fn set_fan_fixed_igcl(speed_percent: u8) -> Result<()> {
         use igcl_fan::*;
         let clamped = speed_percent.clamp(20, 100) as i32;
         let n = with_igcl_fans(|fan, lib| unsafe {
-            let set_fixed: libloading::Symbol<FnCtlFanSetFixedSpeedMode> =
-                lib.get(b"ctlFanSetFixedSpeedMode\0").context("ctlFanSetFixedSpeedMode")?;
+            let set_fixed: libloading::Symbol<FnCtlFanSetFixedSpeedMode> = lib
+                .get(b"ctlFanSetFixedSpeedMode\0")
+                .context("ctlFanSetFixedSpeedMode")?;
             let speed = CtlFanSpeed {
-                size:    std::mem::size_of::<CtlFanSpeed>() as u32,
+                size: std::mem::size_of::<CtlFanSpeed>() as u32,
                 version: 0,
-                _pad:    [0; 3],
-                units:   0,         // PERCENT
-                value:   clamped,
+                _pad: [0; 3],
+                units: 0, // PERCENT
+                value: clamped,
             };
             let rc = set_fixed(fan, &speed);
-            if rc != 0 { anyhow::bail!("ctlFanSetFixedSpeedMode {clamped}%: {rc:#x}"); }
+            if rc != 0 {
+                anyhow::bail!("ctlFanSetFixedSpeedMode {clamped}%: {rc:#x}");
+            }
             log::info!("[fan] IGCL ctlFanSetFixedSpeedMode {clamped}% OK");
             Ok(())
         })?;

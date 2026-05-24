@@ -68,9 +68,19 @@ struct EcramBuf {
 const _: () = assert!(std::mem::size_of::<EcramBuf>() == IOCTL_BUF_SIZE);
 
 enum ShimCommand {
-    Read { addr: u64, count: usize },
-    Write { addr: u64, data: Vec<u8> },
-    ReadRegion { name: &'static str, addr: u64, count: usize },
+    Read {
+        addr: u64,
+        count: usize,
+    },
+    Write {
+        addr: u64,
+        data: Vec<u8>,
+    },
+    ReadRegion {
+        name: &'static str,
+        addr: u64,
+        count: usize,
+    },
 }
 
 fn main() {
@@ -115,12 +125,13 @@ fn main() {
 
 fn parse_args(args: &[String]) -> Result<ShimCommand, String> {
     fn parse_addr(raw: &str) -> Result<u64, String> {
-        u64::from_str_radix(raw.trim_start_matches("0x"), 16)
-            .map_err(|e| format!("bad addr: {e}"))
+        u64::from_str_radix(raw.trim_start_matches("0x"), 16).map_err(|e| format!("bad addr: {e}"))
     }
 
     fn parse_count(raw: &str) -> Result<usize, String> {
-        let count = raw.parse::<usize>().map_err(|e| format!("bad count: {e}"))?;
+        let count = raw
+            .parse::<usize>()
+            .map_err(|e| format!("bad count: {e}"))?;
         if count == 0 || count > 0x100 {
             return Err("count must be 1..256".into());
         }
@@ -245,14 +256,8 @@ fn find_iot_device_path() -> Result<String, String> {
         }
 
         let mut required = 0u32;
-        let _ = SetupDiGetDeviceInterfaceDetailW(
-            dev_info,
-            &iface,
-            None,
-            0,
-            Some(&mut required),
-            None,
-        );
+        let _ =
+            SetupDiGetDeviceInterfaceDetailW(dev_info, &iface, None, 0, Some(&mut required), None);
 
         if required == 0 || required > 4096 {
             let _ = SetupDiDestroyDeviceInfoList(dev_info);
@@ -261,8 +266,7 @@ fn find_iot_device_path() -> Result<String, String> {
 
         let mut buf = vec![0u8; required as usize];
         let detail_ptr = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
-        (*detail_ptr).cbSize =
-            std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+        (*detail_ptr).cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
 
         let detail_ok = SetupDiGetDeviceInterfaceDetailW(
             dev_info,
@@ -284,13 +288,19 @@ fn find_iot_device_path() -> Result<String, String> {
             .iter()
             .position(|&c| c == 0)
             .unwrap_or(wide_slice.len());
-        String::from_utf16(&wide_slice[..null_pos])
-            .map_err(|e| format!("UTF-16 device path: {e}"))
+        String::from_utf16(&wide_slice[..null_pos]).map_err(|e| format!("UTF-16 device path: {e}"))
     }
 }
 
-fn read_ecram_inner(device_path: &str, phys_addr: u64, byte_count: usize) -> Result<Vec<u8>, String> {
-    let path_w: Vec<u16> = OsStr::new(device_path).encode_wide().chain(Some(0)).collect();
+fn read_ecram_inner(
+    device_path: &str,
+    phys_addr: u64,
+    byte_count: usize,
+) -> Result<Vec<u8>, String> {
+    let path_w: Vec<u16> = OsStr::new(device_path)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
 
     unsafe {
         let handle = CreateFileW(
@@ -341,7 +351,10 @@ fn read_ecram_inner(device_path: &str, phys_addr: u64, byte_count: usize) -> Res
 }
 
 fn write_ecram_inner(device_path: &str, phys_addr: u64, data: &[u8]) -> Result<(), String> {
-    let path_w: Vec<u16> = OsStr::new(device_path).encode_wide().chain(Some(0)).collect();
+    let path_w: Vec<u16> = OsStr::new(device_path)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
 
     unsafe {
         let handle = CreateFileW(

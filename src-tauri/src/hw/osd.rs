@@ -12,59 +12,57 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize,
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-    GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
-    MonitorFromPoint, RoundRect, SelectObject, SetBkMode, SetGraphicsMode, SetTextAlign,
-    SetTextColor, SetWorldTransform, TextOutW, XFORM, TA_CENTER, TA_LEFT,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, GM_ADVANCED, GM_COMPATIBLE,
-    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetMonitorInfoW,
+    GetStockObject, InvalidateRect, MonitorFromPoint, RoundRect, SelectObject, SetBkMode,
+    SetGraphicsMode, SetTextAlign, SetTextColor, SetWorldTransform, TextOutW, CLIP_DEFAULT_PRECIS,
+    DEFAULT_CHARSET, GM_ADVANCED, GM_COMPATIBLE, HBRUSH, HDC, HGDIOBJ, MONITORINFO,
+    MONITOR_DEFAULTTOPRIMARY, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TA_CENTER,
+    TA_LEFT, TRANSPARENT, XFORM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, LoadCursorW,
-    PostMessageW, RegisterClassExW, SetLayeredWindowAttributes, SetTimer, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, LWA_ALPHA, LWA_COLORKEY,
-    MSG, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, WNDCLASSEXW,
-    WM_ERASEBKGND, WM_PAINT, WM_TIMER,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    PostMessageW, RegisterClassExW, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow,
+    TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, LWA_ALPHA, LWA_COLORKEY, MSG,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_ERASEBKGND, WM_PAINT, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 // ── Shared state between gesture thread and OSD message loop ─────────────────
 
-static OSD_HWND:       AtomicUsize = AtomicUsize::new(0);
-static OSD_LEVEL:      AtomicU8    = AtomicU8::new(50);
-static OSD_HIDE_VER:   AtomicU64   = AtomicU64::new(0);
-static OSD_ALPHA:      AtomicU8    = AtomicU8::new(0);
-static OSD_SPIN_FRAME: AtomicU8    = AtomicU8::new(0);
+static OSD_HWND: AtomicUsize = AtomicUsize::new(0);
+static OSD_LEVEL: AtomicU8 = AtomicU8::new(50);
+static OSD_HIDE_VER: AtomicU64 = AtomicU64::new(0);
+static OSD_ALPHA: AtomicU8 = AtomicU8::new(0);
+static OSD_SPIN_FRAME: AtomicU8 = AtomicU8::new(0);
 /// 0=hidden  1=entering(fade-in+spin)  2=showing  3=leaving(fade-out)
-static OSD_ANIM_PHASE: AtomicU8    = AtomicU8::new(0);
+static OSD_ANIM_PHASE: AtomicU8 = AtomicU8::new(0);
 /// Tracks mic mute state locally.
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
 
 /// 0 = brightness  1 = mic-muted  2 = mic-active  3 = keyboard-light
-static OSD_MODE:       AtomicU8    = AtomicU8::new(0);
+static OSD_MODE: AtomicU8 = AtomicU8::new(0);
 /// Unicode codepoint (u16 stored in u32) of the notification icon to draw.
 /// Used when OSD_MODE != 0.
-static OSD_NOTIF_ICON: AtomicU32   = AtomicU32::new(0);
+static OSD_NOTIF_ICON: AtomicU32 = AtomicU32::new(0);
 /// Current keyboard backlight level (0–10). 0xFF = unknown (not reported by this event path).
-static OSD_KBL_LEVEL:  AtomicU8    = AtomicU8::new(0xFF);
+static OSD_KBL_LEVEL: AtomicU8 = AtomicU8::new(0xFF);
 
 // ── Layout constants (96-dpi logical pixels) ─────────────────────────────────
 
-const OSD_W:    i32 = 368;
-const OSD_H:    i32 = 92;   // double height × 1.15
-const CORNER_R: i32 = 46;   // = OSD_H/2 → perfect pill
-const NOTIF_W:  i32 = 420;  // notification pill width  (2.5× fonts)
-const NOTIF_H:  i32 = 150;  // notification pill height (2.5× fonts)
-const NOTIF_R:  i32 = NOTIF_H / 2; // = 75 → perfect pill corners
-const BAR_X:    i32 = 64;
-const BAR_END:  i32 = 354;  // OSD_W - 14
-const BAR_H:    i32 = 8;    // original 6 × 1.15 × 1.20
-const BAR_Y:    i32 = 42;   // (OSD_H - BAR_H) / 2
-const ICON_X:   i32 = 18;
-const ICON_Y:   i32 = 34;   // (OSD_H - ICON_SZ) / 2
-const ICON_SZ:  i32 = 23;
+const OSD_W: i32 = 368;
+const OSD_H: i32 = 92; // double height × 1.15
+const CORNER_R: i32 = 46; // = OSD_H/2 → perfect pill
+const NOTIF_W: i32 = 420; // notification pill width  (2.5× fonts)
+const NOTIF_H: i32 = 150; // notification pill height (2.5× fonts)
+const NOTIF_R: i32 = NOTIF_H / 2; // = 75 → perfect pill corners
+const BAR_X: i32 = 64;
+const BAR_END: i32 = 354; // OSD_W - 14
+const BAR_H: i32 = 8; // original 6 × 1.15 × 1.20
+const BAR_Y: i32 = 42; // (OSD_H - BAR_H) / 2
+const ICON_X: i32 = 18;
+const ICON_Y: i32 = 34; // (OSD_H - ICON_SZ) / 2
+const ICON_SZ: i32 = 23;
 
 // ── Colours (COLORREF = 0x00BBGGRR) ──────────────────────────────────────────
 
@@ -72,26 +70,26 @@ const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(r as u32 | ((g as u32) << 8) | ((b as u32) << 16))
 }
 
-const COLORKEY:  COLORREF = rgb(255,   0, 254);   // transparent corners (hot magenta)
-const BG:        COLORREF = rgb( 31,  31,  31);   // near-black (Windows dark OSD)
-const BAR_TRACK: COLORREF = rgb( 68,  68,  68);   // unfilled track (medium gray)
-const BAR_FILL:  COLORREF = rgb(  0, 120, 212);   // filled — Windows accent #0078D4
-const ICON_CLR:  COLORREF = rgb(255, 255, 255);   // icon colour (white)
+const COLORKEY: COLORREF = rgb(255, 0, 254); // transparent corners (hot magenta)
+const BG: COLORREF = rgb(31, 31, 31); // near-black (Windows dark OSD)
+const BAR_TRACK: COLORREF = rgb(68, 68, 68); // unfilled track (medium gray)
+const BAR_FILL: COLORREF = rgb(0, 120, 212); // filled — Windows accent #0078D4
+const ICON_CLR: COLORREF = rgb(255, 255, 255); // icon colour (white)
 
-const TIMER_HIDE:          usize = 1;
-const TIMER_ANIM:          usize = 2;
-const HIDE_MS:             u32   = 1500;
-const ANIM_MS:             u32   = 16;       // ~60 fps
-const SPIN_TOTAL_FRAMES:   u8    = 60;       // 960 ms full rotation
-const FADE_IN_ALPHA_STEP:  u8    = 28;       // 0 → 255 in ~9 frames ≈ 150 ms
-const FADE_OUT_ALPHA_STEP: u8    = 26;       // 255 → 0 in ~10 frames ≈ 160 ms
+const TIMER_HIDE: usize = 1;
+const TIMER_ANIM: usize = 2;
+const HIDE_MS: u32 = 1500;
+const ANIM_MS: u32 = 16; // ~60 fps
+const SPIN_TOTAL_FRAMES: u8 = 60; // 960 ms full rotation
+const FADE_IN_ALPHA_STEP: u8 = 28; // 0 → 255 in ~9 frames ≈ 150 ms
+const FADE_OUT_ALPHA_STEP: u8 = 26; // 255 → 0 in ~10 frames ≈ 160 ms
 /// Custom message posted from gesture thread to the OSD message loop.
-const WM_OSD_SHOW:  u32 = 0x0401; // WM_USER + 1  — brightness / default
+const WM_OSD_SHOW: u32 = 0x0401; // WM_USER + 1  — brightness / default
 const WM_OSD_NOTIF: u32 = 0x0402; // WM_USER + 2  — notification OSD (mic/keyboard)
 
 // Notification-OSD colours
-const TEXT_CLR:  COLORREF = rgb(235, 235, 235);  // near-white label text
-const TEXT2_CLR: COLORREF = rgb(160, 160, 160);  // secondary lighter text
+const TEXT_CLR: COLORREF = rgb(235, 235, 235); // near-white label text
+const TEXT2_CLR: COLORREF = rgb(160, 160, 160); // secondary lighter text
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -109,9 +107,13 @@ pub fn show_brightness_osd(level: u8) {
     OSD_LEVEL.store(level, Ordering::Relaxed);
     OSD_HIDE_VER.fetch_add(1, Ordering::Relaxed);
     let raw = OSD_HWND.load(Ordering::Relaxed);
-    if raw == 0 { return; }
+    if raw == 0 {
+        return;
+    }
     let hwnd = HWND(raw as *mut core::ffi::c_void);
-    unsafe { let _ = PostMessageW(hwnd, WM_OSD_SHOW, WPARAM(0), LPARAM(0)); }
+    unsafe {
+        let _ = PostMessageW(hwnd, WM_OSD_SHOW, WPARAM(0), LPARAM(0));
+    }
 }
 
 /// Show mic mute OSD with known mute state (e.g. from WMI event).
@@ -121,7 +123,11 @@ pub fn show_mic_mute_osd(muted: bool) {
     MIC_MUTED.store(muted, Ordering::Relaxed);
     log::info!("[osd] Mic mute OSD: muted={}", muted);
     // Icon: U+E8D4 = MicOff (Segoe MDL2), U+E720 = Microphone (active)
-    let (mode, icon) = if muted { (1u8, 0xE8D4u16) } else { (2u8, 0xE720u16) };
+    let (mode, icon) = if muted {
+        (1u8, 0xE8D4u16)
+    } else {
+        (2u8, 0xE720u16)
+    };
     show_notification_osd(mode, icon);
 }
 
@@ -131,7 +137,11 @@ pub fn show_mic_mute_osd(muted: bool) {
 pub fn show_mic_mute_osd_toggle() {
     let muted = !MIC_MUTED.fetch_xor(true, Ordering::Relaxed);
     log::info!("[osd] Mic mute OSD (toggle): muted={}", muted);
-    let (mode, icon) = if muted { (1u8, 0xE8D4u16) } else { (2u8, 0xE720u16) };
+    let (mode, icon) = if muted {
+        (1u8, 0xE8D4u16)
+    } else {
+        (2u8, 0xE720u16)
+    };
     show_notification_osd(mode, icon);
 }
 
@@ -151,9 +161,13 @@ fn show_notification_osd(mode: u8, icon_cp: u16) {
     OSD_NOTIF_ICON.store(icon_cp as u32, Ordering::Relaxed);
     OSD_HIDE_VER.fetch_add(1, Ordering::Relaxed);
     let raw = OSD_HWND.load(Ordering::Relaxed);
-    if raw == 0 { return; }
+    if raw == 0 {
+        return;
+    }
     let hwnd = HWND(raw as *mut core::ffi::c_void);
-    unsafe { let _ = PostMessageW(hwnd, WM_OSD_NOTIF, WPARAM(0), LPARAM(0)); }
+    unsafe {
+        let _ = PostMessageW(hwnd, WM_OSD_NOTIF, WPARAM(0), LPARAM(0));
+    }
 }
 
 // ── WASAPI mic mute query — replaced by local toggle state (see MIC_MUTED) ─────
@@ -170,16 +184,16 @@ unsafe fn run_message_loop() {
     let class_name = w!("MiCtrl_BrightnessOSD_v1");
     let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
     let wc = WNDCLASSEXW {
-        cbSize:        std::mem::size_of::<WNDCLASSEXW>() as u32,
-        style:         CS_HREDRAW | CS_VREDRAW,
-        lpfnWndProc:   Some(wnd_proc),
-        hInstance:     hinstance,
-        hCursor:       cursor,
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(wnd_proc),
+        hInstance: hinstance,
+        hCursor: cursor,
         hbrBackground: HBRUSH(GetStockObject(NULL_BRUSH).0),
         lpszClassName: class_name,
         ..Default::default()
     };
-    RegisterClassExW(&wc);   // ignore duplicate-class error on re-launch
+    RegisterClassExW(&wc); // ignore duplicate-class error on re-launch
 
     // Position bottom-centre of primary monitor's work area
     let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
@@ -189,7 +203,7 @@ unsafe fn run_message_loop() {
     };
     let _ = GetMonitorInfoW(hmon, &mut mi);
     let work = mi.rcWork;
-    let x = work.left + (work.right  - work.left - OSD_W) / 2;
+    let x = work.left + (work.right - work.left - OSD_W) / 2;
     let y = work.bottom - OSD_H - 48;
 
     // Create window (hidden initially)
@@ -198,8 +212,14 @@ unsafe fn run_message_loop() {
         class_name,
         w!(""),
         WS_POPUP,
-        x, y, OSD_W, OSD_H,
-        None, None, hinstance, None,
+        x,
+        y,
+        OSD_W,
+        OSD_H,
+        None,
+        None,
+        hinstance,
+        None,
     ) {
         Ok(h) => h,
         Err(_) => return,
@@ -219,14 +239,12 @@ unsafe fn run_message_loop() {
 
 // ── Window procedure ──────────────────────────────────────────────────────────
 
-unsafe extern "system" fn wnd_proc(
-    hwnd: HWND,
-    msg:  u32,
-    wp:   WPARAM,
-    lp:   LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_PAINT => { paint(hwnd); LRESULT(0) }
+        WM_PAINT => {
+            paint(hwnd);
+            LRESULT(0)
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_TIMER if wp.0 == TIMER_HIDE => {
             let _ = KillTimer(hwnd, TIMER_HIDE);
@@ -240,7 +258,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ if msg == WM_OSD_SHOW => {
-            OSD_MODE.store(0, Ordering::Relaxed);  // ensure brightness mode
+            OSD_MODE.store(0, Ordering::Relaxed); // ensure brightness mode
             reposition_osd(hwnd, OSD_W, OSD_H);
             start_show_animation(hwnd);
             LRESULT(0)
@@ -261,7 +279,10 @@ unsafe extern "system" fn wnd_proc(
 /// Safe to call even when the window is already at the requested size.
 unsafe fn reposition_osd(hwnd: HWND, w: i32, h: i32) {
     let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
     let _ = GetMonitorInfoW(hmon, &mut mi);
     let work = mi.rcWork;
     let x = work.left + (work.right - work.left - w) / 2;
@@ -301,7 +322,8 @@ unsafe fn handle_anim_frame(hwnd: HWND) {
     match OSD_ANIM_PHASE.load(Ordering::Relaxed) {
         1 => {
             // Fade in + spin simultaneously.
-            let new_alpha = OSD_ALPHA.load(Ordering::Relaxed)
+            let new_alpha = OSD_ALPHA
+                .load(Ordering::Relaxed)
                 .saturating_add(FADE_IN_ALPHA_STEP)
                 .min(255);
             OSD_ALPHA.store(new_alpha, Ordering::Relaxed);
@@ -328,11 +350,14 @@ unsafe fn handle_anim_frame(hwnd: HWND) {
             } else {
                 let new_alpha = alpha - FADE_OUT_ALPHA_STEP;
                 OSD_ALPHA.store(new_alpha, Ordering::Relaxed);
-                let _ = SetLayeredWindowAttributes(hwnd, COLORKEY, new_alpha, LWA_COLORKEY | LWA_ALPHA);
+                let _ =
+                    SetLayeredWindowAttributes(hwnd, COLORKEY, new_alpha, LWA_COLORKEY | LWA_ALPHA);
                 let _ = InvalidateRect(hwnd, None, true);
             }
         }
-        _ => { let _ = KillTimer(hwnd, TIMER_ANIM); }
+        _ => {
+            let _ = KillTimer(hwnd, TIMER_ANIM);
+        }
     }
 }
 
@@ -350,32 +375,58 @@ unsafe fn paint(hwnd: HWND) {
 
 /// Create a Segoe MDL2 Assets icon font.  Positive `height` = cell height.
 unsafe fn new_mdl2_font(height: i32) -> HGDIOBJ {
-    HGDIOBJ(CreateFontW(
-        height, 0, 0, 0, 400, 0, 0, 0,
-        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
-        CLIP_DEFAULT_PRECIS.0 as u32, 4, 0,
-        w!("Segoe MDL2 Assets"),
-    ).0)
+    HGDIOBJ(
+        CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            4,
+            0,
+            w!("Segoe MDL2 Assets"),
+        )
+        .0,
+    )
 }
 
 /// Create a Segoe UI text font.  Negative `height` = cap height; `weight` 400/600/700.
 unsafe fn new_segoe_font(height: i32, weight: i32) -> HGDIOBJ {
-    HGDIOBJ(CreateFontW(
-        height, 0, 0, 0, weight, 0, 0, 0,
-        DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
-        CLIP_DEFAULT_PRECIS.0 as u32, 5, 0,
-        w!("Segoe UI"),
-    ).0)
+    HGDIOBJ(
+        CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            5,
+            0,
+            w!("Segoe UI"),
+        )
+        .0,
+    )
 }
 
 /// Map the raw firmware byte to `(bar_fill_pct, display_label)`.
 /// Firmware cycles: 0x00 (Off) → 0x05 (33%) → 0x0A (66%) → 0x80 (100%).
 fn keyboard_level_info(raw: u8) -> (i32, &'static str) {
     match raw {
-        0      => (0,   "Off"),
-        1..=7  => (33,  "33%"),   // 0x05
-        8..=63 => (66,  "66%"),   // 0x0A
-        _      => (100, "100%"),  // 0x80
+        0 => (0, "Off"),
+        1..=7 => (33, "33%"),  // 0x05
+        8..=63 => (66, "66%"), // 0x0A
+        _ => (100, "100%"),    // 0x80
     }
 }
 
@@ -392,7 +443,7 @@ fn keyboard_level_info(raw: u8) -> (i32, &'static str) {
 ///                             [████████░░░░░░]  50% (bar + percentage)
 ///                             Medium               (small, muted-gray)
 unsafe fn paint_notification(hwnd: HWND) {
-    let mode    = OSD_MODE.load(Ordering::Relaxed);
+    let mode = OSD_MODE.load(Ordering::Relaxed);
     let icon_cp = OSD_NOTIF_ICON.load(Ordering::Relaxed) as u16;
 
     let mut ps = PAINTSTRUCT::default();
@@ -403,27 +454,40 @@ unsafe fn paint_notification(hwnd: HWND) {
 
     // 1. Colorkey fill for transparent corners.
     let br_key = CreateSolidBrush(COLORKEY);
-    let _ = FillRect(hdc, &RECT { left: 0, top: 0, right: NOTIF_W, bottom: NOTIF_H }, br_key);
+    let _ = FillRect(
+        hdc,
+        &RECT {
+            left: 0,
+            top: 0,
+            right: NOTIF_W,
+            bottom: NOTIF_H,
+        },
+        br_key,
+    );
     let _ = DeleteObject(HGDIOBJ(br_key.0));
 
     // 2. Dark pill background (NOTIF_R = NOTIF_H/2 → perfect half-circle ends).
-    let br_bg  = CreateSolidBrush(BG);
+    let br_bg = CreateSolidBrush(BG);
     let old_br = SelectObject(hdc, HGDIOBJ(br_bg.0));
     let _ = RoundRect(hdc, 0, 0, NOTIF_W, NOTIF_H, NOTIF_R, NOTIF_R);
     SelectObject(hdc, old_br);
     let _ = DeleteObject(HGDIOBJ(br_bg.0));
 
     SetBkMode(hdc, TRANSPARENT);
-    let _ = SetTextAlign(hdc, TA_CENTER);  // centre all text horizontally at CX
-    const CX: i32 = NOTIF_W / 2;          // = 210
+    let _ = SetTextAlign(hdc, TA_CENTER); // centre all text horizontally at CX
+    const CX: i32 = NOTIF_W / 2; // = 210
 
     if mode == 1 || mode == 2 {
         // ── Mic mute / active ─────────────────────────────────────────────────
         // Side-by-side, space-evenly: 420 / 3 = 140 → icon at X=140, text at X=280.
         // Both vertically centred — icon centre ≈ Y 74, text block centre ≈ Y 75.
         const ICN_SZ: i32 = 67;
-        const CX_R:   i32 = 280;   // centre of right text zone
-        let accent = if mode == 1 { rgb(210, 80, 80) } else { rgb(60, 200, 110) };
+        const CX_R: i32 = 280; // centre of right text zone
+        let accent = if mode == 1 {
+            rgb(210, 80, 80)
+        } else {
+            rgb(60, 200, 110)
+        };
 
         // Icon — coloured, left third, vertically centred.
         SetTextColor(hdc, accent);
@@ -446,7 +510,9 @@ unsafe fn paint_notification(hwnd: HWND) {
         SetTextColor(hdc, accent);
         let hf3 = new_segoe_font(-37, 700);
         let old_f3 = SelectObject(hdc, hf3);
-        let state: Vec<u16> = (if mode == 1 { "Muted" } else { "Active" }).encode_utf16().collect();
+        let state: Vec<u16> = (if mode == 1 { "Muted" } else { "Active" })
+            .encode_utf16()
+            .collect();
         let _ = TextOutW(hdc, CX_R, 70, &state);
         SelectObject(hdc, old_f3);
         let _ = DeleteObject(hf3);
@@ -475,15 +541,15 @@ unsafe fn paint_notification(hwnd: HWND) {
         let _ = DeleteObject(hf2);
 
         // Bar (centred, 256 px wide, 10 px tall).
-        const BAR_W:  i32 = 256;
-        const BAR_L:  i32 = CX - BAR_W / 2;   // = 82
-        const BAR_R:  i32 = CX + BAR_W / 2;   // = 338
-        const BAR_T:  i32 = 94;
+        const BAR_W: i32 = 256;
+        const BAR_L: i32 = CX - BAR_W / 2; // = 82
+        const BAR_R: i32 = CX + BAR_W / 2; // = 338
+        const BAR_T: i32 = 94;
         const BAR_HT: i32 = 10;
 
         // Bar track (unfilled, always drawn).
         let br_track = CreateSolidBrush(BAR_TRACK);
-        let old_br2  = SelectObject(hdc, HGDIOBJ(br_track.0));
+        let old_br2 = SelectObject(hdc, HGDIOBJ(br_track.0));
         let _ = RoundRect(hdc, BAR_L, BAR_T, BAR_R, BAR_T + BAR_HT, BAR_HT, BAR_HT);
         SelectObject(hdc, old_br2);
         let _ = DeleteObject(HGDIOBJ(br_track.0));
@@ -492,13 +558,21 @@ unsafe fn paint_notification(hwnd: HWND) {
         let fill_w = pct * BAR_W / 100;
         if fill_w >= BAR_HT {
             let fill_clr = match pct {
-                1..=33  => rgb( 80, 140, 220),   // 33%  — dim blue
-                34..=66 => BAR_FILL,             // 66%  — accent blue
-                _       => rgb(255, 200,  80),   // 100% — amber/gold
+                1..=33 => rgb(80, 140, 220), // 33%  — dim blue
+                34..=66 => BAR_FILL,         // 66%  — accent blue
+                _ => rgb(255, 200, 80),      // 100% — amber/gold
             };
             let br_fill = CreateSolidBrush(fill_clr);
             let old_br3 = SelectObject(hdc, HGDIOBJ(br_fill.0));
-            let _ = RoundRect(hdc, BAR_L, BAR_T, BAR_L + fill_w, BAR_T + BAR_HT, BAR_HT, BAR_HT);
+            let _ = RoundRect(
+                hdc,
+                BAR_L,
+                BAR_T,
+                BAR_L + fill_w,
+                BAR_T + BAR_HT,
+                BAR_HT,
+                BAR_HT,
+            );
             SelectObject(hdc, old_br3);
             let _ = DeleteObject(HGDIOBJ(br_fill.0));
         }
@@ -513,16 +587,16 @@ unsafe fn paint_notification(hwnd: HWND) {
         let _ = DeleteObject(hf3);
     }
 
-    let _ = SetTextAlign(hdc, TA_LEFT);   // restore default alignment
+    let _ = SetTextAlign(hdc, TA_LEFT); // restore default alignment
     SelectObject(hdc, orig_pen);
     let _ = EndPaint(hwnd, &ps);
 }
 
 unsafe fn paint_brightness(hwnd: HWND) {
-    let level      = OSD_LEVEL.load(Ordering::Relaxed) as i32;
+    let level = OSD_LEVEL.load(Ordering::Relaxed) as i32;
     let spin_frame = OSD_SPIN_FRAME.load(Ordering::Relaxed);
     // Map frame 0-30 to degrees 0-360; frame 0 = no transform (icon at rest).
-    let spin_deg   = (spin_frame as i32 * 360) / SPIN_TOTAL_FRAMES as i32;
+    let spin_deg = (spin_frame as i32 * 360) / SPIN_TOTAL_FRAMES as i32;
 
     let mut ps = PAINTSTRUCT::default();
     let hdc: HDC = BeginPaint(hwnd, &mut ps);
@@ -532,11 +606,20 @@ unsafe fn paint_brightness(hwnd: HWND) {
 
     // 1. Colorkey fill — rounded pill corners appear transparent.
     let br_key = CreateSolidBrush(COLORKEY);
-    let _ = FillRect(hdc, &RECT { left: 0, top: 0, right: OSD_W, bottom: OSD_H }, br_key);
+    let _ = FillRect(
+        hdc,
+        &RECT {
+            left: 0,
+            top: 0,
+            right: OSD_W,
+            bottom: OSD_H,
+        },
+        br_key,
+    );
     let _ = DeleteObject(HGDIOBJ(br_key.0));
 
     // 2. Dark pill background.
-    let br_bg  = CreateSolidBrush(BG);
+    let br_bg = CreateSolidBrush(BG);
     let old_br = SelectObject(hdc, HGDIOBJ(br_bg.0));
     let _ = RoundRect(hdc, 0, 0, OSD_W, OSD_H, CORNER_R, CORNER_R);
     SelectObject(hdc, old_br);
@@ -546,7 +629,14 @@ unsafe fn paint_brightness(hwnd: HWND) {
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, ICON_CLR);
     let hfont_icon = CreateFontW(
-        ICON_SZ, 0, 0, 0, 400, 0, 0, 0,
+        ICON_SZ,
+        0,
+        0,
+        0,
+        400,
+        0,
+        0,
+        0,
         DEFAULT_CHARSET.0 as u32,
         OUT_DEFAULT_PRECIS.0 as u32,
         CLIP_DEFAULT_PRECIS.0 as u32,
@@ -561,9 +651,9 @@ unsafe fn paint_brightness(hwnd: HWND) {
     // Always enter GM_ADVANCED so we can explicitly reset after the icon draw.
     let _ = SetGraphicsMode(hdc, GM_ADVANCED);
     if spinning {
-        let t     = spin_frame as f32 / SPIN_TOTAL_FRAMES as f32; // 0 → 1
-        let scale = 0.3_f32 + 0.7_f32 * t;                        // zoom 0.3x → 1.0x
-        let rad   = (spin_deg as f32).to_radians();
+        let t = spin_frame as f32 / SPIN_TOTAL_FRAMES as f32; // 0 → 1
+        let scale = 0.3_f32 + 0.7_f32 * t; // zoom 0.3x → 1.0x
+        let rad = (spin_deg as f32).to_radians();
         let cos_a = rad.cos();
         let sin_a = rad.sin();
         // Centre of icon in logical coords.
@@ -572,10 +662,10 @@ unsafe fn paint_brightness(hwnd: HWND) {
         // Combined scale+rotation XFORM around (cx, cy).
         // x' = x*eM11 + y*eM21 + eDx
         let xform = XFORM {
-            eM11:  scale * cos_a,
-            eM12:  scale * sin_a,
+            eM11: scale * cos_a,
+            eM12: scale * sin_a,
             eM21: -scale * sin_a,
-            eM22:  scale * cos_a,
+            eM22: scale * cos_a,
             eDx: cx * (1.0 - scale * cos_a) + cy * scale * sin_a,
             eDy: cy * (1.0 - scale * cos_a) - cx * scale * sin_a,
         };
@@ -586,7 +676,14 @@ unsafe fn paint_brightness(hwnd: HWND) {
     let _ = TextOutW(hdc, ICON_X, ICON_Y, &icon);
 
     // Explicitly reset world transform to identity before drawing the bar.
-    let identity = XFORM { eM11: 1.0, eM12: 0.0, eM21: 0.0, eM22: 1.0, eDx: 0.0, eDy: 0.0 };
+    let identity = XFORM {
+        eM11: 1.0,
+        eM12: 0.0,
+        eM21: 0.0,
+        eM22: 1.0,
+        eDx: 0.0,
+        eDy: 0.0,
+    };
     let _ = SetWorldTransform(hdc, &identity);
     let _ = SetGraphicsMode(hdc, GM_COMPATIBLE);
 

@@ -28,11 +28,12 @@ pub struct BatteryInfo {
 
 #[cfg(windows)]
 pub fn get_battery_info() -> Result<BatteryInfo> {
-    use wmi::{COMLibrary, WMIConnection};
     use std::collections::HashMap;
+    use wmi::{COMLibrary, WMIConnection};
 
     let com = COMLibrary::new().context("COM init")?;
-    let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com.into()).context("WMI connect root\\wmi")?;
+    let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com.into())
+        .context("WMI connect root\\wmi")?;
 
     // BatteryStatus
     let statuses: Vec<HashMap<String, wmi::Variant>> = wmi
@@ -101,7 +102,9 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
     };
 
     let level = if full_cap_mah > 0 {
-        ((remaining_capacity as f64 / full_cap_mah as f64) * 100.0).round().clamp(0.0, 100.0) as u8
+        ((remaining_capacity as f64 / full_cap_mah as f64) * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u8
     } else {
         0
     };
@@ -192,11 +195,28 @@ mod tests {
     #[test]
     fn battery_info_fields_valid() {
         let info = get_battery_info().expect("get_battery_info should succeed");
-        assert!(info.level <= 100, "Battery level out of range: {}", info.level);
-        assert!(info.health_percent <= 110.0, "Health out of range: {}", info.health_percent);
-        assert!(!info.manufacturer.is_empty(), "Manufacturer should not be empty");
-        assert!(!info.device_name.is_empty(), "Device name should not be empty");
-        assert!(info.designed_capacity_mwh > 0, "Designed capacity should be > 0");
+        assert!(
+            info.level <= 100,
+            "Battery level out of range: {}",
+            info.level
+        );
+        assert!(
+            info.health_percent <= 110.0,
+            "Health out of range: {}",
+            info.health_percent
+        );
+        assert!(
+            !info.manufacturer.is_empty(),
+            "Manufacturer should not be empty"
+        );
+        assert!(
+            !info.device_name.is_empty(),
+            "Device name should not be empty"
+        );
+        assert!(
+            info.designed_capacity_mwh > 0,
+            "Designed capacity should be > 0"
+        );
         assert!(info.full_capacity_mwh > 0, "Full capacity should be > 0");
     }
 
@@ -204,7 +224,10 @@ mod tests {
     fn battery_capacity_ratio_sane() {
         let info = get_battery_info().expect("get_battery_info should succeed");
         let ratio = info.full_capacity_mwh as f64 / info.designed_capacity_mwh as f64;
-        assert!(ratio <= 1.1, "Full capacity exceeds 110% of designed: {ratio}");
+        assert!(
+            ratio <= 1.1,
+            "Full capacity exceeds 110% of designed: {ratio}"
+        );
         assert!(ratio > 0.0, "Full capacity must be positive");
     }
 

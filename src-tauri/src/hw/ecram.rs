@@ -23,7 +23,6 @@
 ///
 /// AC adapter wattage (ADPW) is at physical address 0xFE0B0381 (ERAM + 0x81).
 /// Reading requires satisfying the IoTDriver security check (process name = IoTService.exe).
-
 use anyhow::{Context, Result};
 
 /// Physical base address of the ACPI ERAM region (SystemMemory at 0xFE0B0300, size 0x100).
@@ -192,8 +191,7 @@ pub fn debug_ecram_hex() -> Result<String> {
             }
             out.push_str(&format!(
                 "ADPW (AC wattage) @ +0x81 = 0x{:02X} = {} W\n",
-                eram[ERAM_ADPW_OFFSET],
-                eram[ERAM_ADPW_OFFSET]
+                eram[ERAM_ADPW_OFFSET], eram[ERAM_ADPW_OFFSET]
             ));
         }
         Err(e) => out.push_str(&format!("Error reading ERAM: {e}\n")),
@@ -218,15 +216,10 @@ pub fn debug_ecram_hex() -> Result<String> {
 
 #[cfg(windows)]
 fn find_iot_device_path() -> Result<String> {
-    use windows::{
-        Win32::{
-            Devices::DeviceAndDriverInstallation::{
-                SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
-                SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-                DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
-                SP_DEVICE_INTERFACE_DETAIL_DATA_W,
-            },
-        },
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+        SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+        SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
     };
 
     unsafe {
@@ -251,14 +244,8 @@ fn find_iot_device_path() -> Result<String> {
 
         // First call: get required buffer size
         let mut required = 0u32;
-        let _ = SetupDiGetDeviceInterfaceDetailW(
-            dev_info,
-            &iface,
-            None,
-            0,
-            Some(&mut required),
-            None,
-        );
+        let _ =
+            SetupDiGetDeviceInterfaceDetailW(dev_info, &iface, None, 0, Some(&mut required), None);
 
         if required == 0 || required > 4096 {
             let _ = SetupDiDestroyDeviceInfoList(dev_info);
@@ -268,8 +255,7 @@ fn find_iot_device_path() -> Result<String> {
         // Second call: get the device path
         let mut buf = vec![0u8; required as usize];
         let detail_ptr = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
-        (*detail_ptr).cbSize =
-            std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+        (*detail_ptr).cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
 
         let detail_result = SetupDiGetDeviceInterfaceDetailW(
             dev_info,
@@ -292,8 +278,8 @@ fn find_iot_device_path() -> Result<String> {
             .iter()
             .position(|&c| c == 0)
             .unwrap_or(wide_slice.len());
-        let path = String::from_utf16(&wide_slice[..null_pos])
-            .context("Invalid UTF-16 device path")?;
+        let path =
+            String::from_utf16(&wide_slice[..null_pos]).context("Invalid UTF-16 device path")?;
 
         Ok(path)
     }
@@ -401,9 +387,11 @@ pub fn find_iotdriver_store_dir() -> Result<std::path::PathBuf> {
         .context("IoTDriver ImagePath value missing")?;
 
     // Normalise `\SystemRoot\` → actual Windows directory
-    let windows_dir =
-        std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-    let normalised = if image_path.to_ascii_lowercase().starts_with("\\systemroot\\") {
+    let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let normalised = if image_path
+        .to_ascii_lowercase()
+        .starts_with("\\systemroot\\")
+    {
         format!("{}{}", windows_dir, &image_path["\\SystemRoot".len()..])
     } else if image_path.starts_with("\\??\\") {
         image_path[4..].to_string()
@@ -508,11 +496,7 @@ pub fn write_ecram_via_shim(phys_addr: u64, data: &[u8]) -> Result<()> {
         );
 
         let hex_data: String = data.iter().map(|b| format!("{b:02x}")).collect();
-        let _ = run_ecram_shim([
-            "write".to_string(),
-            format!("{phys_addr:#010x}"),
-            hex_data,
-        ])?;
+        let _ = run_ecram_shim(["write".to_string(), format!("{phys_addr:#010x}"), hex_data])?;
         Ok(())
     }
     #[cfg(not(windows))]
@@ -561,9 +545,9 @@ fn run_ecram_shim(args: impl IntoIterator<Item = String>) -> Result<serde_json::
     // Try IoTService.exe alias first, then fall back to ecram_shim.exe.
     let mut errors: Vec<String> = Vec::new();
     for helper_name in ["IoTService.exe", "ecram_shim.exe"] {
-        let shim_path = match deploy_ecram_shim(helper_name).with_context(|| {
-            format!("deploy {helper_name} to IoTDriver DriverStore")
-        }) {
+        let shim_path = match deploy_ecram_shim(helper_name)
+            .with_context(|| format!("deploy {helper_name} to IoTDriver DriverStore"))
+        {
             Ok(p) => p,
             Err(e) => {
                 errors.push(format!("{helper_name}: {e:#}"));
@@ -629,8 +613,8 @@ fn decode_shim_hex_payload(v: &serde_json::Value) -> Result<Vec<u8>> {
 #[cfg(windows)]
 fn enable_restore_privilege() -> Result<()> {
     use windows::Win32::Security::{
-        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
-        SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -641,12 +625,8 @@ fn enable_restore_privilege() -> Result<()> {
 
         let priv_name: Vec<u16> = "SeRestorePrivilege\0".encode_utf16().collect();
         let mut luid = windows::Win32::Foundation::LUID::default();
-        LookupPrivilegeValueW(
-            None,
-            windows::core::PCWSTR(priv_name.as_ptr()),
-            &mut luid,
-        )
-        .context("LookupPrivilegeValueW(SeRestorePrivilege)")?;
+        LookupPrivilegeValueW(None, windows::core::PCWSTR(priv_name.as_ptr()), &mut luid)
+            .context("LookupPrivilegeValueW(SeRestorePrivilege)")?;
 
         let tp = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
@@ -681,8 +661,7 @@ fn copy_with_backup_semantics(src: &std::path::Path, dst: &std::path::Path) -> R
         },
     };
 
-    let src_data = std::fs::read(src)
-        .with_context(|| format!("Read shim source {src:?}"))?;
+    let src_data = std::fs::read(src).with_context(|| format!("Read shim source {src:?}"))?;
 
     let dst_wide: Vec<u16> = OsStr::new(dst).encode_wide().chain(Some(0)).collect();
 

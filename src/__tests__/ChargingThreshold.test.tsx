@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import ChargingThreshold from "../components/ChargingThreshold";
 
 describe("ChargingThreshold", () => {
@@ -24,10 +25,13 @@ describe("ChargingThreshold", () => {
     expect(btn70).toHaveClass("active");
   });
 
-  it("calls onThresholdChange when a threshold is selected", () => {
+  it("calls onThresholdChange when a threshold is selected", async () => {
+    const user = userEvent.setup();
     render(<ChargingThreshold threshold={80} onThresholdChange={mockOnChange} />);
-    fireEvent.click(screen.getByText("60%").closest("button")!);
-    expect(mockOnChange).toHaveBeenCalledWith(60);
+    await user.click(screen.getByText("60%").closest("button")!);
+    await waitFor(() => {
+      expect(mockOnChange).toHaveBeenCalledWith(60);
+    });
   });
 
   it("shows the recommended badge on 80%", () => {

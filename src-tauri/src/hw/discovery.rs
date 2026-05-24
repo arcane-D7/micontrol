@@ -6,26 +6,27 @@
 /// and re-loaded on subsequent starts so the scan happens at most once a week.
 ///
 /// Other hw modules call `global_profile()` to read the discovered paths.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{OnceLock, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
 use {
+    std::ffi::OsStr,
+    std::os::windows::ffi::OsStrExt,
     windows::{
         core::GUID,
         Win32::{
             Devices::{
                 DeviceAndDriverInstallation::{
                     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
-                    SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-                    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
-                    SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+                    SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE,
+                    DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
                 },
                 HumanInterfaceDevice::{
                     HidD_FreePreparsedData, HidD_GetPreparsedData, HidP_GetCaps, HIDP_CAPS,
@@ -39,25 +40,34 @@ use {
             },
         },
     },
-    std::ffi::OsStr,
-    std::os::windows::ffi::OsStrExt,
 };
 
 // ── Global singleton ─────────────────────────────────────────────────────────
 
-static PROFILE: OnceLock<HardwareProfile> = OnceLock::new();
+static PROFILE: OnceLock<RwLock<HardwareProfile>> = OnceLock::new();
 
 /// Access the global hardware profile.
 /// Returns `None` only if `init()` has not been called yet.
-pub fn global_profile() -> Option<&'static HardwareProfile> {
-    PROFILE.get()
+pub fn global_profile() -> Option<HardwareProfile> {
+    let lock = PROFILE.get()?;
+    Some(lock.read().ok()?.clone())
+}
+
+/// Update the in-process global profile snapshot.
+fn set_global_profile(profile: HardwareProfile) {
+    if let Some(lock) = PROFILE.get() {
+        if let Ok(mut guard) = lock.write() {
+            *guard = profile;
+        }
+    } else {
+        let _ = PROFILE.set(RwLock::new(profile));
+    }
 }
 
 /// Call once from `lib.rs` setup().  Loads cached profile or runs discovery.
 pub fn init(app_data_dir: Option<PathBuf>) {
     let profile = load_or_discover(app_data_dir.as_deref());
-    // OnceLock silently ignores a second set — that's fine.
-    let _ = PROFILE.set(profile);
+    set_global_profile(profile);
 }
 
 // ── Data structures ───────────────────────────────────────────────────────────
@@ -124,11 +134,12 @@ pub struct HardwareProfile {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Force a fresh discovery, update the cache file, and return the result.
-/// This does NOT update the in-process `PROFILE` (which is immutable after init).
-/// Callers should restart the app or call `init()` before using the new paths.
+/// Also updates the in-process `PROFILE` so new paths/capabilities take effect
+/// immediately without requiring app restart.
 pub fn rediscover(app_data_dir: Option<PathBuf>) -> HardwareProfile {
     let profile = run_discovery();
     save_profile(&profile, app_data_dir.as_deref());
+    set_global_profile(profile.clone());
     profile
 }
 
@@ -152,14 +163,83 @@ pub fn install_driver(inf_path: &str) -> Result<String> {
     }
 }
 
+/// Resolve a bundled driver `.inf` path by logical driver name.
+///
+/// Security checks:
+/// - `driver_name` must be a simple token (no path separators / traversal chars)
+/// - resolved `.inf` must exist
+/// - canonicalized `.inf` path must remain inside the app resources directory
+pub fn resolve_bundled_inf_by_name(driver_name: &str) -> Result<String> {
+    let name = driver_name.trim();
+    anyhow::ensure!(!name.is_empty(), "Driver name cannot be empty");
+    let has_forbidden = name.chars().any(|c| c == '\\' || c == '/' || c == ':');
+    anyhow::ensure!(
+        !has_forbidden && !name.contains(".."),
+        "Invalid driver name"
+    );
+
+    let resources = resources_dir();
+    let resources_canon = std::fs::canonicalize(&resources)
+        .with_context(|| format!("Cannot canonicalize resources dir: {}", resources.display()))?;
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Known bundled drivers (default package layout).
+    for (known_name, rel_inf) in [
+        (
+            "VirtualControlHID",
+            "drivers/VirtualControlHID/virtualcontrolhid.inf",
+        ),
+        ("IoTDriver", "drivers/IoTDriver/iotdriver.inf"),
+    ] {
+        if known_name.eq_ignore_ascii_case(name) {
+            candidates.push(resources.join(rel_inf));
+            candidates.push(resources.join(format!("drivers/{name}/{name}.inf")));
+            candidates.push(resources.join(format!("drivers/{name}/driver.inf")));
+        }
+    }
+
+    // Discovery profile may provide additional bundled paths.
+    if let Some(profile) = global_profile() {
+        for missing in &profile.missing_drivers {
+            if missing.name.eq_ignore_ascii_case(name) {
+                if let Some(inf) = &missing.bundled_inf {
+                    candidates.push(PathBuf::from(inf));
+                }
+            }
+        }
+    }
+
+    anyhow::ensure!(
+        !candidates.is_empty(),
+        "Bundled .inf for driver '{}' is not registered.",
+        name
+    );
+
+    for candidate in candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        let canon = match std::fs::canonicalize(&candidate) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if canon.starts_with(&resources_canon) {
+            return Ok(canon.to_string_lossy().to_string());
+        }
+    }
+
+    anyhow::bail!(
+        "Bundled .inf for driver '{}' not found or outside resources directory.",
+        name
+    );
+}
+
 /// Locate the app's resources directory (works in both dev and installed modes).
 pub fn resources_dir() -> PathBuf {
     // Installed: <exe_dir>\resources\
     if let Ok(exe) = std::env::current_exe() {
-        let candidate = exe
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("resources");
+        let candidate = exe.parent().unwrap_or(Path::new(".")).join("resources");
         if candidate.exists() {
             return candidate;
         }
@@ -304,9 +384,7 @@ fn probe_vhf_device() -> Option<String> {
             data3: 0x54F5,
             data4: [0xBB, 0x10, 0xC0, 0xD5, 0xEA, 0x4A, 0x4F, 0x4C],
         };
-        return enumerate_device_interfaces(&guid)
-            .into_iter()
-            .next();
+        return enumerate_device_interfaces(&guid).into_iter().next();
     }
     #[cfg(not(windows))]
     None
@@ -333,7 +411,8 @@ fn probe_touchpad_hid() -> Option<String> {
             if path_lower.contains("kbd")
                 || path_lower.contains("keyboard")
                 || path_lower.contains("mouse")
-                || path_lower.contains("col01")  // usually system controls
+                || path_lower.contains("col01")
+            // usually system controls
             {
                 continue;
             }
@@ -567,8 +646,7 @@ fn enumerate_device_interfaces(guid: &GUID) -> Vec<String> {
             if required > 0 && required <= 2048 {
                 // Allocate a byte buffer large enough for the struct + path string
                 let mut buf = vec![0u8; required as usize];
-                let detail_ptr =
-                    buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+                let detail_ptr = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
                 // cbSize must be set to the struct header size (not total buffer)
                 (*detail_ptr).cbSize =
                     std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
@@ -588,7 +666,10 @@ fn enumerate_device_interfaces(guid: &GUID) -> Vec<String> {
                         buf.as_ptr().add(path_start) as *const u16,
                         (required as usize - path_start) / 2,
                     );
-                    let null_pos = wide_slice.iter().position(|&c| c == 0).unwrap_or(wide_slice.len());
+                    let null_pos = wide_slice
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(wide_slice.len());
                     if let Ok(s) = String::from_utf16(&wide_slice[..null_pos]) {
                         if !s.is_empty() {
                             paths.push(s);
@@ -656,7 +737,11 @@ fn service_exists(name: &str) -> bool {
                 return false;
             };
             let name_w: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
-            let svc = OpenServiceW(scm, windows::core::PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS);
+            let svc = OpenServiceW(
+                scm,
+                windows::core::PCWSTR(name_w.as_ptr()),
+                SERVICE_QUERY_STATUS,
+            );
             let found = svc.is_ok();
             if let Ok(h) = svc {
                 let _ = CloseServiceHandle(h);

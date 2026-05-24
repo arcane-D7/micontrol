@@ -25,8 +25,8 @@ pub struct ProcessInfo {
 pub fn get_process_list() -> Vec<ProcessInfo> {
     #[cfg(windows)]
     {
-        use wmi::{COMLibrary, WMIConnection};
         use std::collections::HashMap;
+        use wmi::{COMLibrary, WMIConnection};
 
         let com = match COMLibrary::new() {
             Ok(c) => c,
@@ -88,7 +88,12 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
                     _ => 0.0,
                 };
 
-                Some(ProcessInfo { name, pid, cpu_percent, memory_mb })
+                Some(ProcessInfo {
+                    name,
+                    pid,
+                    cpu_percent,
+                    memory_mb,
+                })
             })
             .collect();
 
@@ -101,5 +106,7 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
         procs
     }
     #[cfg(not(windows))]
-    { vec![] }
+    {
+        vec![]
+    }
 }

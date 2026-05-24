@@ -1395,6 +1395,18 @@ function AiAnalysisTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSetting
 export default function MainWindow({ hardware, activeTab, onTabChange, themeMode, toggleTheme }: Props) {
   const aiSettings = useSettings();
   const [showTrayPreview, setShowTrayPreview] = useState(false);
+  const refreshErrorLabels: Record<string, string> = {
+    system_info: "System",
+    battery: "Battery",
+    display: "Display",
+    fan: "Fan",
+    touchpad: "Touchpad",
+    performance_mode: "Performance",
+    charging_threshold: "Charging",
+  };
+  const refreshErrorItems = Object.entries(hardware.refreshErrors).filter(
+    ([, message]) => Boolean(message)
+  );
 
   // Background logger — runs regardless of active tab
   useAnalysisLogger(hardware, aiSettings);
@@ -1440,6 +1452,24 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
           {hardware.error && (
             <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--error)", wordBreak: "break-word" }}>
               ⚠️ {hardware.error}
+            </div>
+          )}
+          {refreshErrorItems.length > 0 && (
+            <div
+              style={{
+                padding: "4px 8px",
+                fontSize: 10,
+                color: "var(--text-dim)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 3,
+              }}
+            >
+              {refreshErrorItems.map(([key, message]) => (
+                <div key={key} title={message ?? undefined}>
+                  {refreshErrorLabels[key] ?? key}: {message}
+                </div>
+              ))}
             </div>
           )}
           {hardware.loading && (

@@ -122,11 +122,14 @@ pub fn set_touchpad_haptics(enabled: bool) -> Result<()> {
 }
 
 pub fn set_touchpad_haptics_intensity(intensity: HapticsIntensity) -> Result<()> {
-    persist_reg_dword(TP_REG_HAPTICS_INTENSITY, match intensity {
-        HapticsIntensity::Low => 1,
-        HapticsIntensity::Medium => 2,
-        HapticsIntensity::High => 3,
-    })?;
+    persist_reg_dword(
+        TP_REG_HAPTICS_INTENSITY,
+        match intensity {
+            HapticsIntensity::Low => 1,
+            HapticsIntensity::Medium => 2,
+            HapticsIntensity::High => 3,
+        },
+    )?;
     #[cfg(windows)]
     {
         // Read current enabled state from registry.
@@ -155,7 +158,14 @@ pub fn set_touchpad_repress(enabled: bool) -> Result<()> {
 
 pub fn set_touchpad_edge_slide(enabled: bool) -> Result<()> {
     #[cfg(windows)]
-    EDGE_SLIDE_ENABLED.store(enabled, Ordering::Relaxed);
+    {
+        EDGE_SLIDE_ENABLED.store(enabled, Ordering::Relaxed);
+        // Defensive reset: if edge-slide is disabled while a gesture is active,
+        // immediately release WM_MOUSEMOVE suppression.
+        if !enabled {
+            EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
+        }
+    }
     persist_reg_dword(TP_REG_EDGE_SLIDE, if enabled { 1 } else { 0 })?;
     // Ensure the Raw Input gesture listener thread is running.
     #[cfg(windows)]
@@ -185,20 +195,42 @@ fn persist_reg_dword(value_name: &str, value: u32) -> Result<()> {
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
         use windows::Win32::System::Registry::{
             RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD,
             REG_OPTION_NON_VOLATILE,
         };
-        use windows::core::PCWSTR;
         unsafe {
-            let key_w: Vec<u16> = OsStr::new(TP_REG_KEY).encode_wide().chain(Some(0)).collect();
+            let key_w: Vec<u16> = OsStr::new(TP_REG_KEY)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let mut hkey = std::mem::zeroed();
             RegCreateKeyExW(
-                HKEY_CURRENT_USER, PCWSTR(key_w.as_ptr()), 0, None,
-                REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hkey, None,
-            ).ok().context("Create touchpad reg key")?;
-            let val_w: Vec<u16> = OsStr::new(value_name).encode_wide().chain(Some(0)).collect();
-            let _ = RegSetValueExW(hkey, PCWSTR(val_w.as_ptr()), 0, REG_DWORD, Some(&value.to_le_bytes())).ok();
+                HKEY_CURRENT_USER,
+                PCWSTR(key_w.as_ptr()),
+                0,
+                None,
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                None,
+                &mut hkey,
+                None,
+            )
+            .ok()
+            .context("Create touchpad reg key")?;
+            let val_w: Vec<u16> = OsStr::new(value_name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let _ = RegSetValueExW(
+                hkey,
+                PCWSTR(val_w.as_ptr()),
+                0,
+                REG_DWORD,
+                Some(&value.to_le_bytes()),
+            )
+            .ok();
             let _ = RegCloseKey(hkey).ok();
         }
     }
@@ -210,15 +242,25 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
         use windows::Win32::System::Registry::{
             RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, REG_VALUE_TYPE,
         };
-        use windows::core::PCWSTR;
         unsafe {
-            let key_w: Vec<u16> = OsStr::new(TP_REG_KEY).encode_wide().chain(Some(0)).collect();
+            let key_w: Vec<u16> = OsStr::new(TP_REG_KEY)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let mut hkey = std::mem::zeroed();
-            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(key_w.as_ptr()), 0,
-                windows::Win32::System::Registry::KEY_READ, &mut hkey).is_err() {
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key_w.as_ptr()),
+                0,
+                windows::Win32::System::Registry::KEY_READ,
+                &mut hkey,
+            )
+            .is_err()
+            {
                 return Ok(TouchpadInfo {
                     sensitivity: TouchpadSensitivity::Medium,
                     haptics_enabled: true,
@@ -234,8 +276,14 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
                 let mut v: u32 = default;
                 let mut size = 4u32;
                 let w: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
-                let _ = RegQueryValueExW(hkey, PCWSTR(w.as_ptr()), None, Some(&mut ty),
-                    Some((&mut v as *mut u32).cast()), Some(&mut size));
+                let _ = RegQueryValueExW(
+                    hkey,
+                    PCWSTR(w.as_ptr()),
+                    None,
+                    Some(&mut ty),
+                    Some((&mut v as *mut u32).cast()),
+                    Some(&mut size),
+                );
                 v
             };
 
@@ -249,9 +297,18 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
             let _ = RegCloseKey(hkey).ok();
 
             Ok(TouchpadInfo {
-                sensitivity: match sens_raw { 1 => TouchpadSensitivity::Low, 3 => TouchpadSensitivity::High, 4 => TouchpadSensitivity::VeryHigh, _ => TouchpadSensitivity::Medium },
+                sensitivity: match sens_raw {
+                    1 => TouchpadSensitivity::Low,
+                    3 => TouchpadSensitivity::High,
+                    4 => TouchpadSensitivity::VeryHigh,
+                    _ => TouchpadSensitivity::Medium,
+                },
                 haptics_enabled: haptics,
-                haptics_intensity: match haptics_intensity_raw { 1 => HapticsIntensity::Low, 3 => HapticsIntensity::High, _ => HapticsIntensity::Medium },
+                haptics_intensity: match haptics_intensity_raw {
+                    1 => HapticsIntensity::Low,
+                    3 => HapticsIntensity::High,
+                    _ => HapticsIntensity::Medium,
+                },
                 gesture_screenshot,
                 trackpad_repress,
                 edge_slide,
@@ -289,15 +346,15 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
 fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
     use windows::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetPreparsedData, HidD_SetFeature,
-        HidP_GetCaps, HIDP_CAPS, PHIDP_PREPARSED_DATA,
+        HidD_FreePreparsedData, HidD_GetPreparsedData, HidD_SetFeature, HidP_GetCaps, HIDP_CAPS,
+        PHIDP_PREPARSED_DATA,
     };
     use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows::core::PCWSTR;
 
     let path = touchpad_hid_path();
     let path_w: Vec<u16> = OsStr::new(&path).encode_wide().chain(Some(0)).collect();
@@ -330,21 +387,26 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Resul
     // plus the two data bytes.
     let report_len = feature_len.max(8).min(64);
     let mut report = vec![0u8; report_len];
-    report[0] = 0x07;                              // BLTP7853 haptics Feature Report ID
+    report[0] = 0x07; // BLTP7853 haptics Feature Report ID
     report[1] = if enabled { 0x01 } else { 0x00 }; // haptics on/off
     report[2] = match intensity {
-        HapticsIntensity::Low    => 0x00,
+        HapticsIntensity::Low => 0x00,
         HapticsIntensity::Medium => 0x01,
-        HapticsIntensity::High   => 0x02,
+        HapticsIntensity::High => 0x02,
     };
 
     let ok = unsafe {
         HidD_SetFeature(handle, report.as_mut_ptr() as *mut _, report.len() as u32).as_bool()
     };
-    unsafe { let _ = CloseHandle(handle); }
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
 
     if ok {
-        log::info!("[touchpad] BLTP7853 haptics HID: enabled={enabled} intensity={:?}", intensity);
+        log::info!(
+            "[touchpad] BLTP7853 haptics HID: enabled={enabled} intensity={:?}",
+            intensity
+        );
         Ok(())
     } else {
         let err = unsafe { windows::Win32::Foundation::GetLastError() };
@@ -405,16 +467,14 @@ fn ensure_gesture_listener() {
 
 #[cfg(windows)]
 unsafe fn win_gesture_loop() {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::HINSTANCE;
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-    use windows::Win32::UI::Input::{
-        RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK,
-    };
+    use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassExW,
-        TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
+        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassExW, TranslateMessage,
+        HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
     };
-    use windows::core::PCWSTR;
 
     // Initialise COM so brightness calls (WMI/IGCL) work from this thread.
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -462,9 +522,7 @@ unsafe fn win_gesture_loop() {
         hwndTarget: hwnd,
     };
 
-    if let Err(e) =
-        RegisterRawInputDevices(&[rid], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
-    {
+    if let Err(e) = RegisterRawInputDevices(&[rid], std::mem::size_of::<RAWINPUTDEVICE>() as u32) {
         log::warn!(
             "[gesture] RegisterRawInputDevices failed: {e}. \
              Gesture detection will be unavailable."
@@ -485,7 +543,9 @@ unsafe fn win_gesture_loop() {
             0,
         ) {
             Ok(_hook) => {
-                log::info!("[gesture] Mouse hook installed — cursor suppressed during edge gestures");
+                log::info!(
+                    "[gesture] Mouse hook installed — cursor suppressed during edge gestures"
+                );
                 let _ = _hook;
             }
             Err(e) => log::warn!("[gesture] Failed to install mouse hook: {e}"),
@@ -596,6 +656,9 @@ thread_local! {
     /// Per-device preparsed HID data cache, keyed by HANDLE numeric value.
     static PREPARSED_CACHE: std::cell::RefCell<std::collections::HashMap<usize, Vec<u8>>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Per-device "is this the touchpad?" decision cache.
+    static TOUCHPAD_DEVICE_CACHE: std::cell::RefCell<std::collections::HashMap<usize, bool>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 
     static GESTURE_STATE: std::cell::RefCell<GestureState> =
         std::cell::RefCell::new(GestureState::default());
@@ -604,10 +667,80 @@ thread_local! {
 // ─── Raw Input processor ──────────────────────────────────────────────────────
 
 #[cfg(windows)]
+fn normalize_hid_path(path: &str) -> String {
+    let mut p = path
+        .trim_matches('\0')
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    if let Some(stripped) = p.strip_prefix(r"\??\") {
+        p = format!(r"\\?\{stripped}");
+    }
+    p
+}
+
+/// Returns the hardware identifier segment from a HID path.
+/// Example: "\\\\?\\hid#bltp7853&col04#...#..." -> "bltp7853".
+#[cfg(windows)]
+fn hid_hardware_key(path: &str) -> Option<String> {
+    let normalized = normalize_hid_path(path);
+    let mut parts = normalized.split('#');
+    let _prefix = parts.next()?;
+    let hardware = parts.next()?;
+    Some(
+        hardware
+            .split("&col")
+            .next()
+            .unwrap_or(hardware)
+            .to_string(),
+    )
+}
+
+#[cfg(windows)]
+fn is_touchpad_device_path(raw_input_path: &str, touchpad_path: &str) -> bool {
+    let raw_norm = normalize_hid_path(raw_input_path);
+    let tp_norm = normalize_hid_path(touchpad_path);
+    if raw_norm == tp_norm {
+        return true;
+    }
+    match (hid_hardware_key(&raw_norm), hid_hardware_key(&tp_norm)) {
+        (Some(raw_key), Some(tp_key)) => raw_key == tp_key,
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+unsafe fn query_raw_input_device_name(
+    hdevice: windows::Win32::Foundation::HANDLE,
+) -> Option<String> {
+    use windows::Win32::UI::Input::{GetRawInputDeviceInfoW, RIDI_DEVICENAME};
+
+    let mut name_len: u32 = 0;
+    let _ = GetRawInputDeviceInfoW(hdevice, RIDI_DEVICENAME, None, &mut name_len);
+    if name_len == 0 || name_len > 1024 {
+        return None;
+    }
+    let mut name_buf = vec![0u16; name_len as usize];
+    let ret = GetRawInputDeviceInfoW(
+        hdevice,
+        RIDI_DEVICENAME,
+        Some(name_buf.as_mut_ptr() as *mut _),
+        &mut name_len,
+    );
+    if ret == u32::MAX || ret == 0 {
+        return None;
+    }
+    let len = name_buf
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(ret as usize);
+    Some(String::from_utf16_lossy(&name_buf[..len]))
+}
+
+#[cfg(windows)]
 unsafe fn process_raw_input(lparam: isize) {
     use windows::Win32::Devices::HumanInterfaceDevice::{
-        HidP_GetSpecificValueCaps, HidP_GetUsageValue, HidP_GetUsages, HidP_Input,
-        HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
+        HidP_GetSpecificValueCaps, HidP_GetUsageValue, HidP_GetUsages, HidP_Input, HIDP_VALUE_CAPS,
+        PHIDP_PREPARSED_DATA,
     };
     use windows::Win32::UI::Input::{
         GetRawInputData, GetRawInputDeviceInfoW, HRAWINPUT, RAWINPUT, RAWINPUTHEADER,
@@ -648,6 +781,39 @@ unsafe fn process_raw_input(lparam: isize) {
     }
 
     let device_key = (*raw).header.hDevice.0 as usize;
+
+    // Hard filter: process gesture data only from the physical touchpad.
+    // This prevents touchscreen/stylus/raw digitizer packets from entering
+    // the edge-slide state machine and disturbing pointer behavior.
+    let is_touchpad = TOUCHPAD_DEVICE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(cached) = cache.get(&device_key) {
+            return *cached;
+        }
+        let raw_name = query_raw_input_device_name((*raw).header.hDevice);
+        let expected_touchpad = touchpad_hid_path();
+        let matched = raw_name
+            .as_deref()
+            .map(|name| is_touchpad_device_path(name, &expected_touchpad))
+            .unwrap_or(false);
+        cache.insert(device_key, matched);
+        if !matched {
+            log::debug!("[gesture] Ignoring non-touchpad raw device: {:?}", raw_name);
+        }
+        matched
+    });
+    if !is_touchpad {
+        return;
+    }
+
+    // If edge-slide has been disabled, force-release suppression and stale state.
+    if !EDGE_SLIDE_ENABLED.load(Ordering::Relaxed)
+        && EDGE_GESTURE_ACTIVE.swap(false, Ordering::Relaxed)
+    {
+        GESTURE_STATE.with(|state| {
+            state.borrow_mut().edge = None;
+        });
+    }
 
     // ── Get/cache preparsed data for this device ──────────────────────────────
     let pp_bytes = PREPARSED_CACHE.with(|cache| {
@@ -691,8 +857,7 @@ unsafe fn process_raw_input(lparam: isize) {
     if hid.dwSizeHid == 0 || hid.dwCount == 0 {
         return;
     }
-    let report =
-        std::slice::from_raw_parts(hid.bRawData.as_ptr(), hid.dwSizeHid as usize);
+    let report = std::slice::from_raw_parts(hid.bRawData.as_ptr(), hid.dwSizeHid as usize);
 
     // ── Read logical maxima once per device (for edge/step sizing) ────────────
     GESTURE_STATE.with(|state| {
@@ -761,12 +926,16 @@ unsafe fn process_raw_input(lparam: isize) {
     for lc in 1u16..=5 {
         let mut x_val: u32 = 0;
         let mut y_val: u32 = 0;
-        let rx = HidP_GetUsageValue(HidP_Input, 0x0001, lc, 0x0030, &mut x_val, preparsed, report);
-        let ry = HidP_GetUsageValue(HidP_Input, 0x0001, lc, 0x0031, &mut y_val, preparsed, report);
+        let rx = HidP_GetUsageValue(
+            HidP_Input, 0x0001, lc, 0x0030, &mut x_val, preparsed, report,
+        );
+        let ry = HidP_GetUsageValue(
+            HidP_Input, 0x0001, lc, 0x0031, &mut y_val, preparsed, report,
+        );
         if rx.is_ok() && ry.is_ok() && x_val > 0 && y_val > 0 {
             first_lc = lc;
-            first_x  = x_val;
-            first_y  = y_val;
+            first_x = x_val;
+            first_y = y_val;
             break;
         }
     }
@@ -804,9 +973,8 @@ unsafe fn process_raw_input(lparam: isize) {
     // on this thread (WMI internally pumps the message queue), which would
     // otherwise re-enter the gesture loop while borrow_mut() is still held.
     let fire_screenshot = GESTURE_SCREENSHOT_ENABLED.load(Ordering::Relaxed)
-        && GESTURE_STATE.with(|state| {
-            handle_five_finger_gesture(&mut state.borrow_mut(), contact_count)
-        });
+        && GESTURE_STATE
+            .with(|state| handle_five_finger_gesture(&mut state.borrow_mut(), contact_count));
 
     // (brightness_steps, volume_steps) — positive = up, negative = down
     let (brightness_steps, volume_steps) = if EDGE_SLIDE_ENABLED.load(Ordering::Relaxed) {
@@ -824,11 +992,54 @@ unsafe fn process_raw_input(lparam: isize) {
     };
 
     // ── Execute actions — borrow fully released here ───────────────────────────
-    if fire_screenshot { simulate_win_shift_s(); }
-    for _ in 0..brightness_steps       { simulate_brightness_up();   }
-    for _ in 0..(-brightness_steps)    { simulate_brightness_down(); }
-    for _ in 0..volume_steps           { simulate_volume_up();        }
-    for _ in 0..(-volume_steps)        { simulate_volume_down();      }
+    if fire_screenshot {
+        simulate_win_shift_s();
+    }
+    for _ in 0..brightness_steps {
+        simulate_brightness_up();
+    }
+    for _ in 0..(-brightness_steps) {
+        simulate_brightness_down();
+    }
+    for _ in 0..volume_steps {
+        simulate_volume_up();
+    }
+    for _ in 0..(-volume_steps) {
+        simulate_volume_down();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::{hid_hardware_key, is_touchpad_device_path, normalize_hid_path};
+
+    #[test]
+    fn normalize_hid_path_handles_case_and_prefix() {
+        let raw = r"\??\HID#BLTP7853&COL04#5&ABC#{4D1E55B2-F16F-11CF-88CB-001111000030}";
+        let norm = normalize_hid_path(raw);
+        assert!(norm.starts_with(r"\\?\hid#bltp7853"));
+    }
+
+    #[test]
+    fn hid_hardware_key_strips_collection_suffix() {
+        let path = r"\\?\hid#bltp7853&col04#5&abc#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let key = hid_hardware_key(path).expect("hardware key");
+        assert_eq!(key, "bltp7853");
+    }
+
+    #[test]
+    fn touchpad_path_match_accepts_same_device_different_collection() {
+        let raw = r"\\?\hid#bltp7853&col01#5&abc#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let touchpad = r"\\?\hid#bltp7853&col04#5&abc#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        assert!(is_touchpad_device_path(raw, touchpad));
+    }
+
+    #[test]
+    fn touchpad_path_match_rejects_other_digitizer_hardware() {
+        let raw = r"\\?\hid#elan2514&col01#7&def#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let touchpad = r"\\?\hid#bltp7853&col04#5&abc#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        assert!(!is_touchpad_device_path(raw, touchpad));
+    }
 }
 
 // ─── Gesture handlers ─────────────────────────────────────────────────────────
@@ -900,11 +1111,11 @@ fn handle_edge_slide(
         return (0, 0);
     }
 
-    let edge_thresh = state.x_max / 8;         // 12.5% of width
-    let y_step      = (state.y_max / 10).max(1); // 10% of height per action
-    // A Y jump larger than this in one frame means a new finger was placed
-    // (the touchpad sent no intermediate contact_count=0 report).
-    let jump_thresh = state.y_max * 15 / 100;   // 15% of height
+    let edge_thresh = state.x_max / 8; // 12.5% of width
+    let y_step = (state.y_max / 10).max(1); // 10% of height per action
+                                            // A Y jump larger than this in one frame means a new finger was placed
+                                            // (the touchpad sent no intermediate contact_count=0 report).
+    let jump_thresh = state.y_max * 15 / 100; // 15% of height
 
     match &mut state.edge {
         None => {
@@ -916,11 +1127,23 @@ fn handle_edge_slide(
                 None
             };
             if let Some(side) = side {
-                log::info!("[gesture] edge-slide started: side={} x={}/{} y={}",
-                    match side { EdgeSide::Left => "left", EdgeSide::Right => "right" },
-                    x, state.x_max, y);
+                log::info!(
+                    "[gesture] edge-slide started: side={} x={}/{} y={}",
+                    match side {
+                        EdgeSide::Left => "left",
+                        EdgeSide::Right => "right",
+                    },
+                    x,
+                    state.x_max,
+                    y
+                );
                 EDGE_GESTURE_ACTIVE.store(true, Ordering::Relaxed);
-                state.edge = Some(EdgeSlideState { side, last_y: y, accum: 0, lost_frames: 0 });
+                state.edge = Some(EdgeSlideState {
+                    side,
+                    last_y: y,
+                    accum: 0,
+                    lost_frames: 0,
+                });
             }
             (0, 0)
         }
@@ -933,14 +1156,18 @@ fn handle_edge_slide(
             // BLTP7853 skips the contact_count=0 frame between two touches, a
             // new contact in the center was silently continuing the edge swipe.
             let in_zone = match edge.side {
-                EdgeSide::Left  => x < state.x_max / 3,
+                EdgeSide::Left => x < state.x_max / 3,
                 EdgeSide::Right => x > state.x_max * 2 / 3,
             };
             if !in_zone {
                 log::info!(
                     "[gesture] edge-slide ended: x={}/{} left edge zone ({} side)",
-                    x, state.x_max,
-                    match edge.side { EdgeSide::Left => "left", EdgeSide::Right => "right" },
+                    x,
+                    state.x_max,
+                    match edge.side {
+                        EdgeSide::Left => "left",
+                        EdgeSide::Right => "right",
+                    },
                 );
                 state.edge = None;
                 EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
@@ -961,7 +1188,7 @@ fn handle_edge_slide(
             if dy.abs() > jump_thresh {
                 log::debug!("[gesture] edge-slide position jump ({dy}), re-anchoring at y={y}");
                 edge.last_y = y;
-                edge.accum  = 0;
+                edge.accum = 0;
                 return (0, 0);
             }
 
@@ -969,15 +1196,21 @@ fn handle_edge_slide(
             edge.accum += dy;
 
             let mut brightness = 0i32;
-            let mut volume     = 0i32;
+            let mut volume = 0i32;
 
             while edge.accum >= y_step {
                 edge.accum -= y_step;
-                match edge.side { EdgeSide::Left => brightness += 1, EdgeSide::Right => volume += 1 }
+                match edge.side {
+                    EdgeSide::Left => brightness += 1,
+                    EdgeSide::Right => volume += 1,
+                }
             }
             while edge.accum <= -y_step {
                 edge.accum += y_step;
-                match edge.side { EdgeSide::Left => brightness -= 1, EdgeSide::Right => volume -= 1 }
+                match edge.side {
+                    EdgeSide::Left => brightness -= 1,
+                    EdgeSide::Right => volume -= 1,
+                }
             }
 
             if brightness != 0 {
@@ -997,7 +1230,7 @@ fn handle_edge_slide(
 #[cfg(windows)]
 fn simulate_win_shift_s() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, INPUT, VIRTUAL_KEY,
+        SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let inputs: [INPUT; 6] = unsafe {
         [
@@ -1017,7 +1250,7 @@ fn simulate_win_shift_s() {
 #[cfg(windows)]
 fn simulate_volume_up() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, INPUT, VIRTUAL_KEY,
+        SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let inputs: [INPUT; 2] = unsafe {
         [
@@ -1025,13 +1258,15 @@ fn simulate_volume_up() {
             make_key_input(VIRTUAL_KEY(0xAF), KEYEVENTF_KEYUP),      // VK_VOLUME_UP up
         ]
     };
-    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32); }
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 #[cfg(windows)]
 fn simulate_volume_down() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, INPUT, VIRTUAL_KEY,
+        SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let inputs: [INPUT; 2] = unsafe {
         [
@@ -1039,7 +1274,9 @@ fn simulate_volume_down() {
             make_key_input(VIRTUAL_KEY(0xAE), KEYEVENTF_KEYUP),      // VK_VOLUME_DOWN up
         ]
     };
-    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32); }
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 /// Increase display brightness by 5 points and show the OSD overlay.
@@ -1075,9 +1312,7 @@ unsafe fn make_key_input(
     vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
     flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
 ) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT};
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {

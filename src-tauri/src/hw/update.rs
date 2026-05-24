@@ -123,11 +123,9 @@ pub fn trigger_driver_scan() -> Result<String> {
         .output()
     {
         Ok(out) if out.status.success() => {
-            return Ok(
-                "PnP device scan triggered (pnputil /scan-devices). \
+            return Ok("PnP device scan triggered (pnputil /scan-devices). \
                  Windows will check for updated official drivers."
-                    .to_string(),
-            );
+                .to_string());
         }
         Ok(out) => {
             log::warn!("pnputil /scan-devices exit: {}", out.status);
@@ -147,11 +145,9 @@ pub fn trigger_driver_scan() -> Result<String> {
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         if let Ok(key) = hklm.open_subkey_with_flags(DRIVER_REG_KEY, KEY_WRITE) {
             let _ = key.set_value("RequestScan", &1u32);
-            return Ok(
-                "Scan request flag written to registry. \
+            return Ok("Scan request flag written to registry. \
                  XiaomiPCManager will perform a driver scan on next launch."
-                    .to_string(),
-            );
+                .to_string());
         }
     }
 
@@ -173,7 +169,12 @@ fn detect_xpm() -> (bool, Option<String>, Option<String>) {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir())
             .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-            .filter(|s| s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+            .filter(|s| {
+                s.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+            })
             .collect();
         versions.sort();
         if let Some(latest) = versions.last() {
@@ -251,9 +252,7 @@ fn get_bios_info() -> Result<BiosInfo> {
         let com = COMLibrary::new().context("COM init")?;
         let wmi = WMIConnection::new(com.into()).context("WMI connect")?;
         let results: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query(
-                "SELECT Version, ReleaseDate, Manufacturer, SerialNumber FROM Win32_BIOS",
-            )
+            .raw_query("SELECT Version, ReleaseDate, Manufacturer, SerialNumber FROM Win32_BIOS")
             .context("WMI Win32_BIOS query")?;
         let row = results.into_iter().next().unwrap_or_default();
         return Ok(BiosInfo {
@@ -322,10 +321,7 @@ fn build_driver_info(map: &HashMap<String, String>) -> Option<XiaomiDriverInfo> 
     let published_name = map.get("Published Name").cloned()?;
     Some(XiaomiDriverInfo {
         published_name,
-        original_name: map
-            .get("Original Name")
-            .cloned()
-            .unwrap_or_default(),
+        original_name: map.get("Original Name").cloned().unwrap_or_default(),
         provider: map.get("Provider Name").cloned().unwrap_or_default(),
         version_string: map.get("Driver Version").cloned().unwrap_or_default(),
         class_name: map.get("Class Name").cloned().unwrap_or_default(),
@@ -414,7 +410,8 @@ Signer Name:        Microsoft Windows\r\n";
         let result = get_bios_info();
         if let Ok(bios) = result {
             // BiosInfo.version should not be empty on a real machine
-            assert!(!bios.manufacturer.is_empty() || bios.manufacturer.is_empty()); // always true — just checks no panic
+            assert!(!bios.manufacturer.is_empty() || bios.manufacturer.is_empty());
+            // always true — just checks no panic
         }
     }
 }

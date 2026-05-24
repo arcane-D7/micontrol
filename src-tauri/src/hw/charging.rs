@@ -53,7 +53,9 @@ pub fn get_charging_threshold() -> Result<u8> {
         read_threshold_registry().unwrap_or(Ok(80))
     }
     #[cfg(not(windows))]
-    { Ok(80) }
+    {
+        Ok(80)
+    }
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────
@@ -72,14 +74,13 @@ struct IotIpcMsg {
 fn send_via_pipe(threshold: u8) -> Result<()> {
     #[cfg(windows)]
     {
-        use std::io::Write;
         use std::fs::OpenOptions;
+        use std::io::Write;
 
         // Use the IoT pipe path discovered at startup; fall back to the default constant.
         let pipe_path = crate::hw::discovery::global_profile()
-            .and_then(|p| p.iot_pipe_path.as_deref())
-            .unwrap_or(IOT_PIPE)
-            .to_string();
+            .and_then(|p| p.iot_pipe_path)
+            .unwrap_or_else(|| IOT_PIPE.to_string());
 
         let mut pipe = OpenOptions::new()
             .read(true)
@@ -119,13 +120,16 @@ fn persist_threshold_registry(threshold: u8) -> Result<()> {
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
         use windows::Win32::System::Registry::{
             RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD,
         };
-        use windows::core::PCWSTR;
 
         unsafe {
-            let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY).encode_wide().chain(Some(0)).collect();
+            let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let mut hkey = std::mem::zeroed();
             // If key doesn't exist, create it
             let res = RegOpenKeyExW(
@@ -138,7 +142,10 @@ fn persist_threshold_registry(threshold: u8) -> Result<()> {
             if res.is_err() {
                 return Ok(()); // Registry key doesn't exist — IoT driver may be absent
             }
-            let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE).encode_wide().chain(Some(0)).collect();
+            let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let val = threshold as u32;
             RegSetValueExW(
                 hkey,
@@ -146,7 +153,9 @@ fn persist_threshold_registry(threshold: u8) -> Result<()> {
                 0,
                 REG_DWORD,
                 Some(&val.to_le_bytes()),
-            ).ok().context("Write charging threshold to registry")?;
+            )
+            .ok()
+            .context("Write charging threshold to registry")?;
             let _ = RegCloseKey(hkey).ok();
         }
     }
@@ -157,13 +166,16 @@ fn persist_threshold_registry(threshold: u8) -> Result<()> {
 fn read_threshold_registry() -> Option<Result<u8>> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, REG_VALUE_TYPE,
     };
-    use windows::core::PCWSTR;
 
     unsafe {
-        let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY).encode_wide().chain(Some(0)).collect();
+        let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let mut hkey = std::mem::zeroed();
         let res = RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -175,7 +187,10 @@ fn read_threshold_registry() -> Option<Result<u8>> {
         if res.is_err() {
             return None;
         }
-        let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE).encode_wide().chain(Some(0)).collect();
+        let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let mut data: u32 = 0;
         let mut data_size = 4u32;
         let mut ty = REG_VALUE_TYPE::default();

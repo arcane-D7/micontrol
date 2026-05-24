@@ -1,18 +1,18 @@
+use crate::state::PerformanceMode;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::state::PerformanceMode;
 
 #[cfg(windows)]
 use {
+    std::ffi::OsStr,
+    std::os::windows::ffi::OsStrExt,
     windows::{
         core::GUID,
         Win32::{
             Devices::DeviceAndDriverInstallation::{
-                SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
-                SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-                DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
-                SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
-                SP_DEVINFO_DATA,
+                SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+                SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+                SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
             },
             Foundation::{CloseHandle, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
             Storage::FileSystem::{
@@ -20,13 +20,15 @@ use {
                 OPEN_EXISTING,
             },
             System::{
+                Registry::{
+                    RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW,
+                    HKEY_LOCAL_MACHINE, KEY_WRITE, REG_CREATE_KEY_DISPOSITION, REG_DWORD,
+                    REG_OPTION_NON_VOLATILE,
+                },
                 IO::DeviceIoControl,
-                Registry::{RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_CREATE_KEY_DISPOSITION, REG_DWORD, REG_OPTION_NON_VOLATILE},
             },
         },
     },
-    std::ffi::OsStr,
-    std::os::windows::ffi::OsStrExt,
 };
 
 /// Registry key for last-known performance mode (used as a fallback / state persistence).
@@ -53,11 +55,13 @@ pub fn set_performance_mode(mode: PerformanceMode) -> Result<PerformanceResult> 
     // Attempt WMI HQWmiCommonInterface first (real TDP control on Xiaomi Book Pro 14)
     #[cfg(windows)]
     match send_via_hq_wmi(mode) {
-        Ok(()) => return Ok(PerformanceResult {
-            success: true,
-            method: "hq_wmi+registry+overlay".to_string(),
-            mode,
-        }),
+        Ok(()) => {
+            return Ok(PerformanceResult {
+                success: true,
+                method: "hq_wmi+registry+overlay".to_string(),
+                mode,
+            })
+        }
         Err(e) => log::warn!("HQ WMI SetPerformanceMode failed, trying VHF: {e}"),
     }
 
@@ -105,15 +109,20 @@ pub fn get_performance_mode() -> Result<PerformanceMode> {
         Ok(PerformanceMode::Balance)
     }
     #[cfg(not(windows))]
-    { Ok(PerformanceMode::Balance) }
+    {
+        Ok(PerformanceMode::Balance)
+    }
 }
 
 #[cfg(windows)]
 fn read_mi_registry_mode() -> Option<PerformanceMode> {
-    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE, KEY_READ};
     use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{RegQueryValueExW, KEY_READ, REG_VALUE_TYPE};
     unsafe {
-        let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY).encode_wide().chain(Some(0)).collect();
+        let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let mut hkey = std::mem::zeroed();
         if RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -121,10 +130,15 @@ fn read_mi_registry_mode() -> Option<PerformanceMode> {
             0,
             KEY_READ,
             &mut hkey,
-        ).is_err() {
+        )
+        .is_err()
+        {
             return None;
         }
-        let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE).encode_wide().chain(Some(0)).collect();
+        let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let mut data: u32 = 0;
         let mut data_size = 4u32;
         let mut ty = REG_VALUE_TYPE::default();
@@ -137,20 +151,22 @@ fn read_mi_registry_mode() -> Option<PerformanceMode> {
             Some(&mut data_size),
         );
         let _ = RegCloseKey(hkey).ok();
-        if ok.is_err() { return None; }
+        if ok.is_err() {
+            return None;
+        }
         Some(match data {
-            0  => PerformanceMode::Silence,
-            1  => PerformanceMode::Balance,
-            2  => PerformanceMode::Turbo,
-            3  => PerformanceMode::Decepticon,
-            4  => PerformanceMode::Overdrive,
-            5  => PerformanceMode::OverdriveHigh,
-            6  => PerformanceMode::OverdriveMax,
-            9  => PerformanceMode::SmartAdaptive,
+            0 => PerformanceMode::Silence,
+            1 => PerformanceMode::Balance,
+            2 => PerformanceMode::Turbo,
+            3 => PerformanceMode::Decepticon,
+            4 => PerformanceMode::Overdrive,
+            5 => PerformanceMode::OverdriveHigh,
+            6 => PerformanceMode::OverdriveMax,
+            9 => PerformanceMode::SmartAdaptive,
             10 => PerformanceMode::Smart,
             11 => PerformanceMode::LongBattery,
             14 => PerformanceMode::SmartAcceleration,
-            _  => return None,
+            _ => return None,
         })
     }
 }
@@ -169,28 +185,34 @@ fn read_mi_registry_mode() -> Option<PerformanceMode> {
 // We set this via PowerSetActiveOverlayScheme (requires elevation).
 // We read it via the registry (no elevation needed).
 
-const OVERLAY_REG_KEY: &str =
-    r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes";
+const OVERLAY_REG_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes";
 
 const GUID_BEST_POWER_EFFICIENCY: &str = "961cc777-2547-4f9d-8174-7d86181b8a7a";
-const GUID_BALANCED:              &str = "3af9b8d9-7c97-431d-ad78-34a8bfea439f";
-const GUID_BEST_PERFORMANCE:      &str = "ded574b5-45a0-4f42-8737-46345c09c238";
+const GUID_BALANCED: &str = "3af9b8d9-7c97-431d-ad78-34a8bfea439f";
+const GUID_BEST_PERFORMANCE: &str = "ded574b5-45a0-4f42-8737-46345c09c238";
 
 #[cfg(windows)]
 fn read_windows_power_overlay() -> Option<PerformanceMode> {
-    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
-    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
     use windows::core::PCWSTR;
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    use windows::Win32::System::Registry::{RegQueryValueExW, REG_VALUE_TYPE};
 
     // Determine current power source: AC (plugged in) = 1, DC (battery) = 0
     let on_ac = unsafe {
         let mut sps = std::mem::zeroed::<SYSTEM_POWER_STATUS>();
         GetSystemPowerStatus(&mut sps).is_ok() && sps.ACLineStatus == 1
     };
-    let reg_value = if on_ac { "ActiveOverlayAcPowerScheme" } else { "ActiveOverlayDcPowerScheme" };
+    let reg_value = if on_ac {
+        "ActiveOverlayAcPowerScheme"
+    } else {
+        "ActiveOverlayDcPowerScheme"
+    };
 
     unsafe {
-        let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY).encode_wide().chain(Some(0)).collect();
+        let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let mut hkey = std::mem::zeroed();
         if RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -198,7 +220,9 @@ fn read_windows_power_overlay() -> Option<PerformanceMode> {
             0,
             windows::Win32::System::Registry::KEY_READ,
             &mut hkey,
-        ).is_err() {
+        )
+        .is_err()
+        {
             return None;
         }
         let val_w: Vec<u16> = OsStr::new(reg_value).encode_wide().chain(Some(0)).collect();
@@ -212,7 +236,9 @@ fn read_windows_power_overlay() -> Option<PerformanceMode> {
             Some(&mut ty),
             Some(buf.as_mut_ptr().cast()),
             Some(&mut size),
-        ).is_err() {
+        )
+        .is_err()
+        {
             let _ = RegCloseKey(hkey).ok();
             return None;
         }
@@ -239,14 +265,17 @@ fn read_windows_power_overlay() -> Option<PerformanceMode> {
 pub fn set_windows_power_overlay(mode: PerformanceMode) {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
-        RegOpenKeyExW, RegSetValueExW, RegCloseKey, HKEY_LOCAL_MACHINE,
-        REG_SZ, KEY_SET_VALUE,
+        RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_SZ,
     };
 
     let guid_str = match mode {
         PerformanceMode::Silence | PerformanceMode::LongBattery => GUID_BEST_POWER_EFFICIENCY,
-        PerformanceMode::Turbo | PerformanceMode::Decepticon | PerformanceMode::SmartAcceleration
-        | PerformanceMode::Overdrive | PerformanceMode::OverdriveHigh | PerformanceMode::OverdriveMax => GUID_BEST_PERFORMANCE,
+        PerformanceMode::Turbo
+        | PerformanceMode::Decepticon
+        | PerformanceMode::SmartAcceleration
+        | PerformanceMode::Overdrive
+        | PerformanceMode::OverdriveHigh
+        | PerformanceMode::OverdriveMax => GUID_BEST_PERFORMANCE,
         _ => GUID_BALANCED,
     };
 
@@ -254,14 +283,34 @@ pub fn set_windows_power_overlay(mode: PerformanceMode) {
     // This updates the live Windows power state that Settings and Task Manager read.
     // The function is not bound in windows-rs 0.58, so we load it dynamically.
     #[repr(C)]
-    struct WinGuid { data1: u32, data2: u16, data3: u16, data4: [u8; 8] }
+    struct WinGuid {
+        data1: u32,
+        data2: u16,
+        data3: u16,
+        data4: [u8; 8],
+    }
 
     let guid_bytes: Option<WinGuid> = if guid_str.contains("961cc777") {
-        Some(WinGuid { data1: 0x961cc777, data2: 0x2547, data3: 0x4f9d, data4: [0x81,0x74,0x7d,0x86,0x18,0x1b,0x8a,0x7a] })
+        Some(WinGuid {
+            data1: 0x961cc777,
+            data2: 0x2547,
+            data3: 0x4f9d,
+            data4: [0x81, 0x74, 0x7d, 0x86, 0x18, 0x1b, 0x8a, 0x7a],
+        })
     } else if guid_str.contains("ded574b5") {
-        Some(WinGuid { data1: 0xded574b5, data2: 0x45a0, data3: 0x4f42, data4: [0x87,0x37,0x46,0x34,0x5c,0x09,0xc2,0x38] })
+        Some(WinGuid {
+            data1: 0xded574b5,
+            data2: 0x45a0,
+            data3: 0x4f42,
+            data4: [0x87, 0x37, 0x46, 0x34, 0x5c, 0x09, 0xc2, 0x38],
+        })
     } else {
-        Some(WinGuid { data1: 0x3af9b8d9, data2: 0x7c97, data3: 0x431d, data4: [0xad,0x78,0x34,0xa8,0xbf,0xea,0x43,0x9f] })
+        Some(WinGuid {
+            data1: 0x3af9b8d9,
+            data2: 0x7c97,
+            data3: 0x431d,
+            data4: [0xad, 0x78, 0x34, 0xa8, 0xbf, 0xea, 0x43, 0x9f],
+        })
     };
 
     if let Some(guid) = guid_bytes {
@@ -284,14 +333,16 @@ pub fn set_windows_power_overlay(mode: PerformanceMode) {
     // whether the device is currently on AC or DC power.
     let guid_with_braces = guid_str.to_string();
     let val_utf16: Vec<u16> = guid_with_braces.encode_utf16().chain(Some(0)).collect();
-    let val_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(val_utf16.as_ptr().cast(), val_utf16.len() * 2)
-    };
+    let val_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(val_utf16.as_ptr().cast(), val_utf16.len() * 2) };
 
     let reg_values = ["ActiveOverlayAcPowerScheme", "ActiveOverlayDcPowerScheme"];
 
     unsafe {
-        let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY).encode_wide().chain(Some(0)).collect();
+        let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let mut hkey = std::mem::zeroed();
         if RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
@@ -299,19 +350,18 @@ pub fn set_windows_power_overlay(mode: PerformanceMode) {
             0,
             KEY_SET_VALUE,
             &mut hkey,
-        ).is_err() {
+        )
+        .is_err()
+        {
             log::warn!("set_windows_power_overlay: cannot open registry key (needs elevation)");
             return;
         }
         for val_name_str in &reg_values {
-            let val_name: Vec<u16> = OsStr::new(val_name_str).encode_wide().chain(Some(0)).collect();
-            let _ = RegSetValueExW(
-                hkey,
-                PCWSTR(val_name.as_ptr()),
-                0,
-                REG_SZ,
-                Some(val_bytes),
-            );
+            let val_name: Vec<u16> = OsStr::new(val_name_str)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            let _ = RegSetValueExW(hkey, PCWSTR(val_name.as_ptr()), 0, REG_SZ, Some(val_bytes));
         }
         let _ = RegCloseKey(hkey).ok();
     }
@@ -321,14 +371,15 @@ pub fn set_windows_power_overlay(mode: PerformanceMode) {
 #[cfg(not(windows))]
 pub fn set_windows_power_overlay(_mode: PerformanceMode) {}
 
-
-
 fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
     #[cfg(windows)]
     {
         use windows::core::PCWSTR;
         unsafe {
-            let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY).encode_wide().chain(Some(0)).collect();
+            let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let mut hkey = std::mem::zeroed();
             let mut disposition = REG_CREATE_KEY_DISPOSITION::default();
             // Use RegCreateKeyExW so the key is created if it does not yet exist
@@ -342,9 +393,14 @@ fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
                 None,
                 &mut hkey,
                 Some(&mut disposition),
-            ).ok().context("Create/open HKLM\\SOFTWARE\\MI\\PerformanceMode")?;
+            )
+            .ok()
+            .context("Create/open HKLM\\SOFTWARE\\MI\\PerformanceMode")?;
 
-            let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE).encode_wide().chain(Some(0)).collect();
+            let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
             let hw_val = mode.to_hw_value();
             RegSetValueExW(
                 hkey,
@@ -352,7 +408,9 @@ fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
                 0,
                 REG_DWORD,
                 Some(&hw_val.to_le_bytes()),
-            ).ok().context("Write DWORD to registry")?;
+            )
+            .ok()
+            .context("Write DWORD to registry")?;
             let _ = RegCloseKey(hkey).ok();
         }
     }
@@ -381,11 +439,9 @@ fn find_hq_wmi_instance_name(wmi: &wmi::WMIConnection) -> Result<String> {
 /// (uses ACPI\PNP0C14\0 device, WmiMethodId=9).
 #[cfg(windows)]
 fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
-    use wmi::{COMLibrary, WMIConnection};
     use windows::core::{BSTR, VARIANT};
-    use windows::Win32::System::Wmi::{
-        WBEM_FLAG_RETURN_WBEM_COMPLETE, WBEM_GENERIC_FLAG_TYPE,
-    };
+    use windows::Win32::System::Wmi::{WBEM_FLAG_RETURN_WBEM_COMPLETE, WBEM_GENERIC_FLAG_TYPE};
+    use wmi::{COMLibrary, WMIConnection};
 
     let com = COMLibrary::without_security().context("HQ WMI: COM init")?;
     let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com)
@@ -402,31 +458,28 @@ fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
     // WMI object-path format requires backslashes in key values to be escaped as \\.
     // e.g. InstanceName="ACPI\PNP0C14\0_0"  →  "ACPI\\PNP0C14\\0_0" in the path string.
     let escaped = instance_name.replace('\\', "\\\\");
-    let instance_path = BSTR::from(
-        format!("HQWmiCommonInterface.InstanceName=\"{escaped}\"")
-    );
-    let method_name   = BSTR::from("SetPerformanceMode");
+    let instance_path = BSTR::from(format!("HQWmiCommonInterface.InstanceName=\"{escaped}\""));
+    let method_name = BSTR::from("SetPerformanceMode");
 
     unsafe {
         // Get the class definition to spawn a parameter object
         let mut class_obj = None;
-        wmi.svc.GetObject(
-            &BSTR::from("HQWmiCommonInterface"),
-            WBEM_FLAG_RETURN_WBEM_COMPLETE,
-            None,
-            Some(&mut class_obj),
-            None,
-        ).context("HQ WMI: GetObject class")?;
+        wmi.svc
+            .GetObject(
+                &BSTR::from("HQWmiCommonInterface"),
+                WBEM_FLAG_RETURN_WBEM_COMPLETE,
+                None,
+                Some(&mut class_obj),
+                None,
+            )
+            .context("HQ WMI: GetObject class")?;
         let class_obj = class_obj.context("HQ WMI: class object is None")?;
 
         // Get the in-params class for SetPerformanceMode
         let mut in_sig: Option<windows::Win32::System::Wmi::IWbemClassObject> = None;
-        class_obj.GetMethod(
-            &method_name,
-            0,
-            &mut in_sig as *mut _,
-            std::ptr::null_mut(),
-        ).context("HQ WMI: GetMethod")?;
+        class_obj
+            .GetMethod(&method_name, 0, &mut in_sig as *mut _, std::ptr::null_mut())
+            .context("HQ WMI: GetMethod")?;
         let in_sig = in_sig.context("HQ WMI: in-params class is None")?;
 
         // Spawn an instance of the in-params class
@@ -434,29 +487,30 @@ fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
 
         // Set req = mode string (e.g. "1" for Balance)
         let req_variant = VARIANT::from(BSTR::from(mode_str.as_str()));
-        in_params.Put(
-            &BSTR::from("req"),
-            0,
-            &req_variant,
-            0,
-        ).context("HQ WMI: Put req")?;
+        in_params
+            .Put(&BSTR::from("req"), 0, &req_variant, 0)
+            .context("HQ WMI: Put req")?;
 
         // Execute the method on the specific instance
         let mut out_params = None;
-        wmi.svc.ExecMethod(
-            &instance_path,
-            &method_name,
-            WBEM_GENERIC_FLAG_TYPE(0),
-            None,
-            Some(&in_params),
-            Some(&mut out_params),
-            None,
-        ).context("HQ WMI: ExecMethod")?;
+        wmi.svc
+            .ExecMethod(
+                &instance_path,
+                &method_name,
+                WBEM_GENERIC_FLAG_TYPE(0),
+                None,
+                Some(&in_params),
+                Some(&mut out_params),
+                None,
+            )
+            .context("HQ WMI: ExecMethod")?;
 
         if let Some(out) = out_params {
             let mut ret_v = VARIANT::default();
             let _ = out.Get(&BSTR::from("ret"), 0, &mut ret_v, None, None);
-            let ret_str = BSTR::try_from(&ret_v).map(|b| b.to_string()).unwrap_or_default();
+            let ret_str = BSTR::try_from(&ret_v)
+                .map(|b| b.to_string())
+                .unwrap_or_default();
             log::debug!("HQ WMI SetPerformanceMode({mode:?}) → {ret_str}");
         }
     }
@@ -474,7 +528,10 @@ fn send_via_vhf(mode: PerformanceMode) -> Result<()> {
     let hw_val = mode.to_hw_value();
 
     unsafe {
-        let path_w: Vec<u16> = OsStr::new(&device_path).encode_wide().chain(Some(0)).collect();
+        let path_w: Vec<u16> = OsStr::new(&device_path)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         let handle = CreateFileW(
             windows::core::PCWSTR(path_w.as_ptr()),
             GENERIC_WRITE.0,
@@ -483,7 +540,8 @@ fn send_via_vhf(mode: PerformanceMode) -> Result<()> {
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
             HANDLE::default(),
-        ).context("Open VHF device")?;
+        )
+        .context("Open VHF device")?;
 
         if handle == INVALID_HANDLE_VALUE {
             anyhow::bail!("INVALID_HANDLE_VALUE for VHF device");
@@ -531,58 +589,55 @@ fn find_vhf_device_path() -> Result<String> {
             None,
             None,
             DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
-        ).context("SetupDiGetClassDevsW")?;
+        )
+        .context("SetupDiGetClassDevsW")?;
 
         let mut iface_data = SP_DEVICE_INTERFACE_DATA {
             cbSize: std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
             ..std::mem::zeroed()
         };
 
-        let result = if SetupDiEnumDeviceInterfaces(
-            dev_info,
-            None,
-            &guid,
-            0,
-            &mut iface_data,
-        ).is_ok() {
-            let mut required_size = 0u32;
-            // First call: get required size
-            let _ = SetupDiGetDeviceInterfaceDetailW(
-                dev_info,
-                &iface_data,
-                None,
-                0,
-                Some(&mut required_size),
-                None,
-            );
+        let result =
+            if SetupDiEnumDeviceInterfaces(dev_info, None, &guid, 0, &mut iface_data).is_ok() {
+                let mut required_size = 0u32;
+                // First call: get required size
+                let _ = SetupDiGetDeviceInterfaceDetailW(
+                    dev_info,
+                    &iface_data,
+                    None,
+                    0,
+                    Some(&mut required_size),
+                    None,
+                );
 
-            let buf_size = required_size as usize;
-            let mut buf = vec![0u8; buf_size];
-            let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
-            (*detail).cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+                let buf_size = required_size as usize;
+                let mut buf = vec![0u8; buf_size];
+                let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+                (*detail).cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
 
-            let mut devinfo_data = SP_DEVINFO_DATA {
-                cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
-                ..std::mem::zeroed()
+                let mut devinfo_data = SP_DEVINFO_DATA {
+                    cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+                    ..std::mem::zeroed()
+                };
+
+                SetupDiGetDeviceInterfaceDetailW(
+                    dev_info,
+                    &iface_data,
+                    Some(detail),
+                    buf_size as u32,
+                    None,
+                    Some(&mut devinfo_data),
+                )
+                .context("SetupDiGetDeviceInterfaceDetailW")?;
+
+                // DevicePath is at offset 4 in SP_DEVICE_INTERFACE_DETAIL_DATA_W
+                let path_ptr = buf.as_ptr().add(4) as *const u16;
+                let len = (0..).take_while(|&i| *path_ptr.add(i) != 0).count();
+                let path_slice = std::slice::from_raw_parts(path_ptr, len);
+                Ok(String::from_utf16_lossy(path_slice))
+            } else {
+                Err(anyhow::anyhow!("No VHF device interface found"))
             };
-
-            SetupDiGetDeviceInterfaceDetailW(
-                dev_info,
-                &iface_data,
-                Some(detail),
-                buf_size as u32,
-                None,
-                Some(&mut devinfo_data),
-            ).context("SetupDiGetDeviceInterfaceDetailW")?;
-
-            // DevicePath is at offset 4 in SP_DEVICE_INTERFACE_DETAIL_DATA_W
-            let path_ptr = buf.as_ptr().add(4) as *const u16;
-            let len = (0..).take_while(|&i| *path_ptr.add(i) != 0).count();
-            let path_slice = std::slice::from_raw_parts(path_ptr, len);
-            Ok(String::from_utf16_lossy(path_slice))
-        } else {
-            Err(anyhow::anyhow!("No VHF device interface found"))
-        };
 
         SetupDiDestroyDeviceInfoList(dev_info).ok();
         result
@@ -610,9 +665,9 @@ pub struct PerfDebugInfo {
 pub fn get_perf_debug() -> PerfDebugInfo {
     #[cfg(windows)]
     {
-        use wmi::{COMLibrary, WMIConnection};
         use windows::core::{BSTR, VARIANT};
         use windows::Win32::System::Wmi::WBEM_GENERIC_FLAG_TYPE;
+        use wmi::{COMLibrary, WMIConnection};
 
         let mut info = PerfDebugInfo {
             hq_wmi_instance: None,
@@ -632,56 +687,76 @@ pub fn get_perf_debug() -> PerfDebugInfo {
             info.overlay_mode = format!("{mode:?}");
         }
         // VHF path
-        info.vhf_device_path = crate::hw::discovery::global_profile()
-            .and_then(|p| p.vhf_device_path.clone());
+        info.vhf_device_path =
+            crate::hw::discovery::global_profile().and_then(|p| p.vhf_device_path.clone());
 
         // WMI check
-        let Ok(com) = COMLibrary::without_security() else { return info; };
-        let Ok(wmi) = WMIConnection::with_namespace_path("ROOT\\WMI", com) else { return info; };
+        let Ok(com) = COMLibrary::without_security() else {
+            return info;
+        };
+        let Ok(wmi) = WMIConnection::with_namespace_path("ROOT\\WMI", com) else {
+            return info;
+        };
 
         if let Ok(name) = find_hq_wmi_instance_name(&wmi) {
             info.hq_wmi_instance = Some(name.clone());
 
             // Live test: call SetPerformanceMode("1") and capture return
             let escaped = name.replace('\\', "\\\\");
-            let instance_path = BSTR::from(format!("HQWmiCommonInterface.InstanceName=\"{escaped}\""));
-            let method_name   = BSTR::from("SetPerformanceMode");
+            let instance_path =
+                BSTR::from(format!("HQWmiCommonInterface.InstanceName=\"{escaped}\""));
+            let method_name = BSTR::from("SetPerformanceMode");
 
             // Wrap in a closure so `?` propagates into anyhow::Result correctly.
-            let test_ok: anyhow::Result<String> = (|| -> anyhow::Result<String> { unsafe {
-                let mut class_obj = None;
-                wmi.svc.GetObject(
-                    &BSTR::from("HQWmiCommonInterface"),
-                    windows::Win32::System::Wmi::WBEM_FLAG_RETURN_WBEM_COMPLETE,
-                    None,
-                    Some(&mut class_obj),
-                    None,
-                ).context("GetObject")?;
-                let class_obj = class_obj.context("class obj none")?;
+            let test_ok: anyhow::Result<String> = (|| -> anyhow::Result<String> {
+                unsafe {
+                    let mut class_obj = None;
+                    wmi.svc
+                        .GetObject(
+                            &BSTR::from("HQWmiCommonInterface"),
+                            windows::Win32::System::Wmi::WBEM_FLAG_RETURN_WBEM_COMPLETE,
+                            None,
+                            Some(&mut class_obj),
+                            None,
+                        )
+                        .context("GetObject")?;
+                    let class_obj = class_obj.context("class obj none")?;
 
-                let mut in_sig: Option<windows::Win32::System::Wmi::IWbemClassObject> = None;
-                class_obj.GetMethod(&method_name, 0, &mut in_sig as *mut _, std::ptr::null_mut())
-                    .context("GetMethod")?;
-                let in_sig = in_sig.context("in_sig none")?;
-                let in_params = in_sig.SpawnInstance(0).context("SpawnInstance")?;
+                    let mut in_sig: Option<windows::Win32::System::Wmi::IWbemClassObject> = None;
+                    class_obj
+                        .GetMethod(&method_name, 0, &mut in_sig as *mut _, std::ptr::null_mut())
+                        .context("GetMethod")?;
+                    let in_sig = in_sig.context("in_sig none")?;
+                    let in_params = in_sig.SpawnInstance(0).context("SpawnInstance")?;
 
-                let req_v = VARIANT::from(BSTR::from("1"));
-                in_params.Put(&BSTR::from("req"), 0, &req_v, 0).context("Put req")?;
+                    let req_v = VARIANT::from(BSTR::from("1"));
+                    in_params
+                        .Put(&BSTR::from("req"), 0, &req_v, 0)
+                        .context("Put req")?;
 
-                let mut out_params = None;
-                wmi.svc.ExecMethod(
-                    &instance_path, &method_name,
-                    WBEM_GENERIC_FLAG_TYPE(0), None,
-                    Some(&in_params), Some(&mut out_params), None,
-                ).context("ExecMethod")?;
+                    let mut out_params = None;
+                    wmi.svc
+                        .ExecMethod(
+                            &instance_path,
+                            &method_name,
+                            WBEM_GENERIC_FLAG_TYPE(0),
+                            None,
+                            Some(&in_params),
+                            Some(&mut out_params),
+                            None,
+                        )
+                        .context("ExecMethod")?;
 
-                let ret = out_params.and_then(|out| {
-                    let mut v = VARIANT::default();
-                    out.Get(&BSTR::from("ret"), 0, &mut v, None, None).ok()?;
-                    BSTR::try_from(&v).ok().map(|b| b.to_string())
-                }).unwrap_or_default();
-                Ok(ret)
-            } })();
+                    let ret = out_params
+                        .and_then(|out| {
+                            let mut v = VARIANT::default();
+                            out.Get(&BSTR::from("ret"), 0, &mut v, None, None).ok()?;
+                            BSTR::try_from(&v).ok().map(|b| b.to_string())
+                        })
+                        .unwrap_or_default();
+                    Ok(ret)
+                }
+            })();
 
             match test_ok {
                 Ok(ret) => {

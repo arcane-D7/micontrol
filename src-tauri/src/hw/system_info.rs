@@ -34,33 +34,53 @@ fn cpu_pdh_poller_thread() {
     #[cfg(windows)]
     unsafe {
         use libloading::{Library, Symbol};
-        type FnOpenQuery  = unsafe extern "system" fn(*const std::ffi::c_void, usize, *mut isize) -> u32;
+        type FnOpenQuery =
+            unsafe extern "system" fn(*const std::ffi::c_void, usize, *mut isize) -> u32;
         type FnAddCounter = unsafe extern "system" fn(isize, *const u16, usize, *mut isize) -> u32;
-        type FnCollect    = unsafe extern "system" fn(isize) -> u32;
-        type FnGetValue   = unsafe extern "system" fn(isize, u32, *mut u32, *mut u8) -> u32;
-        type FnClose      = unsafe extern "system" fn(isize) -> u32;
+        type FnCollect = unsafe extern "system" fn(isize) -> u32;
+        type FnGetValue = unsafe extern "system" fn(isize, u32, *mut u32, *mut u8) -> u32;
+        type FnClose = unsafe extern "system" fn(isize) -> u32;
 
         let lib: &'static Library = match Library::new("pdh.dll") {
             Ok(l) => Box::leak(Box::new(l)),
             Err(_) => return,
         };
-        let open_q:  Symbol<'static, FnOpenQuery>  = match lib.get(b"PdhOpenQueryW\0")               { Ok(f) => f, Err(_) => return };
-        let add_c:   Symbol<'static, FnAddCounter> = match lib.get(b"PdhAddEnglishCounterW\0")       { Ok(f) => f, Err(_) => return };
-        let collect: Symbol<'static, FnCollect>    = match lib.get(b"PdhCollectQueryData\0")         { Ok(f) => f, Err(_) => return };
-        let get_val: Symbol<'static, FnGetValue>   = match lib.get(b"PdhGetFormattedCounterValue\0") { Ok(f) => f, Err(_) => return };
-        let close_q: Symbol<'static, FnClose>      = match lib.get(b"PdhCloseQuery\0")               { Ok(f) => f, Err(_) => return };
+        let open_q: Symbol<'static, FnOpenQuery> = match lib.get(b"PdhOpenQueryW\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let add_c: Symbol<'static, FnAddCounter> = match lib.get(b"PdhAddEnglishCounterW\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let collect: Symbol<'static, FnCollect> = match lib.get(b"PdhCollectQueryData\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let get_val: Symbol<'static, FnGetValue> = match lib.get(b"PdhGetFormattedCounterValue\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let close_q: Symbol<'static, FnClose> = match lib.get(b"PdhCloseQuery\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
 
         let mut query: isize = 0;
-        if open_q(std::ptr::null(), 0, &mut query) != 0 { return; }
+        if open_q(std::ptr::null(), 0, &mut query) != 0 {
+            return;
+        }
 
         // Primary: Processor Information provider (Vista+) — scheduling-based %.
         let path: Vec<u16> = "\\Processor Information(_Total)\\% Processor Time\0"
-            .encode_utf16().collect();
+            .encode_utf16()
+            .collect();
         let mut counter: isize = 0;
         if add_c(query, path.as_ptr(), 0, &mut counter) != 0 {
             // Fallback: legacy Processor provider (XP-era, always available)
             let path2: Vec<u16> = "\\Processor(_Total)\\% Processor Time\0"
-                .encode_utf16().collect();
+                .encode_utf16()
+                .collect();
             if add_c(query, path2.as_ptr(), 0, &mut counter) != 0 {
                 close_q(query);
                 return;
@@ -77,13 +97,25 @@ fn cpu_pdh_poller_thread() {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             collect(query);
-            if get_val(counter, PDH_FMT_DOUBLE, &mut dummy_type, val_buf.as_mut_ptr()) != 0 { continue; }
+            if get_val(
+                counter,
+                PDH_FMT_DOUBLE,
+                &mut dummy_type,
+                val_buf.as_mut_ptr(),
+            ) != 0
+            {
+                continue;
+            }
             let c_status = u32::from_ne_bytes(val_buf[0..4].try_into().unwrap_or([1; 4]));
-            if c_status > 1 { continue; }
+            if c_status > 1 {
+                continue;
+            }
             let pct = f64::from_ne_bytes(val_buf[8..16].try_into().unwrap_or([0; 8]));
             if pct.is_finite() {
                 if let Some(cache) = CPU_USAGE_CACHE.get() {
-                    if let Ok(mut g) = cache.lock() { *g = pct.clamp(0.0, 100.0); }
+                    if let Ok(mut g) = cache.lock() {
+                        *g = pct.clamp(0.0, 100.0);
+                    }
                 }
             }
         }
@@ -123,11 +155,12 @@ fn gpu_pdh_poller_thread() {
         use libloading::{Library, Symbol};
 
         // Function types from pdh.dll
-        type FnOpenQuery  = unsafe extern "system" fn(*const std::ffi::c_void, usize, *mut isize) -> u32;
+        type FnOpenQuery =
+            unsafe extern "system" fn(*const std::ffi::c_void, usize, *mut isize) -> u32;
         type FnAddCounter = unsafe extern "system" fn(isize, *const u16, usize, *mut isize) -> u32;
-        type FnCollect    = unsafe extern "system" fn(isize) -> u32;
-        type FnGetArray   = unsafe extern "system" fn(isize, u32, *mut u32, *mut u32, *mut u8) -> u32;
-        type FnClose      = unsafe extern "system" fn(isize) -> u32;
+        type FnCollect = unsafe extern "system" fn(isize) -> u32;
+        type FnGetArray = unsafe extern "system" fn(isize, u32, *mut u32, *mut u32, *mut u8) -> u32;
+        type FnClose = unsafe extern "system" fn(isize) -> u32;
 
         // Box::leak keeps the library loaded for the process lifetime (this
         // thread never exits, so the lib is always needed).
@@ -136,11 +169,27 @@ fn gpu_pdh_poller_thread() {
             Err(_) => return,
         };
 
-        let open_q:  Symbol<'static, FnOpenQuery>  = match lib.get(b"PdhOpenQueryW\0")            { Ok(f) => f, Err(_) => return };
-        let add_c:   Symbol<'static, FnAddCounter> = match lib.get(b"PdhAddEnglishCounterW\0")    { Ok(f) => f, Err(_) => return };
-        let collect: Symbol<'static, FnCollect>    = match lib.get(b"PdhCollectQueryData\0")      { Ok(f) => f, Err(_) => return };
-        let get_arr: Symbol<'static, FnGetArray>   = match lib.get(b"PdhGetFormattedCounterArrayW\0") { Ok(f) => f, Err(_) => return };
-        let close_q: Symbol<'static, FnClose>      = match lib.get(b"PdhCloseQuery\0")            { Ok(f) => f, Err(_) => return };
+        let open_q: Symbol<'static, FnOpenQuery> = match lib.get(b"PdhOpenQueryW\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let add_c: Symbol<'static, FnAddCounter> = match lib.get(b"PdhAddEnglishCounterW\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let collect: Symbol<'static, FnCollect> = match lib.get(b"PdhCollectQueryData\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let get_arr: Symbol<'static, FnGetArray> = match lib.get(b"PdhGetFormattedCounterArrayW\0")
+        {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let close_q: Symbol<'static, FnClose> = match lib.get(b"PdhCloseQuery\0") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
 
         let mut query: isize = 0;
         if open_q(std::ptr::null(), 0, &mut query) != 0 {
@@ -160,8 +209,8 @@ fn gpu_pdh_poller_thread() {
         // First collection establishes the baseline for rate counters
         collect(query);
 
-        const PDH_FMT_DOUBLE:  u32 = 0x00000200;
-        const PDH_MORE_DATA:   u32 = 0x800007D2;
+        const PDH_FMT_DOUBLE: u32 = 0x00000200;
+        const PDH_MORE_DATA: u32 = 0x800007D2;
         // PDH_FMT_COUNTERVALUE_ITEM_W layout on x64:
         //   offset  0 : szName     LPWSTR (pointer, 8 bytes)
         //   offset  8 : CStatus    DWORD  (4 bytes)
@@ -177,16 +226,29 @@ fn gpu_pdh_poller_thread() {
             // First call: get required buffer size.
             // PdhGetFormattedCounterArrayW signature:
             //   (hCounter, dwFormat, lpdwBufferSize, lpdwItemCount, ItemBuffer)
-            let mut buf_size: u32 = 0;   // lpdwBufferSize — receives required bytes
+            let mut buf_size: u32 = 0; // lpdwBufferSize — receives required bytes
             let mut item_count: u32 = 0; // lpdwItemCount  — receives number of items
-            let st = get_arr(counter, PDH_FMT_DOUBLE, &mut buf_size, &mut item_count, std::ptr::null_mut());
+            let st = get_arr(
+                counter,
+                PDH_FMT_DOUBLE,
+                &mut buf_size,
+                &mut item_count,
+                std::ptr::null_mut(),
+            );
             if st != PDH_MORE_DATA || buf_size == 0 || item_count == 0 {
                 continue;
             }
 
             // Second call: fill the buffer (buf_size bytes allocated).
             let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
-            if get_arr(counter, PDH_FMT_DOUBLE, &mut buf_size, &mut item_count, buf.as_mut_ptr()) != 0 {
+            if get_arr(
+                counter,
+                PDH_FMT_DOUBLE,
+                &mut buf_size,
+                &mut item_count,
+                buf.as_mut_ptr(),
+            ) != 0
+            {
                 continue;
             }
 
@@ -199,12 +261,14 @@ fn gpu_pdh_poller_thread() {
             let mut total = 0.0f64;
             for i in 0..n {
                 let base = i * ITEM_SIZE;
-                let c_status = u32::from_ne_bytes(buf[base + 8..base + 12].try_into().unwrap_or([0xff; 4]));
+                let c_status =
+                    u32::from_ne_bytes(buf[base + 8..base + 12].try_into().unwrap_or([0xff; 4]));
                 // Accept valid (0) or new (1) data
                 if c_status > 1 {
                     continue;
                 }
-                let val = f64::from_ne_bytes(buf[base + 16..base + 24].try_into().unwrap_or([0; 8]));
+                let val =
+                    f64::from_ne_bytes(buf[base + 16..base + 24].try_into().unwrap_or([0; 8]));
                 if !val.is_finite() || val < 0.0 {
                     continue;
                 }
@@ -216,7 +280,8 @@ fn gpu_pdh_poller_thread() {
                 // Each process gets a time-slice on the shared hardware engine; the
                 // sum of their slices = total engine busy time.  Values are clamped
                 // to 100 below so simultaneous use across engines never over-reports.
-                let name_ptr = usize::from_ne_bytes(buf[base..base + 8].try_into().unwrap_or([0; 8]));
+                let name_ptr =
+                    usize::from_ne_bytes(buf[base..base + 8].try_into().unwrap_or([0; 8]));
                 let contains_3d = if name_ptr >= buf_base && name_ptr + 2 <= buf_base + buf.len() {
                     let off = name_ptr - buf_base;
                     let wchars: Vec<u16> = buf[off..]
@@ -269,8 +334,8 @@ pub struct SystemInfo {
 pub fn get_system_info() -> Result<SystemInfo> {
     #[cfg(windows)]
     {
-        use wmi::{COMLibrary, WMIConnection};
         use std::collections::HashMap;
+        use wmi::{COMLibrary, WMIConnection};
 
         // Start the PDH pollers on first call (no-op on subsequent calls)
         ensure_gpu_poller();
@@ -312,7 +377,9 @@ pub fn get_system_info() -> Result<SystemInfo> {
 
         // ── Dedicated VRAM used ───────────────────────────────────────────
         let vram_q: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT DedicatedUsage FROM Win32_PerfFormattedData_GPUAdapterMemory_GPUAdapter")
+            .raw_query(
+                "SELECT DedicatedUsage FROM Win32_PerfFormattedData_GPUAdapterMemory_GPUAdapter",
+            )
             .unwrap_or_default();
         let vram_used_mb = vram_q
             .first()
@@ -328,13 +395,14 @@ pub fn get_system_info() -> Result<SystemInfo> {
         let mem_query: Vec<HashMap<String, wmi::Variant>> = wmi
             .raw_query("SELECT Capacity FROM Win32_PhysicalMemory")
             .unwrap_or_default();
-        let ram_total_bytes: u64 = mem_query.iter().filter_map(|row| {
-            match row.get("Capacity") {
+        let ram_total_bytes: u64 = mem_query
+            .iter()
+            .filter_map(|row| match row.get("Capacity") {
                 Some(wmi::Variant::String(s)) => s.parse::<u64>().ok(),
                 Some(wmi::Variant::UI8(v)) => Some(*v),
                 _ => None,
-            }
-        }).sum();
+            })
+            .sum();
 
         // ── OS info + available (free) memory ─────────────────────────────
         let os_info: Vec<HashMap<String, wmi::Variant>> = wmi
@@ -346,8 +414,14 @@ pub fn get_system_info() -> Result<SystemInfo> {
             Some(wmi::Variant::String(s)) => s.trim().to_string(),
             _ => "Unknown CPU".to_string(),
         };
-        let cpu_cores   = match cpu.get("NumberOfCores")             { Some(wmi::Variant::UI4(v)) => *v, _ => 0 };
-        let cpu_threads = match cpu.get("NumberOfLogicalProcessors") { Some(wmi::Variant::UI4(v)) => *v, _ => 0 };
+        let cpu_cores = match cpu.get("NumberOfCores") {
+            Some(wmi::Variant::UI4(v)) => *v,
+            _ => 0,
+        };
+        let cpu_threads = match cpu.get("NumberOfLogicalProcessors") {
+            Some(wmi::Variant::UI4(v)) => *v,
+            _ => 0,
+        };
         let ram_total_gb = ram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
         let free_kb = match os_row.get("FreePhysicalMemory") {
@@ -369,9 +443,15 @@ pub fn get_system_info() -> Result<SystemInfo> {
         };
 
         Ok(SystemInfo {
-            cpu_name, cpu_cores, cpu_threads, cpu_usage,
-            gpu_name, gpu_usage, vram_used_mb,
-            ram_total_gb, ram_used_gb,
+            cpu_name,
+            cpu_cores,
+            cpu_threads,
+            cpu_usage,
+            gpu_name,
+            gpu_usage,
+            vram_used_mb,
+            ram_total_gb,
+            ram_used_gb,
             os_version,
         })
     }
@@ -379,15 +459,15 @@ pub fn get_system_info() -> Result<SystemInfo> {
     {
         Ok(SystemInfo {
             cpu_name: "Unknown".into(),
-            cpu_cores: 0, cpu_threads: 0, cpu_usage: 0.0,
+            cpu_cores: 0,
+            cpu_threads: 0,
+            cpu_usage: 0.0,
             gpu_name: "Unknown".into(),
-            gpu_usage: 0.0, vram_used_mb: 0.0,
-            ram_total_gb: 0.0, ram_used_gb: 0.0,
+            gpu_usage: 0.0,
+            vram_used_mb: 0.0,
+            ram_total_gb: 0.0,
+            ram_used_gb: 0.0,
             os_version: "".into(),
         })
     }
 }
-
-
-
-

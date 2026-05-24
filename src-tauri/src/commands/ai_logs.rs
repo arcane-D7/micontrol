@@ -86,10 +86,7 @@ fn epoch_days_to_ymd(mut d: u32) -> String {
 
 /// Append one log entry to today's JSONL file.
 #[tauri::command]
-pub async fn write_ai_perf_log(
-    entry: AiPerfLogEntry,
-    app: AppHandle,
-) -> Result<(), String> {
+pub async fn write_ai_perf_log(entry: AiPerfLogEntry, app: AppHandle) -> Result<(), String> {
     let path = today_log_path(&app)?;
     let line = serde_json::to_string(&entry).map_err(|e| e.to_string())? + "\n";
     use std::io::Write;
@@ -98,7 +95,8 @@ pub async fn write_ai_perf_log(
         .append(true)
         .open(&path)
         .map_err(|e| format!("Cannot open log file: {e}"))?;
-    f.write_all(line.as_bytes()).map_err(|e| format!("Write failed: {e}"))?;
+    f.write_all(line.as_bytes())
+        .map_err(|e| format!("Write failed: {e}"))?;
     Ok(())
 }
 
@@ -126,10 +124,14 @@ pub async fn read_ai_perf_logs(
         // Read lines in reverse (newest entries last in file = show them first)
         let lines: Vec<&str> = text.lines().collect();
         for line in lines.iter().rev() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Ok(e) = serde_json::from_str::<AiPerfLogEntry>(line) {
                 entries.push(e);
-                if entries.len() >= cap { break 'outer; }
+                if entries.len() >= cap {
+                    break 'outer;
+                }
             }
         }
     }

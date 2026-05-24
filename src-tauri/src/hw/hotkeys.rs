@@ -141,7 +141,11 @@ pub enum HotkeyAction {
     MediaControl { action: String },
     /// Run a script or executable without a visible window.
     /// `interpreter`: "" (direct) | "powershell" | "cmd"
-    Script { interpreter: String, path: String, args: Vec<String> },
+    Script {
+        interpreter: String,
+        path: String,
+        args: Vec<String>,
+    },
 }
 
 impl Default for HotkeyAction {
@@ -187,12 +191,6 @@ pub struct HotkeyMap {
 
 impl Default for HotkeyMap {
     fn default() -> Self {
-        // Default: Xiaomi key redirects to MiControl itself; others are unbound.
-        let micontrol_exe = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("micontrol.exe"))
-            .to_string_lossy()
-            .into_owned();
-
         Self {
             ai_key: KeyBinding {
                 // Fn+F7 (Xiaomi AI) → toggle the miControl tray popup
@@ -209,7 +207,10 @@ impl Default for HotkeyMap {
             copilot_key: KeyBinding {
                 // Copilot Key → remap to Right Ctrl (same as AHK CopilotKeyRemap)
                 enabled: true,
-                action: HotkeyAction::RemapToKey { vk: 0xA3, extended: true },
+                action: HotkeyAction::RemapToKey {
+                    vk: 0xA3,
+                    extended: true,
+                },
                 label: Some("Copilot Key → Right Ctrl".into()),
             },
         }
@@ -243,7 +244,8 @@ fn migrate_config(mut cfg: HotkeyMap) -> HotkeyMap {
         .and_then(|p| p.canonicalize().ok());
     for binding in [&mut cfg.ai_key, &mut cfg.xiaomi_key, &mut cfg.copilot_key] {
         if let HotkeyAction::LaunchApp { ref path, .. } = binding.action {
-            let is_self = our_exe.as_deref()
+            let is_self = our_exe
+                .as_deref()
                 .and_then(|exe| PathBuf::from(path).canonicalize().ok().map(|p| p == exe))
                 .unwrap_or(false);
             if is_self {
@@ -256,8 +258,11 @@ fn migrate_config(mut cfg: HotkeyMap) -> HotkeyMap {
     if cfg.copilot_key.action == HotkeyAction::FocusMicontrol
         && cfg.copilot_key.label.as_deref() == Some("Copilot Key")
     {
-        cfg.copilot_key.action = HotkeyAction::RemapToKey { vk: 0xA3, extended: true };
-        cfg.copilot_key.label  = Some("Copilot Key → Right Ctrl".into());
+        cfg.copilot_key.action = HotkeyAction::RemapToKey {
+            vk: 0xA3,
+            extended: true,
+        };
+        cfg.copilot_key.label = Some("Copilot Key → Right Ctrl".into());
     }
     cfg
 }
@@ -322,8 +327,10 @@ pub fn start_detect_mode() {
             }
         }
         DETECT_MODE.store(false, Ordering::Relaxed);
-        log::info!("[hotkeys] Key detect mode ended, last VK: {:#04X}",
-            DETECTED_VK.load(Ordering::Relaxed));
+        log::info!(
+            "[hotkeys] Key detect mode ended, last VK: {:#04X}",
+            DETECTED_VK.load(Ordering::Relaxed)
+        );
     });
 }
 
@@ -386,18 +393,15 @@ pub fn stop_hook() {
 // ── Hook thread ───────────────────────────────────────────────────────────────
 
 fn hook_thread_main() {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HINSTANCE, HMODULE};
     use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::Input::{
-        RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK,
-    };
+    use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DispatchMessageW, GetMessageW, PeekMessageW,
-        RegisterClassExW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-        WH_KEYBOARD_LL, HWND_MESSAGE, MSG, PM_NOREMOVE, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WNDCLASSEXW,
+        CreateWindowExW, DispatchMessageW, GetMessageW, PeekMessageW, RegisterClassExW,
+        SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HWND_MESSAGE, MSG, PM_NOREMOVE,
+        WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
     };
-    use windows::core::PCWSTR;
 
     // Record this thread's ID so stop_hook() can post WM_QUIT.
     let tid = unsafe { GetCurrentThreadId() };
@@ -406,7 +410,7 @@ fn hook_thread_main() {
     // Force-create the thread message queue before any window or hook work.
     unsafe {
         let mut msg = MSG::default();
-        PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
     }
 
     // ── Create a message-only window so Raw Input has a delivery target ──────
@@ -426,9 +430,14 @@ fn hook_thread_main() {
             PCWSTR(class_name.as_ptr()),
             PCWSTR::null(),
             WINDOW_STYLE::default(),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             HWND_MESSAGE,
-            None, None, None,
+            None,
+            None,
+            None,
         )
     };
     let hwnd = match hwnd {
@@ -448,18 +457,42 @@ fn hook_thread_main() {
     //  • UsagePage 0xFFBC / UsageId 0x0088 = Vendor-specific (Xiaomi USB keyboard col04)
     //    These two vendor channels carry Xiaomi-specific key codes not in Consumer spec.
     let raw_devices = [
-        RAWINPUTDEVICE { usUsagePage: 0x01,   usUsage: 0x06,   dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd },
-        RAWINPUTDEVICE { usUsagePage: 0x0C,   usUsage: 0x01,   dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd },
-        RAWINPUTDEVICE { usUsagePage: 0xFF00, usUsage: 0x000E, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd },
-        RAWINPUTDEVICE { usUsagePage: 0xFFBC, usUsage: 0x0088, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd },
+        RAWINPUTDEVICE {
+            usUsagePage: 0x01,
+            usUsage: 0x06,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+        RAWINPUTDEVICE {
+            usUsagePage: 0x0C,
+            usUsage: 0x01,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+        RAWINPUTDEVICE {
+            usUsagePage: 0xFF00,
+            usUsage: 0x000E,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+        RAWINPUTDEVICE {
+            usUsagePage: 0xFFBC,
+            usUsage: 0x0088,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
     ];
-    match unsafe { RegisterRawInputDevices(&raw_devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32) } {
+    match unsafe {
+        RegisterRawInputDevices(&raw_devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+    } {
         Ok(()) => {
             RAW_INPUT_ACTIVE.store(true, Ordering::Relaxed);
             log::info!("[hotkeys] Raw Input keyboard+consumer listener active (RIDEV_INPUTSINK, thread {tid})");
         }
         Err(e) => {
-            log::warn!("[hotkeys] RegisterRawInputDevices failed: {e}. Key detection may not work.");
+            log::warn!(
+                "[hotkeys] RegisterRawInputDevices failed: {e}. Key detection may not work."
+            );
         }
     }
 
@@ -469,7 +502,7 @@ fn hook_thread_main() {
     // triggering our handler.  RegisterHotKey claims the VK at the Win32 level:
     // Windows posts WM_HOTKEY to our window and skips the Shell handler entirely.
     {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, RegisterHotKey};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
         for (id, vk) in [
             (101i32, VK_AI_KEY),
             (102i32, VK_XIAOMI_KEY),
@@ -477,7 +510,10 @@ fn hook_thread_main() {
         ] {
             match unsafe { RegisterHotKey(hwnd, id, HOT_KEY_MODIFIERS(0), vk) } {
                 Ok(()) => log::info!("[hotkeys] RegisterHotKey VK={:#04X} id={id} OK", vk),
-                Err(e) => log::warn!("[hotkeys] RegisterHotKey VK={:#04X} id={id} failed: {e}", vk),
+                Err(e) => log::warn!(
+                    "[hotkeys] RegisterHotKey VK={:#04X} id={id} failed: {e}",
+                    vk
+                ),
             }
         }
     }
@@ -486,7 +522,13 @@ fn hook_thread_main() {
     // Action triggering is handled by Raw Input above. This hook only prevents
     // bound keys from reaching Windows default handlers (e.g. Copilot panel).
     let hhook = unsafe {
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), HMODULE::default(), 0).ok()
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(keyboard_hook_proc),
+            HMODULE::default(),
+            0,
+        )
+        .ok()
     };
     match hhook {
         Some(h) => {
@@ -512,11 +554,15 @@ fn hook_thread_main() {
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
         for id in [101i32, 102i32, 103i32] {
-            unsafe { let _ = UnregisterHotKey(hwnd, id); }
+            unsafe {
+                let _ = UnregisterHotKey(hwnd, id);
+            }
         }
     }
     if let Some(h) = hhook {
-        unsafe { let _ = UnhookWindowsHookEx(h); }
+        unsafe {
+            let _ = UnhookWindowsHookEx(h);
+        }
         HOOK_HANDLE.store(0, Ordering::Relaxed);
     }
     RAW_INPUT_ACTIVE.store(false, Ordering::Relaxed);
@@ -592,8 +638,13 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
                 let p = hid.bRawData.as_ptr();
 
                 if DETECT_MODE.load(Ordering::Relaxed) {
-                    let hex: Vec<String> = (0..total).map(|i| format!("{:02X}", *p.add(i))).collect();
-                    log::info!("[hotkeys] DETECT(HID type2 raw): {} byte(s): {}", total, hex.join(" "));
+                    let hex: Vec<String> =
+                        (0..total).map(|i| format!("{:02X}", *p.add(i))).collect();
+                    log::info!(
+                        "[hotkeys] DETECT(HID type2 raw): {} byte(s): {}",
+                        total,
+                        hex.join(" ")
+                    );
                     // Store combined bytes as usage with 0x8000 flag so frontend
                     // can distinguish HID usages from standard keyboard VKs.
                     let usage: u32 = if total >= 3 {
@@ -604,7 +655,9 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
                     } else {
                         *p as u32
                     };
-                    if usage != 0 { DETECTED_VK.store(0x8000 | usage, Ordering::Relaxed); }
+                    if usage != 0 {
+                        DETECTED_VK.store(0x8000 | usage, Ordering::Relaxed);
+                    }
                 }
 
                 // Decode Consumer usage code and dispatch action.
@@ -638,7 +691,11 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
         return;
     }
 
-    log::debug!("[hotkeys] Raw Input key-down: VK={:#04X} scan={:#04X}", vk, kb.MakeCode);
+    log::debug!(
+        "[hotkeys] Raw Input key-down: VK={:#04X} scan={:#04X}",
+        vk,
+        kb.MakeCode
+    );
 
     // ── Key-detect diagnostic mode ────────────────────────────────────────────
     if DETECT_MODE.load(Ordering::Relaxed) {
@@ -648,11 +705,18 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
             0xFF => {
                 // VKey=0xFF: the driver assigned no standard VK. Log the scan code
                 // so the key can be identified via its hardware scan code.
-                log::info!("[hotkeys] DETECT(raw): VK=0xFF scan={:#04X} (no standard VK)", kb.MakeCode);
+                log::info!(
+                    "[hotkeys] DETECT(raw): VK=0xFF scan={:#04X} (no standard VK)",
+                    kb.MakeCode
+                );
                 DETECTED_VK.store(0xFF, Ordering::Relaxed);
             }
             detected_vk => {
-                log::info!("[hotkeys] DETECT(raw): VK={:#04X} (decimal={})", detected_vk, detected_vk);
+                log::info!(
+                    "[hotkeys] DETECT(raw): VK={:#04X} (decimal={})",
+                    detected_vk,
+                    detected_vk
+                );
                 DETECTED_VK.store(detected_vk, Ordering::Relaxed);
             }
         }
@@ -684,7 +748,10 @@ fn handle_hotkey_message(id: i32) {
 
     if let Some(action) = resolve_action(vk) {
         match action {
-            HotkeyAction::RemapToKey { vk: target, extended } => {
+            HotkeyAction::RemapToKey {
+                vk: target,
+                extended,
+            } => {
                 log::info!(
                     "[hotkeys] WM_HOTKEY remap source={:#04X} target={:#04X} extended={}",
                     vk,
@@ -781,7 +848,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     }
 
     let is_keydown = event_type == WM_KEYDOWN || event_type == WM_SYSKEYDOWN;
-    let is_keyup   = event_type == WM_KEYUP   || event_type == WM_SYSKEYUP;
+    let is_keyup = event_type == WM_KEYUP || event_type == WM_SYSKEYUP;
 
     // ── Detect mode: record VK and pass the key through ───────────────────────
     if is_keydown && DETECT_MODE.load(Ordering::Relaxed) {
@@ -802,8 +869,8 @@ unsafe extern "system" fn keyboard_hook_proc(
     if is_keyup {
         let src = REMAP_SOURCE_VK.load(Ordering::Relaxed);
         if src != 0 && vk == src {
-            let target  = REMAP_TARGET_VK.load(Ordering::Relaxed);
-            let ext     = REMAP_TARGET_EXTENDED.load(Ordering::Relaxed);
+            let target = REMAP_TARGET_VK.load(Ordering::Relaxed);
+            let ext = REMAP_TARGET_EXTENDED.load(Ordering::Relaxed);
             // Clear state before injecting to prevent re-entrancy.
             REMAP_SOURCE_VK.store(0, Ordering::Relaxed);
             REMAP_TARGET_VK.store(0, Ordering::Relaxed);
@@ -813,11 +880,13 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
 
         // Also catch F23 key-up when it was the Copilot combo source.
-        if vk == 0x86 /* VK_F23 */ {
+        if vk == 0x86
+        /* VK_F23 */
+        {
             let src_f23 = REMAP_SOURCE_VK.load(Ordering::Relaxed);
             if src_f23 == 0x86 {
                 let target = REMAP_TARGET_VK.load(Ordering::Relaxed);
-                let ext    = REMAP_TARGET_EXTENDED.load(Ordering::Relaxed);
+                let ext = REMAP_TARGET_EXTENDED.load(Ordering::Relaxed);
                 REMAP_SOURCE_VK.store(0, Ordering::Relaxed);
                 REMAP_TARGET_VK.store(0, Ordering::Relaxed);
                 REMAP_TARGET_EXTENDED.store(false, Ordering::Relaxed);
@@ -839,7 +908,11 @@ unsafe extern "system" fn keyboard_hook_proc(
 
     // ── RemapToKey handling: VK_COPILOT (0xC3) path ───────────────────────────
     if vk == VK_COPILOT {
-        if let Some(HotkeyAction::RemapToKey { vk: target, extended }) = resolve_action(vk) {
+        if let Some(HotkeyAction::RemapToKey {
+            vk: target,
+            extended,
+        }) = resolve_action(vk)
+        {
             // Record which physical key is being remapped so keyup knows what to do.
             REMAP_SOURCE_VK.store(VK_COPILOT, Ordering::Relaxed);
             REMAP_TARGET_VK.store(target, Ordering::Relaxed);
@@ -853,12 +926,18 @@ unsafe extern "system" fn keyboard_hook_proc(
     // Some hardware / firmware revisions fire the raw Win+Shift+F23 sequence
     // instead of synthesising VK 0xC3.  Intercept F23 when it arrives while
     // LWin and LShift are physically held.
-    if vk == 0x86 /* VK_F23 */ {
+    if vk == 0x86
+    /* VK_F23 */
+    {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-        let lwin_down   = (GetAsyncKeyState(0x5B) as u16) & 0x8000 != 0; // VK_LWIN
+        let lwin_down = (GetAsyncKeyState(0x5B) as u16) & 0x8000 != 0; // VK_LWIN
         let lshift_down = (GetAsyncKeyState(0xA0) as u16) & 0x8000 != 0; // VK_LSHIFT
         if lwin_down && lshift_down {
-            if let Some(HotkeyAction::RemapToKey { vk: target, extended }) = resolve_action(VK_COPILOT) {
+            if let Some(HotkeyAction::RemapToKey {
+                vk: target,
+                extended,
+            }) = resolve_action(VK_COPILOT)
+            {
                 REMAP_SOURCE_VK.store(0x86, Ordering::Relaxed);
                 REMAP_TARGET_VK.store(target, Ordering::Relaxed);
                 REMAP_TARGET_EXTENDED.store(extended, Ordering::Relaxed);
@@ -969,12 +1048,10 @@ fn dispatch_action(action: &HotkeyAction) {
             // Parse the snake_case mode name into the enum by round-tripping JSON.
             let quoted = format!("\"{}\"", mode);
             match serde_json::from_str::<PerformanceMode>(&quoted) {
-                Ok(pm) => {
-                    match crate::hw::performance::set_performance_mode(pm) {
-                        Ok(res) => log::info!("[hotkeys] SetPerformanceMode {:?}: {:?}", pm, res),
-                        Err(e) => log::warn!("[hotkeys] SetPerformanceMode {:?} failed: {e}", pm),
-                    }
-                }
+                Ok(pm) => match crate::hw::performance::set_performance_mode(pm) {
+                    Ok(res) => log::info!("[hotkeys] SetPerformanceMode {:?}: {:?}", pm, res),
+                    Err(e) => log::warn!("[hotkeys] SetPerformanceMode {:?} failed: {e}", pm),
+                },
                 Err(_) => log::warn!("[hotkeys] SetPerformanceMode: unknown mode '{mode}'"),
             }
         }
@@ -990,12 +1067,12 @@ fn dispatch_action(action: &HotkeyAction) {
         HotkeyAction::MediaControl { action } => {
             // VK codes for media/volume keys.
             let vk: Option<u16> = match action.as_str() {
-                "volume_up"   => Some(0xAF),
+                "volume_up" => Some(0xAF),
                 "volume_down" => Some(0xAE),
-                "mute"        => Some(0xAD),
-                "play_pause"  => Some(0xB3),
-                "next"        => Some(0xB0),
-                "prev"        => Some(0xB1),
+                "mute" => Some(0xAD),
+                "play_pause" => Some(0xB3),
+                "next" => Some(0xB0),
+                "prev" => Some(0xB1),
                 _ => {
                     log::warn!("[hotkeys] MediaControl: unknown action '{action}'");
                     None
@@ -1008,7 +1085,11 @@ fn dispatch_action(action: &HotkeyAction) {
             }
         }
 
-        HotkeyAction::Script { interpreter, path, args } => {
+        HotkeyAction::Script {
+            interpreter,
+            path,
+            args,
+        } => {
             let result = match interpreter.as_str() {
                 "powershell" => std::process::Command::new("powershell")
                     .args(["-NoProfile", "-NonInteractive", "-File", path.as_str()])
@@ -1039,20 +1120,65 @@ fn dispatch_action(action: &HotkeyAction) {
 #[cfg(windows)]
 fn send_win_key_combo(vk: u16) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        VIRTUAL_KEY,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, VIRTUAL_KEY,
     };
     const KEY_DOWN: KEYBD_EVENT_FLAGS = KEYBD_EVENT_FLAGS(0);
-    const KEY_UP:   KEYBD_EVENT_FLAGS = KEYBD_EVENT_FLAGS(2); // KEYEVENTF_KEYUP
-    const VK_LWIN:  VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
+    const KEY_UP: KEYBD_EVENT_FLAGS = KEYBD_EVENT_FLAGS(2); // KEYEVENTF_KEYUP
+    const VK_LWIN: VIRTUAL_KEY = VIRTUAL_KEY(0x5B);
 
     let inputs = [
-        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LWIN,        wScan: 0, dwFlags: KEY_DOWN, time: 0, dwExtraInfo: 0 } } },
-        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: KEY_DOWN, time: 0, dwExtraInfo: 0 } } },
-        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: KEY_UP,   time: 0, dwExtraInfo: 0 } } },
-        INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LWIN,        wScan: 0, dwFlags: KEY_UP,   time: 0, dwExtraInfo: 0 } } },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_LWIN,
+                    wScan: 0,
+                    dwFlags: KEY_DOWN,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: KEY_DOWN,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: KEY_UP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_LWIN,
+                    wScan: 0,
+                    dwFlags: KEY_UP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
     ];
-    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32); }
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 #[cfg(not(windows))]
@@ -1075,21 +1201,27 @@ fn inject_key_event(vk: u16, scan: u16, is_up: bool, extended: bool) {
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let mut flags = KEYBD_EVENT_FLAGS(0);
-    if is_up      { flags = KEYBD_EVENT_FLAGS(flags.0 | KEYEVENTF_KEYUP.0); }
-    if extended   { flags = KEYBD_EVENT_FLAGS(flags.0 | KEYEVENTF_EXTENDEDKEY.0); }
+    if is_up {
+        flags = KEYBD_EVENT_FLAGS(flags.0 | KEYEVENTF_KEYUP.0);
+    }
+    if extended {
+        flags = KEYBD_EVENT_FLAGS(flags.0 | KEYEVENTF_EXTENDEDKEY.0);
+    }
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk:        VIRTUAL_KEY(vk),
-                wScan:      scan,
-                dwFlags:    flags,
-                time:       0,
+                wVk: VIRTUAL_KEY(vk),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
                 dwExtraInfo: MICONTROL_INJECT_MAGIC,
             },
         },
     };
-    unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32); }
+    unsafe {
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 #[cfg(not(windows))]
@@ -1103,9 +1235,9 @@ fn do_remap_keydown(target_vk: u32, extended: bool) {
     // Release the modifier keys that accompany the Copilot combo (Win+Shift+F23).
     // These are no-ops when the key arrived as plain VK 0xC3 (no mods held),
     // but they are essential when the firmware sends the raw Win+Shift+F23 path.
-    inject_key_event(0xA0, 0, true,  false); // LShift up
-    inject_key_event(0x5B, 0, true,  true);  // LWin up  (extended)
-    // Press the target key.
+    inject_key_event(0xA0, 0, true, false); // LShift up
+    inject_key_event(0x5B, 0, true, true); // LWin up  (extended)
+                                           // Press the target key.
     inject_key_event(target_vk as u16, 0, false, extended);
 }
 
@@ -1136,8 +1268,8 @@ fn start_hotkey_remap(source_vk: u32, target_vk: u32, extended: bool) {
         loop {
             let source_down = unsafe {
                 let primary_down = ((GetAsyncKeyState(source_vk as i32) as u16) & 0x8000) != 0;
-                let f23_down = source_vk == VK_COPILOT
-                    && ((GetAsyncKeyState(0x86) as u16) & 0x8000) != 0;
+                let f23_down =
+                    source_vk == VK_COPILOT && ((GetAsyncKeyState(0x86) as u16) & 0x8000) != 0;
                 primary_down || f23_down
             };
 
@@ -1206,7 +1338,8 @@ fn wmi_hid_event_thread(class_name: &str, class_idx: u32) -> anyhow::Result<()> 
     struct HidWmiEvent {
         Active: bool,
         EventDetail: Vec<u8>,
-        InstanceName: String,
+        #[serde(rename = "InstanceName")]
+        _instance_name: String,
     }
 
     let com = COMLibrary::new().context("WMI: COMLibrary")?;
@@ -1261,9 +1394,7 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
     }
 
     // Log every active WMI key event regardless of what happens next.
-    log::info!(
-        "[hotkeys] WMI key: class={class_name} detail={detail:02X?}"
-    );
+    log::info!("[hotkeys] WMI key: class={class_name} detail={detail:02X?}");
 
     // Debounce: IoTDriver may fire active=true repeatedly while the key is held.
     // Suppress re-triggers within 400 ms of the last dispatched action.
@@ -1298,7 +1429,10 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
         ("HID_EVENT20", 0x05) => {
             // Fn+F10: keyboard backlight level cycle.  detail[2] = new level (0x00–0xFF).
             let level = detail.get(2).copied().unwrap_or(0xFF);
-            log::info!("[hotkeys] WMI Fn+F10 → keyboard backlight OSD (raw=0x{:02X})", level);
+            log::info!(
+                "[hotkeys] WMI Fn+F10 → keyboard backlight OSD (raw=0x{:02X})",
+                level
+            );
             LAST_WMI_ACTION_MS.store(now, Ordering::Relaxed);
             crate::hw::osd::show_keyboard_osd(level);
             return;
@@ -1325,7 +1459,7 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
         arc.read().ok().and_then(|cfg| {
             let binding = match (class_name, distinguish_byte) {
                 ("HID_EVENT20", 0x25) => &cfg.xiaomi_key, // Xiaomi logo key (press)
-                ("HID_EVENT20", 0x23) => &cfg.ai_key,    // Fn+F7 AI key (press)
+                ("HID_EVENT20", 0x23) => &cfg.ai_key,     // Fn+F7 AI key (press)
                 _ => return None,
             };
             if binding.enabled && binding.action != HotkeyAction::None {
@@ -1333,7 +1467,8 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
             } else {
                 log::info!(
                     "[hotkeys] WMI key skipped — enabled={} action={:?}",
-                    binding.enabled, binding.action
+                    binding.enabled,
+                    binding.action
                 );
                 None
             }
@@ -1358,13 +1493,12 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
 fn start_virtual_control_hid() {
     #[cfg(windows)]
     unsafe {
-        use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, GetLastError};
+        use windows::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED};
         use windows::Win32::System::Services::{
             ChangeServiceConfigW, CloseServiceHandle, OpenSCManagerW, OpenServiceW,
-            QueryServiceStatus, StartServiceW, SC_MANAGER_CONNECT,
-            ENUM_SERVICE_TYPE, SERVICE_CHANGE_CONFIG, SERVICE_DEMAND_START,
-            SERVICE_ERROR, SERVICE_NO_CHANGE, SERVICE_QUERY_STATUS,
-            SERVICE_RUNNING, SERVICE_START, SERVICE_STATUS,
+            QueryServiceStatus, StartServiceW, ENUM_SERVICE_TYPE, SC_MANAGER_CONNECT,
+            SERVICE_CHANGE_CONFIG, SERVICE_DEMAND_START, SERVICE_ERROR, SERVICE_NO_CHANGE,
+            SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_STATUS,
         };
 
         let scm = match OpenSCManagerW(None, None, SC_MANAGER_CONNECT) {
@@ -1429,10 +1563,7 @@ fn start_virtual_control_hid() {
                         // ERROR_SERVICE_ALREADY_RUNNING
                         log::info!("[hotkeys] VirtualControlHID already running");
                     } else {
-                        log::warn!(
-                            "[hotkeys] VirtualControlHID start failed: code={}",
-                            code.0
-                        );
+                        log::warn!("[hotkeys] VirtualControlHID start failed: code={}", code.0);
                     }
                 }
             }
@@ -1473,22 +1604,20 @@ fn start_hid_raw_reader() {
 
 #[cfg(windows)]
 unsafe fn hid_raw_reader_main() {
+    use windows::core::PCWSTR;
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
-        SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+        SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+        SP_DEVICE_INTERFACE_DATA,
     };
     use windows::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid,
-        HidD_GetPreparsedData, HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS,
-        HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
+        HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid, HidD_GetPreparsedData,
+        HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
     };
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows::core::PCWSTR;
 
     let guid = HidD_GetHidGuid();
 
@@ -1519,9 +1648,7 @@ unsafe fn hid_raw_reader_main() {
 
         // First call: query the required buffer size.
         let mut needed = 0u32;
-        let _ = SetupDiGetDeviceInterfaceDetailW(
-            info, &iface, None, 0, Some(&mut needed), None,
-        );
+        let _ = SetupDiGetDeviceInterfaceDetailW(info, &iface, None, 0, Some(&mut needed), None);
         if needed < 6 {
             continue;
         }
@@ -1573,8 +1700,7 @@ unsafe fn hid_raw_reader_main() {
         let mut preparsed = PHIDP_PREPARSED_DATA(0isize);
         let has_pp = HidD_GetPreparsedData(h, &mut preparsed).as_bool();
         let mut caps = HIDP_CAPS::default();
-        let caps_ok =
-            has_pp && HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS;
+        let caps_ok = has_pp && HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS;
         if has_pp {
             let _ = HidD_FreePreparsedData(preparsed);
         }
@@ -1605,7 +1731,11 @@ unsafe fn hid_raw_reader_main() {
         log::info!(
             "[hotkeys] HID reader: page={:#06X}/usage={:#04X} \
             VID={:04X} PID={:04X} rpt={}B ...{}",
-            page, dev_usage, attrs.VendorID, attrs.ProductID, rpt_size,
+            page,
+            dev_usage,
+            attrs.VendorID,
+            attrs.ProductID,
+            rpt_size,
             &path_str[sfx..]
         );
 
@@ -1626,18 +1756,13 @@ unsafe fn hid_raw_reader_main() {
 }
 
 #[cfg(windows)]
-unsafe fn hid_device_read_loop(
-    path_str: String,
-    page: u16,
-    dev_usage: u16,
-    rpt_size: usize,
-) {
+unsafe fn hid_device_read_loop(path_str: String, page: u16, dev_usage: u16, rpt_size: usize) {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, ReadFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, ReadFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
-    use windows::core::PCWSTR;
 
     let mut path_z: Vec<u16> = path_str.encode_utf16().collect();
     path_z.push(0);
@@ -1662,7 +1787,8 @@ unsafe fn hid_device_read_loop(
     let mut buf = vec![0u8; buf_size];
     log::debug!(
         "[hotkeys] HID reader active: page={:#06X}/usage={:#04X}",
-        page, dev_usage
+        page,
+        dev_usage
     );
 
     loop {
@@ -1678,7 +1804,9 @@ unsafe fn hid_device_read_loop(
             let hex: Vec<String> = data.iter().map(|b| format!("{:02X}", b)).collect();
             log::info!(
                 "[hotkeys] DETECT(HID-direct page={:#06X}/usage={:#04X}): [{}]",
-                page, dev_usage, hex.join(" ")
+                page,
+                dev_usage,
+                hex.join(" ")
             );
             // Store a synthetic non-zero value so detect_key() returns non-zero.
             if let Some(&b) = data.iter().find(|&&b| b != 0) {
@@ -1703,7 +1831,9 @@ unsafe fn hid_device_read_loop(
             let hex: Vec<String> = data.iter().map(|b| format!("{:02X}", b)).collect();
             log::debug!(
                 "[hotkeys] HID-direct vendor page={:#06X}/usage={:#04X}: [{}]",
-                page, dev_usage, hex.join(" ")
+                page,
+                dev_usage,
+                hex.join(" ")
             );
         }
     }
@@ -1711,6 +1841,7 @@ unsafe fn hid_device_read_loop(
     let _ = CloseHandle(h);
     log::debug!(
         "[hotkeys] HID reader exiting: page={:#06X}/usage={:#04X}",
-        page, dev_usage
+        page,
+        dev_usage
     );
 }

@@ -1,23 +1,26 @@
 mod commands;
+mod elev_bridge;
+pub mod elevated;
 mod hw;
 mod state;
-pub mod elevated;
-mod elev_bridge;
 
-use commands::ai_logs::{write_ai_perf_log, read_ai_perf_logs, open_ai_logs_dir};
-use commands::hardware::{get_performance_mode, set_performance_mode, get_charging_threshold, set_charging_threshold, get_perf_debug, get_ecram_map, get_iot_region_hex, write_iot_hex, read_ecram_raw, is_elevated, relaunch_as_admin};
-use commands::hotkeys::{get_hotkey_config, set_hotkey_config, start_key_detect, get_detected_key, is_hook_active};
+use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
+use commands::hardware::{
+    get_charging_threshold, get_ecram_map, get_iot_region_hex, get_perf_debug,
+    get_performance_mode, is_elevated, read_ecram_raw, relaunch_as_admin, set_charging_threshold,
+    set_performance_mode, write_iot_hex,
+};
+use commands::hotkeys::{
+    get_detected_key, get_hotkey_config, is_hook_active, set_hotkey_config, start_key_detect,
+};
 use commands::system::{
-    get_battery_info, get_display_info, set_brightness, set_hdr,
-    set_ai_brightness, get_ai_brightness_config, set_ai_brightness_config,
-    get_fan_info, set_fan_mode, get_touchpad_info,
-    set_touchpad_sensitivity, set_touchpad_haptics,
-    set_touchpad_haptics_intensity, set_touchpad_gesture_screenshot,
-    set_touchpad_repress, set_touchpad_edge_slide, get_system_info,
-    get_autostart, set_autostart, get_update_status, trigger_driver_scan,
-    get_hardware_profile, run_hardware_discovery, install_driver,
-    get_available_refresh_rates, set_refresh_rate, set_adaptive_refresh_rate, get_process_list,
-    debug_ecram_dump,
+    debug_ecram_dump, get_ai_brightness_config, get_autostart, get_available_refresh_rates,
+    get_battery_info, get_display_info, get_fan_info, get_hardware_profile, get_process_list,
+    get_system_info, get_touchpad_info, get_update_status, install_driver, run_hardware_discovery,
+    set_adaptive_refresh_rate, set_ai_brightness, set_ai_brightness_config, set_autostart,
+    set_brightness, set_fan_mode, set_hdr, set_refresh_rate, set_touchpad_edge_slide,
+    set_touchpad_gesture_screenshot, set_touchpad_haptics, set_touchpad_haptics_intensity,
+    set_touchpad_repress, set_touchpad_sensitivity, trigger_driver_scan,
 };
 use state::AppState;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -317,17 +320,19 @@ async fn resize_tray_popup(app: tauri::AppHandle, height: f64) -> Result<(), Str
             return Ok(());
         }
         let scale = window.scale_factor().map_err(|e| e.to_string())?;
-        let pos   = window.outer_position().map_err(|e| e.to_string())?;
-        let cur   = window.inner_size().map_err(|e| e.to_string())?;
+        let pos = window.outer_position().map_err(|e| e.to_string())?;
+        let cur = window.inner_size().map_err(|e| e.to_string())?;
         // Anchor: physical y of the bottom edge
         let bottom_phys = pos.y + cur.height as i32;
-        let new_h_phys  = (height * scale).round() as u32;
-        let new_y       = (bottom_phys - new_h_phys as i32).max(0);
+        let new_h_phys = (height * scale).round() as u32;
+        let new_y = (bottom_phys - new_h_phys as i32).max(0);
         // Apply — size first, then position so there's no flicker
-        window.set_size(tauri::PhysicalSize::new(cur.width, new_h_phys))
-              .map_err(|e| e.to_string())?;
-        window.set_position(tauri::PhysicalPosition::new(pos.x, new_y))
-              .map_err(|e| e.to_string())?;
+        window
+            .set_size(tauri::PhysicalSize::new(cur.width, new_h_phys))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(tauri::PhysicalPosition::new(pos.x, new_y))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -362,7 +367,11 @@ fn open_window_sync(app: &tauri::AppHandle) {
 /// Toggle the tray quick-access popup near the taskbar.
 /// Left-click on the tray icon calls this; subsequent clicks toggle visibility.
 fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition<f64>) {
-    log::info!("[tray] toggle_tray_popup click=({:.0},{:.0})", click_pos.x, click_pos.y);
+    log::info!(
+        "[tray] toggle_tray_popup click=({:.0},{:.0})",
+        click_pos.x,
+        click_pos.y
+    );
     // If popup exists and is visible, hide it (toggle off)
     if let Some(popup) = app.get_webview_window("tray") {
         let visible = popup.is_visible().unwrap_or(false);
@@ -391,8 +400,12 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
                 // scale_factor() / inner_size() before it was associated with a monitor.
                 position_popup(&popup, click_pos);
                 if let Ok(pos) = popup.outer_position() {
-                    log::info!("[tray] show() OK — outer_pos=({},{}) is_visible={}",
-                        pos.x, pos.y, popup.is_visible().unwrap_or(false));
+                    log::info!(
+                        "[tray] show() OK — outer_pos=({},{}) is_visible={}",
+                        pos.x,
+                        pos.y,
+                        popup.is_visible().unwrap_or(false)
+                    );
                 }
                 let _ = popup.set_focus();
             }
@@ -401,7 +414,9 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
         return;
     }
 
-    log::warn!("[tray] popup window not found — creating on-demand (pre-creation must have failed)");
+    log::warn!(
+        "[tray] popup window not found — creating on-demand (pre-creation must have failed)"
+    );
     // Fallback: pre-creation at startup failed — create the window now.
     let popup = match tauri::WebviewWindowBuilder::new(
         app,
@@ -430,7 +445,10 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
     TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
     match popup.show() {
         Ok(_) => {
-            log::info!("[tray] on-demand show() OK — is_visible={}", popup.is_visible().unwrap_or(false));
+            log::info!(
+                "[tray] on-demand show() OK — is_visible={}",
+                popup.is_visible().unwrap_or(false)
+            );
             let _ = popup.set_focus();
         }
         Err(e) => log::error!("[tray] on-demand show() FAILED: {e}"),
@@ -442,14 +460,21 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
 /// just above the taskbar regardless of taskbar height, size, or DPI.
 /// Uses the window's CURRENT height so that a previous dynamic resize is honoured.
 fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosition<f64>) {
-    const POPUP_W: f64 = 300.0;   // logical px — matches .tray-popup CSS width
+    const POPUP_W: f64 = 300.0; // logical px — matches .tray-popup CSS width
     const POPUP_H_DEFAULT: f64 = 460.0; // fallback before first dynamic resize
-    const GAP: f64 = 8.0;         // logical px gap above taskbar
+    const GAP: f64 = 8.0; // logical px gap above taskbar
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
     // Guard: a hidden window may report height=0 before first render; fall back to default.
-    let ph = window.inner_size()
-        .map(|s| if s.height > 0 { s.height as f64 } else { POPUP_H_DEFAULT * scale })
+    let ph = window
+        .inner_size()
+        .map(|s| {
+            if s.height > 0 {
+                s.height as f64
+            } else {
+                POPUP_H_DEFAULT * scale
+            }
+        })
         .unwrap_or(POPUP_H_DEFAULT * scale);
     let gap = GAP * scale;
 
@@ -462,7 +487,10 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
             GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         };
         unsafe {
-            let pt = POINT { x: click_pos.x as i32, y: click_pos.y as i32 };
+            let pt = POINT {
+                x: click_pos.x as i32,
+                y: click_pos.y as i32,
+            };
             let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
             let mut info = MONITORINFO {
                 cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -479,7 +507,10 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
     let (work_right, work_bottom) = (click_pos.x + pw / 2.0 + 1.0, click_pos.y);
 
     // X: centred on the click, clamped so it doesn't overflow the right edge.
-    let x = (click_pos.x - pw / 2.0).max(0.0).min(work_right - pw).round() as i32;
+    let x = (click_pos.x - pw / 2.0)
+        .max(0.0)
+        .min(work_right - pw)
+        .round() as i32;
     // Y: popup bottom sits at work-area bottom (top of taskbar) minus a small gap.
     let y = (work_bottom - ph - gap).max(0.0).round() as i32;
     log::info!("[tray] position_popup: scale={scale:.2} pw={pw:.0} ph={ph:.0} work=({work_right:.0},{work_bottom:.0}) → pos=({x},{y})");
@@ -494,8 +525,15 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
     // Guard: a hidden window may report height=0 before first render; fall back to default.
-    let ph = window.inner_size()
-        .map(|s| if s.height > 0 { s.height as f64 } else { 460.0 * scale })
+    let ph = window
+        .inner_size()
+        .map(|s| {
+            if s.height > 0 {
+                s.height as f64
+            } else {
+                460.0 * scale
+            }
+        })
         .unwrap_or(460.0 * scale);
     let gap = GAP * scale;
 
@@ -507,7 +545,10 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
         };
         unsafe {
             let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..std::mem::zeroed() };
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..std::mem::zeroed()
+            };
             if GetMonitorInfoW(hmon, &mut info).as_bool() {
                 (info.rcWork.right as f64, info.rcWork.bottom as f64)
             } else {

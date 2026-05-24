@@ -1,8 +1,8 @@
 pub mod battery;
 pub mod charging;
-pub mod ecram;
 pub mod discovery;
 pub mod display;
+pub mod ecram;
 pub mod fan;
 pub mod hotkeys;
 pub mod mic;

@@ -15,13 +15,12 @@ pub fn set_system_mic_mute(_muted: bool) {}
 
 #[cfg(windows)]
 unsafe fn set_mute_inner(muted: bool) {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
         eCapture, eConsole, IMMDeviceEnumerator, MMDeviceEnumerator,
     };
-    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
-        COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
 
     let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
