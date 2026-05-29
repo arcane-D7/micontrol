@@ -398,6 +398,35 @@
     "show": "Afficher",
     "hide": "Masquer"
   },
+  "wifi": {
+    "title": "Gestionnaire WiFi",
+    "connectedTo": "Connecté à",
+    "notConnected": "Non connecté",
+    "signal": "Signal",
+    "disconnect": "Déconnecter",
+    "connect": "Connecter",
+    "password": "Mot de passe",
+    "availableNetworks": "Réseaux Disponibles",
+    "noNetworks": "Aucun réseau trouvé. Cliquez sur Actualiser pour rechercher.",
+    "refresh": "Actualiser",
+    "connected": "Connecté"
+  },
+  "cast": {
+    "title": "Screen Cast",
+    "subtitle": "Projetez votre écran sur un écran sans fil",
+    "noDevices": "Aucun appareil Miracast trouvé. Ouvrez le panneau de connexion Windows.",
+    "scanError": "Erreur de recherche",
+    "panelOpened": "Panneau de connexion ouvert — sélectionnez votre appareil",
+    "error": "Erreur de projection",
+    "stopped": "Projection terminée",
+    "start": "Démarrer la Projection",
+    "casting": "Projection en cours...",
+    "stop": "Arrêter",
+    "scan": "Rechercher des Appareils",
+    "availableDevices": "Appareils Disponibles",
+    "tip": "Astuce",
+    "tipText": "Vous pouvez également appuyer sur Win + K pour ouvrir directement le panneau de connexion Windows."
+  },
   "updates": {
     "title": "Pilotes et BIOS",
     "subtitle": "Noyau officiel de mises à jour — propulsé par le moteur d'analyse de XiaomiPCManager",

@@ -1,9 +1,23 @@
 use crate::elev_bridge;
+use crate::hw::audio::{
+    list_audio_devices as hw_list_audio, set_playback_mute as hw_set_mute,
+    set_playback_volume as hw_set_volume, AudioDeviceList, AudioVolumeResult,
+};
+use crate::hw::screen_cast::{
+    list_cast_devices as hw_list_cast, start_casting as hw_start_cast,
+    stop_casting as hw_stop_cast, CastDevice, CastResult,
+};
 use crate::hw::charging::{get_charging_threshold as hw_get_charge, ChargingResult};
+use crate::hw::iotservice;
+use crate::hw::iotservice::{
+    BindStatusInfo, IotDeviceInfo, LaptopStatus, PowerEvent, WiFiItem, WiFiItemInfo,
+    WiFiStatusInfo,
+};
 use crate::hw::performance::{
     get_perf_debug as hw_perf_debug, get_performance_mode as hw_get_perf, PerfDebugInfo,
     PerformanceResult,
 };
+use crate::hw::wifi::{self, WifiNetwork, WifiStatus};
 use crate::state::{AppState, PerformanceMode};
 use tauri::State;
 
@@ -160,6 +174,210 @@ pub fn is_elevated() -> bool {
     crate::hw::ecram::is_process_elevated()
 }
 
+// ── IoTService IPC commands ──────────────────────────────────────────────────
+
+/// Check whether the IoTService named pipe is available.
+#[tauri::command]
+pub async fn iot_pipe_available() -> Result<bool, String> {
+    Ok(iotservice::is_available())
+}
+
+/// Get all available IoT device info via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_device_info() -> Result<IotDeviceInfo, String> {
+    tokio::task::spawn_blocking(iotservice::get_device_info)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))
+}
+
+/// Get the device model via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_model() -> Result<String, String> {
+    tokio::task::spawn_blocking(iotservice::get_model)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get the firmware version via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_fw_version() -> Result<String, String> {
+    tokio::task::spawn_blocking(iotservice::get_fw_version)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get the IoT device bind status via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_bind_status() -> Result<BindStatusInfo, String> {
+    tokio::task::spawn_blocking(iotservice::get_bind_status)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get the IoT device ID via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_device_id() -> Result<i64, String> {
+    tokio::task::spawn_blocking(iotservice::get_device_id)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get the current device status via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_device_status() -> Result<String, String> {
+    tokio::task::spawn_blocking(iotservice::get_device_status)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Report laptop status to the IoT device via IPC.
+///
+/// Valid status values: `win_ready`, `suspending`, `shutting`.
+#[tauri::command]
+pub async fn send_iot_laptop_status(status: String) -> Result<(), String> {
+    let status = match status.as_str() {
+        "win_ready" => LaptopStatus::WinReady,
+        "suspending" => LaptopStatus::Suspending,
+        "shutting" => LaptopStatus::Shutting,
+        _ => return Err(format!("Invalid laptop status: {status}")),
+    };
+    tokio::task::spawn_blocking(move || iotservice::send_laptop_status(status))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Send WinReady status via IoTService IPC.
+#[tauri::command]
+pub async fn iot_report_windows_ready() -> Result<(), String> {
+    tokio::task::spawn_blocking(iotservice::report_windows_ready)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get WiFi connection status via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_wifi_status() -> Result<WiFiStatusInfo, String> {
+    tokio::task::spawn_blocking(iotservice::read_wifi_status)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get the number of provisioned WiFi networks via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_wifi_count() -> Result<u32, String> {
+    tokio::task::spawn_blocking(iotservice::read_wifi_count)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get a WiFi item by index via IoTService IPC.
+#[tauri::command]
+pub async fn get_iot_wifi_by_index(index: u32) -> Result<WiFiItemInfo, String> {
+    tokio::task::spawn_blocking(move || iotservice::get_wifi_by_index(index))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Force IoT device to connect to provisioned WiFi via IoTService IPC.
+#[tauri::command]
+pub async fn iot_connect_wifi() -> Result<(), String> {
+    tokio::task::spawn_blocking(iotservice::connect_wifi)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Write a WiFi network to the IoT device provisioning list via IPC.
+#[tauri::command]
+pub async fn iot_write_wifi_item(item: WiFiItem) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || iotservice::write_wifi_item(&item))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a WiFi network from the IoT device by SSID via IPC.
+#[tauri::command]
+pub async fn iot_delete_wifi_item(ssid: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || iotservice::delete_wifi_item(&ssid))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Clear all provisioned WiFi networks on the IoT device via IPC.
+#[tauri::command]
+pub async fn iot_empty_wifi_items() -> Result<(), String> {
+    tokio::task::spawn_blocking(iotservice::empty_wifi_items)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Set the IoT device status via IPC.
+#[tauri::command]
+pub async fn iot_set_device_status(status: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || iotservice::set_device_status(&status))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Reset the IoT device via IPC.
+#[tauri::command]
+pub async fn iot_reset_device() -> Result<(), String> {
+    tokio::task::spawn_blocking(iotservice::reset_device)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Send a power event notification to IoTService via IPC.
+#[tauri::command]
+pub async fn iot_notify_power_event(event: PowerEvent) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || iotservice::notify_power_event(&event))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Send an EC event notification to IoTService via IPC.
+#[tauri::command]
+pub async fn iot_notify_ec_event(event_func: u32, event_value: u32) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || iotservice::notify_ec_event(event_func, event_value))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Send Suspending status via IoTService IPC.
+#[tauri::command]
+pub async fn iot_report_suspending() -> Result<(), String> {
+    tokio::task::spawn_blocking(iotservice::report_suspending)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Send Shutting status via IoTService IPC.
+#[tauri::command]
+pub async fn iot_report_shutting_down() -> Result<(), String> {
+    tokio::task::spawn_blocking(iotservice::report_shutting_down)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
 /// Re-launch the application as administrator (UAC prompt) and exit the current instance.
 ///
 /// This triggers the standard Windows UAC prompt.  If the user approves, a new
@@ -208,6 +426,111 @@ fn is_known_safe_single_byte_write(addr: u64, data: &[u8]) -> bool {
         offset,
         0x1B | 0x40 | 0x42 | 0x4A | 0x4B | 0x68 | 0x96 | 0xAE | 0xB2
     )
+}
+
+// ── WiFi commands ────────────────────────────────────────────────────────
+
+/// Scan for available WiFi networks.
+#[tauri::command]
+pub async fn wifi_scan() -> Result<Vec<WifiNetwork>, String> {
+    tokio::task::spawn_blocking(wifi::scan_networks)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get current WiFi connection status.
+#[tauri::command]
+pub async fn wifi_status() -> Result<WifiStatus, String> {
+    tokio::task::spawn_blocking(wifi::get_status)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Connect to a WiFi network.
+#[tauri::command]
+pub async fn wifi_connect(ssid: String, password: Option<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || wifi::connect(&ssid, password.as_deref()))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Disconnect from current WiFi network.
+#[tauri::command]
+pub async fn wifi_disconnect() -> Result<(), String> {
+    tokio::task::spawn_blocking(wifi::disconnect)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+// ── Audio device commands ──────────────────────────────────────────────────
+
+/// List all audio devices grouped by playback/capture.
+#[tauri::command]
+pub async fn get_audio_devices() -> Result<AudioDeviceList, String> {
+    tokio::task::spawn_blocking(hw_list_audio)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Get the current playback volume and mute state.
+#[tauri::command]
+pub async fn get_audio_volume() -> Result<AudioVolumeResult, String> {
+    tokio::task::spawn_blocking(crate::hw::audio::get_playback_volume)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Set the master playback volume (0-100).
+#[tauri::command]
+pub async fn set_audio_volume(volume: u8) -> Result<AudioVolumeResult, String> {
+    tokio::task::spawn_blocking(move || hw_set_volume(volume))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Mute/unmute the default playback device.
+#[tauri::command]
+pub async fn set_audio_mute(muted: bool) -> Result<AudioVolumeResult, String> {
+    tokio::task::spawn_blocking(move || hw_set_mute(muted))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+// ── Screen Cast commands ──────────────────────────────────────────────────
+
+/// List available Miracast/WiDi receivers.
+#[tauri::command]
+pub async fn get_cast_devices() -> Result<Vec<CastDevice>, String> {
+    tokio::task::spawn_blocking(hw_list_cast)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Start casting to a device.
+#[tauri::command]
+pub async fn start_casting(device_id: String) -> Result<CastResult, String> {
+    tokio::task::spawn_blocking(move || hw_start_cast(&device_id))
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Stop casting.
+#[tauri::command]
+pub async fn stop_casting() -> Result<CastResult, String> {
+    tokio::task::spawn_blocking(hw_stop_cast)
+        .await
+        .map_err(|e| format!("blocking task panicked: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { t } from "../hooks/useI18n";
 import type { useHardware, PerformanceMode } from "../hooks/useHardware";
 import { useSettings } from "../hooks/useSettings";
@@ -34,17 +34,31 @@ export default function TrayPopup({ hardware }: Props) {
     loading,
     display,
     fan,
+    audioState,
     setBrightness,
     setAiBrightness,
     setAiBrightnessConfig,
     setFanMode,
+    setMasterVolume,
+    setMasterMute,
   } = hardware;
 
   const [showDisplay, setShowDisplay] = useState(false);
   const [showFan, setShowFan] = useState(false);
   const [localBrightness, setLocalBrightness] = useState(display?.brightness ?? 80);
+  const [localVolume, setLocalVolume] = useState(audioState?.volume ?? 50);
+  const [isAdjustingVolume, setIsAdjustingVolume] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const { isConfigured: hasAiApi, settings, updateKey } = useSettings();
+
+  const requestTrayResize = useCallback(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const nextHeight = Math.ceil(el.getBoundingClientRect().height);
+    if (nextHeight > 0) {
+      void invoke("resize_tray_popup", { height: nextHeight });
+    }
+  }, []);
 
   // ── Tray window opacity ───────────────────────────────────────────────────
   const [opacity, setOpacityState] = useState(() =>
@@ -77,16 +91,50 @@ export default function TrayPopup({ hardware }: Props) {
       });
     });
     observer.observe(el);
-    return () => { observer.disconnect(); cancelAnimationFrame(rafId); };
-  }, []);
+    requestTrayResize();
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        requestAnimationFrame(requestTrayResize);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      observer.disconnect();
+      cancelAnimationFrame(rafId);
+    };
+  }, [requestTrayResize]);
+
+  useEffect(() => {
+    requestAnimationFrame(requestTrayResize);
+  }, [showDisplay, showFan, requestTrayResize]);
 
   // Sync local brightness when hardware updates
   useEffect(() => {
     if (display?.brightness !== undefined) setLocalBrightness(display.brightness);
   }, [display?.brightness]);
 
+  useEffect(() => {
+    if (!isAdjustingVolume && audioState?.volume !== undefined) {
+      setLocalVolume(audioState.volume);
+    }
+  }, [audioState?.volume, isAdjustingVolume]);
+
+  useEffect(() => {
+    // Audio is polled by useHardware hook every 2s — no need to duplicate here
+  }, []);
+
+  // Audio is polled by useHardware hook globally — no duplicate poll needed here
+
   const openMainWindow = async () => {
     await invoke("open_main_window");
+  };
+
+  const handleVolumeCommit = () => {
+    setIsAdjustingVolume(false);
+    void setMasterVolume(localVolume / 100);
   };
 
   return (
@@ -162,6 +210,49 @@ export default function TrayPopup({ hardware }: Props) {
             </div>
           </div>
         )}
+
+        {/* Xiaomi-style quick cards */}
+        <div className="tray-section">
+          <div className="tray-section-label">Cross-Device</div>
+          <div className="tray-quick-grid">
+            <div className="tray-quick-card">
+              <div className="tray-quick-head">
+                <span className="tray-quick-title">🔊 Audio</span>
+                <button
+                  className="tray-chip-btn"
+                  onClick={() => void setMasterMute(!(audioState?.muted ?? false))}
+                >
+                  {(audioState?.muted ?? false) ? "Unmute" : "Mute"}
+                </button>
+              </div>
+              <div className="tray-quick-meta">
+                {audioState?.volume ?? 50}% • {(audioState?.muted ?? false) ? "Muted" : "On"}
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={localVolume}
+                onPointerDown={() => setIsAdjustingVolume(true)}
+                onChange={(e) => setLocalVolume(Number(e.target.value))}
+                onMouseUp={handleVolumeCommit}
+                onTouchEnd={handleVolumeCommit}
+                onBlur={handleVolumeCommit}
+                style={{ width: "100%" }}
+              />
+            </div>
+
+            {/* WiFi quick status */}
+            <div className="tray-quick-card">
+              <div className="tray-quick-head">
+                <span className="tray-quick-title">📶 WiFi</span>
+              </div>
+              <div className="tray-quick-meta">
+                {t("tray.openApp")} → WiFi Manager
+              </div>
+            </div>
+          </div>
+        </div>
 
         {/* Quick actions */}
         <div className="tray-section">

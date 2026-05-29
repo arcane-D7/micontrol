@@ -7,9 +7,19 @@ mod state;
 
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
 use commands::hardware::{
-    get_charging_threshold, get_ecram_map, get_iot_region_hex, get_perf_debug,
-    get_performance_mode, is_elevated, read_ecram_raw, relaunch_as_admin, set_charging_threshold,
-    set_performance_mode, write_iot_hex,
+    get_audio_devices, get_audio_volume, set_audio_mute,
+    set_audio_volume, get_cast_devices, start_casting, stop_casting,
+    get_charging_threshold, get_ecram_map,
+    get_iot_bind_status, get_iot_device_id,
+    get_iot_device_info, get_iot_device_status, get_iot_fw_version, get_iot_model,
+    get_iot_region_hex, get_iot_wifi_by_index, get_iot_wifi_count, get_iot_wifi_status,
+    get_perf_debug, get_performance_mode, iot_connect_wifi, iot_delete_wifi_item,
+    iot_empty_wifi_items, iot_notify_ec_event, iot_notify_power_event,
+    iot_pipe_available, iot_report_shutting_down, iot_report_suspending,
+    iot_report_windows_ready, iot_reset_device, iot_set_device_status,
+    iot_write_wifi_item, is_elevated, read_ecram_raw, relaunch_as_admin,
+    send_iot_laptop_status, set_charging_threshold, set_performance_mode, write_iot_hex,
+    wifi_connect, wifi_disconnect, wifi_scan, wifi_status,
 };
 use commands::hotkeys::{
     get_detected_key, get_hotkey_config, is_hook_active, set_hotkey_config, start_key_detect,
@@ -95,6 +105,43 @@ pub fn run() {
             read_ecram_raw,
             is_elevated,
             relaunch_as_admin,
+            // IoTService IPC
+            iot_pipe_available,
+            get_iot_device_info,
+            get_iot_model,
+            get_iot_fw_version,
+            get_iot_bind_status,
+            get_iot_device_id,
+            get_iot_device_status,
+            send_iot_laptop_status,
+            iot_report_windows_ready,
+            get_iot_wifi_status,
+            get_iot_wifi_count,
+            get_iot_wifi_by_index,
+            iot_connect_wifi,
+            iot_write_wifi_item,
+            iot_delete_wifi_item,
+            iot_empty_wifi_items,
+            iot_set_device_status,
+            iot_reset_device,
+            iot_notify_power_event,
+            iot_notify_ec_event,
+            iot_report_suspending,
+            iot_report_shutting_down,
+            // Audio
+            get_audio_devices,
+            get_audio_volume,
+            set_audio_volume,
+            set_audio_mute,
+            // Screen Cast
+            get_cast_devices,
+            start_casting,
+            stop_casting,
+            // WiFi
+            wifi_scan,
+            wifi_status,
+            wifi_connect,
+            wifi_disconnect,
             // System info
             get_system_info,
             // Battery

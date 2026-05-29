@@ -20,6 +20,11 @@ import HardwareDiscovery from "../components/HardwareDiscovery";
 import AiAdvisor from "../components/AiAdvisor";
 import AiAnalysis from "../components/AiAnalysis";
 import SettingsPage from "../components/SettingsPage";
+import AudioControl from "../components/AudioControl";
+import ScreenCast from "../components/ScreenCast";
+import IotDeviceCard from "../components/IotDeviceCard";
+import WiFiManager from "../components/WiFiManager";
+import EcrDebugPanel from "../components/EcrDebugPanel";
 import { MiControlIcon } from "../components/MiControlIcon";
 import { useAnalysisLogger } from "../hooks/useAnalysisLogger";
 
@@ -48,11 +53,16 @@ const NAV_ITEMS = [
   { id: "battery", icon: "🔋", label: "nav.battery" },
   { id: "display", icon: "🖥️", label: "nav.display" },
   { id: "fan", icon: "💨", label: "nav.fan" },
+  { id: "audio", icon: "🎵", label: "nav.audio" },
+  { id: "cast", icon: "📺", label: "nav.cast" },
   { id: "touchpad", icon: "🖱️", label: "nav.touchpad" },
+  { id: "iot", icon: "🔌", label: "nav.iot" },
+  { id: "wifi", icon: "📶", label: "nav.wifi" },
   { id: "startup", icon: "🚀", label: "nav.startup" },
   { id: "updates", icon: "🔄", label: "nav.updates" },
   { id: "keyboard", icon: "⌨️", label: "nav.keyboard" },
   { id: "setup", icon: "🔍", label: "nav.setup" },
+  { id: "ecrdebug", icon: "🔧", label: "nav.ecrdebug" },
   { id: "ai_analysis", icon: "🤖", label: "nav.aiAnalysis" },
   { id: "settings", icon: "⚙️", label: "nav.settings" },
   { id: "about", icon: "ℹ️", label: "nav.about" },
@@ -470,6 +480,51 @@ function FanTab({ hw }: { hw: Hardware }) {
     <>
       <PageHeader title={t("fan.title")} />
       <FanControl fan={hw.fan} onModeChange={hw.setFanMode} />
+    </>
+  );
+}
+
+function AudioTab() {
+  return (
+    <>
+      <PageHeader title="Audio Control" />
+      <AudioControl />
+    </>
+  );
+}
+
+function CastTab() {
+  return (
+    <>
+      <PageHeader title="Screen Cast" />
+      <ScreenCast />
+    </>
+  );
+}
+
+function IotTab() {
+  return (
+    <>
+      <PageHeader title="IoT Device" />
+      <IotDeviceCard />
+    </>
+  );
+}
+
+function WiFiTab() {
+  return (
+    <>
+      <PageHeader title="WiFi Manager" />
+      <WiFiManager />
+    </>
+  );
+}
+
+function EcrDebugTab() {
+  return (
+    <>
+      <PageHeader title="EC Debug Panel" />
+      <EcrDebugPanel />
     </>
   );
 }
@@ -1395,18 +1450,6 @@ function AiAnalysisTab({ hw, ai, onOpenSettings }: { hw: Hardware; ai: AiSetting
 export default function MainWindow({ hardware, activeTab, onTabChange, themeMode, toggleTheme }: Props) {
   const aiSettings = useSettings();
   const [showTrayPreview, setShowTrayPreview] = useState(false);
-  const refreshErrorLabels: Record<string, string> = {
-    system_info: "System",
-    battery: "Battery",
-    display: "Display",
-    fan: "Fan",
-    touchpad: "Touchpad",
-    performance_mode: "Performance",
-    charging_threshold: "Charging",
-  };
-  const refreshErrorItems = Object.entries(hardware.refreshErrors).filter(
-    ([, message]) => Boolean(message)
-  );
 
   // Background logger — runs regardless of active tab
   useAnalysisLogger(hardware, aiSettings);
@@ -1418,6 +1461,11 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
       case "battery":    return <BatteryTab hw={hardware} />;
       case "display":    return <DisplayTab hw={hardware} />;
       case "fan":        return <FanTab hw={hardware} />;
+      case "audio":      return <AudioTab />;
+      case "cast":       return <CastTab />;
+      case "iot":        return <IotTab />;
+      case "wifi":       return <WiFiTab />;
+      case "ecrdebug":   return <EcrDebugTab />;
       case "touchpad":   return <TouchpadTab hw={hardware} />;
       case "startup":    return <StartupTab />;
       case "updates":    return <UpdatesTab hw={hardware} />;
@@ -1452,24 +1500,6 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
           {hardware.error && (
             <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--error)", wordBreak: "break-word" }}>
               ⚠️ {hardware.error}
-            </div>
-          )}
-          {refreshErrorItems.length > 0 && (
-            <div
-              style={{
-                padding: "4px 8px",
-                fontSize: 10,
-                color: "var(--text-dim)",
-                display: "flex",
-                flexDirection: "column",
-                gap: 3,
-              }}
-            >
-              {refreshErrorItems.map(([key, message]) => (
-                <div key={key} title={message ?? undefined}>
-                  {refreshErrorLabels[key] ?? key}: {message}
-                </div>
-              ))}
             </div>
           )}
           {hardware.loading && (

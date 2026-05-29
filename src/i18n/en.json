@@ -412,6 +412,35 @@
     "show": "Show",
     "hide": "Hide"
   },
+  "wifi": {
+    "title": "WiFi Manager",
+    "connectedTo": "Connected to",
+    "notConnected": "Not connected",
+    "signal": "Signal",
+    "disconnect": "Disconnect",
+    "connect": "Connect",
+    "password": "Password",
+    "availableNetworks": "Available Networks",
+    "noNetworks": "No networks found. Click Refresh to scan.",
+    "refresh": "Refresh",
+    "connected": "Connected"
+  },
+  "cast": {
+    "title": "Screen Cast",
+    "subtitle": "Project your screen to a wireless display",
+    "noDevices": "No Miracast devices found. Open Windows Connect panel.",
+    "scanError": "Scan error",
+    "panelOpened": "Connect panel opened — select your device",
+    "error": "Cast error",
+    "stopped": "Casting stopped",
+    "start": "Start Casting",
+    "casting": "Casting...",
+    "stop": "Stop",
+    "scan": "Scan for Devices",
+    "availableDevices": "Available Devices",
+    "tip": "Tip",
+    "tipText": "You can also press Win + K to open the Windows Connect panel directly."
+  },
   "updates": {
     "title": "Drivers & BIOS",
     "subtitle": "Official update nucleus — powered by XiaomiPCManager scan engine",

@@ -398,6 +398,35 @@
     "show": "Mostrar",
     "hide": "Ocultar"
   },
+  "wifi": {
+    "title": "Gestor de WiFi",
+    "connectedTo": "Conectado a",
+    "notConnected": "No conectado",
+    "signal": "Señal",
+    "disconnect": "Desconectar",
+    "connect": "Conectar",
+    "password": "Contraseña",
+    "availableNetworks": "Redes Disponibles",
+    "noNetworks": "No se encontraron redes. Haga clic en Actualizar para buscar.",
+    "refresh": "Actualizar",
+    "connected": "Conectado"
+  },
+  "cast": {
+    "title": "Screen Cast",
+    "subtitle": "Proyecte su pantalla a una pantalla inalámbrica",
+    "noDevices": "No se encontraron dispositivos Miracast. Abra el panel de Conexión de Windows.",
+    "scanError": "Error de búsqueda",
+    "panelOpened": "Panel de conexión abierto — seleccione su dispositivo",
+    "error": "Error de proyección",
+    "stopped": "Proyección terminada",
+    "start": "Iniciar Proyección",
+    "casting": "Proyectando...",
+    "stop": "Parar",
+    "scan": "Buscar Dispositivos",
+    "availableDevices": "Dispositivos Disponibles",
+    "tip": "Consejo",
+    "tipText": "También puede presionar Win + K para abrir el panel de Conexión de Windows directamente."
+  },
   "updates": {
     "title": "Controladores y BIOS",
     "subtitle": "Núcleo oficial de actualizaciones — impulsado por el motor de análisis de XiaomiPCManager",

@@ -696,6 +696,101 @@ input[type="range"]:active::-webkit-slider-thumb {
 .tray-mode-btn:hover  { border-color: var(--border-strong); color: var(--text); }
 .tray-mode-btn.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 
+.tray-quick-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.tray-quick-card {
+  padding: 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(130deg, var(--surface-2), color-mix(in oklch, var(--surface-2) 72%, var(--accent-soft)));
+}
+
+.tray-quick-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.tray-quick-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.tray-quick-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.tray-chip-btn,
+.tray-link-btn {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.tray-icon-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+
+.tray-icon-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.tray-chip-btn {
+  padding: 4px 8px;
+}
+
+.tray-link-btn {
+  padding: 4px 10px;
+}
+
+.tray-chip-btn:hover:not(:disabled),
+.tray-link-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.tray-chip-btn:disabled,
+.tray-link-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.tray-path-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  word-break: break-all;
+}
+
 /* ── Skeleton ────────────────────────────────────────────────────────────── */
 @keyframes shimmer {
   0%   { background-position: -200% 50%; }

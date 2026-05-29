@@ -211,6 +211,12 @@ export interface EramMap {
   raw_hex: string;
 }
 
+export interface AudioVolumeResult {
+  success: boolean;
+  volume: number;
+  muted: boolean;
+}
+
 export interface HardwareRefreshErrors {
   system_info: string | null;
   battery: string | null;
@@ -266,6 +272,7 @@ export function useHardware() {
   const [loadingUpdate, setLoadingUpdate] = useState(false);
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfile | null>(null);
   const [loadingDiscovery, setLoadingDiscovery] = useState(false);
+  const [audioState, setAudioState] = useState<AudioVolumeResult | null>(null);
 
   const hasLoadedOnce = useRef(false);
   // Prevent the 2 s poll from overwriting optimistic touchpad state immediately
@@ -581,6 +588,38 @@ export function useHardware() {
     await invoke("relaunch_as_admin");
   }, []);
 
+  // ── Audio state ──────────────────────────────────────────────────────────
+  const getAudioState = useCallback(async () => {
+    try {
+      const result = await invoke<AudioVolumeResult>("get_audio_volume");
+      setAudioState(result);
+    } catch (e) {
+      console.error("getAudioState failed:", e);
+    }
+  }, []);
+
+  const setMasterVolume = useCallback(async (volumeFraction: number) => {
+    const volume = Math.round(volumeFraction * 100);
+    await invoke("set_audio_volume", { volume });
+    await getAudioState();
+  }, [getAudioState]);
+
+  const setMasterMute = useCallback(async (muted: boolean) => {
+    await invoke("set_audio_mute", { muted });
+    await getAudioState();
+  }, [getAudioState]);
+
+  // Poll audio state every 2s while visible (catches hardware key changes)
+  useEffect(() => {
+    const poll = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      void getAudioState();
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => clearInterval(id);
+  }, [getAudioState]);
+
   useEffect(() => {
     void refreshHardwareProfile();
   }, [refreshHardwareProfile]);
@@ -631,5 +670,9 @@ export function useHardware() {
     readEcramRaw,
     isElevated,
     relaunchAsAdmin,
+    audioState,
+    getAudioState,
+    setMasterVolume,
+    setMasterMute,
   };
 }
