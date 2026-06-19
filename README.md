@@ -23,6 +23,20 @@ Toda documentação anterior foi movida para `docs/deprecated/`.
 
 ## Changelog Simples
 
+### 2026-05-29
+
+- **WiFi Manager reescrito** para gerenciar WiFi do próprio PC via `netsh wlan` (era gerenciador de WiFi de dispositivo IoT via IPC).
+- Novo módulo Rust `hw/wifi.rs` com funções `scan_networks`, `get_status`, `connect`, `disconnect`.
+- 4 novos comandos Tauri registrados: `wifi_scan`, `wifi_status`, `wifi_connect`, `wifi_disconnect`.
+- `WiFiManager.tsx` reescrito do zero: escaneia redes disponíveis, exibe sinal/segurança, conecta/desconecta com senha.
+- `ScreenCast.tsx` atualizado para usar i18n (`t("cast.*")`); lógica inalterada.
+- Card "EC Debug" removido do TrayPopup; substituído por card "WiFi" que navega para aba WiFi Manager.
+- Seções `"wifi"` e `"cast"` adicionadas a todos os 4 arquivos de locale (`en`, `pt`, `es`, `fr`).
+- Checks executados após mudanças:
+  - `cargo test -p micontrol` — 48 testes passando
+  - `npx tsc --noEmit` — 0 erros
+  - `cargo build --release` — build OK
+
 ### 2026-05-23
 
 - Hardening do bridge elevado com `request_id` por chamada e arquivos de comando/resultado por requisição.
@@ -63,8 +77,12 @@ Toda documentação anterior foi movida para `docs/deprecated/`.
 - [x] Atualizar perfil global de hardware em runtime após `rediscover`.
 - [x] Melhorar sinalização de erro por subsistema no `useHardware`.
 - [x] Reduzir warnings pendentes no backend (`hotkeys.rs`) e testes frontend (`act(...)`).
-
----
+- [x] Reescrever WiFi Manager para gerenciar WiFi do PC via `netsh wlan` (não IoT device).
+- [x] Adicionar i18n ao ScreenCast.tsx.
+- [x] Remover EC Debug do TrayPopup; adicionar card WiFi.
+- [x] Adicionar traduções `wifi` e `cast` para EN, PT, ES, FR.
+- [ ] Implementar enumeração de dispositivos Miracast via WinRT (atualmente retorna lista vazia).
+- [ ] Definir critério de "documentação estável" para saída de beta interno.
 
 ## Roteiro Técnico Detalhado
 
