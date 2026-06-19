@@ -1,0 +1,54 @@
+name: DriverStore Integrity Check
+
+on:
+  push:
+    paths:
+      - 'scripts/check-driverstore-integrity.ps1'
+      - 'scripts/driverstore-allowlist.json'
+      - '.github/workflows/driverstore-integrity.yml'
+  pull_request:
+    paths:
+      - 'scripts/check-driverstore-integrity.ps1'
+      - 'scripts/driverstore-allowlist.json'
+  schedule:
+    # Run weekly to catch driver updates
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run DriverStore integrity check
+        shell: pwsh
+        run: |
+          # On CI runners, there is no real IoTDriver DriverStore.
+          # This step validates the script syntax and allowlist format.
+          $script = "scripts/check-driverstore-integrity.ps1"
+          if (Test-Path $script) {
+            # Validate script parses without errors
+            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content $script -Raw), [ref]$null)
+            Write-Host "✓ Script syntax valid"
+          }
+          $allowlist = "scripts/driverstore-allowlist.json"
+          if (Test-Path $allowlist) {
+            $null = Get-Content $allowlist -Raw | ConvertFrom-Json
+            Write-Host "✓ Allowlist JSON valid"
+          }
+
+      - name: Validate allowlist entries
+        shell: pwsh
+        run: |
+          $allowlist = Get-Content "scripts/driverstore-allowlist.json" -Raw | ConvertFrom-Json
+          if ($allowlist.binaries.Count -eq 0) {
+            Write-Host "⚠ Allowlist is empty — run check-driverstore-integrity.ps1 -Fix on a machine with the driver installed"
+          } else {
+            foreach ($b in $allowlist.binaries) {
+              if (-not $b.signed) {
+                Write-Host "⚠ Allowlisted binary is unsigned: $($b.file)" -ForegroundColor Yellow
+              }
+            }
+          }

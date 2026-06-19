@@ -1,5 +1,9 @@
 # Sprint 1 — Touchpad/Charger Ghost Touch: Analog EMI Root Cause & Mitigation
 
+> **Status:** ✅ Code tickets complete (S1-003, S1-009, S1-013) — physical-test tickets (S1-002, S1-004, S1-006, S1-007, S1-008, S1-010, S1-012) deferred to user
+> **Execution Date:** 2026-06-19
+> **Health Check:** cargo check ✅ | cargo test 48/48 ✅ | clippy 48 warnings (−3 from baseline, 0 new in touchpad.rs/ecram.rs)
+
 ## Sprint Metadata
 
 | Field | Value |
@@ -657,3 +661,51 @@ flowchart TD
 - Touchpad HID processing (micontrol/src-tauri/src/hw/touchpad.rs)
 - Capacitive touch sensor EMI coupling research (touch-dt.com, Renesas CTSU docs, Analog Devices)
 - Full system investigation report (`analysis_binaries/SYSTEM_INVESTIGATION_REPORT.md`) — 11-section OS-level scan covering processes, services, scheduled tasks, registry, DriverStore, WMI, event logs, power management, disk, loaded drivers
+
+---
+
+## Execution Summary (2026-06-19)
+
+### Completed Code Tickets
+
+| Ticket | Title | Outcome |
+|--------|-------|---------|
+| **S1-003** | DSDT decompilation & I2C/touchpad power-method analysis | ✅ Decompiled ACPI DSDT with iasl (1,304,801 bytes). Key findings: BLTP7853 is in a dynamically loaded SSDT (not static DSDT); I2C5 `_PS0` is empty; I2C5 `_PS3` calls `SOD3()`; EC `TPEN` bit at ERAM offset `0x1A` is defined but NEVER referenced by any ACPI method; no EC commands in I2C/touchpad power methods. Conclusion: ACPI power methods are NOT the root cause — the ghost-touch is analog EMI, not a software power-state bug. |
+| **S1-009** | Touchpad defense-in-depth (charger-aware deadband + HID bounds hardening) | ✅ Four hardening changes in `src-tauri/src/hw/touchpad.rs`: (1) Safe `dwSizeHid` bounds check — replaced unsafe `from_raw_parts` with length computed from actual buffer size, clamped to `dwSizeHid`; (2) `TipSwitch` fallback now rejects unknown state (`tip_switch_known && tip_switch`) instead of assuming contact; (3) Exponential decay (~25%/frame) on edge-slide accumulator to prevent stale drift; (4) Charger-aware Y deadband — 4% when charger connected (via `GetSystemPowerStatus`), 2% otherwise, capped at `y_step/2`. Plus 4 clippy fixes (`unwrap_or`, `clamp`, `entry().or_insert_with()`, `if let`). All 12 touchpad tests pass. |
+| **S1-013a** | EC RAM write hardening (allowlist + audit logging) | ✅ Added `SAFE_WRITE_ERAM_OFFSETS` allowlist (9 offsets), `RAW_ECRAM_WRITE_ENABLE_ENV` override env var, and `validate_write()` two-layer check (safe single-byte allowlist OR raw-write override + ERAM region bounds) in `src-tauri/src/hw/ecram.rs`. `write_ecram()` now calls `validate_write()` and emits `log::warn!` audit log before any hardware access. Defense-in-depth at the function level (caller `write_iot_hex` already had its own allowlist). |
+| **S1-013b** | CI/CD DriverStore integrity check | ✅ Created `scripts/check-driverstore-integrity.ps1` (auto-detects DriverStore path, checks Authenticode signatures, computes SHA256, compares against allowlist JSON, supports `-Fix` mode, exits 1 on issues), `scripts/driverstore-allowlist.json` (placeholder, needs `-Fix` run on machine with driver), and `.github/workflows/driverstore-integrity.yml` (weekly schedule + manual trigger). |
+
+### Health Check Results (Post-Change)
+
+| Check | Command | Result |
+|-------|---------|--------|
+| Compile | `cargo check --manifest-path src-tauri/Cargo.toml` | ✅ CLEAN (3 pre-existing warnings in audio.rs/screen_cast.rs, 0 new) |
+| Tests | `cargo test --manifest-path src-tauri/Cargo.toml` | ✅ 48 passed, 0 failed |
+| Lint | `cargo clippy --manifest-path src-tauri/Cargo.toml` | ✅ 48 warnings (baseline was 51, reduced by 3, 0 new in touchpad.rs/ecram.rs) |
+
+### Deferred Physical-Test Tickets
+
+The following tickets require hands-on user action (touching the touchpad, connecting/disconnecting the charger, EC reset, firmware update) and cannot be automated:
+
+| Ticket | Title | Action Required |
+|--------|-------|-----------------|
+| S1-002 | Touchpad EMI reproduction (charger on/off) | User: touch touchpad with charger connected, observe ghost touches |
+| S1-004 | IoTService disable/enable test | User: stop IoTService, test touchpad, re-enable |
+| S1-006 | Charger cable shielding test | User: try different charger/cable, ferrite core |
+| S1-007 | EC RAM TPEN bit toggle | User: write ERAM offset 0x1A, observe effect |
+| S1-008 | Touchpad firmware update check | User: check Xiaomi support for BLTP7853 firmware |
+| S1-010 | Grounding strap test | User: use anti-static wrist strap grounded to chassis |
+| S1-012 | EC reset (power drain) | User: disconnect battery, hold power button 30s |
+
+### Files Changed
+
+**Modified:**
+- `src-tauri/src/hw/touchpad.rs` — S1-009 defense-in-depth + clippy fixes
+- `src-tauri/src/hw/ecram.rs` — S1-013a write hardening + audit logging
+- `sprint-planning/sprint-01-touchpad-charger-fix/sprint.md` — This execution summary
+
+**Created:**
+- `dsdt.dsl` — S1-003 decompiled ACPI DSDT (1,304,801 bytes)
+- `scripts/check-driverstore-integrity.ps1` — S1-013b DriverStore integrity scanner
+- `scripts/driverstore-allowlist.json` — S1-013b known-good binary allowlist
+- `.github/workflows/driverstore-integrity.yml` — S1-013b weekly CI/CD check

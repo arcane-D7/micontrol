@@ -79,6 +79,31 @@ static GESTURE_THREAD_STARTED: AtomicBool = AtomicBool::new(false);
 /// (e.g. show the brightness OSD) without needing a channel or mutex.
 static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
+/// Returns true when the AC adapter is currently connected (charger plugged in).
+/// Used to increase filtering aggressiveness when EMI coupling is most likely.
+#[cfg(windows)]
+fn is_charger_connected() -> bool {
+    use windows::Win32::System::Power::GetSystemPowerStatus;
+    let mut status = windows::Win32::System::Power::SYSTEM_POWER_STATUS::default();
+    unsafe {
+        if GetSystemPowerStatus(&mut status).is_ok() {
+            // ACLineStatus: 0 = offline, 1 = online, 255 = unknown
+            return status.ACLineStatus == 1;
+        }
+    }
+    false
+}
+
+/// Returns a charger-aware Y-axis deadband threshold (as a fraction of y_max).
+/// When the charger is connected, EMI coupling is more likely, so we apply a
+/// larger deadband to reject small corrupted Y deltas.
+#[cfg(windows)]
+fn charger_aware_y_deadband(y_max: i32) -> i32 {
+    // 2% of height normally; 4% when charger connected (EMI defense-in-depth).
+    let pct = if is_charger_connected() { 4 } else { 2 };
+    (y_max as u32 * pct / 100) as i32
+}
+
 /// Called once during app setup to give the gesture thread access to Tauri.
 pub fn set_app_handle(h: tauri::AppHandle) {
     let _ = APP_HANDLE.set(h);
@@ -87,7 +112,7 @@ pub fn set_app_handle(h: tauri::AppHandle) {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 pub fn get_touchpad_info() -> Result<TouchpadInfo> {
-    let info = read_touchpad_registry().unwrap_or_else(|_| TouchpadInfo {
+    let info = read_touchpad_registry().unwrap_or(TouchpadInfo {
         sensitivity: TouchpadSensitivity::Medium,
         haptics_enabled: true,
         haptics_intensity: HapticsIntensity::Medium,
@@ -399,7 +424,7 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Resul
 
     // Build the Feature Report; always at least 8 bytes to cover the report ID
     // plus the two data bytes.
-    let report_len = feature_len.max(8).min(64);
+    let report_len = feature_len.clamp(8, 64);
     let mut report = vec![0u8; report_len];
     report[0] = 0x07; // BLTP7853 haptics Feature Report ID
     report[1] = if enabled { 0x01 } else { 0x00 }; // haptics on/off
@@ -908,7 +933,7 @@ unsafe fn process_raw_input(lparam: isize) {
     // ── Get/cache preparsed data for this device ──────────────────────────────
     let pp_bytes = PREPARSED_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !cache.contains_key(&device_key) {
+        let pp_buf = cache.entry(device_key).or_insert_with(|| {
             let mut pp_size: u32 = 0;
             GetRawInputDeviceInfoW(
                 (*raw).header.hDevice,
@@ -917,7 +942,7 @@ unsafe fn process_raw_input(lparam: isize) {
                 &mut pp_size,
             );
             if pp_size == 0 || pp_size > 65536 {
-                return None;
+                return Vec::new();
             }
             let mut pp_buf = vec![0u8; pp_size as usize];
             let ret = GetRawInputDeviceInfoW(
@@ -927,11 +952,15 @@ unsafe fn process_raw_input(lparam: isize) {
                 &mut pp_size,
             );
             if ret == u32::MAX {
-                return None;
+                return Vec::new();
             }
-            cache.insert(device_key, pp_buf);
+            pp_buf
+        });
+        if pp_buf.is_empty() {
+            None
+        } else {
+            Some(pp_buf.clone())
         }
-        cache.get(&device_key).cloned()
     });
 
     let pp_bytes = match pp_bytes {
@@ -942,19 +971,36 @@ unsafe fn process_raw_input(lparam: isize) {
     let preparsed = PHIDP_PREPARSED_DATA(pp_bytes.as_ptr() as isize);
 
     // ── Extract the HID report bytes ──────────────────────────────────────────
-    // bRawData is [u8;1] stub for the flexible array; use from_raw_parts.
+    // Harden dwSizeHid: validate against the actual raw input buffer size
+    // to prevent out-of-bounds reads if the driver reports a bogus length.
     let hid = &(*raw).data.hid;
     if hid.dwSizeHid == 0 || hid.dwCount == 0 {
         return;
     }
+    // bRawData is the flexible array at the end of RAWHID; compute the safe
+    // available length from the overall buffer size minus the header offset.
+    let raw_data_offset = (hid.bRawData.as_ptr() as usize) - (buf.as_ptr() as usize);
+    let safe_len = buf
+        .len()
+        .saturating_sub(raw_data_offset)
+        .min(hid.dwSizeHid as usize);
+    if safe_len == 0 {
+        log::debug!(
+            target: "hw::touchpad",
+            "rejecting raw touchpad frame: dwSizeHid={} but safe_len=0 (buf={}, offset={})",
+            hid.dwSizeHid, buf.len(), raw_data_offset
+        );
+        return;
+    }
     log::trace!(
         target: "hw::touchpad",
-        "accepted raw touchpad frame: device_key={} size_hid={} count={}",
+        "accepted raw touchpad frame: device_key={} size_hid={} count={} safe_len={}",
         device_key,
         hid.dwSizeHid,
-        hid.dwCount
+        hid.dwCount,
+        safe_len
     );
-    let report = std::slice::from_raw_parts(hid.bRawData.as_ptr(), hid.dwSizeHid as usize);
+    let report = std::slice::from_raw_parts(hid.bRawData.as_ptr(), safe_len);
 
     // ── Read logical maxima once per device (for edge/step sizing) ────────────
     GESTURE_STATE.with(|state| {
@@ -1078,12 +1124,17 @@ unsafe fn process_raw_input(lparam: isize) {
     // (brightness_steps, volume_steps) — positive = up, negative = down
     let (brightness_steps, volume_steps) = if EDGE_SLIDE_ENABLED.load(Ordering::Relaxed) {
         GESTURE_STATE.with(|state| {
+            // Harden TipSwitch fallback: when the tip switch state is unknown
+            // (HidP_GetUsages failed), do NOT assume contact — reject the frame
+            // instead of treating unknown as "touching". This prevents corrupted
+            // HID reports from triggering edge-slide gestures.
+            let contact_active = tip_switch_known && tip_switch;
             handle_edge_slide(
                 &mut state.borrow_mut(),
                 contact_count,
                 first_x as i32,
                 first_y as i32,
-                tip_switch || !tip_switch_known,
+                contact_active,
             )
         })
     } else {
@@ -1296,6 +1347,22 @@ fn handle_edge_slide(
     y: i32,
     tip_switch: bool,
 ) -> (i32, i32) {
+    // Exponential decay: drift the accumulator toward zero during idle/noise
+    // frames so stale Y-deltas don't accumulate into phantom gestures.
+    // This is defense-in-depth against EMI-corrupted Y values that could
+    // otherwise build up in the accumulator.
+    if let Some(edge) = &mut state.edge {
+        if edge.accum != 0 {
+            // Decay by ~25% per frame (shift right by 2), rounding toward zero.
+            let decay = edge.accum.abs() / 4;
+            if decay > 0 {
+                edge.accum -= if edge.accum > 0 { decay } else { -decay };
+            } else if edge.accum.abs() == 1 {
+                edge.accum = 0; // snap small residual to zero
+            }
+        }
+    }
+
     // Allow up to 5 consecutive frames of lost contact before resetting.
     const GRACE_FRAMES: u8 = 5;
 
@@ -1313,15 +1380,12 @@ fn handle_edge_slide(
                 state.edge_contact_lost_frames = 0;
             }
         }
-        match &mut state.edge {
-            Some(edge) => {
-                edge.lost_frames += 1;
-                if edge.lost_frames > GRACE_FRAMES {
-                    state.edge = None;
-                    EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
-                }
+        if let Some(edge) = &mut state.edge {
+            edge.lost_frames += 1;
+            if edge.lost_frames > GRACE_FRAMES {
+                state.edge = None;
+                EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
             }
-            None => {}
         }
         return (0, 0);
     }
@@ -1459,6 +1523,15 @@ fn handle_edge_slide(
 
             edge.last_x = x;
             edge.last_y = y;
+            // Apply charger-aware Y deadband to reject EMI-corrupted small deltas.
+            // Cap at half the y_step so the deadband never rejects a movement
+            // large enough to legitimately generate an action step (important
+            // when y_max is large but y_step is clamped to a small value).
+            let deadband = charger_aware_y_deadband(state.y_max).min(y_step / 2);
+            if dy.abs() < deadband {
+                // Delta too small — likely EMI noise, skip it.
+                return (0, 0);
+            }
             edge.accum += dy;
 
             let mut brightness = 0i32;

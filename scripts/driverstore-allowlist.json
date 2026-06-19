@@ -1,0 +1,6 @@
+{
+  "description": "Known-good binaries in the IoTDriver DriverStore. Run check-driverstore-integrity.ps1 -Fix to regenerate.",
+  "generated": "2026-06-19T00:00:00.0000000+00:00",
+  "driverStore": "C:\\WINDOWS\\System32\\DriverStore\\FileRepository\\iotdriver.inf_amd64_*",
+  "binaries": []
+}

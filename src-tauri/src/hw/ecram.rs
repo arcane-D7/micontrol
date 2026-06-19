@@ -402,6 +402,79 @@ fn write_ecram_inner(device_path: &str, phys_addr: u64, data: &[u8]) -> Result<(
     }
 }
 
+// ── Write allowlist (defense-in-depth) ────────────────────────────────────────
+//
+// The caller in `commands/hardware.rs` already gates writes behind an env var
+// and an ERAM-range check.  This allowlist is a SECOND layer of defense at the
+// hardware-access level: even if a future caller bypasses the command layer,
+// only known-safe single-byte offsets within the ACPI ERAM region are accepted
+// without the explicit raw-write override flag.
+//
+// These offsets correspond to harmless configuration bytes discovered via DSDT
+// and SvrCModule.dll analysis:
+//   0x1B — MISC flags (AILM, LBLM)
+//   0x40, 0x42 — touchpad config
+//   0x4A, 0x4B — Smart Mode Type/Data
+//   0x68 — QFAN mode
+//   0x96, 0xAE, 0xB2 — other config bytes
+const SAFE_WRITE_ERAM_OFFSETS: [usize; 9] = [0x1B, 0x40, 0x42, 0x4A, 0x4B, 0x68, 0x96, 0xAE, 0xB2];
+
+/// Environment variable that must be set to `1` to allow writes outside the
+/// safe single-byte allowlist.  This mirrors the check in `commands/hardware.rs`
+/// so that both layers agree on the override mechanism.
+const RAW_ECRAM_WRITE_ENABLE_ENV: &str = "MICONTROL_ENABLE_RAW_ECRAM_WRITE";
+
+/// Validate a write request against the defense-in-depth allowlist.
+///
+/// Returns `Ok(())` if the write is allowed, or an error describing why it was
+/// rejected.  A write is allowed if EITHER:
+///   1. It is a single byte to a known-safe ERAM offset, OR
+///   2. The `MICONTROL_ENABLE_RAW_ECRAM_WRITE=1` env var is set AND the target
+///      address falls within the ACPI ERAM region (0xFE0B0300..0xFE0B03FF).
+fn validate_write(phys_addr: u64, data: &[u8]) -> Result<()> {
+    // Check 1: known-safe single-byte write within ERAM
+    let is_safe_single_byte = data.len() == 1
+        && phys_addr >= ERAM_BASE
+        && phys_addr < ERAM_BASE + ERAM_SIZE as u64
+        && {
+            let offset = (phys_addr - ERAM_BASE) as usize;
+            SAFE_WRITE_ERAM_OFFSETS.contains(&offset)
+        };
+    if is_safe_single_byte {
+        return Ok(());
+    }
+
+    // Check 2: raw-write override enabled and address is within ERAM
+    let raw_enabled = std::env::var(RAW_ECRAM_WRITE_ENABLE_ENV)
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        })
+        .unwrap_or(false);
+
+    if !raw_enabled {
+        anyhow::bail!(
+            "ECRAM write to 0x{phys_addr:08X} ({} bytes) rejected: not in safe allowlist \
+             and {RAW_ECRAM_WRITE_ENABLE_ENV}=1 is not set",
+            data.len()
+        );
+    }
+
+    // Even with the override, restrict to the ERAM region to prevent writes to
+    // the IoT status/sensor blocks (0xFE0B0F00+) which control device state.
+    let write_end = phys_addr.saturating_add(data.len() as u64);
+    let in_eram = phys_addr >= ERAM_BASE && write_end <= ERAM_BASE + ERAM_SIZE as u64;
+    if !in_eram {
+        anyhow::bail!(
+            "ECRAM write to 0x{phys_addr:08X} rejected: address outside ERAM region \
+             (0x{ERAM_BASE:08X}..0x{:08X}) even with raw-write override",
+            ERAM_BASE + ERAM_SIZE as u64
+        );
+    }
+
+    Ok(())
+}
+
 // ── Direct ECRAM write ────────────────────────────────────────────────────────
 
 /// Write `data` bytes into ECRAM at `phys_addr` via direct IoTDriver IOCTL.
@@ -417,6 +490,19 @@ pub fn write_ecram(phys_addr: u64, data: &[u8]) -> Result<()> {
     assert!(
         !data.is_empty() && data.len() <= 0x100,
         "data must be 1..=0x100 bytes (driver limit)"
+    );
+
+    // Defense-in-depth: validate the address against the allowlist before
+    // touching hardware.  This is a second layer on top of the command-layer
+    // checks in `commands/hardware.rs`.
+    validate_write(phys_addr, data).context("ECRAM write rejected by allowlist")?;
+
+    // Audit log: record every write for diagnostics and security review.
+    let hex: String = data.iter().map(|b| format!("{b:02X}")).collect();
+    log::warn!(
+        target: "hw::ecram::write",
+        "ECRAM WRITE: addr=0x{phys_addr:08X} len={} data=[{hex}]",
+        data.len()
     );
 
     #[cfg(windows)]
