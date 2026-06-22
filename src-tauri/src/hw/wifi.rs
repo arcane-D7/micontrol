@@ -3,6 +3,7 @@
 // PC WiFi management via Windows netsh wlan commands.
 // Provides network scanning, connection status, connect/disconnect.
 
+use crate::util::xml;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -48,17 +49,31 @@ pub fn get_status() -> Result<WifiStatus> {
 }
 
 /// Connect to a WiFi network.
+///
+/// The SSID and password are validated and XML-escaped before being
+/// interpolated into the WLAN profile template to prevent XML injection.
 pub fn connect(ssid: &str, password: Option<&str>) -> Result<()> {
+    // Validate the SSID before any XML construction.
+    xml::validate_ssid(ssid).map_err(anyhow::Error::msg)?;
+
+    // Validate the password if provided.
+    if let Some(pwd) = password {
+        xml::validate_wpa2_passphrase(pwd).map_err(anyhow::Error::msg)?;
+    }
+
     // Create profile XML and connect
     if let Some(pwd) = password {
-        // Use netsh to connect with password
+        // Escape SSID and password to prevent XML injection.
+        let escaped_ssid = xml::escape_xml(ssid);
+        let escaped_pwd = xml::escape_xml(pwd);
+
         let profile_xml = format!(
             r#"<?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-    <name>{ssid}</name>
+    <name>{escaped_ssid}</name>
     <SSIDConfig>
         <SSID>
-            <name>{ssid}</name>
+            <name>{escaped_ssid}</name>
         </SSID>
     </SSIDConfig>
     <connectionType>ESS</connectionType>
@@ -73,33 +88,52 @@ pub fn connect(ssid: &str, password: Option<&str>) -> Result<()> {
             <sharedKey>
                 <keyType>passPhrase</keyType>
                 <protected>false</protected>
-                <keyMaterial>{pwd}</keyMaterial>
+                <keyMaterial>{escaped_pwd}</keyMaterial>
             </sharedKey>
         </security>
     </MSM>
 </WLANProfile>"#
         );
 
-        // Write profile to temp file and import
+        // Write profile to a temp file with a random suffix to prevent
+        // path collision with attacker-controlled names.
         let temp_dir = std::env::temp_dir();
-        let profile_path = temp_dir.join(format!("micontrol_wifi_{ssid}.xml"));
-        std::fs::write(&profile_path, &profile_xml)
-            .context("Failed to write WiFi profile")?;
+        let random_suffix: String = (0..8)
+            .map(|_| {
+                let n = rand::random::<u8>() % 36;
+                if n < 10 {
+                    (b'0' + n) as char
+                } else {
+                    (b'a' + n - 10) as char
+                }
+            })
+            .collect();
+        let profile_path = temp_dir.join(format!("micontrol_wifi_{random_suffix}.xml"));
 
-        // Add profile
-        let add = Command::new("netsh")
-            .args(["wlan", "add", "profile", "filename"])
-            .arg(&profile_path)
-            .output()
-            .context("Failed to add WiFi profile")?;
+        // Use a cleanup guard to ensure the temp file is deleted even on error.
+        let result = (|| -> Result<()> {
+            std::fs::write(&profile_path, &profile_xml)
+                .context("Failed to write WiFi profile")?;
 
-        if !add.status.success() {
-            let stderr = String::from_utf8_lossy(&add.stderr);
-            anyhow::bail!("Failed to add WiFi profile: {stderr}");
-        }
+            // Add profile
+            let add = Command::new("netsh")
+                .args(["wlan", "add", "profile", "filename"])
+                .arg(&profile_path)
+                .output()
+                .context("Failed to add WiFi profile")?;
 
-        // Clean up temp file
+            if !add.status.success() {
+                let stderr = String::from_utf8_lossy(&add.stderr);
+                anyhow::bail!("Failed to add WiFi profile: {stderr}");
+            }
+
+            Ok(())
+        })();
+
+        // Always clean up the temp file, even on error.
         let _ = std::fs::remove_file(&profile_path);
+
+        result?;
     }
 
     // Connect
@@ -218,6 +252,7 @@ fn parse_interface_output(output: &str) -> Result<WifiStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::xml;
 
     #[test]
     fn test_get_status_does_not_panic() {
@@ -241,5 +276,85 @@ mod tests {
     fn test_parse_empty_interface() {
         let result = parse_interface_output("");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ssid_injection_prevented() {
+        // An SSID that tries to break out of the <name> element
+        let malicious = "test</name><name>evil";
+        let escaped = xml::escape_xml(malicious);
+        // The escaped version should not contain raw XML tags
+        assert!(!escaped.contains("</name>"));
+        assert!(!escaped.contains("<name>"));
+    }
+
+    #[test]
+    fn test_password_injection_prevented() {
+        // A password that tries to break out of <keyMaterial>
+        let malicious = "</keyMaterial><x>";
+        let escaped = xml::escape_xml(malicious);
+        assert!(!escaped.contains("</keyMaterial>"));
+        assert!(escaped.contains("&lt;/keyMaterial&gt;"));
+    }
+
+    #[test]
+    fn test_oversized_ssid_rejected() {
+        let long_ssid = "a".repeat(33);
+        assert!(xml::validate_ssid(&long_ssid).is_err());
+    }
+
+    #[test]
+    fn test_short_password_rejected() {
+        assert!(xml::validate_wpa2_passphrase("short").is_err());
+    }
+
+    #[test]
+    fn test_valid_ssid_accepted() {
+        assert!(xml::validate_ssid("MyHomeNetwork").is_ok());
+    }
+
+    #[test]
+    fn test_valid_password_accepted() {
+        assert!(xml::validate_wpa2_passphrase("correct horse battery staple").is_ok());
+    }
+
+    #[test]
+    fn test_profile_xml_well_formed_after_escape() {
+        // Build the profile XML the same way connect() does, with a malicious SSID
+        let ssid = "test</name><name>evil";
+        let pwd = "password</keyMaterial><x>";
+        // validate_ssid should pass (it's 23 bytes, under 32)
+        assert!(xml::validate_ssid(ssid).is_ok());
+        // validate_wpa2_passphrase should pass (it's > 8 chars)
+        assert!(xml::validate_wpa2_passphrase(pwd).is_ok());
+
+        let escaped_ssid = xml::escape_xml(ssid);
+        let escaped_pwd = xml::escape_xml(pwd);
+
+        let profile_xml = format!(
+            r#"<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>{escaped_ssid}</name>
+    <SSIDConfig>
+        <SSID>
+            <name>{escaped_ssid}</name>
+        </SSID>
+    </SSIDConfig>
+    <MSM>
+        <security>
+            <sharedKey>
+                <keyMaterial>{escaped_pwd}</keyMaterial>
+            </sharedKey>
+        </security>
+    </MSM>
+</WLANProfile>"#
+        );
+
+        // The profile XML should not contain any raw injection tags
+        assert!(!profile_xml.contains("</name><name>evil"));
+        assert!(!profile_xml.contains("</keyMaterial><x>"));
+        // It should contain the escaped versions
+        assert!(profile_xml.contains("&lt;/name&gt;"));
+        assert!(profile_xml.contains("&lt;/keyMaterial&gt;"));
     }
 }
