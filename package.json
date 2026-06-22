@@ -13,7 +13,10 @@
     "tauri": "tauri",
     "lint": "eslint src",
     "format": "prettier --write src",
-    "format:check": "prettier --check src"
+    "format:check": "prettier --check src",
+    "version:sync": "node scripts/sync-version.cjs",
+    "version:check": "node scripts/sync-version.cjs --check",
+    "version:bump": "node scripts/sync-version.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

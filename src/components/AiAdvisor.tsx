@@ -72,7 +72,13 @@ export default function AiAdvisor({ hw, ai, onOpenSettings }: Props) {
       setStatus('done');
     } catch (e) {
       const msg = String(e).replace(/^Error:\s*/, '');
-      setError(msg === 'api_key_missing' ? t('settings.apiKeyMissing') : msg);
+      setError(
+        msg === 'api_key_missing'
+          ? t('settings.apiKeyMissing')
+          : msg === 'consent_denied'
+            ? t('ai.consentRequired')
+            : msg,
+      );
       setStatus('error');
     }
   }

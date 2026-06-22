@@ -182,3 +182,38 @@ Concluir beta interno somente quando:
 1. Este arquivo permanece como fonte única de referência ativa.
 2. Toda documentação antiga ou parcialmente inválida deve ir para `docs/deprecated/`.
 3. Mudanças de arquitetura/segurança devem atualizar primeiro o checklist e o roteiro acima.
+
+---
+
+## Development
+
+### Prerequisites
+- Node.js 20+
+- Rust (stable)
+- Windows SDK (for Tauri builds)
+
+### Running Checks Locally
+
+**Rust:**
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo fmt --check --manifest-path src-tauri/Cargo.toml
+```
+
+**Frontend:**
+```bash
+npm ci
+npx tsc --noEmit
+npm run lint
+npm run format:check
+npm run build
+```
+
+**Full Tauri build:**
+```bash
+npm run tauri build
+```
+
+These checks run automatically in CI on every pull request.

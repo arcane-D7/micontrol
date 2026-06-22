@@ -431,7 +431,9 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
           ? t('settings.apiKeyMissing')
           : msg === 'no_logs'
             ? t('aiAnalysis.analysis.notEnoughData')
-            : msg;
+            : msg === 'consent_denied'
+              ? t('ai.consentRequired')
+              : msg;
       setAnalyzeError(displayMsg);
       addToast(displayMsg, 'error');
     } finally {

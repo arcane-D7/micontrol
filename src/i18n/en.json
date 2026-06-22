@@ -529,7 +529,18 @@
     "testOk": "Connection successful",
     "reset": "Reset to defaults",
     "storageNote": "API key is stored locally in this browser's localStorage and never leaves your device.",
-    "apiKeyMissing": "API key not configured. Go to Settings to add your key."
+    "apiKeyMissing": "API key not configured. Go to Settings to add your key.",
+    "privacy": "Privacy",
+    "consentStatus": "Consent Status",
+    "consentGranted": "Telemetry consent granted — AI features active",
+    "consentDenied": "Telemetry consent denied — AI features disabled",
+    "consentNotSet": "Not yet decided — AI features will prompt for consent",
+    "revokeConsent": "Revoke Consent",
+    "grantConsent": "Grant Consent",
+    "privacyPolicy": "Privacy Policy",
+    "privacyPolicyDesc": "View how your data is collected and used",
+    "consentGrantedAt": "Consent granted on",
+    "revokedAt": "Consent revoked"
   },
   "ai": {
     "title": "AI System Advisor",
@@ -539,7 +550,42 @@
     "analyzeBtn": "Analyse My System",
     "analyzing": "Analysing…",
     "analyzingHint": "Sending hardware data to the AI model…",
-    "clear": "Clear"
+    "clear": "Clear",
+    "consentRequired": "Telemetry consent required. Please allow telemetry data sharing in Settings → Privacy to use AI features.",
+    "consentRequiredDesc": "To use AI features, please allow telemetry data sharing in the consent dialog."
+  },
+  "consent": {
+    "dialog": {
+      "title": "Telemetry & AI Features Consent",
+      "intro": "MiControl can send hardware telemetry (device state, sensor data) to OpenAI to power AI-assisted features. This data helps provide intelligent hardware optimisation recommendations.",
+      "what": "Hardware telemetry: battery level, CPU/GPU temperature, performance mode, touchpad state, display settings, and system information",
+      "where": "OpenAI API — processed on their servers in accordance with their privacy policy",
+      "why": "To provide AI-powered insights and hardware optimisation recommendations",
+      "control": "You can revoke this consent at any time in Settings \u2192 Privacy. AI features will stop immediately.",
+      "allow": "Allow",
+      "deny": "Deny",
+      "privacyLink": "Read our Privacy Policy"
+    }
+  },
+  "privacy": {
+    "title": "Privacy Policy",
+    "lastUpdated": "Last updated: June 2026",
+    "section1Title": "1. What Data We Collect",
+    "section1Body": "When you enable AI-powered features, MiControl collects hardware telemetry data from your device. This includes:\n\n\u2022 Battery information: charge level, health percentage, cycle count, temperature, charging status, capacity\n\u2022 CPU / GPU data: usage percentage, temperature, package power draw (TDP)\n\u2022 Performance mode: current power profile and switching events\n\u2022 Display information: brightness level, refresh rate, HDR status\n\u2022 Fan state: speed (RPM), temperature readings\n\u2022 Touchpad state: sensitivity, haptics configuration\n\u2022 System information: RAM usage, OS version, device model\n\nNo personal identifying information (name, email, location, files) is collected unless explicitly provided by you.",
+    "section2Title": "2. Where Data Is Sent",
+    "section2Body": "Hardware telemetry data is sent to OpenAI via their API (api.openai.com). If you have configured a custom endpoint (such as Ollama, Azure OpenAI, or LM Studio), data is sent to that endpoint instead. Data is transmitted over HTTPS and is not stored by MiControl on any external server.",
+    "section3Title": "3. Purpose of Data Collection",
+    "section3Body": "The collected hardware data is used exclusively to:\n\n\u2022 Analyse your system\u2019s performance and battery health\n\u2022 Provide personalised hardware optimisation recommendations\n\u2022 Detect potential hardware issues or thermal anomalies\n\u2022 Suggest optimal performance modes for your current workload\n\nData is not used for advertising, profiling, or sold to third parties.",
+    "section4Title": "4. Data Retention",
+    "section4Body": "Telemetry data is sent to the AI provider in real time during an analysis request. MiControl does not persistently store the data you send. Performance logs written to disk (if AI Analysis logging is enabled) are stored locally on your device and are never automatically uploaded. You can clear these logs at any time from the AI Analysis tab.",
+    "section5Title": "5. Your Rights",
+    "section5Body": "You have full control over your data:\n\n\u2022 Grant or deny consent at any time via Settings \u2192 Privacy\n\u2022 Revoke previously granted consent \u2014 this immediately stops all telemetry transmission\n\u2022 Delete locally stored performance logs from the AI Analysis tab\n\u2022 Uninstall MiControl to remove all locally stored configuration and logs\n\nIf you have separately provided personal data to OpenAI, you must contact them directly to exercise your data rights under applicable law.",
+    "section6Title": "6. Contact",
+    "section6Body": "For privacy-related inquiries about MiControl, please open an issue on the GitHub repository: github.com/Freitas-MA/miPC",
+    "consentStatus": "Consent Status",
+    "consentGranted": "Granted",
+    "consentDenied": "Denied",
+    "consentNotSet": "Not yet decided"
   },
   "aiAnalysis": {
     "title": "AI Analysis",

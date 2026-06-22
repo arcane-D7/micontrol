@@ -14,6 +14,14 @@ interface Props {
   settings: AppSettings;
   onSave: (s: AppSettings) => void;
   onTest: () => Promise<void>;
+  /** Current telemetry consent state */
+  telemetryConsent: 'granted' | 'denied' | null;
+  /** Called when user clicks Revoke Consent */
+  onRevokeConsent: () => Promise<void>;
+  /** Called when user clicks Grant Consent */
+  onGrantConsent: () => Promise<void>;
+  /** Called when user clicks Privacy Policy link */
+  onOpenPrivacyPolicy: () => void;
 }
 
 function FieldRow({
@@ -38,7 +46,15 @@ function FieldRow({
   );
 }
 
-export default function SettingsPage({ settings, onSave, onTest }: Props) {
+export default function SettingsPage({
+  settings,
+  onSave,
+  onTest,
+  telemetryConsent,
+  onRevokeConsent,
+  onGrantConsent,
+  onOpenPrivacyPolicy,
+}: Props) {
   const { locale, setLanguage, supported } = useLanguage();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [showKey, setShowKey] = useState(false);
@@ -230,6 +246,71 @@ export default function SettingsPage({ settings, onSave, onTest }: Props) {
           style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 16, marginBottom: 0 }}
         >
           🔒 {t('settings.storageNote')}
+        </p>
+      </div>
+
+      {/* Privacy & Consent */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-title">{t('settings.privacy')}</div>
+        <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
+          {t('settings.consentStatus')}:{' '}
+          <strong
+            style={{
+              color:
+                telemetryConsent === 'granted'
+                  ? 'var(--color-success, #4ade80)'
+                  : telemetryConsent === 'denied'
+                    ? 'var(--color-danger, #f87171)'
+                    : 'var(--color-text-muted)',
+            }}
+          >
+            {telemetryConsent === 'granted'
+              ? t('privacy.consentGranted')
+              : telemetryConsent === 'denied'
+                ? t('privacy.consentDenied')
+                : t('privacy.consentNotSet')}
+          </strong>
+        </p>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            className="btn-ghost"
+            onClick={() => void onOpenPrivacyPolicy()}
+            style={{ fontSize: 12 }}
+          >
+            📄 {t('settings.privacyPolicy')}
+          </button>
+          {telemetryConsent === 'granted' && (
+            <button
+              className="btn-ghost"
+              onClick={() => void onRevokeConsent()}
+              style={{
+                fontSize: 12,
+                color: 'var(--color-danger, #f87171)',
+                borderColor: 'var(--color-danger, #f87171)',
+              }}
+            >
+              🛑 {t('settings.revokeConsent')}
+            </button>
+          )}
+          {telemetryConsent === 'denied' && (
+            <button
+              className="btn-primary"
+              onClick={() => void onGrantConsent()}
+              style={{ fontSize: 12 }}
+            >
+              ✅ {t('settings.grantConsent')}
+            </button>
+          )}
+        </div>
+        <p
+          style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 12, marginBottom: 0 }}
+        >
+          🔒 {t('settings.consentStatus')}{' '}
+          {telemetryConsent === 'granted'
+            ? t('settings.consentGranted')
+            : telemetryConsent === 'denied'
+              ? t('settings.consentDenied')
+              : t('settings.consentNotSet')}
         </p>
       </div>
     </>

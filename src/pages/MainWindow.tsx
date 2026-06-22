@@ -27,6 +27,8 @@ import WiFiManager from '../components/WiFiManager';
 import EcrDebugPanel from '../components/EcrDebugPanel';
 import { MiControlIcon } from '../components/MiControlIcon';
 import { useAnalysisLogger } from '../hooks/useAnalysisLogger';
+import { ConsentDialog } from '../components/ConsentDialog';
+import PrivacyPolicy from './PrivacyPolicy';
 
 type Hardware = ReturnType<typeof useHardware>;
 
@@ -1964,11 +1966,35 @@ function IotModulePanel({ hw }: { hw: Hardware }) {
   );
 }
 
-function SettingsTab({ ai }: { ai: AiSettings }) {
+function SettingsTab({ ai, onTabChange }: { ai: AiSettings; onTabChange: (tab: string) => void }) {
+  const [telemetryConsent, setTelemetryConsent] = useState<'granted' | 'denied' | null>(null);
+
+  useEffect(() => {
+    ai.getTelemetryConsent().then(setTelemetryConsent);
+  }, [ai]);
+
+  const handleRevokeConsent = useCallback(async () => {
+    await ai.revokeTelemetryConsent();
+    setTelemetryConsent(null);
+  }, [ai]);
+
+  const handleGrantConsent = useCallback(async () => {
+    await ai.setTelemetryConsent('granted');
+    setTelemetryConsent('granted');
+  }, [ai]);
+
   return (
     <>
       <PageHeader title={t('settings.title')} subtitle={t('settings.subtitle')} />
-      <SettingsPage settings={ai.settings} onSave={ai.saveSettings} onTest={ai.testConnection} />
+      <SettingsPage
+        settings={ai.settings}
+        onSave={ai.saveSettings}
+        onTest={ai.testConnection}
+        telemetryConsent={telemetryConsent}
+        onRevokeConsent={handleRevokeConsent}
+        onGrantConsent={handleGrantConsent}
+        onOpenPrivacyPolicy={() => onTabChange('privacy')}
+      />
     </>
   );
 }
@@ -2076,6 +2102,36 @@ export default function MainWindow({
 }: Props) {
   const aiSettings = useSettings();
   const [showTrayPreview, setShowTrayPreview] = useState(false);
+  const [showConsentDialog, setShowConsentDialog] = useState(false);
+  const [consentChecked, setConsentChecked] = useState(false);
+
+  // Check telemetry consent on mount — if null, show consent dialog
+  useEffect(() => {
+    if (!consentChecked) {
+      aiSettings.getTelemetryConsent().then((consent) => {
+        setConsentChecked(true);
+        if (consent === null) {
+          // First launch — prompt for consent since AI features are prominent
+          setShowConsentDialog(true);
+        }
+      });
+    }
+  }, [aiSettings, consentChecked]);
+
+  const handleConsentAllow = useCallback(async () => {
+    await aiSettings.setTelemetryConsent('granted');
+    setShowConsentDialog(false);
+  }, [aiSettings]);
+
+  const handleConsentDeny = useCallback(async () => {
+    await aiSettings.setTelemetryConsent('denied');
+    setShowConsentDialog(false);
+  }, [aiSettings]);
+
+  const handleOpenPrivacy = useCallback(() => {
+    setShowConsentDialog(false);
+    onTabChange('privacy');
+  }, [onTabChange]);
 
   // Background logger — runs regardless of active tab
   useAnalysisLogger(hardware, aiSettings);
@@ -2133,7 +2189,9 @@ export default function MainWindow({
           />
         );
       case 'settings':
-        return <SettingsTab ai={aiSettings} />;
+        return <SettingsTab ai={aiSettings} onTabChange={onTabChange} />;
+      case 'privacy':
+        return <PrivacyPolicy />;
       case 'about':
         return <AboutTab />;
       default:
@@ -2322,6 +2380,15 @@ export default function MainWindow({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Telemetry consent dialog */}
+      {showConsentDialog && (
+        <ConsentDialog
+          onAllow={handleConsentAllow}
+          onDeny={handleConsentDeny}
+          onOpenPrivacy={handleOpenPrivacy}
+        />
       )}
     </div>
   );

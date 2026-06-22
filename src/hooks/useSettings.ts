@@ -14,6 +14,7 @@ import type {
 const STORAGE_KEY = 'micontrol_settings_v2';
 const STORAGE_KEY_V1 = 'micontrol_settings_v1';
 const CREDENTIAL_KEY = 'openai_api_key';
+const TELEMETRY_CONSENT_KEY = 'telemetry_consent';
 
 export interface AppSettings {
   /** OpenAI (or compatible) API key */
@@ -230,6 +231,12 @@ export function useSettings() {
       throw new Error('api_key_missing');
     }
 
+    // Check telemetry consent before sending data
+    const consent = await getTelemetryConsent();
+    if (consent !== 'granted') {
+      throw new Error('consent_denied');
+    }
+
     const baseUrl = settings.openai_base_url.replace(/\/+$/, '');
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
@@ -305,6 +312,12 @@ export function useSettings() {
   ): Promise<string> {
     if (!settings.openai_api_key.trim()) throw new Error('api_key_missing');
     if (logs.length === 0) throw new Error('no_logs');
+
+    // Check telemetry consent before sending data
+    const consent = await getTelemetryConsent();
+    if (consent !== 'granted') {
+      throw new Error('consent_denied');
+    }
 
     const langNames: Record<string, string> = {
       en: 'English',
@@ -413,6 +426,41 @@ Be concise. Use short paragraphs with emoji section headers. Max 300 words.`;
     return json.choices?.[0]?.message?.content?.trim() ?? 'No response from model.';
   }
 
+  /** Load telemetry consent from the OS credential store. */
+  async function getTelemetryConsent(): Promise<'granted' | 'denied' | null> {
+    try {
+      const result = await invoke<string | null>('get_secret', { key: TELEMETRY_CONSENT_KEY });
+      if (result === 'granted') return 'granted';
+      if (result === 'denied') return 'denied';
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Store telemetry consent in the OS credential store. */
+  async function setTelemetryConsent(value: 'granted' | 'denied'): Promise<void> {
+    try {
+      const payload = JSON.stringify({
+        value,
+        date: new Date().toISOString(),
+        policyVersion: 1,
+      });
+      await invoke('set_secret', { key: TELEMETRY_CONSENT_KEY, value: payload });
+    } catch (err) {
+      console.error('[settings] Failed to store telemetry consent:', err);
+    }
+  }
+
+  /** Revoke telemetry consent — deletes the consent secret and disables AI features. */
+  async function revokeTelemetryConsent(): Promise<void> {
+    try {
+      await invoke('delete_secret', { key: TELEMETRY_CONSENT_KEY });
+    } catch {
+      // Ignore — key may not exist yet
+    }
+  }
+
   return {
     settings,
     saveSettings,
@@ -421,6 +469,10 @@ Be concise. Use short paragraphs with emoji section headers. Max 300 words.`;
     analyzeWithLogs,
     testConnection,
     isConfigured: Boolean(settings.openai_api_key.trim()),
+    getTelemetryConsent,
+    setTelemetryConsent,
+    revokeTelemetryConsent,
+    checkTelemetryConsent: () => getTelemetryConsent().then((c) => c === 'granted'),
   };
 }
 
