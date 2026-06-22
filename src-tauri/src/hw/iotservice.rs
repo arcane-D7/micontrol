@@ -447,12 +447,9 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
         // Response authentication: verify src_id/dst_id match expectations.
         // The response should come from the destination we sent to (dst_id)
         // and be addressed to us (CLIENT_ID).
-        validate_response_header(resp_header, dst_id, CLIENT_ID)
-            .with_context(|| {
-                format!(
-                    "Response auth failed for request #{seq} (msg_type=0x{msg_type:04X})"
-                )
-            })?;
+        validate_response_header(resp_header, dst_id, CLIENT_ID).with_context(|| {
+            format!("Response auth failed for request #{seq} (msg_type=0x{msg_type:04X})")
+        })?;
 
         let payload_len = resp_header.payload_len as usize;
         if payload_len > MAX_RESPONSE_PAYLOAD {
@@ -1024,11 +1021,7 @@ mod tests {
         // We need a valid File handle; use the test binary itself.
         let mut file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
         let mut buf: &mut [u8] = &mut [];
-        let result = read_exact_timeout(
-            &mut file,
-            &mut buf,
-            std::time::Duration::from_secs(1),
-        );
+        let result = read_exact_timeout(&mut file, &mut buf, std::time::Duration::from_secs(1));
         assert!(result.is_ok(), "zero-length read should succeed");
     }
 }

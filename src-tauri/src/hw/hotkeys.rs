@@ -401,10 +401,7 @@ pub fn start_detect_mode() {
             }
             vk
         };
-        log::info!(
-            "[hotkeys] Key detect mode ended, last VK: {:#04X}",
-            last_vk
-        );
+        log::info!("[hotkeys] Key detect mode ended, last VK: {:#04X}", last_vk);
     });
 }
 
@@ -2334,9 +2331,7 @@ mod remap_state_tests {
                     // If still awaiting, captured_vk must be 0 or a valid key.
                     if *captured_vk != 0 {
                         assert!(
-                            *captured_vk == 0x42
-                                || *captured_vk == 0xB6
-                                || *captured_vk == 0xC3,
+                            *captured_vk == 0x42 || *captured_vk == 0xB6 || *captured_vk == 0xC3,
                             "iteration {i}: captured_vk={:#04X} is not a valid key",
                             captured_vk
                         );
@@ -2367,15 +2362,25 @@ mod remap_state_tests {
         drop(state);
 
         // Capture after cancel — should be a no-op
-        assert!(!capture_key(0x42), "capture after cancel should return false");
+        assert!(
+            !capture_key(0x42),
+            "capture after cancel should return false"
+        );
 
         // State must be Idle
         let state = REMAP_STATE.lock().unwrap();
-        assert!(matches!(&*state, RemapState::Idle), "state should be Idle after cancel");
+        assert!(
+            matches!(&*state, RemapState::Idle),
+            "state should be Idle after cancel"
+        );
         drop(state);
 
         // get_detected_vk should return 0
-        assert_eq!(get_detected_vk(), 0, "no key should be detected after cancel");
+        assert_eq!(
+            get_detected_vk(),
+            0,
+            "no key should be detected after cancel"
+        );
     }
 
     /// Verify that begin → capture → get_detected_vk returns the captured key.
@@ -2411,7 +2416,11 @@ mod remap_state_tests {
         reset_state();
 
         assert!(!capture_key(0x42), "capture when Idle should return false");
-        assert_eq!(get_detected_vk(), 0, "get_detected_vk should return 0 when Idle");
+        assert_eq!(
+            get_detected_vk(),
+            0,
+            "get_detected_vk should return 0 when Idle"
+        );
     }
 }
 
@@ -2435,13 +2444,22 @@ mod wmi_debounce_tests {
         reset_debounce();
 
         // Fire key A — should not be debounced.
-        assert!(!wmi_key_debounced(0x01), "first fire of key 0x01 should not be debounced");
+        assert!(
+            !wmi_key_debounced(0x01),
+            "first fire of key 0x01 should not be debounced"
+        );
 
         // Fire key B — should NOT be debounced, even though we just fired key A.
-        assert!(!wmi_key_debounced(0x02), "key 0x02 within window of key 0x01 should NOT be debounced");
+        assert!(
+            !wmi_key_debounced(0x02),
+            "key 0x02 within window of key 0x01 should NOT be debounced"
+        );
 
         // Fast re-fire of key A — should be debounced (same key).
-        assert!(wmi_key_debounced(0x01), "key 0x01 re-fired within window should be debounced");
+        assert!(
+            wmi_key_debounced(0x01),
+            "key 0x01 re-fired within window should be debounced"
+        );
     }
 
     /// The same key fired twice within the debounce window must be suppressed.
@@ -2449,8 +2467,14 @@ mod wmi_debounce_tests {
     fn test_same_key_is_debounced() {
         reset_debounce();
 
-        assert!(!wmi_key_debounced(0x42), "first fire should not be debounced");
-        assert!(wmi_key_debounced(0x42), "second fire within window should be debounced");
+        assert!(
+            !wmi_key_debounced(0x42),
+            "first fire should not be debounced"
+        );
+        assert!(
+            wmi_key_debounced(0x42),
+            "second fire within window should be debounced"
+        );
     }
 
     /// Sanity-check that the function returns false when called once (no debounce history).
@@ -2458,7 +2482,10 @@ mod wmi_debounce_tests {
     fn test_first_call_not_debounced() {
         reset_debounce();
 
-        assert!(!wmi_key_debounced(0x99), "first call should always be accepted");
+        assert!(
+            !wmi_key_debounced(0x99),
+            "first call should always be accepted"
+        );
         assert!(wmi_key_debounced(0x99), "second call should be debounced");
     }
 
@@ -2473,8 +2500,17 @@ mod wmi_debounce_tests {
         let key_a = (0u32 << 8) | 0x23; // HID_EVENT20, AI key
         let key_b = (1u32 << 8) | 0x23; // HID_EVENT21, same detail byte
 
-        assert!(!wmi_key_debounced(key_a), "key_a first fire should not be debounced");
-        assert!(!wmi_key_debounced(key_b), "key_b (different class, same detail byte) should NOT be debounced");
-        assert!(wmi_key_debounced(key_a), "key_a second fire should be debounced");
+        assert!(
+            !wmi_key_debounced(key_a),
+            "key_a first fire should not be debounced"
+        );
+        assert!(
+            !wmi_key_debounced(key_b),
+            "key_b (different class, same detail byte) should NOT be debounced"
+        );
+        assert!(
+            wmi_key_debounced(key_a),
+            "key_a second fire should be debounced"
+        );
     }
 }

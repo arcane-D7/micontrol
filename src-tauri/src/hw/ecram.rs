@@ -365,9 +365,7 @@ fn check_bytes_returned(bytes_returned: u32, expected_size: usize) -> Result<()>
         target: "hw::ecram",
         "Short read: expected {expected_size} bytes, got {bytes_returned} — rejecting",
     );
-    anyhow::bail!(
-        "EC RAM short read: expected {expected_size}, got {bytes_returned}"
-    );
+    anyhow::bail!("EC RAM short read: expected {expected_size}, got {bytes_returned}");
 }
 
 /// Validate that `index` is a valid byte offset within the ACPI ERAM region.
@@ -381,9 +379,7 @@ fn validate_eram_index(index: usize) -> Result<()> {
         target: "hw::ecram",
         "ERAM index 0x{index:X} exceeds maximum 0x{ECRAM_MAX_INDEX:X} — rejecting",
     );
-    anyhow::bail!(
-        "ERAM index 0x{index:X} out of range (max 0x{ECRAM_MAX_INDEX:X})",
-    )
+    anyhow::bail!("ERAM index 0x{index:X} out of range (max 0x{ECRAM_MAX_INDEX:X})",)
 }
 
 #[cfg(windows)]
@@ -740,9 +736,18 @@ mod tests {
     fn validate_eram_index_rejects_out_of_range() {
         let err = validate_eram_index(0x100).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("0x100"), "error should mention the actual index: {msg}");
-        assert!(msg.contains("0xFF"), "error should mention the max index: {msg}");
-        assert!(err.to_string().contains("out of range"), "error should say 'out of range': {msg}");
+        assert!(
+            msg.contains("0x100"),
+            "error should mention the actual index: {msg}"
+        );
+        assert!(
+            msg.contains("0xFF"),
+            "error should mention the max index: {msg}"
+        );
+        assert!(
+            err.to_string().contains("out of range"),
+            "error should say 'out of range': {msg}"
+        );
     }
 
     #[test]
@@ -763,10 +768,18 @@ mod tests {
     fn check_bytes_returned_short_read_fails() {
         let err = check_bytes_returned(128, 256).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("128"), "error should mention actual bytes: {msg}");
-        assert!(msg.contains("256"), "error should mention expected bytes: {msg}");
-        assert!(msg.contains("short read") || msg.contains("Short read"),
-                "error should mention short read: {msg}");
+        assert!(
+            msg.contains("128"),
+            "error should mention actual bytes: {msg}"
+        );
+        assert!(
+            msg.contains("256"),
+            "error should mention expected bytes: {msg}"
+        );
+        assert!(
+            msg.contains("short read") || msg.contains("Short read"),
+            "error should mention short read: {msg}"
+        );
     }
 
     #[test]

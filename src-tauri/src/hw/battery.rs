@@ -320,8 +320,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ac_power_cache_concurrent_clear_probe_no_panic() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
         use std::time::Duration;
 
         // Two threads racing: one clearing the cache, one probing it.
