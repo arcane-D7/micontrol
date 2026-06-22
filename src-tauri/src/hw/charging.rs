@@ -105,8 +105,11 @@ fn send_via_pipe(threshold: u8) -> Result<()> {
         pipe.write_all(bytes).context("Write to IoT pipe")?;
 
         // Do NOT block on a read here — IoTService does not send an
-        // acknowledgment for 0x1003 (set-charging-limit) messages.  A
-        // blocking pipe.read() would hang the elevated helper indefinitely.
+        // acknowledgment for 0x1003 (set-charging-limit) messages.
+        // This is a fire-and-forget command per the IoT protocol:
+        // the service accepts the threshold and applies it internally
+        // without returning a response payload. A blocking pipe.read()
+        // would hang the elevated helper indefinitely.
     }
     #[cfg(not(windows))]
     {

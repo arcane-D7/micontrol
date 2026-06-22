@@ -38,7 +38,9 @@
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+
+use crate::util::panic::lock_or_recover;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -82,12 +84,25 @@ static FOCUS_CALLBACK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// MiControl application window.  Used by `OpenMainWindow` action.
 static OPEN_MAIN_CALLBACK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
-/// When `true` the hook logs every non-modifier key and stores its VK in
-/// `DETECTED_VK`.  Automatically cleared after 10 seconds.
-static DETECT_MODE: AtomicBool = AtomicBool::new(false);
+/// Remap state machine — tracks whether the user is in key-detect mode.
+///
+/// All transitions (begin, capture, cancel) go through a single Mutex so that
+/// concurrent access from the hook callback, timeout thread, WMI listener, and
+/// Tauri commands cannot produce a race between reading and writing the state.
+enum RemapState {
+    Idle,
+    AwaitingKey {
+        /// The action being remapped (e.g. "ai_key", "xiaomi_key").
+        /// Currently informational; the frontend reads the captured VK and
+        /// applies it via `set_hotkey_config`.
+        #[allow(dead_code)]
+        target_action: String,
+        /// VK code captured so far (0 = none yet).
+        captured_vk: u32,
+    },
+}
 
-/// Last VK code captured during key-detect mode (0 = nothing captured yet).
-static DETECTED_VK: AtomicU32 = AtomicU32::new(0);
+static REMAP_STATE: Mutex<RemapState> = Mutex::new(RemapState::Idle);
 
 /// Timestamp (ms) of the last WMI HID action dispatched.  Used to debounce
 /// key-repeat events (IoTDriver fires active=true repeatedly while held).
@@ -318,28 +333,74 @@ pub fn set_open_main_callback(f: Box<dyn Fn() + Send + Sync>) {
 /// Start key-detect mode: the hook will log and record every non-modifier key
 /// for the next 10 seconds.  Read the result with `get_detected_vk()`.
 pub fn start_detect_mode() {
-    DETECTED_VK.store(0, Ordering::Relaxed);
-    DETECT_MODE.store(true, Ordering::Relaxed);
+    {
+        let mut state = lock_or_recover(&REMAP_STATE);
+        *state = RemapState::AwaitingKey {
+            target_action: String::new(),
+            captured_vk: 0,
+        };
+    }
     log::info!("[hotkeys] Key detect mode started (10 s max — press any key)");
     std::thread::spawn(|| {
         // Poll every 100 ms; exit early as soon as a key is detected.
         for _ in 0..100 {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            if DETECTED_VK.load(Ordering::Relaxed) != 0 {
-                break;
+            let state = lock_or_recover(&REMAP_STATE);
+            if let RemapState::AwaitingKey { captured_vk, .. } = &*state {
+                if *captured_vk != 0 {
+                    break;
+                }
             }
         }
-        DETECT_MODE.store(false, Ordering::Relaxed);
+        let last_vk = {
+            let mut state = lock_or_recover(&REMAP_STATE);
+            let vk = match &*state {
+                RemapState::AwaitingKey { captured_vk, .. } => *captured_vk,
+                _ => 0,
+            };
+            // Only transition to Idle if still in AwaitingKey (not already cancelled).
+            if matches!(&*state, RemapState::AwaitingKey { .. }) {
+                *state = RemapState::Idle;
+            }
+            vk
+        };
         log::info!(
             "[hotkeys] Key detect mode ended, last VK: {:#04X}",
-            DETECTED_VK.load(Ordering::Relaxed)
+            last_vk
         );
     });
 }
 
+/// Cancel key-detect mode immediately, discarding any captured key.
+/// Safe to call even when not in detect mode.
+#[allow(dead_code)]
+pub fn cancel_detect_mode() {
+    let mut state = lock_or_recover(&REMAP_STATE);
+    *state = RemapState::Idle;
+    log::info!("[hotkeys] Key detect mode cancelled");
+}
+
 /// Return the VK code captured in the most recent detect session (0 if none).
 pub fn get_detected_vk() -> u32 {
-    DETECTED_VK.load(Ordering::Relaxed)
+    let state = lock_or_recover(&REMAP_STATE);
+    match &*state {
+        RemapState::AwaitingKey { captured_vk, .. } => *captured_vk,
+        RemapState::Idle => 0,
+    }
+}
+
+/// If detect mode is active and no key has been captured yet, store the VK.
+/// Returns `true` if detect mode was active (caller may log the capture).
+fn capture_key(vk: u32) -> bool {
+    let mut state = lock_or_recover(&REMAP_STATE);
+    match &mut *state {
+        RemapState::AwaitingKey { captured_vk, .. } if *captured_vk == 0 => {
+            *captured_vk = vk;
+            true
+        }
+        RemapState::AwaitingKey { .. } => true, // Already captured, still in detect mode
+        RemapState::Idle => false,
+    }
 }
 
 /// Return `true` if key detection is active (Raw Input registered, or WH_KEYBOARD_LL installed).
@@ -640,26 +701,22 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
             if total > 0 && total <= 64 {
                 let p = hid.bRawData.as_ptr();
 
-                if DETECT_MODE.load(Ordering::Relaxed) {
-                    let hex: Vec<String> =
-                        (0..total).map(|i| format!("{:02X}", *p.add(i))).collect();
-                    log::info!(
-                        "[hotkeys] DETECT(HID type2 raw): {} byte(s): {}",
-                        total,
-                        hex.join(" ")
-                    );
-                    // Store combined bytes as usage with 0x8000 flag so frontend
-                    // can distinguish HID usages from standard keyboard VKs.
+                {
                     let usage: u32 = if total >= 3 {
-                        // 3-byte report: byte[0]=report-ID, bytes[1-2]=usage LE
                         u16::from_le_bytes([*p.add(1), *p.add(2)]) as u32
                     } else if total >= 2 {
                         u16::from_le_bytes([*p, *p.add(1)]) as u32
                     } else {
                         *p as u32
                     };
-                    if usage != 0 {
-                        DETECTED_VK.store(0x8000 | usage, Ordering::Relaxed);
+                    if usage != 0 && capture_key(0x8000 | usage) {
+                        let hex: Vec<String> =
+                            (0..total).map(|i| format!("{:02X}", *p.add(i))).collect();
+                        log::info!(
+                            "[hotkeys] DETECT(HID type2 raw): {} byte(s): {}",
+                            total,
+                            hex.join(" ")
+                        );
                     }
                 }
 
@@ -701,26 +758,24 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
     );
 
     // ── Key-detect diagnostic mode ────────────────────────────────────────────
-    if DETECT_MODE.load(Ordering::Relaxed) {
-        match vk {
-            // Skip pure modifier keys
-            0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5 => {}
-            0xFF => {
-                // VKey=0xFF: the driver assigned no standard VK. Log the scan code
-                // so the key can be identified via its hardware scan code.
+    match vk {
+        // Skip pure modifier keys
+        0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5 => {}
+        0xFF => {
+            if capture_key(0xFF) {
                 log::info!(
                     "[hotkeys] DETECT(raw): VK=0xFF scan={:#04X} (no standard VK)",
                     kb.MakeCode
                 );
-                DETECTED_VK.store(0xFF, Ordering::Relaxed);
             }
-            detected_vk => {
+        }
+        detected_vk => {
+            if capture_key(detected_vk) {
                 log::info!(
                     "[hotkeys] DETECT(raw): VK={:#04X} (decimal={})",
                     detected_vk,
                     detected_vk
                 );
-                DETECTED_VK.store(detected_vk, Ordering::Relaxed);
             }
         }
     }
@@ -745,9 +800,7 @@ fn handle_hotkey_message(id: i32) {
     };
     log::info!("[hotkeys] WM_HOTKEY id={id} VK={:#04X}", vk);
 
-    if DETECT_MODE.load(Ordering::Relaxed) {
-        DETECTED_VK.store(vk, Ordering::Relaxed);
-    }
+    capture_key(vk);
 
     if let Some(action) = resolve_action(vk) {
         match action {
@@ -823,9 +876,9 @@ fn dispatch_consumer_usage(usage: u16) {
 ///
 /// IMPORTANT: during detect mode we must NOT suppress, because returning
 /// LRESULT(1) without calling CallNextHookEx blocks the key from reaching both
-/// RegisterHotKey (no WM_HOTKEY) *and* Raw Input (no WM_INPUT), leaving
-/// DETECTED_VK permanently at 0.  We record the VK here — the earliest
-/// interception point — and pass the key through.
+/// RegisterHotKey (no WM_HOTKEY) *and* Raw Input (no WM_INPUT), leaving the
+/// remap state with captured_vk permanently at 0.  We record the VK here —
+/// the earliest interception point — and pass the key through.
 unsafe extern "system" fn keyboard_hook_proc(
     n_code: i32,
     w_param: windows::Win32::Foundation::WPARAM,
@@ -854,15 +907,23 @@ unsafe extern "system" fn keyboard_hook_proc(
     let is_keyup = event_type == WM_KEYUP || event_type == WM_SYSKEYUP;
 
     // ── Detect mode: record VK and pass the key through ───────────────────────
-    if is_keydown && DETECT_MODE.load(Ordering::Relaxed) {
+    if is_keydown {
         match vk {
             0x10..=0x12 | 0x14 | 0x5B | 0x5C | 0xA0..=0xA5 => {}
             v => {
-                log::info!("[hotkeys] DETECT(LL hook): VK={:#04X} (decimal={})", v, v);
-                DETECTED_VK.store(v, Ordering::Relaxed);
+                if capture_key(v) {
+                    log::info!("[hotkeys] DETECT(LL hook): VK={:#04X} (decimal={})", v, v);
+                }
             }
         }
-        return CallNextHookEx(None, n_code, w_param, l_param);
+        // If we were in detect mode, return early to pass the key through.
+        // Check after capture to avoid holding the lock across the hook call.
+        {
+            let state = lock_or_recover(&REMAP_STATE);
+            if matches!(&*state, RemapState::AwaitingKey { .. }) {
+                return CallNextHookEx(None, n_code, w_param, l_param);
+            }
+        }
     }
 
     // ── Handle active RemapToKey key-up ───────────────────────────────────────
@@ -1580,16 +1641,23 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
     //   detail[1]=0x05  → Fn+F10  (keyboard backlight); detail[2] = new level (0x00–0x0A)
     let distinguish_byte = detail.get(1).copied().unwrap_or(0) as u32;
 
-    if DETECT_MODE.load(Ordering::Relaxed) {
-        log::info!(
-            "[hotkeys] DETECT(WMI): class={class_name} active={active} detail={detail:02X?}"
-        );
-        if active {
-            // Use detail[1] as the distinguishing byte (detail[0] is always 0x01).
-            let synthetic_vk = 0xA000 | (class_idx << 8) | distinguish_byte;
-            DETECTED_VK.store(synthetic_vk, Ordering::Relaxed);
+    if active {
+        let synthetic_vk = 0xA000 | (class_idx << 8) | distinguish_byte;
+        if capture_key(synthetic_vk) {
+            log::info!(
+                "[hotkeys] DETECT(WMI): class={class_name} active={active} detail={detail:02X?}"
+            );
+            return;
         }
-        return;
+    } else {
+        // Check if we're in detect mode even for key-up events (for logging).
+        let state = lock_or_recover(&REMAP_STATE);
+        if matches!(&*state, RemapState::AwaitingKey { .. }) {
+            log::info!(
+                "[hotkeys] DETECT(WMI): class={class_name} active={active} detail={detail:02X?}"
+            );
+            return;
+        }
     }
 
     if !active {
@@ -2010,18 +2078,16 @@ unsafe fn hid_device_read_loop(path_str: String, page: u16, dev_usage: u16, rpt_
         }
         let data = &buf[..bytes_read as usize];
 
-        if DETECT_MODE.load(Ordering::Relaxed) {
-            let hex: Vec<String> = data.iter().map(|b| format!("{:02X}", b)).collect();
-            log::info!(
-                "[hotkeys] DETECT(HID-direct page={:#06X}/usage={:#04X}): [{}]",
-                page,
-                dev_usage,
-                hex.join(" ")
-            );
-            // Store a synthetic non-zero value so detect_key() returns non-zero.
-            if let Some(&b) = data.iter().find(|&&b| b != 0) {
-                let synthetic = 0xD000u32 | ((page as u32 & 0xFF) << 8) | (b as u32);
-                DETECTED_VK.store(synthetic, Ordering::Relaxed);
+        if let Some(&b) = data.iter().find(|&&b| b != 0) {
+            let synthetic = 0xD000u32 | ((page as u32 & 0xFF) << 8) | (b as u32);
+            if capture_key(synthetic) {
+                let hex: Vec<String> = data.iter().map(|b| format!("{:02X}", b)).collect();
+                log::info!(
+                    "[hotkeys] DETECT(HID-direct page={:#06X}/usage={:#04X}): [{}]",
+                    page,
+                    dev_usage,
+                    hex.join(" ")
+                );
             }
         } else if page == 0x0C {
             // Consumer Controls: standard 1-byte report ID + 2-byte usage LE.
@@ -2155,5 +2221,164 @@ mod script_security_tests {
             let result = check_script_action("cmd", "C:\\test.bat", &[]);
             assert_eq!(result, ScriptCheckResult::Disabled);
         }
+    }
+}
+
+#[cfg(test)]
+mod remap_state_tests {
+    use super::*;
+    use std::thread;
+
+    /// Reset the global REMAP_STATE to Idle before each test to prevent
+    /// cross-test contamination from parallel execution.
+    fn reset_state() {
+        let mut state = REMAP_STATE.lock().unwrap();
+        *state = RemapState::Idle;
+    }
+
+    /// Verify that concurrent begin/cancel/capture does not produce partial
+    /// or incorrect remaps.  Spawns threads that race begin/cancel/capture
+    /// and asserts the final state is always consistent.
+    #[test]
+    fn test_concurrent_begin_cancel_capture() {
+        const ITERATIONS: usize = 50;
+
+        for i in 0..ITERATIONS {
+            reset_state();
+
+            let mut handles = vec![];
+
+            // Thread 1: begin remap
+            handles.push(thread::spawn(move || {
+                let mut state = REMAP_STATE.lock().unwrap();
+                *state = RemapState::AwaitingKey {
+                    target_action: format!("action_{}", i),
+                    captured_vk: 0,
+                };
+            }));
+
+            // Thread 2: cancel remap
+            handles.push(thread::spawn(move || {
+                let mut state = REMAP_STATE.lock().unwrap();
+                *state = RemapState::Idle;
+            }));
+
+            // Threads 3-5: capture key (concurrent with begin/cancel)
+            for key in [0x42, 0xB6, 0xC3] {
+                handles.push(thread::spawn(move || {
+                    capture_key(key);
+                }));
+            }
+
+            // Thread 6: read state
+            handles.push(thread::spawn(move || {
+                let state = REMAP_STATE.lock().unwrap();
+                match &*state {
+                    RemapState::Idle => {}
+                    RemapState::AwaitingKey { captured_vk, .. } => {
+                        // If we captured a key, it must be one of the valid ones.
+                        if *captured_vk != 0 {
+                            assert!(
+                                *captured_vk == 0x42
+                                    || *captured_vk == 0xB6
+                                    || *captured_vk == 0xC3,
+                                "captured_vk={:#04X} is not a valid key",
+                                captured_vk
+                            );
+                        }
+                    }
+                }
+            }));
+
+            for h in handles {
+                h.join().expect("thread panicked");
+            }
+
+            // After all threads complete, the state must be valid.
+            let state = REMAP_STATE.lock().unwrap();
+            match &*state {
+                RemapState::Idle => { /* clean cancel or commit */ }
+                RemapState::AwaitingKey { captured_vk, .. } => {
+                    // If still awaiting, captured_vk must be 0 or a valid key.
+                    if *captured_vk != 0 {
+                        assert!(
+                            *captured_vk == 0x42
+                                || *captured_vk == 0xB6
+                                || *captured_vk == 0xC3,
+                            "iteration {i}: captured_vk={:#04X} is not a valid key",
+                            captured_vk
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Verify that a cancel during capture cleanly aborts without applying
+    /// a partial key: begin → cancel → capture should leave state as Idle
+    /// and capture_key should return false.
+    #[test]
+    fn test_cancel_during_capture_aborts() {
+        reset_state();
+
+        // Start remap
+        let mut state = REMAP_STATE.lock().unwrap();
+        *state = RemapState::AwaitingKey {
+            target_action: "test_action".into(),
+            captured_vk: 0,
+        };
+        drop(state);
+
+        // Cancel (simulates user pressing Escape or timeout)
+        let mut state = REMAP_STATE.lock().unwrap();
+        *state = RemapState::Idle;
+        drop(state);
+
+        // Capture after cancel — should be a no-op
+        assert!(!capture_key(0x42), "capture after cancel should return false");
+
+        // State must be Idle
+        let state = REMAP_STATE.lock().unwrap();
+        assert!(matches!(&*state, RemapState::Idle), "state should be Idle after cancel");
+        drop(state);
+
+        // get_detected_vk should return 0
+        assert_eq!(get_detected_vk(), 0, "no key should be detected after cancel");
+    }
+
+    /// Verify that begin → capture → get_detected_vk returns the captured key.
+    #[test]
+    fn test_begin_capture_commit() {
+        reset_state();
+
+        // Start remap
+        let mut state = REMAP_STATE.lock().unwrap();
+        *state = RemapState::AwaitingKey {
+            target_action: "test_action".into(),
+            captured_vk: 0,
+        };
+        drop(state);
+
+        // Capture a key
+        assert!(capture_key(0xB6), "capture should return true");
+
+        // get_detected_vk should return the captured key
+        assert_eq!(get_detected_vk(), 0xB6, "should return captured VK");
+
+        // State should still be AwaitingKey (detect mode stays active until timeout)
+        let state = REMAP_STATE.lock().unwrap();
+        assert!(
+            matches!(&*state, RemapState::AwaitingKey { captured_vk, .. } if *captured_vk == 0xB6),
+            "state should still be AwaitingKey with captured_vk=0xB6"
+        );
+    }
+
+    /// Verify that capture_key returns false when not in detect mode.
+    #[test]
+    fn test_capture_when_idle() {
+        reset_state();
+
+        assert!(!capture_key(0x42), "capture when Idle should return false");
+        assert_eq!(get_detected_vk(), 0, "get_detected_vk should return 0 when Idle");
     }
 }

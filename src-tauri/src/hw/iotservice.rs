@@ -25,6 +25,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Named pipe path to the IoTService IPC broker.
 pub const IOT_PIPE: &str = r"\\.\pipe\LOCAL\IoTService_IPC_Broker";
@@ -42,6 +43,14 @@ const DST_WMI: u16 = 3;
 
 /// Maximum payload size we'll accept in a response.
 const MAX_RESPONSE_PAYLOAD: usize = 0x10000;
+
+/// Monotonically increasing request sequence number for tracking/debugging.
+/// Incremented on each `send_ipc_message` call.
+///
+/// Note: the IoTService wire protocol does not support embedding this
+/// sequence number in the message itself (the header format is fixed and
+/// reverse-engineered). The counter is used for local tracing only.
+static REQUEST_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Check whether a message type is known/recognized.
 ///
@@ -381,6 +390,13 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
         use std::fs::OpenOptions;
         use std::time::Duration;
 
+        let seq = REQUEST_SEQ.fetch_add(1, Ordering::SeqCst);
+        log::trace!(
+            target: "hw::iotservice",
+            "IPC request #{seq}: msg_type=0x{msg_type:04X}, dst_id={dst_id}, payload_len={}",
+            payload.len()
+        );
+
         let pipe_path = resolve_pipe_path();
 
         let mut pipe = OpenOptions::new()
@@ -400,7 +416,7 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
         }
         pipe.flush().context("Flush IPC pipe")?;
 
-        // Read response header (12 bytes)
+        // Read response header (12 bytes) with enforced timeout
         let mut resp_header_buf = [0u8; IPC_HEADER_SIZE];
         match read_exact_timeout(&mut pipe, &mut resp_header_buf, Duration::from_secs(5)) {
             Ok(()) => {}
@@ -428,6 +444,16 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
             return Ok(Vec::new());
         }
 
+        // Response authentication: verify src_id/dst_id match expectations.
+        // The response should come from the destination we sent to (dst_id)
+        // and be addressed to us (CLIENT_ID).
+        validate_response_header(resp_header, dst_id, CLIENT_ID)
+            .with_context(|| {
+                format!(
+                    "Response auth failed for request #{seq} (msg_type=0x{msg_type:04X})"
+                )
+            })?;
+
         let payload_len = resp_header.payload_len as usize;
         if payload_len > MAX_RESPONSE_PAYLOAD {
             anyhow::bail!("Response payload too large: {payload_len} bytes");
@@ -450,17 +476,26 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
     }
 }
 
-/// Read exactly `buf.len()` bytes from `reader` with a timeout.
+/// Read exactly `buf.len()` bytes from a named pipe with a timeout.
+///
+/// Uses `PeekNamedPipe` to check for available data without blocking.
+/// This is necessary because `std::fs::File::read()` on Windows named pipes
+/// blocks indefinitely when no data is available — the previous implementation
+/// relied on `WouldBlock` which never occurs with default pipe mode.
 #[cfg(windows)]
 fn read_exact_timeout(
-    reader: &mut dyn Read,
+    pipe: &mut std::fs::File,
     buf: &mut [u8],
     timeout: std::time::Duration,
 ) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
     use std::time::Instant;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Pipes::PeekNamedPipe;
 
     let deadline = Instant::now() + timeout;
     let mut filled = 0;
+    let handle = HANDLE(pipe.as_raw_handle());
 
     while filled < buf.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -471,19 +506,54 @@ fn read_exact_timeout(
             );
         }
 
-        // On Windows named pipes, we can't easily do non-blocking reads with
-        // std::fs::File. Instead, we read what's available; if the pipe has
-        // nothing, the OS will block until data arrives or the pipe closes.
-        // The timeout is a safety net — the pipe typically responds immediately.
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => anyhow::bail!("IPC pipe closed after reading {filled} bytes"),
-            Ok(n) => filled += n,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
+        // PeekNamedPipe returns immediately — it tells us how many bytes
+        // are available without blocking. If data is available, read it;
+        // otherwise sleep briefly and retry (with deadline check).
+        let mut bytes_available: u32 = 0;
+        let peek_ok = unsafe {
+            PeekNamedPipe(handle, None, 0, None, Some(&mut bytes_available), None).is_ok()
+        };
+
+        if peek_ok && bytes_available > 0 {
+            match pipe.read(&mut buf[filled..]) {
+                Ok(0) => anyhow::bail!("IPC pipe closed after reading {filled} bytes"),
+                Ok(n) => filled += n,
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
+        } else {
+            // No data yet — sleep briefly and retry
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+    Ok(())
+}
+
+/// Validate that the response header's src_id and dst_id match expectations.
+///
+/// This provides response authentication: the response should come from the
+/// destination we sent the request to (expected_src_id == our original dst_id)
+/// and be addressed to us (expected_dst_id == CLIENT_ID).
+///
+/// Note: the IoTService wire protocol does not support nonces or sequence
+/// numbers in the message header (the format is fixed and reverse-engineered).
+/// This src_id/dst_id cross-check is the best available authentication.
+#[cfg(windows)]
+fn validate_response_header(
+    resp_header: &IpcWireHeader,
+    expected_src_id: u16,
+    expected_dst_id: u16,
+) -> Result<()> {
+    if resp_header.src_id != expected_src_id {
+        anyhow::bail!(
+            "Response src_id mismatch: expected 0x{expected_src_id:04X}, got 0x{:04X}",
+            resp_header.src_id
+        );
+    }
+    if resp_header.dst_id != expected_dst_id {
+        anyhow::bail!(
+            "Response dst_id mismatch: expected 0x{expected_dst_id:04X}, got 0x{:04X}",
+            resp_header.dst_id
+        );
     }
     Ok(())
 }
@@ -900,5 +970,65 @@ mod tests {
     fn test_is_known_msg_type_returns_false_for_max_u32() {
         // u32::MAX is never a valid message type.
         assert!(!is_known_msg_type(u32::MAX));
+    }
+
+    // ── Response authentication (validate_response_header) ────────────────
+
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_response_header_ok() {
+        // A valid response: src=2 (IoTDriver), dst=1 (us)
+        let h = IpcWireHeader::new(2, 1, msg_type::GET_MODEL, 10);
+        assert!(validate_response_header(&h, 2, 1).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_response_header_wrong_src() {
+        // Response claims to be from src=3 (WMI worker), but we sent to dst=2
+        let h = IpcWireHeader::new(3, 1, msg_type::GET_MODEL, 10);
+        let err = validate_response_header(&h, 2, 1).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("src_id mismatch"), "Got: {msg}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_validate_response_header_wrong_dst() {
+        // Response addressed to dst=99, but we are CLIENT_ID=1
+        let h = IpcWireHeader::new(2, 99, msg_type::GET_MODEL, 10);
+        let err = validate_response_header(&h, 2, 1).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("dst_id mismatch"), "Got: {msg}");
+    }
+
+    // ── Request sequence counter ──────────────────────────────────────────
+
+    #[test]
+    fn test_request_seq_increments() {
+        // Verify the sequence counter increments monotonically.
+        // We read the current value, then simulate two requests.
+        let before = REQUEST_SEQ.load(Ordering::SeqCst);
+        let s1 = REQUEST_SEQ.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(s1, before);
+        let s2 = REQUEST_SEQ.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(s2, before + 1);
+    }
+
+    // ── Timeout enforcement ───────────────────────────────────────────────
+
+    #[cfg(windows)]
+    #[test]
+    fn test_read_exact_timeout_zero_length() {
+        // A zero-length buffer should succeed immediately (loop doesn't execute).
+        // We need a valid File handle; use the test binary itself.
+        let mut file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let mut buf: &mut [u8] = &mut [];
+        let result = read_exact_timeout(
+            &mut file,
+            &mut buf,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(result.is_ok(), "zero-length read should succeed");
     }
 }
