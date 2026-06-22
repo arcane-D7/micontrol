@@ -244,7 +244,22 @@ pub async fn adaptive_brightness_loop() {
     let mut adaptbright_suppressed = false;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        let cfg = get_ai_brightness_config();
+        // Run blocking hardware calls on the blocking thread pool to avoid
+        // starving the tokio runtime worker threads.
+        let Ok((cfg, brightness_actual)) = tokio::task::spawn_blocking(|| {
+            let cfg = get_ai_brightness_config();
+            let brightness_actual = if cfg.enabled {
+                read_current_brightness()
+            } else {
+                None
+            };
+            (cfg, brightness_actual)
+        })
+        .await else {
+            log::warn!("adaptive_brightness: spawn_blocking(config) panicked");
+            continue;
+        };
+
         if !cfg.enabled {
             smoothed = None;
             last_set = None;
@@ -256,7 +271,7 @@ pub async fn adaptive_brightness_loop() {
         // off — if both run simultaneously they fight over the backlight,
         // causing the brightness-near-zero oscillation symptom.
         if !adaptbright_suppressed {
-            disable_windows_adaptive_brightness();
+            let _ = tokio::task::spawn_blocking(disable_windows_adaptive_brightness).await;
             adaptbright_suppressed = true;
         }
 
@@ -264,7 +279,7 @@ pub async fn adaptive_brightness_loop() {
         // If the actual brightness differs from what we last set by ≥ 2 pp,
         // someone else changed it.  Treat it as a user preference shift:
         // compute a new offset so the loop keeps the adjusted baseline.
-        if let (Some(prev), Some(actual)) = (last_set, read_current_brightness()) {
+        if let (Some(prev), Some(actual)) = (last_set, brightness_actual) {
             let diff = (actual as i16 - prev as i16).abs();
             if diff >= 2 {
                 let raw = AUTO_LAST_TARGET.load(Ordering::Relaxed);
@@ -280,18 +295,22 @@ pub async fn adaptive_brightness_loop() {
             }
         }
 
-        let lux = match get_ambient_lux() {
+        let lux = match tokio::task::spawn_blocking(get_ambient_lux).await {
             // A reading ≤ 0 lux is physically impossible with the screen on; it
             // means the sensor returned an invalid/uninitialised value (common at
             // process startup on this hardware).  Treat it the same as "no sensor"
             // so we never drive brightness to the floor from a bad initial read.
-            Some(v) if v > 0.5 => v,
-            Some(_) => continue,
-            None => {
+            Ok(Some(v)) if v > 0.5 => v,
+            Ok(Some(_)) => continue,
+            Ok(None) => {
                 if !no_sensor_warned {
                     log::warn!("adaptive_brightness: no ambient light sensor found — loop idle");
                     no_sensor_warned = true;
                 }
+                continue;
+            }
+            Err(e) => {
+                log::warn!("adaptive_brightness: spawn_blocking(get_ambient_lux) panicked: {e}");
                 continue;
             }
         };
@@ -337,10 +356,11 @@ pub async fn adaptive_brightness_loop() {
         if last_set.map_or(false, |prev| (value as i16 - prev as i16).abs() < 2) {
             continue;
         }
-        if let Err(e) = set_brightness(value) {
-            log::warn!("adaptive_brightness: set_brightness error: {e}");
-        } else {
-            last_set = Some(value);
+        let set_value = value;
+        match tokio::task::spawn_blocking(move || set_brightness(set_value)).await {
+            Ok(Ok(())) => { last_set = Some(set_value); }
+            Ok(Err(e)) => { log::warn!("adaptive_brightness: set_brightness error: {e}"); }
+            Err(e) => { log::warn!("adaptive_brightness: set_brightness task panicked: {e}"); }
         }
     }
 }

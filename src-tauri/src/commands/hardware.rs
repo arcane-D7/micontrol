@@ -437,7 +437,10 @@ pub async fn wifi_scan() -> Result<Vec<WifiNetwork>, String> {
     tokio::task::spawn_blocking(wifi::scan_networks)
         .await
         .map_err(|e| format!("blocking task panicked: {e}"))?
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            let resp = crate::hw::errors::ErrorResponse::from_error(&e);
+            serde_json::to_string(&resp).unwrap_or_else(|_| e.to_string())
+        })
 }
 
 /// Get current WiFi connection status.
@@ -446,7 +449,10 @@ pub async fn wifi_status() -> Result<WifiStatus, String> {
     tokio::task::spawn_blocking(wifi::get_status)
         .await
         .map_err(|e| format!("blocking task panicked: {e}"))?
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            let resp = crate::hw::errors::ErrorResponse::from_error(&e);
+            serde_json::to_string(&resp).unwrap_or_else(|_| e.to_string())
+        })
 }
 
 /// Connect to a WiFi network.
@@ -455,7 +461,10 @@ pub async fn wifi_connect(ssid: String, password: Option<String>) -> Result<(), 
     tokio::task::spawn_blocking(move || wifi::connect(&ssid, password.as_deref()))
         .await
         .map_err(|e| format!("blocking task panicked: {e}"))?
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            let resp = crate::hw::errors::ErrorResponse::from_error(&e);
+            serde_json::to_string(&resp).unwrap_or_else(|_| e.to_string())
+        })
 }
 
 /// Disconnect from current WiFi network.
@@ -464,7 +473,10 @@ pub async fn wifi_disconnect() -> Result<(), String> {
     tokio::task::spawn_blocking(wifi::disconnect)
         .await
         .map_err(|e| format!("blocking task panicked: {e}"))?
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            let resp = crate::hw::errors::ErrorResponse::from_error(&e);
+            serde_json::to_string(&resp).unwrap_or_else(|_| e.to_string())
+        })
 }
 
 // ── Audio device commands ──────────────────────────────────────────────────

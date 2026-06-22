@@ -3,8 +3,8 @@
 // PC WiFi management via Windows netsh wlan commands.
 // Provides network scanning, connection status, connect/disconnect.
 
+use crate::hw::errors::{HardwareError, HardwareResult};
 use crate::util::xml;
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -27,22 +27,22 @@ pub struct WifiStatus {
 }
 
 /// Scan for available WiFi networks using netsh wlan.
-pub fn scan_networks() -> Result<Vec<WifiNetwork>> {
+pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
     let output = Command::new("netsh")
         .args(["wlan", "show", "networks", "mode=bssid"])
         .output()
-        .context("Failed to run netsh wlan show networks")?;
+        .map_err(|e| HardwareError::Wifi(format!("Failed to run netsh: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_scan_output(&stdout)
 }
 
 /// Get current WiFi connection status.
-pub fn get_status() -> Result<WifiStatus> {
+pub fn get_status() -> HardwareResult<WifiStatus> {
     let output = Command::new("netsh")
         .args(["wlan", "show", "interfaces"])
         .output()
-        .context("Failed to run netsh wlan show interfaces")?;
+        .map_err(|e| HardwareError::Wifi(format!("Failed to run netsh: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_interface_output(&stdout)
@@ -52,13 +52,14 @@ pub fn get_status() -> Result<WifiStatus> {
 ///
 /// The SSID and password are validated and XML-escaped before being
 /// interpolated into the WLAN profile template to prevent XML injection.
-pub fn connect(ssid: &str, password: Option<&str>) -> Result<()> {
+pub fn connect(ssid: &str, password: Option<&str>) -> HardwareResult<()> {
     // Validate the SSID before any XML construction.
-    xml::validate_ssid(ssid).map_err(anyhow::Error::msg)?;
+    xml::validate_ssid(ssid).map_err(|e| HardwareError::Wifi(format!("Invalid SSID: {e}")))?;
 
     // Validate the password if provided.
     if let Some(pwd) = password {
-        xml::validate_wpa2_passphrase(pwd).map_err(anyhow::Error::msg)?;
+        xml::validate_wpa2_passphrase(pwd)
+            .map_err(|e| HardwareError::Wifi(format!("Invalid WPA2 passphrase: {e}")))?;
     }
 
     // Create profile XML and connect
@@ -111,20 +112,20 @@ pub fn connect(ssid: &str, password: Option<&str>) -> Result<()> {
         let profile_path = temp_dir.join(format!("micontrol_wifi_{random_suffix}.xml"));
 
         // Use a cleanup guard to ensure the temp file is deleted even on error.
-        let result = (|| -> Result<()> {
+        let result = (|| -> HardwareResult<()> {
             std::fs::write(&profile_path, &profile_xml)
-                .context("Failed to write WiFi profile")?;
+                .map_err(HardwareError::Io)?;
 
             // Add profile
             let add = Command::new("netsh")
                 .args(["wlan", "add", "profile", "filename"])
                 .arg(&profile_path)
                 .output()
-                .context("Failed to add WiFi profile")?;
+                .map_err(|e| HardwareError::Wifi(format!("Failed to add profile: {e}")))?;
 
             if !add.status.success() {
                 let stderr = String::from_utf8_lossy(&add.stderr);
-                anyhow::bail!("Failed to add WiFi profile: {stderr}");
+                return Err(HardwareError::Wifi(format!("Failed to add WiFi profile: {stderr}")));
             }
 
             Ok(())
@@ -141,33 +142,33 @@ pub fn connect(ssid: &str, password: Option<&str>) -> Result<()> {
         .args(["wlan", "connect", "name"])
         .arg(ssid)
         .output()
-        .context("Failed to connect to WiFi")?;
+        .map_err(|e| HardwareError::Wifi(format!("Failed to connect: {e}")))?;
 
     if !connect.status.success() {
         let stderr = String::from_utf8_lossy(&connect.stderr);
-        anyhow::bail!("Failed to connect: {stderr}");
+        return Err(HardwareError::Wifi(format!("Failed to connect: {stderr}")));
     }
 
     Ok(())
 }
 
 /// Disconnect from current WiFi network.
-pub fn disconnect() -> Result<()> {
+pub fn disconnect() -> HardwareResult<()> {
     let output = Command::new("netsh")
         .args(["wlan", "disconnect"])
         .output()
-        .context("Failed to disconnect WiFi")?;
+        .map_err(|e| HardwareError::Wifi(format!("Failed to disconnect: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to disconnect: {stderr}");
+        return Err(HardwareError::Wifi(format!("Failed to disconnect: {stderr}")));
     }
 
     Ok(())
 }
 
 /// Parse netsh wlan show networks output.
-fn parse_scan_output(output: &str) -> Result<Vec<WifiNetwork>> {
+fn parse_scan_output(output: &str) -> HardwareResult<Vec<WifiNetwork>> {
     let mut networks: Vec<WifiNetwork> = Vec::new();
     let mut current_ssid: Option<String> = None;
     let mut current_signal: u32 = 0;
@@ -218,7 +219,7 @@ fn parse_scan_output(output: &str) -> Result<Vec<WifiNetwork>> {
 }
 
 /// Parse netsh wlan show interfaces output.
-fn parse_interface_output(output: &str) -> Result<WifiStatus> {
+fn parse_interface_output(output: &str) -> HardwareResult<WifiStatus> {
     let mut ssid: Option<String> = None;
     let mut signal: Option<u32> = None;
     let mut interface: Option<String> = None;
