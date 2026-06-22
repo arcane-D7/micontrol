@@ -13,11 +13,11 @@ import type {
   SystemInfo,
   UpdateStatus,
   XiaomiDriverInfo,
-} from "../hooks/useHardware";
+} from '../hooks/useHardware';
 
 // ── Persisted mock state (simulates registry / IPC) ─────────────────────────
 
-let _performanceMode: PerformanceMode = "balance";
+let _performanceMode: PerformanceMode = 'balance';
 let _chargingThreshold = 80;
 let _brightness = 72;
 let _hdr = false;
@@ -30,11 +30,11 @@ let _aiBrightnessConfig: AiBrightnessConfig = {
   sensitivity: 100,
   smoothing: 30,
 };
-let _fanMode: "auto" | "fixed" | "off" = "auto";
+let _fanMode: 'auto' | 'fixed' | 'off' = 'auto';
 let _fanSpeedPercent = 0;
-let _touchpadSensitivity: "low" | "medium" | "high" = "high";
+let _touchpadSensitivity: 'low' | 'medium' | 'high' = 'high';
 let _touchpadHaptics = true;
-let _touchpadHapticsIntensity: "low" | "medium" | "high" = "medium";
+let _touchpadHapticsIntensity: 'low' | 'medium' | 'high' = 'medium';
 let _touchpadGestureScreenshot = false;
 let _touchpadRepress = false;
 let _touchpadEdgeSlide = false;
@@ -43,16 +43,16 @@ let _autostart = false;
 // ── Mock data ────────────────────────────────────────────────────────────────
 
 const SYSTEM_INFO: SystemInfo = {
-  cpu_name: "12th Gen Intel Core i7-12700H",
+  cpu_name: '12th Gen Intel Core i7-12700H',
   cpu_cores: 14,
   cpu_threads: 20,
   cpu_usage: 23.4,
-  gpu_name: "NVIDIA GeForce RTX 3060 Laptop GPU",
+  gpu_name: 'NVIDIA GeForce RTX 3060 Laptop GPU',
   gpu_usage: 12.5,
   vram_used_mb: 1024,
   ram_total_gb: 16,
   ram_used_gb: 8.3,
-  os_version: "Windows 11 Home 23H2 (26100.3915)",
+  os_version: 'Windows 11 Home 23H2 (26100.3915)',
 };
 
 const BATTERY_INFO: BatteryInfo = {
@@ -63,8 +63,8 @@ const BATTERY_INFO: BatteryInfo = {
   cycle_count: 412,
   designed_capacity_mwh: 70000,
   full_capacity_mwh: 65800,
-  manufacturer: "Xiaomi",
-  device_name: "LP-L9N80V",
+  manufacturer: 'Xiaomi',
+  device_name: 'LP-L9N80V',
   temperature_celsius: 32.5,
   time_remaining_minutes: 187,
   time_to_full_minutes: null,
@@ -84,43 +84,45 @@ const HARDWARE_CAPABILITIES: HardwareCapabilities = {
 };
 
 const HARDWARE_PROFILE: HardwareProfile = {
-  discovered_at: Math.floor(Date.now() / 1000) - 60 * 60 * 2,  // Unix seconds (2 h ago)
-  device_model: "Xiaomi Mi Notebook Pro X 15",
-  vhf_device_path: "\\\\?\\HID#{0CC99493-EB87-54F5-BB10-C0D5EA4A4F4C}#5&3e2b1f9c&0&0000#{0CC99493-EB87-54F5-BB10-C0D5EA4A4F4C}",
-  touchpad_hid_path: "\\\\?\\HID#VID_2575&PID_0204&Col04#7&1a2b3c4d&0&0003#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+  discovered_at: Math.floor(Date.now() / 1000) - 60 * 60 * 2, // Unix seconds (2 h ago)
+  device_model: 'Xiaomi Mi Notebook Pro X 15',
+  vhf_device_path:
+    '\\\\?\\HID#{0CC99493-EB87-54F5-BB10-C0D5EA4A4F4C}#5&3e2b1f9c&0&0000#{0CC99493-EB87-54F5-BB10-C0D5EA4A4F4C}',
+  touchpad_hid_path:
+    '\\\\?\\HID#VID_2575&PID_0204&Col04#7&1a2b3c4d&0&0003#{4d1e55b2-f16f-11cf-88cb-001111000030}',
   touchscreen_hid_path: null,
   stylus_hid_path: null,
-  iot_pipe_path: "\\\\.\\pipe\\LOCAL\\IoTService_IPC_Broker",
-  iot_service_name: "IoTSvc",
-  igcl_dll_path: "C:\\Windows\\System32\\ControlLib.dll",
+  iot_pipe_path: '\\\\.\\pipe\\LOCAL\\IoTService_IPC_Broker',
+  iot_service_name: 'IoTSvc',
+  igcl_dll_path: 'C:\\Windows\\System32\\ControlLib.dll',
   mi_registry_present: true,
   missing_drivers: [],
   capabilities: HARDWARE_CAPABILITIES,
 };
 
 const BIOS_INFO: BiosInfo = {
-  version: "XMACM100P0106",
-  release_date: "20240815000000.000000+000",
-  manufacturer: "Xiaomi",
-  serial_number: "XMKB2305A0000BX",
+  version: 'XMACM100P0106',
+  release_date: '20240815000000.000000+000',
+  manufacturer: 'Xiaomi',
+  serial_number: 'XMKB2305A0000BX',
 };
 
 const XIAOMI_DRIVERS: XiaomiDriverInfo[] = [
   {
-    published_name: "oem71.inf",
-    original_name: "virtualcontrolhid.inf",
-    provider: "Xiaomi Inc.",
-    version_string: "12/12/2023 1.2.0.8",
-    class_name: "HIDClass",
-    signer: "Microsoft Windows Hardware Compatibility Publisher",
+    published_name: 'oem71.inf',
+    original_name: 'virtualcontrolhid.inf',
+    provider: 'Xiaomi Inc.',
+    version_string: '12/12/2023 1.2.0.8',
+    class_name: 'HIDClass',
+    signer: 'Microsoft Windows Hardware Compatibility Publisher',
   },
   {
-    published_name: "oem169.inf",
-    original_name: "iotdriver.inf",
-    provider: "Xiaomi Inc.",
-    version_string: "11/30/2023 2.0.1.12",
-    class_name: "System",
-    signer: "Microsoft Windows Hardware Compatibility Publisher",
+    published_name: 'oem169.inf',
+    original_name: 'iotdriver.inf',
+    provider: 'Xiaomi Inc.',
+    version_string: '11/30/2023 2.0.1.12',
+    class_name: 'System',
+    signer: 'Microsoft Windows Hardware Compatibility Publisher',
   },
 ];
 
@@ -129,12 +131,12 @@ const UPDATE_STATUS: UpdateStatus = {
   xiaomi_drivers: XIAOMI_DRIVERS,
   last_xpm_scan: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
   xpm_driver_cache: {
-    VirtualControlHID: "1.2.0.8",
-    IoTDriver: "2.0.1.12",
+    VirtualControlHID: '1.2.0.8',
+    IoTDriver: '2.0.1.12',
   },
   xpm_installed: true,
-  xpm_version: "5.8.0.57",
-  xpm_path: "C:\\Program Files\\MI\\XiaomiPCManager\\5.8.0.57",
+  xpm_version: '5.8.0.57',
+  xpm_path: 'C:\\Program Files\\MI\\XiaomiPCManager\\5.8.0.57',
 };
 
 // ── Simulated sensor drift for the overview ──────────────────────────────────
@@ -155,7 +157,7 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
 
   switch (command) {
     // ── System info ────────────────────────────────────────────────────────
-    case "get_system_info":
+    case 'get_system_info':
       return {
         ...SYSTEM_INFO,
         cpu_usage: Math.round(drift(23, 18) * 10) / 10,
@@ -164,14 +166,14 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       } as T;
 
     // ── Battery ────────────────────────────────────────────────────────────
-    case "get_battery_info":
+    case 'get_battery_info':
       return {
         ...BATTERY_INFO,
         level: Math.max(5, Math.min(100, BATTERY_INFO.level)),
       } as T;
 
     // ── Display ────────────────────────────────────────────────────────────
-    case "get_display_info":
+    case 'get_display_info':
       return {
         brightness: _brightness,
         hdr_enabled: _hdr,
@@ -184,42 +186,42 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         ambient_lux: 342.0,
       } as T;
 
-    case "set_brightness":
+    case 'set_brightness':
       _brightness = (args?.level as number) ?? _brightness;
       return undefined as T;
 
-    case "get_available_refresh_rates":
+    case 'get_available_refresh_rates':
       return [60, 120] as T;
 
-    case "set_refresh_rate":
+    case 'set_refresh_rate':
       return undefined as T;
 
-    case "get_process_list":
+    case 'get_process_list':
       return [
-        { name: "chrome", pid: 1234, cpu_percent: drift(8, 6), memory_mb: 512 },
-        { name: "Code", pid: 2345, cpu_percent: drift(3, 3), memory_mb: 256 },
-        { name: "Tauri", pid: 3456, cpu_percent: drift(1, 1), memory_mb: 128 },
-        { name: "explorer", pid: 456, cpu_percent: drift(0.5, 0.5), memory_mb: 64 },
-        { name: "System", pid: 4, cpu_percent: drift(0.3, 0.3), memory_mb: 32 },
+        { name: 'chrome', pid: 1234, cpu_percent: drift(8, 6), memory_mb: 512 },
+        { name: 'Code', pid: 2345, cpu_percent: drift(3, 3), memory_mb: 256 },
+        { name: 'Tauri', pid: 3456, cpu_percent: drift(1, 1), memory_mb: 128 },
+        { name: 'explorer', pid: 456, cpu_percent: drift(0.5, 0.5), memory_mb: 64 },
+        { name: 'System', pid: 4, cpu_percent: drift(0.3, 0.3), memory_mb: 32 },
       ] as T;
 
-    case "set_adaptive_refresh_rate":
+    case 'set_adaptive_refresh_rate':
       _adaptiveRefreshRate = (args?.enabled as boolean) ?? _adaptiveRefreshRate;
       return undefined as T;
 
-    case "set_hdr":
+    case 'set_hdr':
       _hdr = (args?.enabled as boolean) ?? _hdr;
       return undefined as T;
 
-    case "set_ai_brightness":
+    case 'set_ai_brightness':
       _aiBrightness = (args?.enabled as boolean) ?? _aiBrightness;
       _aiBrightnessConfig = { ..._aiBrightnessConfig, enabled: _aiBrightness };
       return undefined as T;
 
-    case "get_ai_brightness_config":
+    case 'get_ai_brightness_config':
       return { ..._aiBrightnessConfig } as T;
 
-    case "set_ai_brightness_config": {
+    case 'set_ai_brightness_config': {
       const cfg = args?.config as AiBrightnessConfig;
       if (cfg) {
         _aiBrightnessConfig = { ...cfg };
@@ -229,21 +231,24 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     }
 
     // ── Fan ────────────────────────────────────────────────────────────────
-    case "get_fan_info":
+    case 'get_fan_info':
       return {
         mode: _fanMode,
-        speed_rpm: _fanMode === "off" ? 0 : Math.round(drift(_fanMode === "fixed" ? _fanSpeedPercent * 55 : 2100, 180)),
+        speed_rpm:
+          _fanMode === 'off'
+            ? 0
+            : Math.round(drift(_fanMode === 'fixed' ? _fanSpeedPercent * 55 : 2100, 180)),
         speed_percent: _fanSpeedPercent,
         gpu_temp_celsius: Math.round(drift(52, 6) * 10) / 10,
       } as T;
 
-    case "set_fan_mode":
-      _fanMode = (args?.mode as "auto" | "fixed" | "off") ?? _fanMode;
+    case 'set_fan_mode':
+      _fanMode = (args?.mode as 'auto' | 'fixed' | 'off') ?? _fanMode;
       _fanSpeedPercent = (args?.speed_percent as number) ?? _fanSpeedPercent;
       return undefined as T;
 
     // ── Touchpad ───────────────────────────────────────────────────────────
-    case "get_touchpad_info":
+    case 'get_touchpad_info':
       return {
         sensitivity: _touchpadSensitivity,
         haptics_enabled: _touchpadHaptics,
@@ -253,75 +258,77 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         edge_slide: _touchpadEdgeSlide,
       } as T;
 
-    case "set_touchpad_sensitivity":
-      _touchpadSensitivity = (args?.sensitivity as "low" | "medium" | "high") ?? _touchpadSensitivity;
+    case 'set_touchpad_sensitivity':
+      _touchpadSensitivity =
+        (args?.sensitivity as 'low' | 'medium' | 'high') ?? _touchpadSensitivity;
       return undefined as T;
 
-    case "set_touchpad_haptics":
+    case 'set_touchpad_haptics':
       _touchpadHaptics = (args?.enabled as boolean) ?? _touchpadHaptics;
       return undefined as T;
 
-    case "set_touchpad_haptics_intensity":
-      _touchpadHapticsIntensity = (args?.intensity as "low" | "medium" | "high") ?? _touchpadHapticsIntensity;
+    case 'set_touchpad_haptics_intensity':
+      _touchpadHapticsIntensity =
+        (args?.intensity as 'low' | 'medium' | 'high') ?? _touchpadHapticsIntensity;
       return undefined as T;
 
-    case "set_touchpad_gesture_screenshot":
+    case 'set_touchpad_gesture_screenshot':
       _touchpadGestureScreenshot = (args?.enabled as boolean) ?? _touchpadGestureScreenshot;
       return undefined as T;
 
-    case "set_touchpad_repress":
+    case 'set_touchpad_repress':
       _touchpadRepress = (args?.enabled as boolean) ?? _touchpadRepress;
       return undefined as T;
 
-    case "set_touchpad_edge_slide":
+    case 'set_touchpad_edge_slide':
       _touchpadEdgeSlide = (args?.enabled as boolean) ?? _touchpadEdgeSlide;
       return undefined as T;
 
     // ── Performance ────────────────────────────────────────────────────────
-    case "get_performance_mode":
+    case 'get_performance_mode':
       return _performanceMode as T;
 
-    case "set_performance_mode":
+    case 'set_performance_mode':
       _performanceMode = (args?.mode as PerformanceMode) ?? _performanceMode;
       return { mode: _performanceMode, hw_value: 1 } as T;
 
     // ── Charging ───────────────────────────────────────────────────────────
-    case "get_charging_threshold":
+    case 'get_charging_threshold':
       return _chargingThreshold as T;
 
-    case "set_charging_threshold":
+    case 'set_charging_threshold':
       _chargingThreshold = (args?.threshold as number) ?? _chargingThreshold;
       return undefined as T;
 
     // ── Startup ────────────────────────────────────────────────────────────
-    case "get_autostart":
+    case 'get_autostart':
       return _autostart as T;
 
-    case "set_autostart":
+    case 'set_autostart':
       _autostart = (args?.enabled as boolean) ?? _autostart;
       return undefined as T;
 
     // ── Updates ────────────────────────────────────────────────────────────
-    case "get_update_status":
+    case 'get_update_status':
       return UPDATE_STATUS as T;
 
-    case "trigger_driver_scan":
+    case 'trigger_driver_scan':
       return UPDATE_STATUS as T;
 
     // ── Hardware discovery ─────────────────────────────────────────────────
-    case "get_hardware_profile":
+    case 'get_hardware_profile':
       return HARDWARE_PROFILE as T;
 
-    case "run_hardware_discovery":
+    case 'run_hardware_discovery':
       await new Promise((r) => setTimeout(r, 1200)); // simulate discovery time
       return HARDWARE_PROFILE as T;
 
-    case "install_driver":
+    case 'install_driver':
       await new Promise((r) => setTimeout(r, 800));
-      return "Driver installed successfully (mock)" as T;
+      return 'Driver installed successfully (mock)' as T;
 
     // ── Tray ───────────────────────────────────────────────────────────────
-    case "open_main_window":
+    case 'open_main_window':
       return undefined as T;
 
     default:

@@ -167,9 +167,8 @@ impl From<HardwareError> for String {
     /// Convert to a JSON string for Tauri command error responses.
     fn from(e: HardwareError) -> String {
         let resp = ErrorResponse::from_error(&e);
-        serde_json::to_string(&resp).unwrap_or_else(|_| {
-            format!(r#"{{"code":"other","message":"{}"}}"#, e)
-        })
+        serde_json::to_string(&resp)
+            .unwrap_or_else(|_| format!(r#"{{"code":"other","message":"{}"}}"#, e))
     }
 }
 
@@ -264,7 +263,11 @@ mod tests {
     fn test_all_variants_have_codes() {
         // Ensure every variant has a non-empty code
         let codes = [
-            HardwareError::WmiQuery { query: String::new(), source: "".into() }.code(),
+            HardwareError::WmiQuery {
+                query: String::new(),
+                source: "".into(),
+            }
+            .code(),
             HardwareError::Io(std::io::Error::new(std::io::ErrorKind::Other, "")).code(),
             HardwareError::Hid("".into()).code(),
             HardwareError::InvalidConfig("".into()).code(),
@@ -287,6 +290,10 @@ mod tests {
         let mut sorted = codes.to_vec();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), codes.len(), "All error codes should be unique");
+        assert_eq!(
+            sorted.len(),
+            codes.len(),
+            "All error codes should be unique"
+        );
     }
 }

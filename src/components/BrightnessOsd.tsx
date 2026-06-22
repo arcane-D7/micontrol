@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, PhysicalPosition, primaryMonitor } from "@tauri-apps/api/window";
+import { useEffect, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow, PhysicalPosition, primaryMonitor } from '@tauri-apps/api/window';
 
 // ── Brightness OSD overlay ────────────────────────────────────────────────────
 // Renders inside the dedicated `brightness-osd` Tauri window (260×88 px,
@@ -22,15 +22,19 @@ export default function BrightnessOsd() {
         const monitor = await primaryMonitor();
         if (monitor) {
           const winSize = await win.outerSize();
-          await win.setPosition(new PhysicalPosition(
-            monitor.position.x + Math.floor((monitor.size.width  - winSize.width)  / 2),
-            monitor.position.y + monitor.size.height - winSize.height - 64,
-          ));
+          await win.setPosition(
+            new PhysicalPosition(
+              monitor.position.x + Math.floor((monitor.size.width - winSize.width) / 2),
+              monitor.position.y + monitor.size.height - winSize.height - 64,
+            ),
+          );
         }
-      } catch { /* non-fatal */ }
+      } catch {
+        /* non-fatal */
+      }
     })();
 
-    const unlisten = listen<number>("gesture:brightness_changed", (event) => {
+    const unlisten = listen<number>('gesture:brightness_changed', (event) => {
       setLevel(Math.round(event.payload));
       setVisible(true);
 
@@ -47,37 +51,37 @@ export default function BrightnessOsd() {
   }, []);
 
   const sunPath =
-    "M12 7a5 5 0 1 1 0 10A5 5 0 0 1 12 7zm0-4v2m0 14v2M4.22 4.22l1.42 1.42" +
-    "m12.72 12.72 1.42 1.42M2 12h2m16 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42";
+    'M12 7a5 5 0 1 1 0 10A5 5 0 0 1 12 7zm0-4v2m0 14v2M4.22 4.22l1.42 1.42' +
+    'm12.72 12.72 1.42 1.42M2 12h2m16 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42';
 
   return (
     <div
       data-tauri-drag-region
       style={{
-        width: "100%",
-        height: "100%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "transparent",
+        width: '100%',
+        height: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'transparent',
       }}
     >
       <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "12px",
-          padding: "14px 20px",
-          borderRadius: "20px",
-          background: "oklch(14% 0.02 260 / 0.82)",
-          backdropFilter: "blur(20px) saturate(1.4)",
-          WebkitBackdropFilter: "blur(20px) saturate(1.4)",
-          border: "1px solid oklch(100% 0 0 / 0.12)",
-          boxShadow: "0 8px 32px oklch(0% 0 0 / 0.4)",
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          padding: '14px 20px',
+          borderRadius: '20px',
+          background: 'oklch(14% 0.02 260 / 0.82)',
+          backdropFilter: 'blur(20px) saturate(1.4)',
+          WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
+          border: '1px solid oklch(100% 0 0 / 0.12)',
+          boxShadow: '0 8px 32px oklch(0% 0 0 / 0.4)',
           opacity: visible ? 1 : 0,
           transform: `translateY(${visible ? 0 : 6}px)`,
-          transition: "opacity 0.18s ease, transform 0.18s ease",
-          minWidth: "220px",
+          transition: 'opacity 0.18s ease, transform 0.18s ease',
+          minWidth: '220px',
         }}
       >
         {/* Sun icon */}
@@ -99,31 +103,31 @@ export default function BrightnessOsd() {
         <div style={{ flex: 1 }}>
           <div
             style={{
-              height: "6px",
-              borderRadius: "3px",
-              background: "oklch(100% 0 0 / 0.15)",
-              overflow: "hidden",
-              marginBottom: "6px",
+              height: '6px',
+              borderRadius: '3px',
+              background: 'oklch(100% 0 0 / 0.15)',
+              overflow: 'hidden',
+              marginBottom: '6px',
             }}
           >
             <div
               style={{
-                height: "100%",
+                height: '100%',
                 width: `${level}%`,
-                borderRadius: "3px",
-                background: "linear-gradient(90deg, oklch(75% 0.15 75), oklch(85% 0.18 60))",
-                transition: "width 0.15s ease",
+                borderRadius: '3px',
+                background: 'linear-gradient(90deg, oklch(75% 0.15 75), oklch(85% 0.18 60))',
+                transition: 'width 0.15s ease',
               }}
             />
           </div>
           <div
             style={{
-              fontSize: "12px",
+              fontSize: '12px',
               fontWeight: 500,
-              color: "oklch(88% 0.008 260)",
-              letterSpacing: "0.01em",
+              color: 'oklch(88% 0.008 260)',
+              letterSpacing: '0.01em',
               fontFamily: "'Outfit', system-ui, sans-serif",
-              textAlign: "right",
+              textAlign: 'right',
             }}
           >
             {level}%

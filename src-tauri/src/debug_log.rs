@@ -32,8 +32,8 @@ fn init_dev_file_logger() -> Result<()> {
     std::fs::create_dir_all(&log_dir).with_context(|| format!("create log dir {log_dir:?}"))?;
 
     let log_path = log_dir.join("tauri-dev-trace.log");
-    let log_file = fern::log_file(&log_path)
-        .with_context(|| format!("open dev log file {log_path:?}"))?;
+    let log_file =
+        fern::log_file(&log_path).with_context(|| format!("open dev log file {log_path:?}"))?;
 
     let _ = DEV_LOG_PATH.set(log_path.clone());
 

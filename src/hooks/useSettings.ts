@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type {
   SystemInfo,
   BatteryInfo,
@@ -6,12 +7,13 @@ import type {
   DisplayInfo,
   PerformanceMode,
   HardwareCapabilities,
-} from "./useHardware";
+} from './useHardware';
 
 // ── Persisted settings ────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "micontrol_settings_v2";
-const STORAGE_KEY_V1 = "micontrol_settings_v1";
+const STORAGE_KEY = 'micontrol_settings_v2';
+const STORAGE_KEY_V1 = 'micontrol_settings_v1';
+const CREDENTIAL_KEY = 'openai_api_key';
 
 export interface AppSettings {
   /** OpenAI (or compatible) API key */
@@ -37,9 +39,9 @@ export interface AppSettings {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  openai_api_key: "",
-  openai_base_url: "https://api.openai.com/v1",
-  openai_model: "gpt-4o-mini",
+  openai_api_key: '',
+  openai_base_url: 'https://api.openai.com/v1',
+  openai_model: 'gpt-4o-mini',
   perf_mode_ac: null,
   perf_mode_dc: null,
   auto_switch_perf: false,
@@ -49,13 +51,62 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ai_daily_analyses: 2,
 };
 
+/**
+ * Load non-secret settings from localStorage.
+ */
 function loadSettings(): AppSettings {
   try {
-    // Try v2 first, fall back to v1 (migrating AI keys across)
     const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(STORAGE_KEY_V1);
     return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
   } catch {
     return DEFAULT_SETTINGS;
+  }
+}
+
+/** Persist non-secret settings to localStorage (API key excluded). */
+function persistSettings(settings: AppSettings): void {
+  const { openai_api_key: _, ...safe } = settings;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+}
+
+/**
+ * Migrate an API key stored in the old localStorage JSON blob to the
+ * OS credential store, then remove it from localStorage. Idempotent.
+ */
+async function migrateApiKey(): Promise<void> {
+  try {
+    for (const key of [STORAGE_KEY, STORAGE_KEY_V1]) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      const oldKey = parsed.openai_api_key;
+      if (typeof oldKey === 'string' && oldKey.trim().length > 0) {
+        await invoke('set_secret', { key: CREDENTIAL_KEY, value: oldKey });
+        delete parsed.openai_api_key;
+        localStorage.setItem(key, JSON.stringify(parsed));
+        console.info('[settings] Migrated OpenAI API key to secure credential store');
+      }
+    }
+  } catch (err) {
+    console.warn('[settings] API key migration failed (non-fatal):', err);
+  }
+}
+
+/**
+ * Fetch the API key from the OS credential store.
+ * Returns empty string if no key is stored or on error.
+ */
+async function loadApiKey(): Promise<string> {
+  try {
+    const result = await invoke<string | null>('get_secret', { key: CREDENTIAL_KEY });
+    return result ?? '';
+  } catch {
+    return '';
   }
 }
 
@@ -81,29 +132,29 @@ function buildPrompt(ctx: SystemContext): string {
   return `You are analyzing a Xiaomi laptop. Provide concise, specific recommendations.
 
 == HARDWARE ==
-Device: ${ctx.deviceModel ?? "Unknown"}
-CPU: ${sys?.cpu_name ?? "Unknown"} — usage: ${sys?.cpu_usage?.toFixed(0) ?? "?"}%
-RAM: ${sys?.ram_used_gb?.toFixed(1) ?? "?"} / ${sys?.ram_total_gb ?? "?"} GB used
-OS: ${sys?.os_version ?? "Unknown"}
+Device: ${ctx.deviceModel ?? 'Unknown'}
+CPU: ${sys?.cpu_name ?? 'Unknown'} — usage: ${sys?.cpu_usage?.toFixed(0) ?? '?'}%
+RAM: ${sys?.ram_used_gb?.toFixed(1) ?? '?'} / ${sys?.ram_total_gb ?? '?'} GB used
+OS: ${sys?.os_version ?? 'Unknown'}
 
 == BATTERY ==
-Level: ${bat?.level ?? "?"}%  |  Charging: ${bat?.is_charging ? "yes" : "no"}
-Health: ${bat?.health_percent ?? "?"}%  |  Cycles: ${bat?.cycle_count ?? "?"}
-Temperature: ${bat?.temperature_celsius != null ? bat.temperature_celsius + "°C" : "unavailable"}
-Capacity: ${bat?.full_capacity_mwh ?? "?"} mWh (designed: ${bat?.designed_capacity_mwh ?? "?"} mWh)
+Level: ${bat?.level ?? '?'}%  |  Charging: ${bat?.is_charging ? 'yes' : 'no'}
+Health: ${bat?.health_percent ?? '?'}%  |  Cycles: ${bat?.cycle_count ?? '?'}
+Temperature: ${bat?.temperature_celsius != null ? bat.temperature_celsius + '°C' : 'unavailable'}
+Capacity: ${bat?.full_capacity_mwh ?? '?'} mWh (designed: ${bat?.designed_capacity_mwh ?? '?'} mWh)
 
 == PERFORMANCE ==
-Current mode: ${ctx.performanceMode ?? "unknown"}
-Fan: ${fan?.mode ?? "?"} — ${fan?.speed_rpm ?? "?"}rpm  |  GPU temp: ${fan?.gpu_temp_celsius ?? "?"}°C
-Display: brightness ${disp?.brightness ?? "?"}%  |  refresh ${disp?.refresh_rate_hz ?? "?"}Hz  |  HDR: ${disp?.hdr_enabled ?? false}
+Current mode: ${ctx.performanceMode ?? 'unknown'}
+Fan: ${fan?.mode ?? '?'} — ${fan?.speed_rpm ?? '?'}rpm  |  GPU temp: ${fan?.gpu_temp_celsius ?? '?'}°C
+Display: brightness ${disp?.brightness ?? '?'}%  |  refresh ${disp?.refresh_rate_hz ?? '?'}Hz  |  HDR: ${disp?.hdr_enabled ?? false}
 
 == HARDWARE CAPABILITIES ==
-VHF performance control: ${cap?.has_vhf_performance ? "✓" : "✗ (registry fallback)"}
-IoT charging service: ${cap?.has_iot_charging ? "✓" : "✗ (registry fallback)"}
-Intel IGCL display: ${cap?.has_igcl ? "✓" : "✗"}
-Touchpad HID channel: ${cap?.has_touchpad_hid ? "✓" : "✗"}
-Touchscreen: ${cap?.has_touchscreen ? "✓" : "✗"}
-Stylus: ${cap?.has_stylus ? "✓" : "✗"}
+VHF performance control: ${cap?.has_vhf_performance ? '✓' : '✗ (registry fallback)'}
+IoT charging service: ${cap?.has_iot_charging ? '✓' : '✗ (registry fallback)'}
+Intel IGCL display: ${cap?.has_igcl ? '✓' : '✗'}
+Touchpad HID channel: ${cap?.has_touchpad_hid ? '✓' : '✗'}
+Touchscreen: ${cap?.has_touchscreen ? '✓' : '✗'}
+Stylus: ${cap?.has_stylus ? '✓' : '✗'}
 
 == REQUESTED ANALYSIS ==
 1. Battery health assessment — is the health/cycle count concerning? Recommend optimal charging threshold (values: 60, 70, 80, 100).
@@ -118,39 +169,83 @@ Be concise. Use bullet points.`.trim();
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useSettings() {
-  const [settings, setSettingsState] = useState<AppSettings>(loadSettings);
+  const [settings, setSettingsState] = useState<AppSettings>(() => ({
+    ...loadSettings(),
+    openai_api_key: '', // loaded asynchronously below
+  }));
 
-  function saveSettings(updated: AppSettings) {
+  /** Persist non-secret settings to localStorage and API key to credential store. */
+  async function saveSettings(updated: AppSettings): Promise<void> {
     setSettingsState(updated);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    persistSettings(updated);
+    if (updated.openai_api_key) {
+      try {
+        await invoke('set_secret', { key: CREDENTIAL_KEY, value: updated.openai_api_key });
+      } catch (err) {
+        console.error('[settings] Failed to store API key in credential store:', err);
+      }
+    } else {
+      try {
+        await invoke('delete_secret', { key: CREDENTIAL_KEY });
+      } catch {
+        // Ignore — key may not exist yet
+      }
+    }
   }
 
   function updateKey<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
-    saveSettings({ ...settings, [key]: value });
+    if (key === 'openai_api_key') {
+      // Update locally immediately for responsiveness; background-save to credential store
+      const updated = { ...settings, [key]: value };
+      setSettingsState(updated);
+      persistSettings(updated);
+      saveSettings(updated).catch((err) =>
+        console.error('[settings] Failed to save API key:', err),
+      );
+    } else {
+      saveSettings({ ...settings, [key]: value });
+    }
   }
+
+  // On mount: migrate legacy localStorage key if present, then load from credential store
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await migrateApiKey();
+      if (cancelled) return;
+      const apiKey = await loadApiKey();
+      if (cancelled) return;
+      if (apiKey !== settings.openai_api_key) {
+        setSettingsState((prev) => ({ ...prev, openai_api_key: apiKey }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /** Sends system context to the configured AI model and returns the analysis text. */
   async function analyzeSystem(ctx: SystemContext): Promise<string> {
     if (!settings.openai_api_key.trim()) {
-      throw new Error("api_key_missing");
+      throw new Error('api_key_missing');
     }
 
-    const baseUrl = settings.openai_base_url.replace(/\/+$/, "");
+    const baseUrl = settings.openai_base_url.replace(/\/+$/, '');
     const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${settings.openai_api_key.trim()}`,
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.openai_api_key.trim()}`,
       },
       body: JSON.stringify({
-        model: settings.openai_model || "gpt-4o-mini",
+        model: settings.openai_model || 'gpt-4o-mini',
         messages: [
           {
-            role: "system",
+            role: 'system',
             content:
-              "You are a hardware optimization assistant specialising in Xiaomi laptops running Windows. Give clear, actionable advice in 200 words or less.",
+              'You are a hardware optimization assistant specialising in Xiaomi laptops running Windows. Give clear, actionable advice in 200 words or less.',
           },
-          { role: "user", content: buildPrompt(ctx) },
+          { role: 'user', content: buildPrompt(ctx) },
         ],
         max_tokens: 700,
         temperature: 0.3,
@@ -158,7 +253,7 @@ export function useSettings() {
     });
 
     if (!res.ok) {
-      let detail = "";
+      let detail = '';
       try {
         const err = await res.json();
         detail = err?.error?.message ?? JSON.stringify(err);
@@ -168,33 +263,33 @@ export function useSettings() {
       throw new Error(`API ${res.status}: ${detail}`);
     }
 
-    const json = await res.json() as {
+    const json = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return json.choices?.[0]?.message?.content?.trim() ?? "No response from model.";
+    return json.choices?.[0]?.message?.content?.trim() ?? 'No response from model.';
   }
 
   /** Quick connectivity + auth test — sends a minimal prompt. */
   async function testConnection(): Promise<void> {
     if (!settings.openai_api_key.trim()) {
-      throw new Error("api_key_missing");
+      throw new Error('api_key_missing');
     }
-    const baseUrl = settings.openai_base_url.replace(/\/+$/, "");
+    const baseUrl = settings.openai_base_url.replace(/\/+$/, '');
     const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${settings.openai_api_key.trim()}`,
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.openai_api_key.trim()}`,
       },
       body: JSON.stringify({
-        model: settings.openai_model || "gpt-4o-mini",
-        messages: [{ role: "user", content: "Reply with the single word OK." }],
+        model: settings.openai_model || 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
         max_tokens: 5,
       }),
     });
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({})) as { error?: { message?: string } };
+      const err = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
       throw new Error(`API ${res.status}: ${err?.error?.message ?? res.statusText}`);
     }
   }
@@ -208,13 +303,16 @@ export function useSettings() {
     hwCtx: SystemContext,
     language: string,
   ): Promise<string> {
-    if (!settings.openai_api_key.trim()) throw new Error("api_key_missing");
-    if (logs.length === 0) throw new Error("no_logs");
+    if (!settings.openai_api_key.trim()) throw new Error('api_key_missing');
+    if (logs.length === 0) throw new Error('no_logs');
 
     const langNames: Record<string, string> = {
-      en: "English", pt: "Portuguese", es: "Spanish", fr: "French",
+      en: 'English',
+      pt: 'Portuguese',
+      es: 'Spanish',
+      fr: 'French',
     };
-    const langName = langNames[language] ?? "English";
+    const langName = langNames[language] ?? 'English';
 
     // Compute statistics from logs
     const n = logs.length;
@@ -226,7 +324,9 @@ export function useSettings() {
     const tdps = logs.filter((l) => l.tdp_watts != null).map((l) => l.tdp_watts as number);
     const cpuPcts = logs.map((l) => l.cpu_pct);
     const gpuPcts = logs.map((l) => l.gpu_pct);
-    const batLevels = logs.filter((l) => l.battery_level != null).map((l) => l.battery_level as number);
+    const batLevels = logs
+      .filter((l) => l.battery_level != null)
+      .map((l) => l.battery_level as number);
 
     const first = logs[0];
     const last = logs[n - 1];
@@ -239,12 +339,12 @@ export function useSettings() {
       .sort((a, b) => b.cpu_pct - a.cpu_pct)
       .slice(0, 6)
       .map((p) => `  - ${p.name}: ${p.cpu_pct.toFixed(1)}% CPU, ${p.memory_mb.toFixed(0)} MB RAM`)
-      .join("\n");
+      .join('\n');
 
     const batterySection =
       batLevels.length > 1
-        ? `**Battery:** ${batLevels[0].toFixed(0)}% → ${batLevels[batLevels.length - 1].toFixed(0)}% (${last.is_charging ? "charging" : "discharging"})`
-        : "";
+        ? `**Battery:** ${batLevels[0].toFixed(0)}% → ${batLevels[batLevels.length - 1].toFixed(0)}% (${last.is_charging ? 'charging' : 'discharging'})`
+        : '';
 
     const prompt = `Respond in ${langName}.
 
@@ -254,19 +354,19 @@ You are a hardware optimization assistant for a Xiaomi laptop. Analyze the follo
 
 **CPU Temperature:** avg ${avg(cpuTemps).toFixed(1)}°C, peak ${max(cpuTemps).toFixed(1)}°C
 **GPU Temperature:** avg ${avg(gpuTemps).toFixed(1)}°C, peak ${max(gpuTemps).toFixed(1)}°C
-**TDP (Package Power):** ${tdps.length ? `avg ${avg(tdps).toFixed(1)} W, peak ${max(tdps).toFixed(1)} W` : "unavailable"}
+**TDP (Package Power):** ${tdps.length ? `avg ${avg(tdps).toFixed(1)} W, peak ${max(tdps).toFixed(1)} W` : 'unavailable'}
 **CPU Usage:** avg ${avg(cpuPcts).toFixed(1)}%, peak ${max(cpuPcts).toFixed(1)}%
 **GPU Usage:** avg ${avg(gpuPcts).toFixed(1)}%, peak ${max(gpuPcts).toFixed(1)}%
 ${batterySection}
 **Performance Mode:** ${last.mode}
 
 **Top Processes (latest snapshot):**
-${topProcs || "  - No process data available"}
+${topProcs || '  - No process data available'}
 
 **Current System:**
-- Device: ${hwCtx.deviceModel ?? "Xiaomi Laptop"}
-- CPU: ${hwCtx.systemInfo?.cpu_name ?? "Unknown"} (${hwCtx.systemInfo?.cpu_cores ?? "?"} cores)
-- RAM: ${hwCtx.systemInfo?.ram_used_gb?.toFixed(1) ?? "?"} / ${hwCtx.systemInfo?.ram_total_gb ?? "?"} GB used
+- Device: ${hwCtx.deviceModel ?? 'Xiaomi Laptop'}
+- CPU: ${hwCtx.systemInfo?.cpu_name ?? 'Unknown'} (${hwCtx.systemInfo?.cpu_cores ?? '?'} cores)
+- RAM: ${hwCtx.systemInfo?.ram_used_gb?.toFixed(1) ?? '?'} / ${hwCtx.systemInfo?.ram_total_gb ?? '?'} GB used
 
 ## Analysis Tasks
 1. **Thermal:** Are temperatures healthy? Any throttling risk?
@@ -277,21 +377,21 @@ ${topProcs || "  - No process data available"}
 
 Be concise. Use short paragraphs with emoji section headers. Max 300 words.`;
 
-    const baseUrl = settings.openai_base_url.replace(/\/+$/, "");
+    const baseUrl = settings.openai_base_url.replace(/\/+$/, '');
     const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${settings.openai_api_key.trim()}`,
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.openai_api_key.trim()}`,
       },
       body: JSON.stringify({
-        model: settings.openai_model || "gpt-4o-mini",
+        model: settings.openai_model || 'gpt-4o-mini',
         messages: [
           {
-            role: "system",
+            role: 'system',
             content: `You are a hardware optimization assistant for Xiaomi laptops. Always respond in ${langName}.`,
           },
-          { role: "user", content: prompt },
+          { role: 'user', content: prompt },
         ],
         max_tokens: 800,
         temperature: 0.4,
@@ -299,14 +399,18 @@ Be concise. Use short paragraphs with emoji section headers. Max 300 words.`;
     });
 
     if (!res.ok) {
-      let detail = "";
-      try { const err = await res.json(); detail = err?.error?.message ?? JSON.stringify(err); }
-      catch { detail = await res.text(); }
+      let detail = '';
+      try {
+        const err = await res.json();
+        detail = err?.error?.message ?? JSON.stringify(err);
+      } catch {
+        detail = await res.text();
+      }
       throw new Error(`API ${res.status}: ${detail}`);
     }
 
-    const json = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-    return json.choices?.[0]?.message?.content?.trim() ?? "No response from model.";
+    const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    return json.choices?.[0]?.message?.content?.trim() ?? 'No response from model.';
   }
 
   return {

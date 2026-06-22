@@ -1001,10 +1001,7 @@ fn resolve_action(vk: u32) -> Option<HotkeyAction> {
 
 /// Allowlist of permitted interpreter executables (canonical System32 paths).
 #[cfg(windows)]
-const ALLOWED_INTERPRETERS: &[&str] = &[
-    "cmd.exe",
-    "powershell.exe",
-];
+const ALLOWED_INTERPRETERS: &[&str] = &["cmd.exe", "powershell.exe"];
 
 /// Check if the script action feature flag is enabled.
 ///
@@ -1014,8 +1011,7 @@ const ALLOWED_INTERPRETERS: &[&str] = &[
 fn is_script_action_enabled() -> bool {
     use winreg::enums::*;
     use winreg::RegKey;
-    let key = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey("Software\\miPC\\hotkeys");
+    let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\miPC\\hotkeys");
     match key {
         Ok(k) => k.get_value::<u32, _>("EnableScriptActions").unwrap_or(0) != 0,
         Err(_) => false,
@@ -1068,7 +1064,11 @@ fn script_hash(interpreter: &str, path: &str, args: &[String]) -> String {
         hasher.update(arg.as_bytes());
         hasher.update(b"\0");
     }
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Path to the consent file: `%LOCALAPPDATA%\MiControl\hotkey_consent.json`
@@ -1092,9 +1092,7 @@ fn has_consent(interpreter: &str, path: &str, args: &[String]) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
-    map.get(&hash)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    map.get(&hash).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 /// Grant "Always Allow" consent for a script.
@@ -1114,10 +1112,9 @@ fn grant_consent(interpreter: &str, path: &str, args: &[String]) -> Result<(), S
         obj.insert(hash, serde_json::json!(true));
     }
 
-    let json = serde_json::to_string_pretty(&map)
-        .map_err(|e| format!("Cannot serialize consent: {e}"))?;
-    std::fs::write(&consent_file, json)
-        .map_err(|e| format!("Cannot write consent file: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(&map).map_err(|e| format!("Cannot serialize consent: {e}"))?;
+    std::fs::write(&consent_file, json).map_err(|e| format!("Cannot write consent file: {e}"))?;
 
     // Restrict the ACL on the consent file.
     crate::util::auth::restrict_file_acl(&consent_file);

@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { useToast } from "../contexts/ToastContext";
-import type { AudioVolumeResult } from "../hooks/useHardware";
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { useToast } from '../contexts/ToastContext';
+import type { AudioVolumeResult } from '../hooks/useHardware';
 
 interface AudioDevice {
   name: string;
@@ -24,7 +24,12 @@ interface AudioControlProps {
   onMuteToggle: (muted: boolean) => Promise<void>;
 }
 
-export default function AudioControl({ audioState, loading, onVolumeChange, onMuteToggle }: AudioControlProps) {
+export default function AudioControl({
+  audioState,
+  loading,
+  onVolumeChange,
+  onMuteToggle,
+}: AudioControlProps) {
   const [devices, setDevices] = useState<AudioDeviceList | null>(null);
   const { addToast } = useToast();
 
@@ -36,10 +41,10 @@ export default function AudioControl({ audioState, loading, onVolumeChange, onMu
   useEffect(() => {
     void (async () => {
       try {
-        const list = await invoke<AudioDeviceList>("get_audio_devices");
+        const list = await invoke<AudioDeviceList>('get_audio_devices');
         setDevices(list);
       } catch (e) {
-        console.error("Failed to load audio devices:", e);
+        console.error('Failed to load audio devices:', e);
       }
     })();
   }, []);
@@ -49,7 +54,7 @@ export default function AudioControl({ audioState, loading, onVolumeChange, onMu
       // onVolumeChange expects 0-1 fraction (setMasterVolume contract)
       await onVolumeChange(newVolume / 100);
     } catch (e) {
-      addToast(`Volume error: ${String(e)}`, "error");
+      addToast(`Volume error: ${String(e)}`, 'error');
     }
   };
 
@@ -57,11 +62,11 @@ export default function AudioControl({ audioState, loading, onVolumeChange, onMu
     try {
       await onMuteToggle(!muted);
     } catch (e) {
-      addToast(`Mute error: ${String(e)}`, "error");
+      addToast(`Mute error: ${String(e)}`, 'error');
     }
   };
 
-  const volumeIcon = muted ? "🔇" : volume > 66 ? "🔊" : volume > 33 ? "🔉" : "🔈";
+  const volumeIcon = muted ? '🔇' : volume > 66 ? '🔊' : volume > 33 ? '🔉' : '🔈';
 
   return (
     <div className="card">
@@ -69,14 +74,19 @@ export default function AudioControl({ audioState, loading, onVolumeChange, onMu
       <p className="page-subtitle">Master volume and device management</p>
 
       {/* Volume Slider */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <button
           onClick={handleMuteToggle}
           style={{
-            background: "none", border: "none", cursor: "pointer", fontSize: 24,
-            padding: 4, borderRadius: "var(--r-xs)", transition: "transform var(--t-fast)",
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            fontSize: 24,
+            padding: 4,
+            borderRadius: 'var(--r-xs)',
+            transition: 'transform var(--t-fast)',
           }}
-          title={muted ? "Unmute" : "Mute"}
+          title={muted ? 'Unmute' : 'Mute'}
         >
           {volumeIcon}
         </button>
@@ -87,17 +97,17 @@ export default function AudioControl({ audioState, loading, onVolumeChange, onMu
           value={muted ? 0 : volume}
           onChange={(e) => handleVolumeChange(Number(e.target.value))}
           disabled={loading}
-          style={{ flex: 1, accentColor: "var(--accent)" }}
+          style={{ flex: 1, accentColor: 'var(--accent)' }}
         />
-        <span style={{ minWidth: 40, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-          {muted ? "Muted" : `${volume}%`}
+        <span style={{ minWidth: 40, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+          {muted ? 'Muted' : `${volume}%`}
         </span>
       </div>
 
       {/* Device List */}
       {devices && (
         <div style={{ marginTop: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8, color: "var(--text-dim)", fontSize: 13 }}>
+          <div style={{ fontWeight: 600, marginBottom: 8, color: 'var(--text-dim)', fontSize: 13 }}>
             Playback Devices
           </div>
           {devices.playback.slice(0, 5).map((d) => (
@@ -105,15 +115,15 @@ export default function AudioControl({ audioState, loading, onVolumeChange, onMu
               key={d.id}
               className="stat-row"
               style={{
-                padding: "6px 8px",
-                borderRadius: "var(--r-xs)",
-                background: d.is_default ? "var(--bg-hover)" : "transparent",
+                padding: '6px 8px',
+                borderRadius: 'var(--r-xs)',
+                background: d.is_default ? 'var(--bg-hover)' : 'transparent',
                 marginBottom: 4,
               }}
             >
               <span style={{ flex: 1, fontSize: 13 }}>{d.name}</span>
-              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                {d.is_default ? "✓ Default" : ""}
+              <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                {d.is_default ? '✓ Default' : ''}
               </span>
             </div>
           ))}

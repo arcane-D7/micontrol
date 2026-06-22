@@ -66,11 +66,7 @@ pub fn install_panic_hook() {
             .unwrap_or_else(|| "<unknown>".to_string());
 
         // Log to the application logger (fern → file + stderr)
-        log::error!(
-            "PANIC at {}: {}",
-            loc_str,
-            payload_str
-        );
+        log::error!("PANIC at {}: {}", loc_str, payload_str);
 
         // Also print to stderr directly in case the logger isn't initialized
         eprintln!("PANIC at {}: {}", loc_str, payload_str);

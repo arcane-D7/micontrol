@@ -153,7 +153,11 @@ pub fn read_all() -> Result<Vec<u8>> {
 pub fn try_get_ac_power_mw() -> Option<i32> {
     let eram = read_ecram(ERAM_BASE, ERAM_SIZE).ok()?;
     let adpw = eram[ERAM_ADPW_OFFSET] as i32;
-    if adpw > 0 && adpw <= 300 { Some(adpw * 1000) } else { None }
+    if adpw > 0 && adpw <= 300 {
+        Some(adpw * 1000)
+    } else {
+        None
+    }
 }
 
 /// Return a hex dump string of all known ECRAM bytes for debugging.
@@ -433,10 +437,8 @@ const RAW_ECRAM_WRITE_ENABLE_ENV: &str = "MICONTROL_ENABLE_RAW_ECRAM_WRITE";
 ///      address falls within the ACPI ERAM region (0xFE0B0300..0xFE0B03FF).
 fn validate_write(phys_addr: u64, data: &[u8]) -> Result<()> {
     // Check 1: known-safe single-byte write within ERAM
-    let is_safe_single_byte = data.len() == 1
-        && phys_addr >= ERAM_BASE
-        && phys_addr < ERAM_BASE + ERAM_SIZE as u64
-        && {
+    let is_safe_single_byte =
+        data.len() == 1 && phys_addr >= ERAM_BASE && phys_addr < ERAM_BASE + ERAM_SIZE as u64 && {
             let offset = (phys_addr - ERAM_BASE) as usize;
             SAFE_WRITE_ERAM_OFFSETS.contains(&offset)
         };
@@ -524,9 +526,9 @@ pub fn write_ecram(phys_addr: u64, data: &[u8]) -> Result<()> {
 /// Supported regions: `ERAM`, `SMA2`, `IOT_STATUS`, `IOT_SENSORS`.
 pub fn read_named_region(region: &str) -> Result<Vec<u8>> {
     match region.to_ascii_uppercase().as_str() {
-        "ERAM"        => read_ecram(ERAM_BASE, ERAM_SIZE),
-        "SMA2"        => read_ecram(SMA2_BASE, SMA2_SIZE),
-        "IOT_STATUS"  => read_ecram(IOT_STATUS_BASE, IOT_STATUS_SIZE),
+        "ERAM" => read_ecram(ERAM_BASE, ERAM_SIZE),
+        "SMA2" => read_ecram(SMA2_BASE, SMA2_SIZE),
+        "IOT_STATUS" => read_ecram(IOT_STATUS_BASE, IOT_STATUS_SIZE),
         "IOT_SENSORS" => read_ecram(ECRAM_SENSOR_BLOCK, ECRAM_SENSOR_SIZE),
         _ => anyhow::bail!(
             "Unknown ECRAM region: {region}. Supported: ERAM, SMA2, IOT_STATUS, IOT_SENSORS"
@@ -623,8 +625,8 @@ pub struct EramMap {
 /// Direct read of the ACPI ERAM register map.
 pub fn read_eram_map() -> Result<EramMap> {
     // Direct read only
-    let eram = read_ecram(ERAM_BASE, 0x100)
-        .context("ECRAM read (direct IoTDriver access failed)")?;
+    let eram =
+        read_ecram(ERAM_BASE, 0x100).context("ECRAM read (direct IoTDriver access failed)")?;
 
     anyhow::ensure!(eram.len() >= 0x100, "Short ERAM read: {} bytes", eram.len());
 

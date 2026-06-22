@@ -12,11 +12,11 @@
 //!
 //! The main process polls the request-specific result file with a 15-second timeout.
 
+use crate::util::auth;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::SystemTime;
-use crate::util::auth;
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -468,7 +468,10 @@ mod tests {
         // Do NOT sign the payload — simulate an attacker who wrote a command
         // file without knowing the key.
         let result = auth::verify_payload(&mut payload, key);
-        assert!(result.is_err(), "Unauthenticated command should be rejected");
+        assert!(
+            result.is_err(),
+            "Unauthenticated command should be rejected"
+        );
         let err_msg = result.unwrap_err();
         assert!(
             err_msg.to_lowercase().contains("hmac"),

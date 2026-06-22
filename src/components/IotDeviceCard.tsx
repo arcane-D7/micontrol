@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 
 interface IotDeviceInfo {
   pipe_available: boolean;
@@ -22,10 +22,10 @@ export default function IotDeviceCard() {
 
   const loadInfo = async () => {
     try {
-      const data = await invoke<IotDeviceInfo>("get_iot_device_info");
+      const data = await invoke<IotDeviceInfo>('get_iot_device_info');
       setInfo(data);
     } catch (e) {
-      console.error("Failed to load IoT device info:", e);
+      console.error('Failed to load IoT device info:', e);
     } finally {
       setLoading(false);
     }
@@ -44,7 +44,7 @@ export default function IotDeviceCard() {
     return (
       <div className="card">
         <div className="card-title">🔌 IoT Device</div>
-        <p className="page-subtitle" style={{ color: "var(--text-dim)" }}>
+        <p className="page-subtitle" style={{ color: 'var(--text-dim)' }}>
           IoT Service not available. The Xiaomi IoT chip was not detected on this system.
         </p>
       </div>
@@ -84,17 +84,18 @@ export default function IotDeviceCard() {
         {info.bind_status && (
           <div className="stat-row">
             <span className="stat-label">Account Binding</span>
-            <span className="stat-value" style={{ color: info.bind_status.bound ? "var(--success)" : "var(--text-dim)" }}>
-              {info.bind_status.bound ? `✓ Bound (UID: ${info.bind_status.uid})` : "Not bound"}
+            <span
+              className="stat-value"
+              style={{ color: info.bind_status.bound ? 'var(--success)' : 'var(--text-dim)' }}
+            >
+              {info.bind_status.bound ? `✓ Bound (UID: ${info.bind_status.uid})` : 'Not bound'}
             </span>
           </div>
         )}
         {info.wifi_status && (
           <div className="stat-row">
             <span className="stat-label">WiFi</span>
-            <span className="stat-value">
-              {info.wifi_status.ssid || "Not connected"}
-            </span>
+            <span className="stat-value">{info.wifi_status.ssid || 'Not connected'}</span>
           </div>
         )}
         {info.wifi_network_count !== null && (
@@ -108,7 +109,7 @@ export default function IotDeviceCard() {
       <button
         className="btn btn-secondary"
         onClick={loadInfo}
-        style={{ marginTop: 12, width: "100%" }}
+        style={{ marginTop: 12, width: '100%' }}
       >
         🔄 Refresh
       </button>

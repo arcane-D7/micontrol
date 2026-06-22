@@ -12,8 +12,8 @@ use std::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WifiNetwork {
     pub ssid: String,
-    pub signal: u32,       // 0-100 percentage
-    pub security: String,   // e.g. "WPA2-Personal", "Open"
+    pub signal: u32,      // 0-100 percentage
+    pub security: String, // e.g. "WPA2-Personal", "Open"
     pub connected: bool,
 }
 
@@ -113,8 +113,7 @@ pub fn connect(ssid: &str, password: Option<&str>) -> HardwareResult<()> {
 
         // Use a cleanup guard to ensure the temp file is deleted even on error.
         let result = (|| -> HardwareResult<()> {
-            std::fs::write(&profile_path, &profile_xml)
-                .map_err(HardwareError::Io)?;
+            std::fs::write(&profile_path, &profile_xml).map_err(HardwareError::Io)?;
 
             // Add profile
             let add = Command::new("netsh")
@@ -125,7 +124,9 @@ pub fn connect(ssid: &str, password: Option<&str>) -> HardwareResult<()> {
 
             if !add.status.success() {
                 let stderr = String::from_utf8_lossy(&add.stderr);
-                return Err(HardwareError::Wifi(format!("Failed to add WiFi profile: {stderr}")));
+                return Err(HardwareError::Wifi(format!(
+                    "Failed to add WiFi profile: {stderr}"
+                )));
             }
 
             Ok(())
@@ -161,7 +162,9 @@ pub fn disconnect() -> HardwareResult<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(HardwareError::Wifi(format!("Failed to disconnect: {stderr}")));
+        return Err(HardwareError::Wifi(format!(
+            "Failed to disconnect: {stderr}"
+        )));
     }
 
     Ok(())

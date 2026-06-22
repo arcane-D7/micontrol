@@ -41,9 +41,7 @@ pub fn validate_ssid(ssid: &str) -> Result<(), String> {
     }
     let byte_len = ssid.len();
     if byte_len > 32 {
-        return Err(format!(
-            "SSID exceeds 32 bytes (got {byte_len} bytes)"
-        ));
+        return Err(format!("SSID exceeds 32 bytes (got {byte_len} bytes)"));
     }
     if ssid.contains('\0') {
         return Err("SSID cannot contain null bytes".to_string());

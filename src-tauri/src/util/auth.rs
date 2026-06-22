@@ -36,8 +36,7 @@ pub fn get_or_create_key() -> Result<Vec<u8>, String> {
     // Generate a new 32-byte key
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
-    std::fs::write(&path, key)
-        .map_err(|e| format!("Cannot write HMAC key file: {e}"))?;
+    std::fs::write(&path, key).map_err(|e| format!("Cannot write HMAC key file: {e}"))?;
     restrict_file_acl(&path);
     Ok(key.to_vec())
 }
@@ -48,8 +47,7 @@ pub fn get_or_create_key() -> Result<Vec<u8>, String> {
 /// all commands are rejected.
 pub fn read_key() -> Result<Vec<u8>, String> {
     let path = key_path();
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("Cannot read HMAC key file: {e}"))?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("Cannot read HMAC key file: {e}"))?;
     if bytes.len() != 32 {
         return Err("HMAC key file is corrupt (wrong length)".to_string());
     }
@@ -60,7 +58,11 @@ pub fn read_key() -> Result<Vec<u8>, String> {
 pub fn compute_hmac(key: &[u8], data: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
-    mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Verify that the expected HMAC matches the data.
@@ -137,7 +139,9 @@ pub fn verify_payload(payload: &mut serde_json::Value, key: &[u8]) -> Result<(),
     // Check timestamp freshness (if present)
     if let Some(ts) = payload.get("created_at_ms").and_then(|v| v.as_u64()) {
         if !is_timestamp_fresh(ts) {
-            return Err(format!("Command timestamp {ts} is stale (older than {MAX_COMMAND_AGE_MS} ms)"));
+            return Err(format!(
+                "Command timestamp {ts} is stale (older than {MAX_COMMAND_AGE_MS} ms)"
+            ));
         }
     }
 

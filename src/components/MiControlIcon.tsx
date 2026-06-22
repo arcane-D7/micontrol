@@ -1,4 +1,4 @@
-import type { SVGProps } from "react";
+import type { SVGProps } from 'react';
 
 interface MiControlIconProps extends SVGProps<SVGSVGElement> {
   size?: number;
@@ -32,11 +32,14 @@ export function MiControlIcon({ size = 22, style, ...props }: MiControlIconProps
         strokeLinejoin="round"
       />
       {/* Accent nodes at the stem bases */}
-      <circle cx="4"  cy="19" r="1.8" fill="var(--accent)"/>
-      <circle cx="20" cy="19" r="1.8" fill="var(--accent)"/>
+      <circle cx="4" cy="19" r="1.8" fill="var(--accent)" />
+      <circle cx="20" cy="19" r="1.8" fill="var(--accent)" />
       {/* Accent underbar — represents the "Control" dimension */}
       <line
-        x1="4" y1="22.5" x2="20" y2="22.5"
+        x1="4"
+        y1="22.5"
+        x2="20"
+        y2="22.5"
         stroke="var(--accent)"
         strokeWidth="2"
         strokeLinecap="round"

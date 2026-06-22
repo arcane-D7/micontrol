@@ -35,9 +35,13 @@ pub fn list_audio_devices() -> Result<AudioDeviceList> {
     use windows::Win32::Media::Audio::{
         eCapture, eRender, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
     };
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
 
-    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
 
     let result = (|| -> Result<AudioDeviceList> {
         unsafe {
@@ -49,24 +53,33 @@ pub fn list_audio_devices() -> Result<AudioDeviceList> {
         }
     })();
 
-    unsafe { CoUninitialize(); }
+    unsafe {
+        CoUninitialize();
+    }
     result
 }
 
 #[cfg(not(windows))]
 pub fn list_audio_devices() -> Result<AudioDeviceList> {
-    Ok(AudioDeviceList { playback: vec![], capture: vec![] })
+    Ok(AudioDeviceList {
+        playback: vec![],
+        capture: vec![],
+    })
 }
 
 #[cfg(windows)]
 pub fn get_playback_volume() -> Result<AudioVolumeResult> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
         eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
     };
-    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
 
-    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
 
     let result = (|| -> Result<AudioVolumeResult> {
         unsafe {
@@ -76,31 +89,45 @@ pub fn get_playback_volume() -> Result<AudioVolumeResult> {
             let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
             let volume = endpoint.GetMasterVolumeLevelScalar()?;
             let muted = endpoint.GetMute()?;
-            Ok(AudioVolumeResult { success: true, volume: (volume * 100.0) as u8, muted: muted.as_bool() })
+            Ok(AudioVolumeResult {
+                success: true,
+                volume: (volume * 100.0) as u8,
+                muted: muted.as_bool(),
+            })
         }
     })();
 
-    unsafe { CoUninitialize(); }
+    unsafe {
+        CoUninitialize();
+    }
     result
 }
 
 #[cfg(not(windows))]
 pub fn get_playback_volume() -> Result<AudioVolumeResult> {
-    Ok(AudioVolumeResult { success: false, volume: 0, muted: false })
+    Ok(AudioVolumeResult {
+        success: false,
+        volume: 0,
+        muted: false,
+    })
 }
 
 #[cfg(windows)]
 pub fn set_playback_volume(volume: u8) -> Result<AudioVolumeResult> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
         eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
     };
-    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
 
     let volume = volume.min(100);
     let scalar = volume as f32 / 100.0;
 
-    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
 
     let result = (|| -> Result<AudioVolumeResult> {
         unsafe {
@@ -110,28 +137,42 @@ pub fn set_playback_volume(volume: u8) -> Result<AudioVolumeResult> {
             let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
             endpoint.SetMasterVolumeLevelScalar(scalar, std::ptr::null())?;
             let muted = endpoint.GetMute()?;
-            Ok(AudioVolumeResult { success: true, volume, muted: muted.as_bool() })
+            Ok(AudioVolumeResult {
+                success: true,
+                volume,
+                muted: muted.as_bool(),
+            })
         }
     })();
 
-    unsafe { CoUninitialize(); }
+    unsafe {
+        CoUninitialize();
+    }
     result
 }
 
 #[cfg(not(windows))]
 pub fn set_playback_volume(_volume: u8) -> Result<AudioVolumeResult> {
-    Ok(AudioVolumeResult { success: false, volume: 0, muted: false })
+    Ok(AudioVolumeResult {
+        success: false,
+        volume: 0,
+        muted: false,
+    })
 }
 
 #[cfg(windows)]
 pub fn set_playback_mute(muted: bool) -> Result<AudioVolumeResult> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{
         eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
     };
-    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
 
-    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
 
     let result = (|| -> Result<AudioVolumeResult> {
         unsafe {
@@ -141,17 +182,27 @@ pub fn set_playback_mute(muted: bool) -> Result<AudioVolumeResult> {
             let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
             endpoint.SetMute(muted, std::ptr::null())?;
             let volume = endpoint.GetMasterVolumeLevelScalar()?;
-            Ok(AudioVolumeResult { success: true, volume: (volume * 100.0) as u8, muted })
+            Ok(AudioVolumeResult {
+                success: true,
+                volume: (volume * 100.0) as u8,
+                muted,
+            })
         }
     })();
 
-    unsafe { CoUninitialize(); }
+    unsafe {
+        CoUninitialize();
+    }
     result
 }
 
 #[cfg(not(windows))]
 pub fn set_playback_mute(_muted: bool) -> Result<AudioVolumeResult> {
-    Ok(AudioVolumeResult { success: false, volume: 0, muted: false })
+    Ok(AudioVolumeResult {
+        success: false,
+        volume: 0,
+        muted: false,
+    })
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────
@@ -161,8 +212,8 @@ fn enumerate_devices(
     enumerator: &windows::Win32::Media::Audio::IMMDeviceEnumerator,
     data_flow: windows::Win32::Media::Audio::EDataFlow,
 ) -> Result<Vec<AudioDevice>> {
-    use windows::Win32::Media::Audio::{eConsole, DEVICE_STATE_ACTIVE};
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::{eConsole, DEVICE_STATE_ACTIVE};
 
     unsafe {
         let collection = enumerator.EnumAudioEndpoints(data_flow, DEVICE_STATE_ACTIVE)?;
@@ -173,7 +224,8 @@ fn enumerate_devices(
         for i in 0..count {
             let device = collection.Item(i)?;
             let id = device.GetId()?.to_string()?;
-            let name = get_device_friendly_name(&device).unwrap_or_else(|_| format!("Audio Device {}", i));
+            let name =
+                get_device_friendly_name(&device).unwrap_or_else(|_| format!("Audio Device {}", i));
 
             let is_default = default_device.as_ref().map_or(false, |d| {
                 d.GetId().map(|s| s.to_string().unwrap_or_default()) == Ok(id.clone())
@@ -184,7 +236,11 @@ fn enumerate_devices(
             devices.push(AudioDevice {
                 name,
                 id,
-                direction: if data_flow == windows::Win32::Media::Audio::eRender { "playback".to_string() } else { "capture".to_string() },
+                direction: if data_flow == windows::Win32::Media::Audio::eRender {
+                    "playback".to_string()
+                } else {
+                    "capture".to_string()
+                },
                 is_default,
                 volume,
                 muted,

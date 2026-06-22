@@ -1,14 +1,8 @@
-import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useRef,
-  useState,
-} from "react";
+import React, { createContext, useCallback, useContext, useRef, useState } from 'react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type ToastType = "error" | "success" | "info";
+export type ToastType = 'error' | 'success' | 'info';
 
 interface ToastItem {
   id: number;
@@ -34,16 +28,13 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const nextId = useRef(0);
 
-  const addToast = useCallback(
-    (message: string, type: ToastType = "error") => {
-      const id = ++nextId.current;
-      setToasts((prev) => [...prev, { id, message, type }]);
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, 5000);
-    },
-    []
-  );
+  const addToast = useCallback((message: string, type: ToastType = 'error') => {
+    const id = ++nextId.current;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 5000);
+  }, []);
 
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -58,14 +49,10 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast--${t.type}`}>
             <span className="toast__icon">
-              {t.type === "error" ? "⚠" : t.type === "success" ? "✓" : "ℹ"}
+              {t.type === 'error' ? '⚠' : t.type === 'success' ? '✓' : 'ℹ'}
             </span>
             <span className="toast__message">{t.message}</span>
-            <button
-              className="toast__close"
-              onClick={() => dismiss(t.id)}
-              aria-label="Dismiss"
-            >
+            <button className="toast__close" onClick={() => dismiss(t.id)} aria-label="Dismiss">
               ×
             </button>
           </div>

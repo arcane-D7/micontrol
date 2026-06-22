@@ -255,7 +255,8 @@ pub async fn adaptive_brightness_loop() {
             };
             (cfg, brightness_actual)
         })
-        .await else {
+        .await
+        else {
             log::warn!("adaptive_brightness: spawn_blocking(config) panicked");
             continue;
         };
@@ -367,9 +368,15 @@ pub async fn adaptive_brightness_loop() {
         }
         let set_value = value;
         match tokio::task::spawn_blocking(move || set_brightness(set_value)).await {
-            Ok(Ok(())) => { last_set = Some(set_value); }
-            Ok(Err(e)) => { log::warn!("adaptive_brightness: set_brightness error: {e}"); }
-            Err(e) => { log::warn!("adaptive_brightness: set_brightness task panicked: {e}"); }
+            Ok(Ok(())) => {
+                last_set = Some(set_value);
+            }
+            Ok(Err(e)) => {
+                log::warn!("adaptive_brightness: set_brightness error: {e}");
+            }
+            Err(e) => {
+                log::warn!("adaptive_brightness: set_brightness task panicked: {e}");
+            }
         }
     }
 }
@@ -524,8 +531,8 @@ fn set_brightness_igcl(_level: u8) -> Result<()> {
 fn get_brightness_wmi() -> Result<u8> {
     #[cfg(windows)]
     {
-        use std::collections::HashMap;
         use crate::hw::wmi_cache;
+        use std::collections::HashMap;
 
         wmi_cache::with_wmi(|wmi| {
             let results: Vec<HashMap<String, wmi::Variant>> = wmi
@@ -932,8 +939,8 @@ pub fn set_refresh_rate(hz: u32) -> Result<()> {
 fn get_refresh_rate() -> Result<u32> {
     #[cfg(windows)]
     {
-        use std::collections::HashMap;
         use crate::hw::wmi_cache;
+        use std::collections::HashMap;
 
         if let Ok(result) = wmi_cache::with_cimv2(|wmi| {
             let results: Vec<HashMap<String, wmi::Variant>> = wmi

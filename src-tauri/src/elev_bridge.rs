@@ -15,11 +15,11 @@
 //! the current binary as `micontrol.exe --elevated --request-id <id>`.  This is intentionally
 //! only a dev ergonomics aid; production always uses the scheduled task.
 
+use crate::util::auth;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use crate::util::auth;
 
 /// Name of the scheduled task registered by the NSIS installer.
 const TASK_NAME: &str = "MiControlElevated";
@@ -79,8 +79,7 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
     });
 
     // Sign the payload with HMAC-SHA256 using the shared key.
-    let key = auth::get_or_create_key()
-        .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
+    let key = auth::get_or_create_key().map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
     auth::sign_payload(&mut payload, &key);
 
     // Remove any stale result from a previous run for this request id.

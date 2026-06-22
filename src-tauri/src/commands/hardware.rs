@@ -3,19 +3,18 @@ use crate::hw::audio::{
     list_audio_devices as hw_list_audio, set_playback_mute as hw_set_mute,
     set_playback_volume as hw_set_volume, AudioDeviceList, AudioVolumeResult,
 };
-use crate::hw::screen_cast::{
-    list_cast_devices as hw_list_cast, start_casting as hw_start_cast,
-    stop_casting as hw_stop_cast, CastDevice, CastResult,
-};
 use crate::hw::charging::{get_charging_threshold as hw_get_charge, ChargingResult};
 use crate::hw::iotservice;
 use crate::hw::iotservice::{
-    BindStatusInfo, IotDeviceInfo, LaptopStatus, PowerEvent, WiFiItem, WiFiItemInfo,
-    WiFiStatusInfo,
+    BindStatusInfo, IotDeviceInfo, LaptopStatus, PowerEvent, WiFiItem, WiFiItemInfo, WiFiStatusInfo,
 };
 use crate::hw::performance::{
     get_perf_debug as hw_perf_debug, get_performance_mode as hw_get_perf, PerfDebugInfo,
     PerformanceResult,
+};
+use crate::hw::screen_cast::{
+    list_cast_devices as hw_list_cast, start_casting as hw_start_cast,
+    stop_casting as hw_stop_cast, CastDevice, CastResult,
 };
 use crate::hw::wifi::{self, WifiNetwork, WifiStatus};
 use crate::state::{AppState, PerformanceMode};

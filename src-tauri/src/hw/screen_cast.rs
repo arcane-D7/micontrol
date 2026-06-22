@@ -54,13 +54,16 @@ pub fn start_casting(device_id: &str) -> Result<CastResult> {
             "Connect panel opened. Select your device to start casting.".into()
         } else {
             "Failed to open Connect panel.".into()
-        }
+        },
     })
 }
 
 #[cfg(not(windows))]
 pub fn start_casting(_device_id: &str) -> Result<CastResult> {
-    Ok(CastResult { success: false, message: "Screen casting only available on Windows".into() })
+    Ok(CastResult {
+        success: false,
+        message: "Screen casting only available on Windows".into(),
+    })
 }
 
 /// Stop casting.
@@ -80,7 +83,10 @@ pub fn stop_casting() -> Result<CastResult> {
 
 #[cfg(not(windows))]
 pub fn stop_casting() -> Result<CastResult> {
-    Ok(CastResult { success: false, message: "Screen casting only available on Windows".into() })
+    Ok(CastResult {
+        success: false,
+        message: "Screen casting only available on Windows".into(),
+    })
 }
 
 #[cfg(test)]

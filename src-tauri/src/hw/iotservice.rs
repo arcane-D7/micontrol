@@ -22,7 +22,6 @@
 ///
 /// Total header size: 12 bytes. No signature field — the pipe name itself
 /// serves as the namespace delimiter.
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -411,7 +410,10 @@ fn read_exact_timeout(
     while filled < buf.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            anyhow::bail!("Timeout reading IPC response ({filled}/{len} bytes)", len = buf.len());
+            anyhow::bail!(
+                "Timeout reading IPC response ({filled}/{len} bytes)",
+                len = buf.len()
+            );
         }
 
         // On Windows named pipes, we can't easily do non-blocking reads with
@@ -449,11 +451,7 @@ fn send_json_cmd<T: for<'de> Deserialize<'de>>(
 }
 
 /// Send a JSON command that expects no response (fire-and-forget).
-fn send_json_cmd_no_resp(
-    dst_id: u16,
-    msg_type: u32,
-    request: &impl Serialize,
-) -> Result<()> {
+fn send_json_cmd_no_resp(dst_id: u16, msg_type: u32, request: &impl Serialize) -> Result<()> {
     let json = serde_json::to_vec(request).context("Serialize IPC request")?;
     send_ipc_message(dst_id, msg_type, &json)?;
     Ok(())
@@ -597,7 +595,11 @@ pub fn set_charging_threshold(threshold: u8) -> Result<()> {
         anyhow::bail!("Invalid threshold {threshold}. Must be one of: 40,50,60,70,80,100");
     }
 
-    send_ipc_message(DST_IOT_DRIVER, msg_type::SET_CHARGING_LIMIT, &[threshold, 0, 0, 0])?;
+    send_ipc_message(
+        DST_IOT_DRIVER,
+        msg_type::SET_CHARGING_LIMIT,
+        &[threshold, 0, 0, 0],
+    )?;
     Ok(())
 }
 

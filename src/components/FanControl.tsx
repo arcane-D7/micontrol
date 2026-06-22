@@ -1,11 +1,11 @@
-import { useState } from "react";
-import { t } from "../hooks/useI18n";
-import type { FanInfo } from "../hooks/useHardware";
-import { useToast } from "../contexts/ToastContext";
+import { useState } from 'react';
+import { t } from '../hooks/useI18n';
+import type { FanInfo } from '../hooks/useHardware';
+import { useToast } from '../contexts/ToastContext';
 
 interface Props {
   fan: FanInfo | null;
-  onModeChange: (mode: "auto" | "fixed" | "off", speedPercent?: number) => Promise<void>;
+  onModeChange: (mode: 'auto' | 'fixed' | 'off', speedPercent?: number) => Promise<void>;
 }
 
 function FanSpeedVisual({ speedPct }: { speedPct: number }) {
@@ -16,7 +16,7 @@ function FanSpeedVisual({ speedPct }: { speedPct: number }) {
       {Array.from({ length: segs }, (_, i) => (
         <div
           key={i}
-          className={`fan-seg ${i < active ? "active" : ""}`}
+          className={`fan-seg ${i < active ? 'active' : ''}`}
           style={{ height: `${40 + (i / segs) * 60}%` }}
         />
       ))}
@@ -26,23 +26,23 @@ function FanSpeedVisual({ speedPct }: { speedPct: number }) {
 
 export default function FanControl({ fan, onModeChange }: Props) {
   const [speed, setSpeed] = useState(fan?.speed_percent ?? 50);
-  const [mode, setMode] = useState<"auto" | "fixed" | "off">(fan?.mode ?? "auto");
+  const [mode, setMode] = useState<'auto' | 'fixed' | 'off'>(fan?.mode ?? 'auto');
   const { addToast } = useToast();
 
-  const handleModeChange = async (m: "auto" | "fixed" | "off") => {
+  const handleModeChange = async (m: 'auto' | 'fixed' | 'off') => {
     setMode(m);
     try {
-      await onModeChange(m, m === "fixed" ? speed : undefined);
-      addToast(t("fan.applied"), "success");
+      await onModeChange(m, m === 'fixed' ? speed : undefined);
+      addToast(t('fan.applied'), 'success');
     } catch (e) {
-      addToast(`${t("fan.error")}: ${String(e)}`, "error");
+      addToast(`${t('fan.error')}: ${String(e)}`, 'error');
     }
   };
 
   if (!fan) {
     return (
       <div className="card">
-        <div className="card-title">{t("fan.title")}</div>
+        <div className="card-title">{t('fan.title')}</div>
         <div className="skeleton" style={{ height: 120 }} />
       </div>
     );
@@ -50,29 +50,27 @@ export default function FanControl({ fan, onModeChange }: Props) {
 
   return (
     <div className="card">
-      <div className="card-title">{t("fan.title")}</div>
+      <div className="card-title">{t('fan.title')}</div>
 
       <div className="grid-3" style={{ marginBottom: 20 }}>
-        {(["auto", "fixed", "off"] as const).map((m) => (
+        {(['auto', 'fixed', 'off'] as const).map((m) => (
           <button
             key={m}
-            className={`mode-btn ${mode === m ? "active" : ""}`}
+            className={`mode-btn ${mode === m ? 'active' : ''}`}
             onClick={() => void handleModeChange(m)}
-            style={{ padding: "12px 8px" }}
+            style={{ padding: '12px 8px' }}
           >
             <span className="mode-btn-icon">
-              {m === "auto" ? "🔄" : m === "fixed" ? "🔧" : "🔇"}
+              {m === 'auto' ? '🔄' : m === 'fixed' ? '🔧' : '🔇'}
             </span>
-            <span className="mode-btn-name">
-              {t(`fan.modes.${m}` as Parameters<typeof t>[0])}
-            </span>
+            <span className="mode-btn-name">{t(`fan.modes.${m}` as Parameters<typeof t>[0])}</span>
           </button>
         ))}
       </div>
 
-      {mode === "fixed" && (
+      {mode === 'fixed' && (
         <div className="slider-row" style={{ marginBottom: 16 }}>
-          <span className="slider-label">{t("fan.speed")}</span>
+          <span className="slider-label">{t('fan.speed')}</span>
           <input
             type="range"
             min={20}
@@ -80,7 +78,7 @@ export default function FanControl({ fan, onModeChange }: Props) {
             step={5}
             value={speed}
             onChange={(e) => setSpeed(Number(e.target.value))}
-            onMouseUp={() => void onModeChange("fixed", speed)}
+            onMouseUp={() => void onModeChange('fixed', speed)}
           />
           <span className="slider-value">{speed}%</span>
         </div>
@@ -88,22 +86,26 @@ export default function FanControl({ fan, onModeChange }: Props) {
 
       <div className="grid-2">
         <div>
-          <div className="stat-label" style={{ marginBottom: 8 }}>{t("fan.current")}</div>
+          <div className="stat-label" style={{ marginBottom: 8 }}>
+            {t('fan.current')}
+          </div>
           <FanSpeedVisual speedPct={fan.speed_percent} />
           <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>
-            {fan.speed_rpm} {t("fan.rpm")}
+            {fan.speed_rpm} {t('fan.rpm')}
           </div>
         </div>
         <div>
-          <div className="stat-label" style={{ marginBottom: 8 }}>{t("fan.temperature")}</div>
+          <div className="stat-label" style={{ marginBottom: 8 }}>
+            {t('fan.temperature')}
+          </div>
           <div className="card-value" style={{ fontSize: 22 }}>
             {fan.gpu_temp_celsius}°
           </div>
         </div>
       </div>
 
-      <p style={{ fontSize: 11, color: "var(--color-warning)", marginTop: 12 }}>
-        ⚠️ {t("fan.warning")}
+      <p style={{ fontSize: 11, color: 'var(--color-warning)', marginTop: 12 }}>
+        ⚠️ {t('fan.warning')}
       </p>
     </div>
   );

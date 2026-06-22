@@ -34,8 +34,8 @@ pub struct BatteryInfo {
 
 #[cfg(windows)]
 pub fn get_battery_info() -> Result<BatteryInfo> {
-    use std::collections::HashMap;
     use crate::hw::wmi_cache;
+    use std::collections::HashMap;
 
     let started = Instant::now();
     log::trace!(target: "hw::battery", "get_battery_info: start");

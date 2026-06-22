@@ -1,20 +1,20 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 // ── Type definitions matching Rust structs ───────────────────────────────────
 
 export type PerformanceMode =
-  | "silence"
-  | "balance"
-  | "turbo"
-  | "smart"
-  | "long_battery"
-  | "decepticon"
-  | "smart_acceleration"
-  | "overdrive"
-  | "overdrive_high"
-  | "overdrive_max"
-  | "smart_adaptive";
+  | 'silence'
+  | 'balance'
+  | 'turbo'
+  | 'smart'
+  | 'long_battery'
+  | 'decepticon'
+  | 'smart_acceleration'
+  | 'overdrive'
+  | 'overdrive_high'
+  | 'overdrive_max'
+  | 'smart_adaptive';
 
 export interface PerformanceResult {
   success: boolean;
@@ -67,10 +67,10 @@ export interface BatteryInfo {
 
 export interface AiBrightnessConfig {
   enabled: boolean;
-  min_brightness: number;  // 5-80
-  max_brightness: number;  // 20-100
-  sensitivity: number;     // 10-200
-  smoothing: number;       // 0-90
+  min_brightness: number; // 5-80
+  max_brightness: number; // 20-100
+  sensitivity: number; // 10-200
+  smoothing: number; // 0-90
 }
 
 export interface DisplayInfo {
@@ -89,7 +89,8 @@ export interface DisplayInfo {
   ambient_lux: number | null;
 }
 
-export interface FanInfo {  mode: "auto" | "fixed" | "off";
+export interface FanInfo {
+  mode: 'auto' | 'fixed' | 'off';
   speed_rpm: number;
   speed_percent: number;
   gpu_temp_celsius: number;
@@ -112,9 +113,9 @@ export interface AiPerfLogEntry {
 }
 
 export interface TouchpadInfo {
-  sensitivity: "low" | "medium" | "high" | "very_high";
+  sensitivity: 'low' | 'medium' | 'high' | 'very_high';
   haptics_enabled: boolean;
-  haptics_intensity: "low" | "medium" | "high";
+  haptics_intensity: 'low' | 'medium' | 'high';
   gesture_screenshot: boolean;
   trackpad_repress: boolean;
   edge_slide: boolean;
@@ -180,7 +181,7 @@ export interface HardwareProfile {
   capabilities: HardwareCapabilities;
 }
 
-export type IotRegionName = "ERAM" | "SMA2" | "IOT_STATUS" | "IOT_SENSORS";
+export type IotRegionName = 'ERAM' | 'SMA2' | 'IOT_STATUS' | 'IOT_SENSORS';
 
 export interface EramMap {
   misc0: number;
@@ -256,14 +257,14 @@ function formatInvokeError(reason: unknown): string {
 }
 
 const REFRESH_ERROR_LABELS: Record<keyof HardwareRefreshErrors, string> = {
-  system_info: "system",
-  battery: "battery",
-  display: "display",
-  fan: "fan",
-  touchpad: "touchpad",
-  performance_mode: "performance",
-  charging_threshold: "charging",
-  audio: "audio",
+  system_info: 'system',
+  battery: 'battery',
+  display: 'display',
+  fan: 'fan',
+  touchpad: 'touchpad',
+  performance_mode: 'performance',
+  charging_threshold: 'charging',
+  audio: 'audio',
 };
 
 // ── Hardware hook ────────────────────────────────────────────────────────────
@@ -274,14 +275,12 @@ export function useHardware() {
   const [display, setDisplay] = useState<DisplayInfo | null>(null);
   const [fan, setFan] = useState<FanInfo | null>(null);
   const [touchpad, setTouchpad] = useState<TouchpadInfo | null>(null);
-  const [performanceMode, setPerformanceModeState] =
-    useState<PerformanceMode>("balance");
+  const [performanceMode, setPerformanceModeState] = useState<PerformanceMode>('balance');
   const [lastPerfResult, setLastPerfResult] = useState<PerformanceResult | null>(null);
   const [chargingThreshold, setChargingThresholdState] = useState<number>(80);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [refreshErrors, setRefreshErrors] =
-    useState<HardwareRefreshErrors>(EMPTY_REFRESH_ERRORS);
+  const [refreshErrors, setRefreshErrors] = useState<HardwareRefreshErrors>(EMPTY_REFRESH_ERRORS);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [loadingUpdate, setLoadingUpdate] = useState(false);
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfile | null>(null);
@@ -295,7 +294,7 @@ export function useHardware() {
   const touchpadRef = useRef<TouchpadInfo | null>(null);
   const displayRef = useRef<DisplayInfo | null>(null);
   const fanRef = useRef<FanInfo | null>(null);
-  const performanceModeRef = useRef<PerformanceMode>("balance");
+  const performanceModeRef = useRef<PerformanceMode>('balance');
   const chargingThresholdRef = useRef<number>(80);
   const audioStateRef = useRef<AudioVolumeResult | null>(null);
 
@@ -305,35 +304,35 @@ export function useHardware() {
     const nextErrors: HardwareRefreshErrors = { ...EMPTY_REFRESH_ERRORS };
 
     try {
-      const state = await invoke<HardwareState>("get_hardware_state_batch");
+      const state = await invoke<HardwareState>('get_hardware_state_batch');
 
       if (state.system_info !== null) setSystemInfo(state.system_info);
-      else nextErrors.system_info = "no data";
+      else nextErrors.system_info = 'no data';
 
       if (state.battery !== null) setBattery(state.battery);
-      else nextErrors.battery = "no data";
+      else nextErrors.battery = 'no data';
 
       if (state.display !== null) setDisplay(state.display);
-      else nextErrors.display = "no data";
+      else nextErrors.display = 'no data';
 
       if (state.fan !== null) setFan(state.fan);
-      else nextErrors.fan = "no data";
+      else nextErrors.fan = 'no data';
 
       // Only update touchpad from poll when no user write is in flight.
       if (state.touchpad !== null && Date.now() >= touchpadDirtyUntil.current) {
         setTouchpad(state.touchpad);
       } else if (state.touchpad === null) {
-        nextErrors.touchpad = "no data";
+        nextErrors.touchpad = 'no data';
       }
 
       if (state.performance_mode !== null) setPerformanceModeState(state.performance_mode);
-      else nextErrors.performance_mode = "no data";
+      else nextErrors.performance_mode = 'no data';
 
       if (state.charging_threshold !== null) setChargingThresholdState(state.charging_threshold);
-      else nextErrors.charging_threshold = "no data";
+      else nextErrors.charging_threshold = 'no data';
 
       if (state.audio !== null) setAudioState(state.audio);
-      else nextErrors.audio = "no data";
+      else nextErrors.audio = 'no data';
     } catch (e) {
       nextErrors.system_info = formatInvokeError(e);
       nextErrors.battery = formatInvokeError(e);
@@ -349,11 +348,7 @@ export function useHardware() {
     const failedSubsystems = Object.entries(nextErrors)
       .filter(([, value]) => Boolean(value))
       .map(([key]) => REFRESH_ERROR_LABELS[key as keyof HardwareRefreshErrors]);
-    setError(
-      failedSubsystems.length
-        ? `Refresh failed for: ${failedSubsystems.join(", ")}`
-        : null
-    );
+    setError(failedSubsystems.length ? `Refresh failed for: ${failedSubsystems.join(', ')}` : null);
 
     hasLoadedOnce.current = true;
     setLoading(false);
@@ -363,7 +358,7 @@ export function useHardware() {
     const refreshIfVisible = () => {
       // The tray popup window is pre-created and often kept hidden.
       // Skip polling while hidden to avoid background WMI/query churn.
-      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
       void refresh();
@@ -375,14 +370,14 @@ export function useHardware() {
     const interval = setInterval(refreshIfVisible, 2000);
 
     const onVisibilityChange = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         void refresh();
       }
     };
-    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       clearInterval(interval);
     };
   }, [refresh]);
@@ -391,11 +386,11 @@ export function useHardware() {
     const snap = performanceModeRef.current;
     setPerformanceModeState(mode);
     try {
-      const result = await invoke<PerformanceResult>("set_performance_mode", { mode });
+      const result = await invoke<PerformanceResult>('set_performance_mode', { mode });
       setLastPerfResult(result);
     } catch (e) {
       setPerformanceModeState(snap);
-      console.error("[perf] set_performance_mode failed:", e);
+      console.error('[perf] set_performance_mode failed:', e);
       throw e;
     }
   }, []);
@@ -404,10 +399,10 @@ export function useHardware() {
     const snap = chargingThresholdRef.current;
     setChargingThresholdState(threshold);
     try {
-      await invoke("set_charging_threshold", { threshold });
+      await invoke('set_charging_threshold', { threshold });
     } catch (e) {
       setChargingThresholdState(snap);
-      console.error("[charge] set_charging_threshold failed:", e);
+      console.error('[charge] set_charging_threshold failed:', e);
       throw e;
     }
   }, []);
@@ -416,10 +411,10 @@ export function useHardware() {
     const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, brightness: level } : null));
     try {
-      await invoke("set_brightness", { level });
+      await invoke('set_brightness', { level });
     } catch (e) {
       setDisplay(snap);
-      console.error("[display] set_brightness failed:", e);
+      console.error('[display] set_brightness failed:', e);
       throw e;
     }
   }, []);
@@ -428,10 +423,10 @@ export function useHardware() {
     const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, hdr_enabled: enabled } : null));
     try {
-      await invoke("set_hdr", { enabled });
+      await invoke('set_hdr', { enabled });
     } catch (e) {
       setDisplay(snap);
-      console.error("[display] set_hdr failed:", e);
+      console.error('[display] set_hdr failed:', e);
       throw e;
     }
   }, []);
@@ -440,68 +435,79 @@ export function useHardware() {
     const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, ai_brightness: enabled } : null));
     try {
-      await invoke("set_ai_brightness", { enabled });
+      await invoke('set_ai_brightness', { enabled });
     } catch (e) {
       setDisplay(snap);
-      console.error("[display] set_ai_brightness failed:", e);
+      console.error('[display] set_ai_brightness failed:', e);
       throw e;
     }
   }, []);
 
   const setAiBrightnessConfig = useCallback(async (config: AiBrightnessConfig) => {
     const snap = displayRef.current;
-    setDisplay((prev) => prev ? { ...prev, ai_brightness: config.enabled, ai_brightness_config: config } : null);
+    setDisplay((prev) =>
+      prev ? { ...prev, ai_brightness: config.enabled, ai_brightness_config: config } : null,
+    );
     try {
-      await invoke("set_ai_brightness_config", { config });
+      await invoke('set_ai_brightness_config', { config });
     } catch (e) {
       setDisplay(snap);
-      console.error("[display] set_ai_brightness_config failed:", e);
+      console.error('[display] set_ai_brightness_config failed:', e);
       throw e;
     }
   }, []);
 
-  const setFanMode = useCallback(
-    async (mode: "auto" | "fixed" | "off", speedPercent?: number) => {
-      const snap = fanRef.current;
-      setFan((prev) =>
-        prev ? { ...prev, mode, speed_percent: speedPercent ?? prev.speed_percent } : null
-      );
-      try {
-        await invoke("set_fan_mode", { mode, speed_percent: speedPercent ?? 50 });
-      } catch (e) {
-        setFan(snap);
-        console.error("[fan] set_fan_mode failed:", e);
-        throw e;
-      }
-    },
-    []
-  );
+  const setFanMode = useCallback(async (mode: 'auto' | 'fixed' | 'off', speedPercent?: number) => {
+    const snap = fanRef.current;
+    setFan((prev) =>
+      prev ? { ...prev, mode, speed_percent: speedPercent ?? prev.speed_percent } : null,
+    );
+    try {
+      await invoke('set_fan_mode', { mode, speed_percent: speedPercent ?? 50 });
+    } catch (e) {
+      setFan(snap);
+      console.error('[fan] set_fan_mode failed:', e);
+      throw e;
+    }
+  }, []);
 
   // Keep stable refs so error-revert closures (with empty deps) can restore
   // the previous snapshot of any state that supports optimistic updates.
-  useEffect(() => { touchpadRef.current = touchpad; }, [touchpad]);
-  useEffect(() => { displayRef.current = display; }, [display]);
-  useEffect(() => { fanRef.current = fan; }, [fan]);
-  useEffect(() => { performanceModeRef.current = performanceMode; }, [performanceMode]);
-  useEffect(() => { chargingThresholdRef.current = chargingThreshold; }, [chargingThreshold]);
-  useEffect(() => { audioStateRef.current = audioState; }, [audioState]);
+  useEffect(() => {
+    touchpadRef.current = touchpad;
+  }, [touchpad]);
+  useEffect(() => {
+    displayRef.current = display;
+  }, [display]);
+  useEffect(() => {
+    fanRef.current = fan;
+  }, [fan]);
+  useEffect(() => {
+    performanceModeRef.current = performanceMode;
+  }, [performanceMode]);
+  useEffect(() => {
+    chargingThresholdRef.current = chargingThreshold;
+  }, [chargingThreshold]);
+  useEffect(() => {
+    audioStateRef.current = audioState;
+  }, [audioState]);
 
   const setTouchpadSensitivity = useCallback(
-    async (sensitivity: "low" | "medium" | "high" | "very_high") => {
+    async (sensitivity: 'low' | 'medium' | 'high' | 'very_high') => {
       const snap = touchpadRef.current;
       touchpadDirtyUntil.current = Date.now() + 3000;
       setTouchpad((s) => (s ? { ...s, sensitivity } : null));
       try {
-        await invoke("set_touchpad_sensitivity", { sensitivity });
+        await invoke('set_touchpad_sensitivity', { sensitivity });
         touchpadDirtyUntil.current = 0;
       } catch (e) {
         setTouchpad(snap);
         touchpadDirtyUntil.current = 0;
-        console.error("[touchpad] set_touchpad_sensitivity failed:", e);
+        console.error('[touchpad] set_touchpad_sensitivity failed:', e);
         throw e;
       }
     },
-    []
+    [],
   );
 
   const setTouchpadHaptics = useCallback(async (enabled: boolean) => {
@@ -509,27 +515,27 @@ export function useHardware() {
     touchpadDirtyUntil.current = Date.now() + 3000;
     setTouchpad((s) => (s ? { ...s, haptics_enabled: enabled } : null));
     try {
-      await invoke("set_touchpad_haptics", { enabled });
+      await invoke('set_touchpad_haptics', { enabled });
       touchpadDirtyUntil.current = 0;
     } catch (e) {
       setTouchpad(snap);
       touchpadDirtyUntil.current = 0;
-      console.error("[touchpad] set_touchpad_haptics failed:", e);
+      console.error('[touchpad] set_touchpad_haptics failed:', e);
       throw e;
     }
   }, []);
 
-  const setTouchpadHapticsIntensity = useCallback(async (intensity: "low" | "medium" | "high") => {
+  const setTouchpadHapticsIntensity = useCallback(async (intensity: 'low' | 'medium' | 'high') => {
     const snap = touchpadRef.current;
     touchpadDirtyUntil.current = Date.now() + 3000;
     setTouchpad((s) => (s ? { ...s, haptics_intensity: intensity } : null));
     try {
-      await invoke("set_touchpad_haptics_intensity", { intensity });
+      await invoke('set_touchpad_haptics_intensity', { intensity });
       touchpadDirtyUntil.current = 0;
     } catch (e) {
       setTouchpad(snap);
       touchpadDirtyUntil.current = 0;
-      console.error("[touchpad] set_touchpad_haptics_intensity failed:", e);
+      console.error('[touchpad] set_touchpad_haptics_intensity failed:', e);
       throw e;
     }
   }, []);
@@ -539,12 +545,12 @@ export function useHardware() {
     touchpadDirtyUntil.current = Date.now() + 3000;
     setTouchpad((s) => (s ? { ...s, gesture_screenshot: enabled } : null));
     try {
-      await invoke("set_touchpad_gesture_screenshot", { enabled });
+      await invoke('set_touchpad_gesture_screenshot', { enabled });
       touchpadDirtyUntil.current = 0;
     } catch (e) {
       setTouchpad(snap);
       touchpadDirtyUntil.current = 0;
-      console.error("[touchpad] set_touchpad_gesture_screenshot failed:", e);
+      console.error('[touchpad] set_touchpad_gesture_screenshot failed:', e);
       throw e;
     }
   }, []);
@@ -554,12 +560,12 @@ export function useHardware() {
     touchpadDirtyUntil.current = Date.now() + 3000;
     setTouchpad((s) => (s ? { ...s, trackpad_repress: enabled } : null));
     try {
-      await invoke("set_touchpad_repress", { enabled });
+      await invoke('set_touchpad_repress', { enabled });
       touchpadDirtyUntil.current = 0;
     } catch (e) {
       setTouchpad(snap);
       touchpadDirtyUntil.current = 0;
-      console.error("[touchpad] set_touchpad_repress failed:", e);
+      console.error('[touchpad] set_touchpad_repress failed:', e);
       throw e;
     }
   }, []);
@@ -569,12 +575,12 @@ export function useHardware() {
     touchpadDirtyUntil.current = Date.now() + 3000;
     setTouchpad((s) => (s ? { ...s, edge_slide: enabled } : null));
     try {
-      await invoke("set_touchpad_edge_slide", { enabled });
+      await invoke('set_touchpad_edge_slide', { enabled });
       touchpadDirtyUntil.current = 0;
     } catch (e) {
       setTouchpad(snap);
       touchpadDirtyUntil.current = 0;
-      console.error("[touchpad] set_touchpad_edge_slide failed:", e);
+      console.error('[touchpad] set_touchpad_edge_slide failed:', e);
       throw e;
     }
   }, []);
@@ -583,10 +589,10 @@ export function useHardware() {
     const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, refresh_rate_hz: hz } : null));
     try {
-      await invoke("set_refresh_rate", { hz });
+      await invoke('set_refresh_rate', { hz });
     } catch (e) {
       setDisplay(snap);
-      console.error("[display] set_refresh_rate failed:", e);
+      console.error('[display] set_refresh_rate failed:', e);
       throw e;
     }
   }, []);
@@ -595,16 +601,16 @@ export function useHardware() {
     const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, adaptive_refresh_rate: enabled } : null));
     try {
-      await invoke("set_adaptive_refresh_rate", { enabled });
+      await invoke('set_adaptive_refresh_rate', { enabled });
     } catch (e) {
       setDisplay(snap);
-      console.error("[display] set_adaptive_refresh_rate failed:", e);
+      console.error('[display] set_adaptive_refresh_rate failed:', e);
       throw e;
     }
   }, []);
 
   const getProcessList = useCallback(async () => {
-    return invoke<ProcessInfo[]>("get_process_list");
+    return invoke<ProcessInfo[]>('get_process_list');
   }, []);
 
   // Update status is NOT polled — fetched once on mount + manually
@@ -613,13 +619,13 @@ export function useHardware() {
     try {
       // Run the scan and a minimum 2-second visual feedback delay in parallel.
       const [status] = await Promise.all([
-        invoke<UpdateStatus>("get_update_status"),
+        invoke<UpdateStatus>('get_update_status'),
         new Promise<void>((resolve) => setTimeout(resolve, 2000)),
       ]);
       setUpdateStatus(status);
     } catch (e) {
       // non-fatal — update panel shows fallback
-      console.warn("get_update_status error:", e);
+      console.warn('get_update_status error:', e);
     } finally {
       setLoadingUpdate(false);
     }
@@ -632,21 +638,21 @@ export function useHardware() {
   // Hardware profile — fetched once at mount; re-fetched after a discovery run
   const refreshHardwareProfile = useCallback(async () => {
     try {
-      const profile = await invoke<HardwareProfile | null>("get_hardware_profile");
+      const profile = await invoke<HardwareProfile | null>('get_hardware_profile');
       setHardwareProfile(profile ?? null);
     } catch (e) {
-      console.warn("get_hardware_profile error:", e);
+      console.warn('get_hardware_profile error:', e);
     }
   }, []);
 
   const runHardwareDiscovery = useCallback(async () => {
     setLoadingDiscovery(true);
     try {
-      const profile = await invoke<HardwareProfile>("run_hardware_discovery");
+      const profile = await invoke<HardwareProfile>('run_hardware_discovery');
       setHardwareProfile(profile);
       return profile;
     } catch (e) {
-      console.warn("run_hardware_discovery error:", e);
+      console.warn('run_hardware_discovery error:', e);
       throw e;
     } finally {
       setLoadingDiscovery(false);
@@ -654,44 +660,44 @@ export function useHardware() {
   }, []);
 
   const installDriver = useCallback(async (driverName: string) => {
-    return invoke<string>("install_driver", { driverName });
+    return invoke<string>('install_driver', { driverName });
   }, []);
 
   // ── AI performance log commands ───────────────────────────────────────────
   const writeAiPerfLog = useCallback(async (entry: AiPerfLogEntry) => {
-    await invoke("write_ai_perf_log", { entry });
+    await invoke('write_ai_perf_log', { entry });
   }, []);
 
   const readAiPerfLogs = useCallback(async (limit?: number) => {
-    return invoke<AiPerfLogEntry[]>("read_ai_perf_logs", { limit });
+    return invoke<AiPerfLogEntry[]>('read_ai_perf_logs', { limit });
   }, []);
 
   const openAiLogsDir = useCallback(async () => {
-    await invoke("open_ai_logs_dir");
+    await invoke('open_ai_logs_dir');
   }, []);
 
   const getEcramMap = useCallback(async () => {
-    return invoke<EramMap>("get_ecram_map");
+    return invoke<EramMap>('get_ecram_map');
   }, []);
 
   const getIotRegionHex = useCallback(async (region: IotRegionName) => {
-    return invoke<string>("get_iot_region_hex", { region });
+    return invoke<string>('get_iot_region_hex', { region });
   }, []);
 
   const writeIotHex = useCallback(async (address: string, hexData: string) => {
-    await invoke("write_iot_hex", { address, hexData });
+    await invoke('write_iot_hex', { address, hexData });
   }, []);
 
   const readEcramRaw = useCallback(async (address: string, count: number) => {
-    return invoke<string>("read_ecram_raw", { address, count });
+    return invoke<string>('read_ecram_raw', { address, count });
   }, []);
 
   const isElevated = useCallback(async () => {
-    return invoke<boolean>("is_elevated");
+    return invoke<boolean>('is_elevated');
   }, []);
 
   const relaunchAsAdmin = useCallback(async () => {
-    await invoke("relaunch_as_admin");
+    await invoke('relaunch_as_admin');
   }, []);
 
   // Audio state is now polled as part of the batched get_hardware_state_batch.
@@ -699,39 +705,45 @@ export function useHardware() {
   // user-initiated volume/mute changes).
   const getAudioState = useCallback(async () => {
     try {
-      const result = await invoke<AudioVolumeResult>("get_audio_volume");
+      const result = await invoke<AudioVolumeResult>('get_audio_volume');
       setAudioState(result);
     } catch (e) {
-      console.error("getAudioState failed:", e);
+      console.error('getAudioState failed:', e);
     }
   }, []);
 
-  const setMasterVolume = useCallback(async (volumeFraction: number) => {
-    const volume = Math.round(volumeFraction * 100);
-    const snap = audioStateRef.current;
-    setAudioState((prev) => prev ? { ...prev, volume } : null);
-    try {
-      await invoke("set_audio_volume", { volume });
-      await getAudioState();
-    } catch (e) {
-      setAudioState(snap);
-      console.error("[audio] set_audio_volume failed:", e);
-      throw e;
-    }
-  }, [getAudioState]);
+  const setMasterVolume = useCallback(
+    async (volumeFraction: number) => {
+      const volume = Math.round(volumeFraction * 100);
+      const snap = audioStateRef.current;
+      setAudioState((prev) => (prev ? { ...prev, volume } : null));
+      try {
+        await invoke('set_audio_volume', { volume });
+        await getAudioState();
+      } catch (e) {
+        setAudioState(snap);
+        console.error('[audio] set_audio_volume failed:', e);
+        throw e;
+      }
+    },
+    [getAudioState],
+  );
 
-  const setMasterMute = useCallback(async (muted: boolean) => {
-    const snap = audioStateRef.current;
-    setAudioState((prev) => prev ? { ...prev, muted } : null);
-    try {
-      await invoke("set_audio_mute", { muted });
-      await getAudioState();
-    } catch (e) {
-      setAudioState(snap);
-      console.error("[audio] set_audio_mute failed:", e);
-      throw e;
-    }
-  }, [getAudioState]);
+  const setMasterMute = useCallback(
+    async (muted: boolean) => {
+      const snap = audioStateRef.current;
+      setAudioState((prev) => (prev ? { ...prev, muted } : null));
+      try {
+        await invoke('set_audio_mute', { muted });
+        await getAudioState();
+      } catch (e) {
+        setAudioState(snap);
+        console.error('[audio] set_audio_mute failed:', e);
+        throw e;
+      }
+    },
+    [getAudioState],
+  );
 
   useEffect(() => {
     void refreshHardwareProfile();
@@ -839,6 +851,6 @@ export function useHardware() {
       getAudioState,
       setMasterVolume,
       setMasterMute,
-    ]
+    ],
   );
 }

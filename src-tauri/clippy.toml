@@ -1,0 +1,8 @@
+# Clippy configuration for miControl
+# Target: cargo clippy -- -D warnings
+# Current warnings: 48 (see sprint backlog for cleanup)
+#
+# Individual allow rules for patterns that are acceptable in this codebase.
+# These can be tightened over time as we refactor.
+
+# Conservative — warn but don't deny for now

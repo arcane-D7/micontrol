@@ -334,8 +334,8 @@ pub struct SystemInfo {
 pub fn get_system_info() -> Result<SystemInfo> {
     #[cfg(windows)]
     {
-        use std::collections::HashMap;
         use crate::hw::wmi_cache;
+        use std::collections::HashMap;
 
         // Start the PDH pollers on first call (no-op on subsequent calls)
         ensure_gpu_poller();
@@ -344,7 +344,9 @@ pub fn get_system_info() -> Result<SystemInfo> {
         wmi_cache::with_cimv2(|wmi| {
             // ── Static CPU identity (name, cores, threads) ────────────────────
             let cpus: Vec<HashMap<String, wmi::Variant>> = wmi
-                .raw_query("SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor")
+                .raw_query(
+                    "SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor",
+                )
                 .unwrap_or_default();
             let cpu = cpus.into_iter().next().unwrap_or_default();
 

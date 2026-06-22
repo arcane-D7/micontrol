@@ -1,10 +1,10 @@
-pub mod errors;
 pub mod audio;
 pub mod battery;
 pub mod charging;
 pub mod discovery;
 pub mod display;
 pub mod ecram;
+pub mod errors;
 pub mod fan;
 pub mod hotkeys;
 pub mod iotservice;
@@ -18,6 +18,6 @@ pub mod startup;
 pub mod system_info;
 pub mod touchpad;
 pub mod update;
+pub mod wifi;
 #[cfg(windows)]
 pub mod wmi_cache;
-pub mod wifi;
