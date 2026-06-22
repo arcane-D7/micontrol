@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../contexts/ToastContext";
+import type { AudioVolumeResult } from "../hooks/useHardware";
 
 interface AudioDevice {
   name: string;
@@ -16,41 +17,20 @@ interface AudioDeviceList {
   capture: AudioDevice[];
 }
 
-interface AudioVolumeResult {
-  success: boolean;
-  volume: number;
-  muted: boolean;
+interface AudioControlProps {
+  audioState: AudioVolumeResult | null;
+  loading: boolean;
+  onVolumeChange: (volumeFraction: number) => Promise<void>;
+  onMuteToggle: (muted: boolean) => Promise<void>;
 }
 
-export default function AudioControl() {
+export default function AudioControl({ audioState, loading, onVolumeChange, onMuteToggle }: AudioControlProps) {
   const [devices, setDevices] = useState<AudioDeviceList | null>(null);
-  const [volume, setVolume] = useState(50);
-  const [muted, setMuted] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { addToast } = useToast();
 
-  // Poll audio volume every 500ms to catch hardware key changes (keyboard volume keys)
-  useEffect(() => {
-    const pollVolume = async () => {
-      try {
-        const result = await invoke<AudioVolumeResult>("get_audio_volume");
-        if (result.success) {
-          setVolume(result.volume);
-          setMuted(result.muted);
-        }
-      } catch {
-        // Silently ignore polling errors
-      }
-    };
-    pollVolume().finally(() => setLoading(false));
-    const id = setInterval(pollVolume, 500);
-    pollRef.current = id;
-    return () => {
-      clearInterval(id);
-      pollRef.current = null;
-    };
-  }, []);
+  // Derive local state from the batched hardware poll (useHardware)
+  const volume = audioState?.volume ?? 50;
+  const muted = audioState?.muted ?? false;
 
   // Load device list once on mount
   useEffect(() => {
@@ -65,19 +45,17 @@ export default function AudioControl() {
   }, []);
 
   const handleVolumeChange = async (newVolume: number) => {
-    setVolume(newVolume);
     try {
-      await invoke("set_audio_volume", { volume: newVolume });
+      // onVolumeChange expects 0-1 fraction (setMasterVolume contract)
+      await onVolumeChange(newVolume / 100);
     } catch (e) {
       addToast(`Volume error: ${String(e)}`, "error");
     }
   };
 
   const handleMuteToggle = async () => {
-    const newMuted = !muted;
-    setMuted(newMuted);
     try {
-      await invoke("set_audio_mute", { muted: newMuted });
+      await onMuteToggle(!muted);
     } catch (e) {
       addToast(`Mute error: ${String(e)}`, "error");
     }

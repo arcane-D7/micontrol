@@ -484,11 +484,16 @@ function FanTab({ hw }: { hw: Hardware }) {
   );
 }
 
-function AudioTab() {
+function AudioTab({ hw }: { hw: Hardware }) {
   return (
     <>
       <PageHeader title="Audio Control" />
-      <AudioControl />
+      <AudioControl
+        audioState={hw.audioState}
+        loading={hw.loading}
+        onVolumeChange={hw.setMasterVolume}
+        onMuteToggle={hw.setMasterMute}
+      />
     </>
   );
 }
@@ -600,6 +605,7 @@ function KeyBindingRow({
 }) {
   const [detecting, setDetecting] = useState(false);
   const [detectedVk, setDetectedVk] = useState<string>("");
+  const pollRef = useRef<number | null>(null);
 
   const actionType = binding.action.type;
   const urlValue = binding.action.type === "open_url" ? binding.action.url : "";
@@ -657,23 +663,41 @@ function KeyBindingRow({
   async function handleDetect() {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("start_key_detect");
+    // Clear any previous interval before starting a new one
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
     setDetecting(true);
     setDetectedVk("…");
     let tries = 0;
-    const poll = setInterval(async () => {
+    const id = window.setInterval(async () => {
       tries++;
       const vk = await invoke<number>("get_detected_key");
       if (vk !== 0) {
         setDetectedVk(`VK 0x${vk.toString(16).toUpperCase().padStart(2, "0")}`);
         setDetecting(false);
-        clearInterval(poll);
+        clearInterval(id);
+        pollRef.current = null;
       } else if (tries >= 50) {
         setDetectedVk("");
         setDetecting(false);
-        clearInterval(poll);
+        clearInterval(id);
+        pollRef.current = null;
       }
     }, 200);
+    pollRef.current = id;
   }
+
+  // Clear the interval on unmount to prevent state updates on unmounted component
+  useEffect(() => {
+    return () => {
+      if (pollRef.current !== null) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, []);
 
   function handleClear() {
     onChange({ ...binding, enabled: false, action: { type: "none" } });
@@ -1461,7 +1485,7 @@ export default function MainWindow({ hardware, activeTab, onTabChange, themeMode
       case "battery":    return <BatteryTab hw={hardware} />;
       case "display":    return <DisplayTab hw={hardware} />;
       case "fan":        return <FanTab hw={hardware} />;
-      case "audio":      return <AudioTab />;
+      case "audio":      return <AudioTab hw={hardware} />;
       case "cast":       return <CastTab />;
       case "iot":        return <IotTab />;
       case "wifi":       return <WiFiTab />;

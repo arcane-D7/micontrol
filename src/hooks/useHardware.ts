@@ -293,6 +293,11 @@ export function useHardware() {
   // after a user write. Cleared automatically once the lock expires.
   const touchpadDirtyUntil = useRef<number>(0);
   const touchpadRef = useRef<TouchpadInfo | null>(null);
+  const displayRef = useRef<DisplayInfo | null>(null);
+  const fanRef = useRef<FanInfo | null>(null);
+  const performanceModeRef = useRef<PerformanceMode>("balance");
+  const chargingThresholdRef = useRef<number>(80);
+  const audioStateRef = useRef<AudioVolumeResult | null>(null);
 
   const refresh = useCallback(async () => {
     if (!hasLoadedOnce.current) setLoading(true);
@@ -383,49 +388,103 @@ export function useHardware() {
   }, [refresh]);
 
   const setPerformanceMode = useCallback(async (mode: PerformanceMode) => {
-    const result = await invoke<PerformanceResult>("set_performance_mode", { mode });
-    setPerformanceModeState(result.mode);
-    setLastPerfResult(result);
+    const snap = performanceModeRef.current;
+    setPerformanceModeState(mode);
+    try {
+      const result = await invoke<PerformanceResult>("set_performance_mode", { mode });
+      setLastPerfResult(result);
+    } catch (e) {
+      setPerformanceModeState(snap);
+      console.error("[perf] set_performance_mode failed:", e);
+      throw e;
+    }
   }, []);
 
   const setChargingThreshold = useCallback(async (threshold: number) => {
-    await invoke("set_charging_threshold", { threshold });
+    const snap = chargingThresholdRef.current;
     setChargingThresholdState(threshold);
+    try {
+      await invoke("set_charging_threshold", { threshold });
+    } catch (e) {
+      setChargingThresholdState(snap);
+      console.error("[charge] set_charging_threshold failed:", e);
+      throw e;
+    }
   }, []);
 
   const setBrightness = useCallback(async (level: number) => {
-    await invoke("set_brightness", { level });
+    const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, brightness: level } : null));
+    try {
+      await invoke("set_brightness", { level });
+    } catch (e) {
+      setDisplay(snap);
+      console.error("[display] set_brightness failed:", e);
+      throw e;
+    }
   }, []);
 
   const setHdr = useCallback(async (enabled: boolean) => {
-    await invoke("set_hdr", { enabled });
+    const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, hdr_enabled: enabled } : null));
+    try {
+      await invoke("set_hdr", { enabled });
+    } catch (e) {
+      setDisplay(snap);
+      console.error("[display] set_hdr failed:", e);
+      throw e;
+    }
   }, []);
 
   const setAiBrightness = useCallback(async (enabled: boolean) => {
-    await invoke("set_ai_brightness", { enabled });
+    const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, ai_brightness: enabled } : null));
+    try {
+      await invoke("set_ai_brightness", { enabled });
+    } catch (e) {
+      setDisplay(snap);
+      console.error("[display] set_ai_brightness failed:", e);
+      throw e;
+    }
   }, []);
 
   const setAiBrightnessConfig = useCallback(async (config: AiBrightnessConfig) => {
-    await invoke("set_ai_brightness_config", { config });
+    const snap = displayRef.current;
     setDisplay((prev) => prev ? { ...prev, ai_brightness: config.enabled, ai_brightness_config: config } : null);
+    try {
+      await invoke("set_ai_brightness_config", { config });
+    } catch (e) {
+      setDisplay(snap);
+      console.error("[display] set_ai_brightness_config failed:", e);
+      throw e;
+    }
   }, []);
 
   const setFanMode = useCallback(
     async (mode: "auto" | "fixed" | "off", speedPercent?: number) => {
-      await invoke("set_fan_mode", { mode, speed_percent: speedPercent ?? 50 });
+      const snap = fanRef.current;
       setFan((prev) =>
         prev ? { ...prev, mode, speed_percent: speedPercent ?? prev.speed_percent } : null
       );
+      try {
+        await invoke("set_fan_mode", { mode, speed_percent: speedPercent ?? 50 });
+      } catch (e) {
+        setFan(snap);
+        console.error("[fan] set_fan_mode failed:", e);
+        throw e;
+      }
     },
     []
   );
 
-  // Keep a stable ref to current touchpad state so error-revert closures
-  // (with empty deps) can restore the previous snapshot.
+  // Keep stable refs so error-revert closures (with empty deps) can restore
+  // the previous snapshot of any state that supports optimistic updates.
   useEffect(() => { touchpadRef.current = touchpad; }, [touchpad]);
+  useEffect(() => { displayRef.current = display; }, [display]);
+  useEffect(() => { fanRef.current = fan; }, [fan]);
+  useEffect(() => { performanceModeRef.current = performanceMode; }, [performanceMode]);
+  useEffect(() => { chargingThresholdRef.current = chargingThreshold; }, [chargingThreshold]);
+  useEffect(() => { audioStateRef.current = audioState; }, [audioState]);
 
   const setTouchpadSensitivity = useCallback(
     async (sensitivity: "low" | "medium" | "high" | "very_high") => {
@@ -509,13 +568,27 @@ export function useHardware() {
   }, []);
 
   const setRefreshRate = useCallback(async (hz: number) => {
-    await invoke("set_refresh_rate", { hz });
+    const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, refresh_rate_hz: hz } : null));
+    try {
+      await invoke("set_refresh_rate", { hz });
+    } catch (e) {
+      setDisplay(snap);
+      console.error("[display] set_refresh_rate failed:", e);
+      throw e;
+    }
   }, []);
 
   const setAdaptiveRefreshRate = useCallback(async (enabled: boolean) => {
-    await invoke("set_adaptive_refresh_rate", { enabled });
+    const snap = displayRef.current;
     setDisplay((prev) => (prev ? { ...prev, adaptive_refresh_rate: enabled } : null));
+    try {
+      await invoke("set_adaptive_refresh_rate", { enabled });
+    } catch (e) {
+      setDisplay(snap);
+      console.error("[display] set_adaptive_refresh_rate failed:", e);
+      throw e;
+    }
   }, []);
 
   const getProcessList = useCallback(async () => {
@@ -623,13 +696,29 @@ export function useHardware() {
 
   const setMasterVolume = useCallback(async (volumeFraction: number) => {
     const volume = Math.round(volumeFraction * 100);
-    await invoke("set_audio_volume", { volume });
-    await getAudioState();
+    const snap = audioStateRef.current;
+    setAudioState((prev) => prev ? { ...prev, volume } : null);
+    try {
+      await invoke("set_audio_volume", { volume });
+      await getAudioState();
+    } catch (e) {
+      setAudioState(snap);
+      console.error("[audio] set_audio_volume failed:", e);
+      throw e;
+    }
   }, [getAudioState]);
 
   const setMasterMute = useCallback(async (muted: boolean) => {
-    await invoke("set_audio_mute", { muted });
-    await getAudioState();
+    const snap = audioStateRef.current;
+    setAudioState((prev) => prev ? { ...prev, muted } : null);
+    try {
+      await invoke("set_audio_mute", { muted });
+      await getAudioState();
+    } catch (e) {
+      setAudioState(snap);
+      console.error("[audio] set_audio_mute failed:", e);
+      throw e;
+    }
   }, [getAudioState]);
 
   useEffect(() => {
