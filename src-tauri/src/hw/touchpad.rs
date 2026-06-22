@@ -716,8 +716,9 @@ enum EdgeSide {
 #[cfg(windows)]
 thread_local! {
     /// Per-device preparsed HID data cache, keyed by HANDLE numeric value.
-    static PREPARSED_CACHE: std::cell::RefCell<std::collections::HashMap<usize, Vec<u8>>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    static PREPARSED_CACHE:
+        std::cell::RefCell<std::collections::HashMap<usize, std::rc::Rc<Vec<u8>>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
     /// Per-device "is this the touchpad?" decision cache.
     static TOUCHPAD_DEVICE_CACHE: std::cell::RefCell<std::collections::HashMap<usize, bool>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
@@ -931,7 +932,7 @@ unsafe fn process_raw_input(lparam: isize) {
     }
 
     // ── Get/cache preparsed data for this device ──────────────────────────────
-    let pp_bytes = PREPARSED_CACHE.with(|cache| {
+    let pp_data = PREPARSED_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let pp_buf = cache.entry(device_key).or_insert_with(|| {
             let mut pp_size: u32 = 0;
@@ -942,7 +943,7 @@ unsafe fn process_raw_input(lparam: isize) {
                 &mut pp_size,
             );
             if pp_size == 0 || pp_size > 65536 {
-                return Vec::new();
+                return std::rc::Rc::new(Vec::new());
             }
             let mut pp_buf = vec![0u8; pp_size as usize];
             let ret = GetRawInputDeviceInfoW(
@@ -952,23 +953,23 @@ unsafe fn process_raw_input(lparam: isize) {
                 &mut pp_size,
             );
             if ret == u32::MAX {
-                return Vec::new();
+                return std::rc::Rc::new(Vec::new());
             }
-            pp_buf
+            std::rc::Rc::new(pp_buf)
         });
         if pp_buf.is_empty() {
             None
         } else {
-            Some(pp_buf.clone())
+            Some(std::rc::Rc::clone(pp_buf))
         }
     });
 
-    let pp_bytes = match pp_bytes {
-        Some(b) => b,
+    let pp_rc = match pp_data {
+        Some(rc) => rc,
         None => return,
     };
 
-    let preparsed = PHIDP_PREPARSED_DATA(pp_bytes.as_ptr() as isize);
+    let preparsed = PHIDP_PREPARSED_DATA(pp_rc.as_ptr() as isize);
 
     // ── Extract the HID report bytes ──────────────────────────────────────────
     // Harden dwSizeHid: validate against the actual raw input buffer size
