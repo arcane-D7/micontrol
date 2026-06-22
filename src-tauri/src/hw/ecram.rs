@@ -64,6 +64,10 @@ const IOT_GUID: windows::core::GUID = windows::core::GUID {
     data4: [0xB3, 0x3B, 0x83, 0x7E, 0x87, 0xE2, 0x5F, 0xBC],
 };
 
+/// Maximum valid byte index within the ACPI ERAM region.
+/// The ERAM is 0x100 bytes (indices 0x00..=0xFF).
+pub const ECRAM_MAX_INDEX: usize = 0xFF;
+
 /// Total IOCTL buffer size (driver requires exactly 0x110 bytes for both in and out).
 const IOCTL_BUF_SIZE: usize = 0x110;
 
@@ -337,12 +341,49 @@ fn read_ecram_inner(device_path: &str, phys_addr: u64, byte_count: usize) -> Res
         CloseHandle(handle).ok();
         result.context("DeviceIoControl IOCTL_ECRAM_READ")?;
 
+        // Validate that the driver actually returned enough data.
+        check_bytes_returned(bytes_returned, byte_count)
+            .context("IOCTL_ECRAM_READ returned fewer bytes than expected")?;
+
         // EC data starts at offset 0x10 in output (= out_buf.data[0..byte_count])
         // out_buf layout: [physical_address:8][byte_count:8][data:0x100]
         // The driver fills at out_buf+0x10 which corresponds to out_buf.data[0..byte_count]
         let ec_bytes = out_buf.data[..byte_count].to_vec();
         Ok(ec_bytes)
     }
+}
+
+/// Validate that `bytes_returned` from an IOCTL read is at least `expected_size`.
+///
+/// If the driver returned fewer bytes than requested, the output buffer may
+/// contain stale or uninitialized data — reject rather than returning garbage.
+fn check_bytes_returned(bytes_returned: u32, expected_size: usize) -> Result<()> {
+    if (bytes_returned as usize) >= expected_size {
+        return Ok(());
+    }
+    log::warn!(
+        target: "hw::ecram",
+        "Short read: expected {expected_size} bytes, got {bytes_returned} — rejecting",
+    );
+    anyhow::bail!(
+        "EC RAM short read: expected {expected_size}, got {bytes_returned}"
+    );
+}
+
+/// Validate that `index` is a valid byte offset within the ACPI ERAM region.
+///
+/// Returns an error if `index > ECRAM_MAX_INDEX`.
+fn validate_eram_index(index: usize) -> Result<()> {
+    if index <= ECRAM_MAX_INDEX {
+        return Ok(());
+    }
+    log::warn!(
+        target: "hw::ecram",
+        "ERAM index 0x{index:X} exceeds maximum 0x{ECRAM_MAX_INDEX:X} — rejecting",
+    );
+    anyhow::bail!(
+        "ERAM index 0x{index:X} out of range (max 0x{ECRAM_MAX_INDEX:X})",
+    )
 }
 
 #[cfg(windows)]
@@ -680,5 +721,59 @@ mod tests {
     #[test]
     fn ecram_buf_size() {
         assert_eq!(std::mem::size_of::<EcramBuf>(), IOCTL_BUF_SIZE);
+    }
+
+    #[test]
+    fn ecram_max_index_value() {
+        assert_eq!(ECRAM_MAX_INDEX, 0xFF);
+        assert_eq!(ECRAM_MAX_INDEX as usize, ERAM_SIZE - 1);
+    }
+
+    #[test]
+    fn validate_eram_index_ok() {
+        assert!(validate_eram_index(0x00).is_ok());
+        assert!(validate_eram_index(0x81).is_ok());
+        assert!(validate_eram_index(0xFF).is_ok());
+    }
+
+    #[test]
+    fn validate_eram_index_rejects_out_of_range() {
+        let err = validate_eram_index(0x100).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("0x100"), "error should mention the actual index: {msg}");
+        assert!(msg.contains("0xFF"), "error should mention the max index: {msg}");
+        assert!(err.to_string().contains("out of range"), "error should say 'out of range': {msg}");
+    }
+
+    #[test]
+    fn validate_eram_index_rejects_large() {
+        assert!(validate_eram_index(0x1000).is_err());
+        assert!(validate_eram_index(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn check_bytes_returned_ok() {
+        // Exact match
+        assert!(check_bytes_returned(256, 256).is_ok());
+        // More returned than expected (still valid — buffer is large enough)
+        assert!(check_bytes_returned(272, 256).is_ok());
+    }
+
+    #[test]
+    fn check_bytes_returned_short_read_fails() {
+        let err = check_bytes_returned(128, 256).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("128"), "error should mention actual bytes: {msg}");
+        assert!(msg.contains("256"), "error should mention expected bytes: {msg}");
+        assert!(msg.contains("short read") || msg.contains("Short read"),
+                "error should mention short read: {msg}");
+    }
+
+    #[test]
+    fn check_bytes_returned_zero_bytes() {
+        // Zero bytes returned when some were expected
+        assert!(check_bytes_returned(0, 1).is_err());
+        // Zero bytes expected, zero returned (edge case — should pass)
+        assert!(check_bytes_returned(0, 0).is_ok());
     }
 }

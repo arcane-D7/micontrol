@@ -610,7 +610,12 @@ export function useHardware() {
   }, []);
 
   const getProcessList = useCallback(async () => {
-    return invoke<ProcessInfo[]>('get_process_list');
+    try {
+      return await invoke<ProcessInfo[]>('get_process_list');
+    } catch (e) {
+      console.error('[sys] get_process_list failed:', e);
+      return [];
+    }
   }, []);
 
   // Update status is NOT polled — fetched once on mount + manually
@@ -660,44 +665,92 @@ export function useHardware() {
   }, []);
 
   const installDriver = useCallback(async (driverName: string) => {
-    return invoke<string>('install_driver', { driverName });
+    try {
+      return await invoke<string>('install_driver', { driverName });
+    } catch (e) {
+      console.error('[setup] install_driver failed:', e);
+      throw e;
+    }
   }, []);
 
   // ── AI performance log commands ───────────────────────────────────────────
   const writeAiPerfLog = useCallback(async (entry: AiPerfLogEntry) => {
-    await invoke('write_ai_perf_log', { entry });
+    try {
+      await invoke('write_ai_perf_log', { entry });
+    } catch (e) {
+      console.error('[perf] write_ai_perf_log failed:', e);
+    }
   }, []);
 
   const readAiPerfLogs = useCallback(async (limit?: number) => {
-    return invoke<AiPerfLogEntry[]>('read_ai_perf_logs', { limit });
+    try {
+      return await invoke<AiPerfLogEntry[]>('read_ai_perf_logs', { limit });
+    } catch (e) {
+      console.error('[perf] read_ai_perf_logs failed:', e);
+      return [];
+    }
   }, []);
 
   const openAiLogsDir = useCallback(async () => {
-    await invoke('open_ai_logs_dir');
+    try {
+      await invoke('open_ai_logs_dir');
+    } catch (e) {
+      console.warn('[perf] open_ai_logs_dir failed:', e);
+    }
   }, []);
 
   const getEcramMap = useCallback(async () => {
-    return invoke<EramMap>('get_ecram_map');
+    try {
+      return await invoke<EramMap>('get_ecram_map');
+    } catch (e) {
+      console.error('[iot] get_ecram_map failed:', e);
+      throw e;
+    }
   }, []);
 
   const getIotRegionHex = useCallback(async (region: IotRegionName) => {
-    return invoke<string>('get_iot_region_hex', { region });
+    try {
+      return await invoke<string>('get_iot_region_hex', { region });
+    } catch (e) {
+      console.error('[iot] get_iot_region_hex failed:', e);
+      throw e;
+    }
   }, []);
 
   const writeIotHex = useCallback(async (address: string, hexData: string) => {
-    await invoke('write_iot_hex', { address, hexData });
+    try {
+      await invoke('write_iot_hex', { address, hexData });
+    } catch (e) {
+      console.error('[iot] write_iot_hex failed:', e);
+      throw e;
+    }
   }, []);
 
   const readEcramRaw = useCallback(async (address: string, count: number) => {
-    return invoke<string>('read_ecram_raw', { address, count });
+    try {
+      return await invoke<string>('read_ecram_raw', { address, count });
+    } catch (e) {
+      console.error('[iot] read_ecram_raw failed:', e);
+      throw e;
+    }
   }, []);
 
   const isElevated = useCallback(async () => {
-    return invoke<boolean>('is_elevated');
+    try {
+      return await invoke<boolean>('is_elevated');
+    } catch (e) {
+      console.error('[iot] is_elevated failed:', e);
+      return false;
+    }
   }, []);
 
   const relaunchAsAdmin = useCallback(async () => {
-    await invoke('relaunch_as_admin');
+    try {
+      await invoke('relaunch_as_admin');
+    } catch (e) {
+      console.error('[app] relaunch_as_admin failed:', e);
+      throw e;
+    }
   }, []);
 
   // Audio state is now polled as part of the batched get_hardware_state_batch.

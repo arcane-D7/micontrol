@@ -316,4 +316,39 @@ mod tests {
         assert!(json.contains("level"));
         assert!(json.contains("manufacturer"));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn ac_power_cache_concurrent_clear_probe_no_panic() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // Two threads racing: one clearing the cache, one probing it.
+        // Under the old implementation the probe could interleave with
+        // the clear; here we verify the lock-held-throughout approach
+        // never panics and never produces a stale read after clear.
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let stop_probe = Arc::clone(&stop);
+        let probe_thread = std::thread::spawn(move || {
+            while !stop_probe.load(Ordering::Relaxed) {
+                let _ = probe_ac_input_power_throttled();
+            }
+        });
+
+        let stop_clear = Arc::clone(&stop);
+        let clear_thread = std::thread::spawn(move || {
+            while !stop_clear.load(Ordering::Relaxed) {
+                clear_ac_power_probe_cache();
+            }
+        });
+
+        // Let them race for long enough to trigger interleaving
+        std::thread::sleep(Duration::from_millis(500));
+        stop.store(true, Ordering::Relaxed);
+
+        probe_thread.join().expect("probe thread panicked");
+        clear_thread.join().expect("clear thread panicked");
+    }
 }

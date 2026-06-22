@@ -15,6 +15,8 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         ecmaFeatures: { jsx: true },
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
       },
     },
     settings: {
@@ -36,6 +38,8 @@ export default tseslint.config(
         { argsIgnorePattern: '^_' },
       ],
       '@typescript-eslint/no-explicit-any': 'warn',
+      // Catch floating promises that might cause unhandled rejections.
+      '@typescript-eslint/no-floating-promises': 'warn',
     },
   },
   {

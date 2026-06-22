@@ -922,32 +922,46 @@ function KeyBindingRow({
   }
 
   async function handleDetect() {
-    const { invoke } = await import('@tauri-apps/api/core');
-    await invoke('start_key_detect');
-    // Clear any previous interval before starting a new one
-    if (pollRef.current !== null) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    setDetecting(true);
-    setDetectedVk('…');
-    let tries = 0;
-    const id = window.setInterval(async () => {
-      tries++;
-      const vk = await invoke<number>('get_detected_key');
-      if (vk !== 0) {
-        setDetectedVk(`VK 0x${vk.toString(16).toUpperCase().padStart(2, '0')}`);
-        setDetecting(false);
-        clearInterval(id);
-        pollRef.current = null;
-      } else if (tries >= 50) {
-        setDetectedVk('');
-        setDetecting(false);
-        clearInterval(id);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('start_key_detect');
+      // Clear any previous interval before starting a new one
+      if (pollRef.current !== null) {
+        clearInterval(pollRef.current);
         pollRef.current = null;
       }
-    }, 200);
-    pollRef.current = id;
+      setDetecting(true);
+      setDetectedVk('…');
+      let tries = 0;
+      const id = window.setInterval(async () => {
+        try {
+          tries++;
+          const vk = await invoke<number>('get_detected_key');
+          if (vk !== 0) {
+            setDetectedVk(`VK 0x${vk.toString(16).toUpperCase().padStart(2, '0')}`);
+            setDetecting(false);
+            clearInterval(id);
+            pollRef.current = null;
+          } else if (tries >= 50) {
+            setDetectedVk('');
+            setDetecting(false);
+            clearInterval(id);
+            pollRef.current = null;
+          }
+        } catch {
+          // Key detection poll failed — stop trying
+          setDetectedVk('');
+          setDetecting(false);
+          clearInterval(id);
+          pollRef.current = null;
+        }
+      }, 200);
+      pollRef.current = id;
+    } catch (e) {
+      console.error('[keyboard] start_key_detect failed:', e);
+      setDetecting(false);
+      setDetectedVk('');
+    }
   }
 
   // Clear the interval on unmount to prevent state updates on unmounted component
@@ -1227,14 +1241,16 @@ function KeyboardTab() {
   }, []);
 
   useEffect(() => {
-    import('@tauri-apps/api/core').then(({ invoke }) => {
-      invoke<HotkeyMap>('get_hotkey_config')
-        .then(setConfig)
-        .catch((e) => console.error('get_hotkey_config', e));
-      invoke<boolean>('is_hook_active')
-        .then(setHookActive)
-        .catch(() => setHookActive(false));
-    });
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => {
+        invoke<HotkeyMap>('get_hotkey_config')
+          .then(setConfig)
+          .catch((e) => console.error('get_hotkey_config', e));
+        invoke<boolean>('is_hook_active')
+          .then(setHookActive)
+          .catch(() => setHookActive(false));
+      })
+      .catch((e) => console.error('Failed to import Tauri core:', e));
   }, []);
 
   async function save() {
@@ -1970,7 +1986,7 @@ function SettingsTab({ ai, onTabChange }: { ai: AiSettings; onTabChange: (tab: s
   const [telemetryConsent, setTelemetryConsent] = useState<'granted' | 'denied' | null>(null);
 
   useEffect(() => {
-    ai.getTelemetryConsent().then(setTelemetryConsent);
+    void ai.getTelemetryConsent().then(setTelemetryConsent);
   }, [ai]);
 
   const handleRevokeConsent = useCallback(async () => {
@@ -2108,13 +2124,18 @@ export default function MainWindow({
   // Check telemetry consent on mount — if null, show consent dialog
   useEffect(() => {
     if (!consentChecked) {
-      aiSettings.getTelemetryConsent().then((consent) => {
-        setConsentChecked(true);
-        if (consent === null) {
-          // First launch — prompt for consent since AI features are prominent
-          setShowConsentDialog(true);
-        }
-      });
+      aiSettings
+        .getTelemetryConsent()
+        .then((consent) => {
+          setConsentChecked(true);
+          if (consent === null) {
+            // First launch — prompt for consent since AI features are prominent
+            setShowConsentDialog(true);
+          }
+        })
+        .catch(() => {
+          setConsentChecked(true);
+        });
     }
   }, [aiSettings, consentChecked]);
 

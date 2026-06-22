@@ -196,8 +196,6 @@ export function useAnalysisLogger(hw: Hardware, ai: Settings) {
     }, intervalMs);
 
     return () => clearInterval(id);
-    // Re-register when enabled/interval setting changes:
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     aiRef.current.settings.ai_analysis_enabled,
     aiRef.current.settings.ai_poll_interval_sec,

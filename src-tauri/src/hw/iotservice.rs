@@ -43,14 +43,57 @@ const DST_WMI: u16 = 3;
 /// Maximum payload size we'll accept in a response.
 const MAX_RESPONSE_PAYLOAD: usize = 0x10000;
 
+/// Check whether a message type is known/recognized.
+///
+/// This is the single source of truth for valid incoming message types.
+/// Unknown types are rejected (fail-closed) to prevent processing
+/// unexpected or potentially malicious response messages.
+fn is_known_msg_type(msg_type: u32) -> bool {
+    matches!(
+        msg_type,
+        msg_type::GET_MODEL
+            | msg_type::GET_FW_VERSION
+            | msg_type::GET_BIND_STATUS
+            | msg_type::GET_DEVICE_ID
+            | msg_type::GET_DEVICE_STATUS
+            | msg_type::SET_DEVICE_STATUS
+            | msg_type::RESET_DEVICE
+            | msg_type::SET_CHARGING_LIMIT
+            | msg_type::SEND_LAPTOP_STATUS
+            | msg_type::WRITE_WIFI_ITEM
+            | msg_type::DELETE_WIFI_ITEM
+            | msg_type::GET_WIFI_BY_INDEX
+            | msg_type::READ_WIFI_COUNT
+            | msg_type::READ_WIFI_STATUS
+            | msg_type::EMPTY_WIFI_ITEMS
+            | msg_type::CONNECT_WIFI
+            // UNCONFIRMED — see msg_type module docs
+            | msg_type::EC_EVENT
+            | msg_type::POWER_EVENT
+    )
+}
+
 // ── Message type constants (discovered via RE) ───────────────────────────────
 
 /// msg_type values for IPC commands.
 ///
 /// Most constants validated against Ghidra decompilation of Worker_IPC.cpp.
+/// See `docs/iotservice-re-analysis.md` Section 3.4 for details on EC and
+/// power events monitored by IoTService.
+///
+/// ## Unconfirmed types
+///
 /// EC_EVENT (0x5001) and POWER_EVENT (0x5002) are **unconfirmed** — they were
 /// inferred from string analysis but their handler signatures were not located
-/// in the decompiled output. Use with caution.
+/// in the decompiled output. The IoTService internally monitors EC events via
+/// WMI (`SELECT * FROM HID_EVENT20`) and power events via
+/// `RegisterPowerSettingNotification`, but whether an external client is
+/// expected to send these message types to the service is unverified.
+///
+/// These types are kept in the known-type list so they are not rejected
+/// by the fail-closed response validator, but they are marked as potentially
+/// unused or incorrect. Use with caution — verify via traffic capture before
+/// relying on them in production.
 #[allow(dead_code)]
 pub mod msg_type {
     // Device info (read-only, no JSON payload needed)
@@ -373,6 +416,18 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
         let resp_header: &IpcWireHeader =
             unsafe { &*(resp_header_buf.as_ptr() as *const IpcWireHeader) };
 
+        // Fail-closed: reject responses with unknown message types.
+        // This prevents processing unexpected or potentially malicious messages
+        // from the IoTService pipe.
+        if !is_known_msg_type(resp_header.msg_type) {
+            log::warn!(
+                target: "hw::iotservice",
+                "Unknown IoT message type 0x{:04X} in response — dropping (fail-closed)",
+                resp_header.msg_type
+            );
+            return Ok(Vec::new());
+        }
+
         let payload_len = resp_header.payload_len as usize;
         if payload_len > MAX_RESPONSE_PAYLOAD {
             anyhow::bail!("Response payload too large: {payload_len} bytes");
@@ -657,8 +712,14 @@ pub fn connect_wifi() -> Result<()> {
 
 /// Send a power event notification to IoTService.
 ///
-/// **WARNING:** This msg_type (0x5002) was inferred from string analysis but
-/// the handler was NOT confirmed in the Ghidra decompiled output.
+/// **UNCONFIRMED — see `msg_type` module docs and `docs/iotservice-re-analysis.md`
+/// Section 3.4 for context.**
+///
+/// The message type 0x5002 (POWER_EVENT) was inferred from string analysis but
+/// was NOT confirmed in the Ghidra decompiled output. The IoTService internally
+/// monitors power events via `RegisterPowerSettingNotification`, but whether
+/// an external client is expected to send this type is unverified.
+///
 /// Test before relying on this in production.
 #[allow(dead_code)]
 pub fn notify_power_event(event: &PowerEvent) -> Result<()> {
@@ -669,8 +730,14 @@ pub fn notify_power_event(event: &PowerEvent) -> Result<()> {
 
 /// Send an EC event notification to IoTService.
 ///
-/// **WARNING:** This msg_type (0x5001) was inferred from string analysis but
-/// the handler was NOT confirmed in the Ghidra decompiled output.
+/// **UNCONFIRMED — see `msg_type` module docs and `docs/iotservice-re-analysis.md`
+/// Section 3.4 for context.**
+///
+/// The message type 0x5001 (EC_EVENT) was inferred from string analysis but
+/// was NOT confirmed in the Ghidra decompiled output. The IoTService internally
+/// monitors EC events via WMI (`SELECT * FROM HID_EVENT20`), but whether
+/// an external client is expected to send this type is unverified.
+///
 /// Test before relying on this in production.
 #[allow(dead_code)]
 pub fn notify_ec_event(event_func: u32, event_value: u32) -> Result<()> {
@@ -773,5 +840,65 @@ mod tests {
         }
         // 99 is not a valid threshold
         assert!(!VALID.contains(&99));
+    }
+
+    // ── Message type validation (fail-closed) ──────────────────────────────
+
+    #[test]
+    fn test_is_known_msg_type_returns_true_for_0x5001() {
+        // 0x5001 (EC_EVENT) is unconfirmed but kept in the known-type list.
+        assert!(is_known_msg_type(msg_type::EC_EVENT));
+    }
+
+    #[test]
+    fn test_is_known_msg_type_returns_true_for_0x5002() {
+        // 0x5002 (POWER_EVENT) is unconfirmed but kept in the known-type list.
+        assert!(is_known_msg_type(msg_type::POWER_EVENT));
+    }
+
+    #[test]
+    fn test_is_known_msg_type_returns_true_for_all_confirmed_types() {
+        let confirmed: Vec<u32> = vec![
+            msg_type::GET_MODEL,
+            msg_type::GET_FW_VERSION,
+            msg_type::GET_BIND_STATUS,
+            msg_type::GET_DEVICE_ID,
+            msg_type::GET_DEVICE_STATUS,
+            msg_type::SET_DEVICE_STATUS,
+            msg_type::RESET_DEVICE,
+            msg_type::SET_CHARGING_LIMIT,
+            msg_type::SEND_LAPTOP_STATUS,
+            msg_type::WRITE_WIFI_ITEM,
+            msg_type::DELETE_WIFI_ITEM,
+            msg_type::GET_WIFI_BY_INDEX,
+            msg_type::READ_WIFI_COUNT,
+            msg_type::READ_WIFI_STATUS,
+            msg_type::EMPTY_WIFI_ITEMS,
+            msg_type::CONNECT_WIFI,
+        ];
+        for t in confirmed {
+            assert!(
+                is_known_msg_type(t),
+                "Expected confirmed type 0x{t:04X} to be known"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_known_msg_type_returns_false_for_unknown_type() {
+        // 0x9999 is not a known message type — should be rejected.
+        assert!(!is_known_msg_type(0x9999));
+    }
+
+    #[test]
+    fn test_is_known_msg_type_returns_false_for_zero() {
+        // 0 is not a valid IoTService message type.
+        assert!(!is_known_msg_type(0));
+    }
+
+    #[test]
+    fn test_is_known_msg_type_returns_false_for_max_u32() {
+        // u32::MAX is never a valid message type.
+        assert!(!is_known_msg_type(u32::MAX));
     }
 }

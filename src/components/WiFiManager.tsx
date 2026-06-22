@@ -42,7 +42,7 @@ export default function WiFiManager() {
   }, []);
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, [loadData]);
 
   const handleConnect = async (ssid: string) => {
@@ -52,7 +52,7 @@ export default function WiFiManager() {
       await invoke('wifi_connect', { ssid, password: newPassword || null });
       addToast(`Connected to "${ssid}"`, 'success');
       setNewPassword('');
-      loadData();
+      void loadData();
     } catch (e) {
       addToast(`Connect error: ${String(e)}`, 'error');
     } finally {
@@ -64,7 +64,7 @@ export default function WiFiManager() {
     try {
       await invoke('wifi_disconnect');
       addToast('Disconnected', 'info');
-      loadData();
+      void loadData();
     } catch (e) {
       addToast(`Disconnect error: ${String(e)}`, 'error');
     }
@@ -72,7 +72,7 @@ export default function WiFiManager() {
 
   const handleRefresh = () => {
     setLoading(true);
-    loadData();
+    void loadData();
   };
 
   if (loading) {
@@ -172,7 +172,7 @@ export default function WiFiManager() {
                     className="btn btn-primary"
                     onClick={(e) => {
                       e.stopPropagation();
-                      handleConnect(n.ssid);
+                      void handleConnect(n.ssid);
                     }}
                     disabled={connecting}
                     style={{ padding: '4px 10px', fontSize: 12 }}

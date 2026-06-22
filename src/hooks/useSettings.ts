@@ -204,14 +204,14 @@ export function useSettings() {
         console.error('[settings] Failed to save API key:', err),
       );
     } else {
-      saveSettings({ ...settings, [key]: value });
+      void saveSettings({ ...settings, [key]: value });
     }
   }
 
   // On mount: migrate legacy localStorage key if present, then load from credential store
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    void (async () => {
       await migrateApiKey();
       if (cancelled) return;
       const apiKey = await loadApiKey();

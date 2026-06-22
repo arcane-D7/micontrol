@@ -16,7 +16,7 @@ export default function BrightnessOsd() {
 
   useEffect(() => {
     // Position the window at bottom-centre of the primary monitor on first mount.
-    (async () => {
+    void (async () => {
       try {
         const win = getCurrentWindow();
         const monitor = await primaryMonitor();
@@ -45,7 +45,7 @@ export default function BrightnessOsd() {
     });
 
     return () => {
-      unlisten.then((f) => f());
+      void unlisten.then((f) => f());
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);

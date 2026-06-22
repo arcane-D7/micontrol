@@ -17,7 +17,7 @@ export default function IotDeviceCard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadInfo();
+    void loadInfo();
   }, []);
 
   const loadInfo = async () => {
