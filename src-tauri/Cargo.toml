@@ -63,7 +63,10 @@ winreg = "0.52"
 tauri-build = { version = "2", features = [] }
 
 [profile.release]
-panic = "abort"
+# Use "unwind" instead of "abort" so panics are recoverable.
+# A poisoned mutex (from a panic while holding the lock) can be recovered
+# via lock_or_recover() instead of killing the entire process.
+panic = "unwind"
 codegen-units = 1
 lto = true
 opt-level = "s"

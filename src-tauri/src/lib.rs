@@ -79,6 +79,7 @@ async fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    util::panic::install_panic_hook();
     if let Err(e) = crate::debug_log::init_logging() {
         eprintln!("failed to initialize logging: {e:#}");
     }

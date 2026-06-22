@@ -19,6 +19,7 @@ use crate::hw::performance::{
 };
 use crate::hw::wifi::{self, WifiNetwork, WifiStatus};
 use crate::state::{AppState, PerformanceMode};
+use crate::util::panic::lock_or_recover;
 use tauri::State;
 
 const RAW_ECRAM_WRITE_ENABLE_ENV: &str = "MICONTROL_ENABLE_RAW_ECRAM_WRITE";
@@ -39,7 +40,7 @@ pub async fn set_performance_mode(
             .await?;
     let result: PerformanceResult =
         serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
-    *state.performance_mode.lock().unwrap() = result.mode;
+    *lock_or_recover(&state.performance_mode) = result.mode;
     Ok(result)
 }
 
@@ -60,7 +61,7 @@ pub async fn set_charging_threshold(
     .await?;
     let result: ChargingResult =
         serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
-    *state.charging_threshold.lock().unwrap() = result.threshold;
+    *lock_or_recover(&state.charging_threshold) = result.threshold;
     Ok(result)
 }
 
