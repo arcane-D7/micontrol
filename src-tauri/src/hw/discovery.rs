@@ -373,18 +373,21 @@ fn run_discovery() -> HardwareProfile {
 fn probe_device_model() -> Option<String> {
     #[cfg(windows)]
     {
-        use wmi::{COMLibrary, WMIConnection};
-        let com = COMLibrary::new().ok()?;
-        let wmi = WMIConnection::new(com.into()).ok()?;
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT Model FROM Win32_ComputerSystem")
-            .ok()?;
-        if let Some(row) = results.into_iter().next() {
-            if let Some(wmi::Variant::String(model)) = row.get("Model") {
-                return Some(model.clone());
+        use crate::hw::wmi_cache;
+        wmi_cache::with_cimv2(|wmi| {
+            let results: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT Model FROM Win32_ComputerSystem")
+                .unwrap_or_default();
+            if let Some(row) = results.into_iter().next() {
+                if let Some(wmi::Variant::String(model)) = row.get("Model") {
+                    return Ok(Some(model.clone()));
+                }
             }
-        }
+            Ok(None::<String>)
+        })
+        .ok()?
     }
+    #[cfg(not(windows))]
     None
 }
 

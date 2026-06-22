@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 
@@ -335,124 +335,123 @@ pub fn get_system_info() -> Result<SystemInfo> {
     #[cfg(windows)]
     {
         use std::collections::HashMap;
-        use wmi::{COMLibrary, WMIConnection};
+        use crate::hw::wmi_cache;
 
         // Start the PDH pollers on first call (no-op on subsequent calls)
         ensure_gpu_poller();
         ensure_cpu_poller();
 
-        let com = COMLibrary::new().context("COM init")?;
-        let wmi = WMIConnection::new(com.into()).context("WMI connect")?;
+        wmi_cache::with_cimv2(|wmi| {
+            // ── Static CPU identity (name, cores, threads) ────────────────────
+            let cpus: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor")
+                .unwrap_or_default();
+            let cpu = cpus.into_iter().next().unwrap_or_default();
 
-        // ── Static CPU identity (name, cores, threads) ────────────────────
-        let cpus: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor")
-            .unwrap_or_default();
-        let cpu = cpus.into_iter().next().unwrap_or_default();
+            // ── CPU usage — PDH "% Processor Utility" matches Task Manager ──────
+            // Unlike WMI Win32_PerfFormattedData_PerfOS_Processor which reports raw
+            // idle-vs-busy time, % Processor Utility accounts for P-state frequency
+            // scaling, matching the value shown in Windows 11 Task Manager.
+            let cpu_usage = read_cpu_usage();
 
-        // ── CPU usage — PDH "% Processor Utility" matches Task Manager ──────
-        // Unlike WMI Win32_PerfFormattedData_PerfOS_Processor which reports raw
-        // idle-vs-busy time, % Processor Utility accounts for P-state frequency
-        // scaling, matching the value shown in Windows 11 Task Manager.
-        let cpu_usage = read_cpu_usage();
+            // ── GPU name ──────────────────────────────────────────────────────
+            let gpu_query: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT Name FROM Win32_VideoController")
+                .unwrap_or_default();
+            let gpu_name = gpu_query
+                .into_iter()
+                .next()
+                .and_then(|r| match r.get("Name") {
+                    Some(wmi::Variant::String(s)) => Some(s.trim().to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "Unknown GPU".to_string());
 
-        // ── GPU name ──────────────────────────────────────────────────────
-        let gpu_query: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT Name FROM Win32_VideoController")
-            .unwrap_or_default();
-        let gpu_name = gpu_query
-            .into_iter()
-            .next()
-            .and_then(|r| match r.get("Name") {
-                Some(wmi::Variant::String(s)) => Some(s.trim().to_string()),
-                _ => None,
+            // ── GPU 3D engine utilization (from PDH background poller) ───────────
+            // The poller maintains a persistent PDH query and writes the latest
+            // value to GPU_USAGE_CACHE every ~1.5 s.  Reading from cache is instant
+            // and avoids the WMI first-sample = 0 issue.
+            let gpu_usage = read_gpu_usage();
+
+            // ── Dedicated VRAM used ───────────────────────────────────────────
+            let vram_q: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query(
+                    "SELECT DedicatedUsage FROM Win32_PerfFormattedData_GPUAdapterMemory_GPUAdapter",
+                )
+                .unwrap_or_default();
+            let vram_used_mb = vram_q
+                .first()
+                .and_then(|r| r.get("DedicatedUsage"))
+                .map(|v| match v {
+                    wmi::Variant::UI8(n) => *n as f64 / (1024.0 * 1024.0),
+                    wmi::Variant::UI4(n) => *n as f64 / (1024.0 * 1024.0),
+                    _ => 0.0,
+                })
+                .unwrap_or(0.0);
+
+            // ── Physical memory total ─────────────────────────────────────────
+            let mem_query: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT Capacity FROM Win32_PhysicalMemory")
+                .unwrap_or_default();
+            let ram_total_bytes: u64 = mem_query
+                .iter()
+                .filter_map(|row| match row.get("Capacity") {
+                    Some(wmi::Variant::String(s)) => s.parse::<u64>().ok(),
+                    Some(wmi::Variant::UI8(v)) => Some(*v),
+                    _ => None,
+                })
+                .sum();
+
+            // ── OS info + available (free) memory ─────────────────────────────
+            let os_info: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT Caption, FreePhysicalMemory, TotalVisibleMemorySize FROM Win32_OperatingSystem")
+                .unwrap_or_default();
+            let os_row = os_info.into_iter().next().unwrap_or_default();
+
+            let cpu_name = match cpu.get("Name") {
+                Some(wmi::Variant::String(s)) => s.trim().to_string(),
+                _ => "Unknown CPU".to_string(),
+            };
+            let cpu_cores = match cpu.get("NumberOfCores") {
+                Some(wmi::Variant::UI4(v)) => *v,
+                _ => 0,
+            };
+            let cpu_threads = match cpu.get("NumberOfLogicalProcessors") {
+                Some(wmi::Variant::UI4(v)) => *v,
+                _ => 0,
+            };
+            let ram_total_gb = ram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+
+            let free_kb = match os_row.get("FreePhysicalMemory") {
+                Some(wmi::Variant::UI8(v)) => *v,
+                Some(wmi::Variant::String(s)) => s.parse().unwrap_or(0),
+                _ => 0,
+            };
+            let total_kb = match os_row.get("TotalVisibleMemorySize") {
+                Some(wmi::Variant::UI8(v)) => *v,
+                Some(wmi::Variant::String(s)) => s.parse().unwrap_or(0),
+                _ => ram_total_bytes / 1024,
+            };
+            let used_kb = total_kb.saturating_sub(free_kb);
+            let ram_used_gb = used_kb as f64 / (1024.0 * 1024.0);
+
+            let os_version = match os_row.get("Caption") {
+                Some(wmi::Variant::String(s)) => s.trim().to_string(),
+                _ => "Windows 11".to_string(),
+            };
+
+            Ok(SystemInfo {
+                cpu_name,
+                cpu_cores,
+                cpu_threads,
+                cpu_usage,
+                gpu_name,
+                gpu_usage,
+                vram_used_mb,
+                ram_total_gb,
+                ram_used_gb,
+                os_version,
             })
-            .unwrap_or_else(|| "Unknown GPU".to_string());
-
-        // ── GPU 3D engine utilization (from PDH background poller) ───────────
-        // The poller maintains a persistent PDH query and writes the latest
-        // value to GPU_USAGE_CACHE every ~1.5 s.  Reading from cache is instant
-        // and avoids the WMI first-sample = 0 issue.
-        let gpu_usage = read_gpu_usage();
-
-        // ── Dedicated VRAM used ───────────────────────────────────────────
-        let vram_q: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query(
-                "SELECT DedicatedUsage FROM Win32_PerfFormattedData_GPUAdapterMemory_GPUAdapter",
-            )
-            .unwrap_or_default();
-        let vram_used_mb = vram_q
-            .first()
-            .and_then(|r| r.get("DedicatedUsage"))
-            .map(|v| match v {
-                wmi::Variant::UI8(n) => *n as f64 / (1024.0 * 1024.0),
-                wmi::Variant::UI4(n) => *n as f64 / (1024.0 * 1024.0),
-                _ => 0.0,
-            })
-            .unwrap_or(0.0);
-
-        // ── Physical memory total ─────────────────────────────────────────
-        let mem_query: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT Capacity FROM Win32_PhysicalMemory")
-            .unwrap_or_default();
-        let ram_total_bytes: u64 = mem_query
-            .iter()
-            .filter_map(|row| match row.get("Capacity") {
-                Some(wmi::Variant::String(s)) => s.parse::<u64>().ok(),
-                Some(wmi::Variant::UI8(v)) => Some(*v),
-                _ => None,
-            })
-            .sum();
-
-        // ── OS info + available (free) memory ─────────────────────────────
-        let os_info: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT Caption, FreePhysicalMemory, TotalVisibleMemorySize FROM Win32_OperatingSystem")
-            .unwrap_or_default();
-        let os_row = os_info.into_iter().next().unwrap_or_default();
-
-        let cpu_name = match cpu.get("Name") {
-            Some(wmi::Variant::String(s)) => s.trim().to_string(),
-            _ => "Unknown CPU".to_string(),
-        };
-        let cpu_cores = match cpu.get("NumberOfCores") {
-            Some(wmi::Variant::UI4(v)) => *v,
-            _ => 0,
-        };
-        let cpu_threads = match cpu.get("NumberOfLogicalProcessors") {
-            Some(wmi::Variant::UI4(v)) => *v,
-            _ => 0,
-        };
-        let ram_total_gb = ram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-
-        let free_kb = match os_row.get("FreePhysicalMemory") {
-            Some(wmi::Variant::UI8(v)) => *v,
-            Some(wmi::Variant::String(s)) => s.parse().unwrap_or(0),
-            _ => 0,
-        };
-        let total_kb = match os_row.get("TotalVisibleMemorySize") {
-            Some(wmi::Variant::UI8(v)) => *v,
-            Some(wmi::Variant::String(s)) => s.parse().unwrap_or(0),
-            _ => ram_total_bytes / 1024,
-        };
-        let used_kb = total_kb.saturating_sub(free_kb);
-        let ram_used_gb = used_kb as f64 / (1024.0 * 1024.0);
-
-        let os_version = match os_row.get("Caption") {
-            Some(wmi::Variant::String(s)) => s.trim().to_string(),
-            _ => "Windows 11".to_string(),
-        };
-
-        Ok(SystemInfo {
-            cpu_name,
-            cpu_cores,
-            cpu_threads,
-            cpu_usage,
-            gpu_name,
-            gpu_usage,
-            vram_used_mb,
-            ram_total_gb,
-            ram_used_gb,
-            os_version,
         })
     }
     #[cfg(not(windows))]

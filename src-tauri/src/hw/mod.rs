@@ -18,4 +18,6 @@ pub mod startup;
 pub mod system_info;
 pub mod touchpad;
 pub mod update;
+#[cfg(windows)]
+pub mod wmi_cache;
 pub mod wifi;

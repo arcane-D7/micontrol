@@ -516,18 +516,18 @@ fn get_brightness_wmi() -> Result<u8> {
     #[cfg(windows)]
     {
         use std::collections::HashMap;
-        use wmi::{COMLibrary, WMIConnection};
+        use crate::hw::wmi_cache;
 
-        let com = COMLibrary::new().context("COM")?;
-        let wmi = WMIConnection::with_namespace_path("root\\WMI", com.into()).context("WMI")?;
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi
-            .raw_query("SELECT CurrentBrightness FROM WmiMonitorBrightness")
-            .context("WmiMonitorBrightness")?;
-        let first = results.first().context("No monitor")?;
-        match first.get("CurrentBrightness") {
-            Some(wmi::Variant::UI1(v)) => Ok(*v),
-            _ => Ok(80),
-        }
+        wmi_cache::with_wmi(|wmi| {
+            let results: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT CurrentBrightness FROM WmiMonitorBrightness")
+                .context("WmiMonitorBrightness")?;
+            let first = results.first().context("No monitor")?;
+            match first.get("CurrentBrightness") {
+                Some(wmi::Variant::UI1(v)) => Ok(*v),
+                _ => Ok(80),
+            }
+        })
     }
     #[cfg(not(windows))]
     {
@@ -924,18 +924,23 @@ fn get_refresh_rate() -> Result<u32> {
     #[cfg(windows)]
     {
         use std::collections::HashMap;
-        use wmi::{COMLibrary, WMIConnection};
-        if let Ok(com) = COMLibrary::new() {
-            if let Ok(wmi) = WMIConnection::new(com.into()) {
-                let results: Vec<HashMap<String, wmi::Variant>> = wmi
-                    .raw_query("SELECT CurrentRefreshRate FROM Win32_VideoController")
-                    .unwrap_or_default();
-                if let Some(row) = results.first() {
-                    match row.get("CurrentRefreshRate") {
-                        Some(wmi::Variant::UI4(v)) => return Ok(*v),
-                        _ => {}
-                    }
+        use crate::hw::wmi_cache;
+
+        if let Ok(result) = wmi_cache::with_cimv2(|wmi| {
+            let results: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT CurrentRefreshRate FROM Win32_VideoController")
+                .unwrap_or_default();
+            if let Some(row) = results.first() {
+                match row.get("CurrentRefreshRate") {
+                    Some(wmi::Variant::UI4(v)) => Ok(Some(*v)),
+                    _ => Ok(None),
                 }
+            } else {
+                Ok(None)
+            }
+        }) {
+            if let Some(hz) = result {
+                return Ok(hz);
             }
         }
     }

@@ -35,163 +35,161 @@ pub struct BatteryInfo {
 #[cfg(windows)]
 pub fn get_battery_info() -> Result<BatteryInfo> {
     use std::collections::HashMap;
-    use wmi::{COMLibrary, WMIConnection};
+    use crate::hw::wmi_cache;
 
     let started = Instant::now();
     log::trace!(target: "hw::battery", "get_battery_info: start");
 
-    let com = COMLibrary::new().context("COM init")?;
-    let wmi = WMIConnection::with_namespace_path("ROOT\\WMI", com.into())
-        .context("WMI connect root\\wmi")?;
+    wmi_cache::with_wmi(|wmi| {
+        // BatteryStatus
+        let statuses: Vec<HashMap<String, wmi::Variant>> = wmi
+            .raw_query("SELECT * FROM BatteryStatus")
+            .context("BatteryStatus query")?;
 
-    // BatteryStatus
-    let statuses: Vec<HashMap<String, wmi::Variant>> = wmi
-        .raw_query("SELECT * FROM BatteryStatus")
-        .context("BatteryStatus query")?;
+        // BatteryStaticData
+        let static_data: Vec<HashMap<String, wmi::Variant>> = wmi
+            .raw_query("SELECT * FROM BatteryStaticData")
+            .context("BatteryStaticData query")?;
 
-    // BatteryStaticData
-    let static_data: Vec<HashMap<String, wmi::Variant>> = wmi
-        .raw_query("SELECT * FROM BatteryStaticData")
-        .context("BatteryStaticData query")?;
+        // BatteryFullChargedCapacity
+        let full_cap_data: Vec<HashMap<String, wmi::Variant>> = wmi
+            .raw_query("SELECT * FROM BatteryFullChargedCapacity")
+            .context("BatteryFullChargedCapacity query")?;
 
-    // BatteryFullChargedCapacity
-    let full_cap_data: Vec<HashMap<String, wmi::Variant>> = wmi
-        .raw_query("SELECT * FROM BatteryFullChargedCapacity")
-        .context("BatteryFullChargedCapacity query")?;
+        let status = statuses.into_iter().next().unwrap_or_default();
+        let statics = static_data.into_iter().next().unwrap_or_default();
+        let full_cap = full_cap_data.into_iter().next().unwrap_or_default();
 
-    let status = statuses.into_iter().next().unwrap_or_default();
-    let statics = static_data.into_iter().next().unwrap_or_default();
-    let full_cap = full_cap_data.into_iter().next().unwrap_or_default();
-
-    let remaining_capacity = match status.get("RemainingCapacity") {
-        Some(wmi::Variant::UI4(v)) => *v,
-        _ => 0,
-    };
-    let charging_rate = match status.get("ChargeRate") {
-        Some(wmi::Variant::I4(v)) => *v,
-        _ => 0,
-    };
-    let voltage = match status.get("Voltage") {
-        Some(wmi::Variant::UI4(v)) => *v as f64 / 1000.0,
-        _ => 0.0,
-    };
-
-    let is_charging = charging_rate > 0;
-    let is_plugged = match status.get("PowerOnline") {
-        Some(wmi::Variant::Bool(v)) => *v,
-        _ => false,
-    };
-    log::trace!(
-        target: "hw::battery",
-        "wmi snapshot: plugged={} charging={} remaining_capacity={} charge_rate_mw={} voltage_v={:.3}",
-        is_plugged,
-        is_charging,
-        remaining_capacity,
-        charging_rate,
-        voltage
-    );
-
-    // Note: WMI DesignedCapacity / FullChargedCapacity / RemainingCapacity are in mWh, not mAh.
-    let designed_mah = match statics.get("DesignedCapacity") {
-        Some(wmi::Variant::UI4(v)) => *v,
-        _ => 68224,
-    };
-    let manufacturer = match statics.get("ManufactureName") {
-        Some(wmi::Variant::String(s)) => s.trim().to_string(),
-        _ => "COSMX".to_string(),
-    };
-    let device_name = match statics.get("DeviceName") {
-        Some(wmi::Variant::String(s)) => s.trim().to_string(),
-        _ => "BX70".to_string(),
-    };
-    let cycle_count = match statics.get("CycleCount") {
-        Some(wmi::Variant::UI4(v)) => *v,
-        _ => 0,
-    };
-    let temp_raw = match statics.get("Temperature") {
-        Some(wmi::Variant::UI4(v)) => Some(*v),
-        _ => None,
-    };
-    let temperature_celsius = temp_raw.map(|t| (t as f64 / 10.0) - 273.15);
-
-    let full_cap_mah = match full_cap.get("FullChargedCapacity") {
-        Some(wmi::Variant::UI4(v)) => *v,
-        _ => designed_mah,
-    };
-
-    let level = if full_cap_mah > 0 {
-        ((remaining_capacity as f64 / full_cap_mah as f64) * 100.0)
-            .round()
-            .clamp(0.0, 100.0) as u8
-    } else {
-        0
-    };
-
-    let health_percent = if designed_mah > 0 {
-        ((full_cap_mah as f64 / designed_mah as f64) * 100.0).clamp(0.0, 100.0)
-    } else {
-        100.0
-    };
-
-    let time_remaining_minutes = if !is_charging && voltage > 0.0 {
-        // Estimate: remaining capacity (mWh) / discharge_rate (mW) * 60
-        let discharge_rate_mw = charging_rate.unsigned_abs();
-        if discharge_rate_mw > 0 {
-            Some((remaining_capacity as f64 / discharge_rate_mw as f64 * 60.0) as i32)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let time_to_full_minutes = if is_charging && charging_rate > 0 {
-        let remaining_to_full = full_cap_mah.saturating_sub(remaining_capacity);
-        if remaining_to_full > 0 {
-            Some((remaining_to_full as f64 / charging_rate as f64 * 60.0) as i32)
-        } else {
-            Some(0) // already at full capacity
-        }
-    } else {
-        None
-    };
-
-    // Try to read AC adapter input power from ECRAM (IoTDriver.sys)
-    let ac_input_power_mw = if is_plugged {
-        log::trace!(target: "hw::battery", "charger is plugged; attempting ECRAM AC power read");
-        probe_ac_input_power_throttled()
-    } else {
-        log::trace!(target: "hw::battery", "charger is unplugged; skipping ECRAM AC power read");
-        clear_ac_power_probe_cache();
-        None
-    };
-
-    log::trace!(
-        target: "hw::battery",
-        "battery info ready: ac_input_power_mw={:?} elapsed_ms={}",
-        ac_input_power_mw,
-        started.elapsed().as_millis()
-    );
-
-    Ok(BatteryInfo {
-        level,
-        is_charging,
-        is_plugged,
-        health_percent,
-        cycle_count,
-        designed_capacity_mwh: designed_mah,
-        full_capacity_mwh: full_cap_mah,
-        manufacturer,
-        device_name,
-        temperature_celsius,
-        time_remaining_minutes,
-        time_to_full_minutes,
-        charge_rate_mw: charging_rate,
-        voltage_mv: match status.get("Voltage") {
+        let remaining_capacity = match status.get("RemainingCapacity") {
             Some(wmi::Variant::UI4(v)) => *v,
             _ => 0,
-        },
-        ac_input_power_mw,
+        };
+        let charging_rate = match status.get("ChargeRate") {
+            Some(wmi::Variant::I4(v)) => *v,
+            _ => 0,
+        };
+        let voltage = match status.get("Voltage") {
+            Some(wmi::Variant::UI4(v)) => *v as f64 / 1000.0,
+            _ => 0.0,
+        };
+
+        let is_charging = charging_rate > 0;
+        let is_plugged = match status.get("PowerOnline") {
+            Some(wmi::Variant::Bool(v)) => *v,
+            _ => false,
+        };
+        log::trace!(
+            target: "hw::battery",
+            "wmi snapshot: plugged={} charging={} remaining_capacity={} charge_rate_mw={} voltage_v={:.3}",
+            is_plugged,
+            is_charging,
+            remaining_capacity,
+            charging_rate,
+            voltage
+        );
+
+        // Note: WMI DesignedCapacity / FullChargedCapacity / RemainingCapacity are in mWh, not mAh.
+        let designed_mah = match statics.get("DesignedCapacity") {
+            Some(wmi::Variant::UI4(v)) => *v,
+            _ => 68224,
+        };
+        let manufacturer = match statics.get("ManufactureName") {
+            Some(wmi::Variant::String(s)) => s.trim().to_string(),
+            _ => "COSMX".to_string(),
+        };
+        let device_name = match statics.get("DeviceName") {
+            Some(wmi::Variant::String(s)) => s.trim().to_string(),
+            _ => "BX70".to_string(),
+        };
+        let cycle_count = match statics.get("CycleCount") {
+            Some(wmi::Variant::UI4(v)) => *v,
+            _ => 0,
+        };
+        let temp_raw = match statics.get("Temperature") {
+            Some(wmi::Variant::UI4(v)) => Some(*v),
+            _ => None,
+        };
+        let temperature_celsius = temp_raw.map(|t| (t as f64 / 10.0) - 273.15);
+
+        let full_cap_mah = match full_cap.get("FullChargedCapacity") {
+            Some(wmi::Variant::UI4(v)) => *v,
+            _ => designed_mah,
+        };
+
+        let level = if full_cap_mah > 0 {
+            ((remaining_capacity as f64 / full_cap_mah as f64) * 100.0)
+                .round()
+                .clamp(0.0, 100.0) as u8
+        } else {
+            0
+        };
+
+        let health_percent = if designed_mah > 0 {
+            ((full_cap_mah as f64 / designed_mah as f64) * 100.0).clamp(0.0, 100.0)
+        } else {
+            100.0
+        };
+
+        let time_remaining_minutes = if !is_charging && voltage > 0.0 {
+            // Estimate: remaining capacity (mWh) / discharge_rate (mW) * 60
+            let discharge_rate_mw = charging_rate.unsigned_abs();
+            if discharge_rate_mw > 0 {
+                Some((remaining_capacity as f64 / discharge_rate_mw as f64 * 60.0) as i32)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let time_to_full_minutes = if is_charging && charging_rate > 0 {
+            let remaining_to_full = full_cap_mah.saturating_sub(remaining_capacity);
+            if remaining_to_full > 0 {
+                Some((remaining_to_full as f64 / charging_rate as f64 * 60.0) as i32)
+            } else {
+                Some(0) // already at full capacity
+            }
+        } else {
+            None
+        };
+
+        // Try to read AC adapter input power from ECRAM (IoTDriver.sys)
+        let ac_input_power_mw = if is_plugged {
+            log::trace!(target: "hw::battery", "charger is plugged; attempting ECRAM AC power read");
+            probe_ac_input_power_throttled()
+        } else {
+            log::trace!(target: "hw::battery", "charger is unplugged; skipping ECRAM AC power read");
+            clear_ac_power_probe_cache();
+            None
+        };
+
+        log::trace!(
+            target: "hw::battery",
+            "battery info ready: ac_input_power_mw={:?} elapsed_ms={}",
+            ac_input_power_mw,
+            started.elapsed().as_millis()
+        );
+
+        Ok(BatteryInfo {
+            level,
+            is_charging,
+            is_plugged,
+            health_percent,
+            cycle_count,
+            designed_capacity_mwh: designed_mah,
+            full_capacity_mwh: full_cap_mah,
+            manufacturer,
+            device_name,
+            temperature_celsius,
+            time_remaining_minutes,
+            time_to_full_minutes,
+            charge_rate_mw: charging_rate,
+            voltage_mv: match status.get("Voltage") {
+                Some(wmi::Variant::UI4(v)) => *v,
+                _ => 0,
+            },
+            ac_input_power_mw,
+        })
     })
 }
 
