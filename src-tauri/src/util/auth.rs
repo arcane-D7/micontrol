@@ -6,6 +6,7 @@
 //! field itself).  The elevated helper rejects any command whose HMAC does not
 //! verify, preventing an attacker from injecting commands via file swapping.
 
+use fs2::FileExt;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
@@ -28,16 +29,71 @@ fn key_path() -> PathBuf {
 /// Both the main process and the elevated helper call this to obtain the key.
 pub fn get_or_create_key() -> Result<Vec<u8>, String> {
     let path = key_path();
-    if let Ok(bytes) = std::fs::read(&path) {
-        if bytes.len() == 32 {
-            return Ok(bytes);
+
+    // Ensure the parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create elev_key directory: {e}"))?;
+    }
+
+    // Open or create the key file, then acquire an exclusive lock.
+    // This prevents the main process and elevated helper from generating
+    // different keys simultaneously on first startup.
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("Cannot open HMAC key file: {e}"))?;
+
+    // Acquire exclusive lock with retry (up to 5 seconds)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() > deadline {
+                    return Err("Timeout acquiring HMAC key file lock (5s)".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                return Err(format!("Cannot lock HMAC key file: {e}"));
+            }
         }
     }
+
+    // Read existing key if present and valid
+    use std::io::Read;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .map_err(|e| format!("Cannot read HMAC key file: {e}"))?;
+
+    if buf.len() == 32 {
+        // Key already exists and is valid — return it
+        let _ = file.unlock();
+        return Ok(buf);
+    }
+
     // Generate a new 32-byte key
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
-    std::fs::write(&path, key).map_err(|e| format!("Cannot write HMAC key file: {e}"))?;
+
+    // Write the new key (truncate + write)
+    use std::io::Write;
+    let mut file = file;
+    file.set_len(0)
+        .map_err(|e| format!("Cannot truncate HMAC key file: {e}"))?;
+    file.write_all(&key)
+        .map_err(|e| format!("Cannot write HMAC key file: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("Cannot sync HMAC key file: {e}"))?;
+
+    let _ = file.unlock();
+
+    // Restrict ACL on the key file
     restrict_file_acl(&path);
+
     Ok(key.to_vec())
 }
 

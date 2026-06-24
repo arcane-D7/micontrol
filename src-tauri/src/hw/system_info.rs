@@ -32,6 +32,14 @@ fn ensure_cpu_poller() {
 
 fn cpu_pdh_poller_thread() {
     #[cfg(windows)]
+    // SAFETY: Dynamic loading of pdh.dll via libloading and calling its FFI
+    // functions (PdhOpenQueryW, PdhAddEnglishCounterW, PdhCollectQueryData,
+    // PdhGetFormattedCounterValue, PdhCloseQuery). The function pointers are
+    // obtained from the Library::get calls and are valid for the library's
+    // lifetime (leaked via Box::leak). Path strings are null-terminated wide
+    // strings backed by Vecs. The query and counter handles are PDH-managed
+    // opaque types. The val_buf is sized to match the PDH_FMT_COUNTERVALUE
+    // layout (16 bytes on x64) and all reads go through safe from_ne_bytes.
     unsafe {
         use libloading::{Library, Symbol};
         type FnOpenQuery =
@@ -151,6 +159,15 @@ fn ensure_gpu_poller() {
 
 fn gpu_pdh_poller_thread() {
     #[cfg(windows)]
+    // SAFETY: Dynamic loading of pdh.dll via libloading and calling its FFI
+    // functions (PdhOpenQueryW, PdhAddEnglishCounterW, PdhCollectQueryData,
+    // PdhGetFormattedCounterArrayW, PdhCloseQuery). Function pointers are
+    // obtained from Library::get and are valid for the library's lifetime
+    // (leaked via Box::leak). Path strings are null-terminated wide strings
+    // backed by Vecs. The query and counter handles are PDH-managed opaque
+    // types. Buffer reads use from_ne_bytes with fallback defaults. The
+    // instance name pointer (name_ptr) is validated to be within the buffer
+    // bounds before dereferencing, preventing out-of-bounds reads.
     unsafe {
         use libloading::{Library, Symbol};
 

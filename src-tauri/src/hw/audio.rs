@@ -39,11 +39,13 @@ pub fn list_audio_devices() -> Result<AudioDeviceList> {
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
     };
 
+    // SAFETY: CoInitializeEx initializes the COM library for this thread; safe because we call CoUninitialize before returning.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
     let result = (|| -> Result<AudioDeviceList> {
+        // SAFETY: CoCreateInstance creates a COM object from a known CLSID; the returned interface pointer is valid and we consume it within this scope.
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -53,6 +55,7 @@ pub fn list_audio_devices() -> Result<AudioDeviceList> {
         }
     })();
 
+    // SAFETY: CoUninitialize shuts down COM on this thread; safe because we initialized it with CoInitializeEx above.
     unsafe {
         CoUninitialize();
     }
@@ -77,11 +80,13 @@ pub fn get_playback_volume() -> Result<AudioVolumeResult> {
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
     };
 
+    // SAFETY: CoInitializeEx initializes COM for this thread; safe because we call CoUninitialize before returning.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
     let result = (|| -> Result<AudioVolumeResult> {
+        // SAFETY: CoCreateInstance creates a known COM object; the returned interface pointers are valid for the scope of this closure.
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -97,6 +102,7 @@ pub fn get_playback_volume() -> Result<AudioVolumeResult> {
         }
     })();
 
+    // SAFETY: CoUninitialize shuts down COM on this thread; safe because it was initialized above.
     unsafe {
         CoUninitialize();
     }
@@ -125,11 +131,13 @@ pub fn set_playback_volume(volume: u8) -> Result<AudioVolumeResult> {
     let volume = volume.min(100);
     let scalar = volume as f32 / 100.0;
 
+    // SAFETY: CoInitializeEx initializes COM for this thread; safe because we call CoUninitialize before returning.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
     let result = (|| -> Result<AudioVolumeResult> {
+        // SAFETY: CoCreateInstance creates a known COM object; the returned interface pointers are valid for the scope of this closure. SetMasterVolumeLevelScalar takes a raw pointer for notifications; passing null is safe per the Windows API contract.
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -145,6 +153,7 @@ pub fn set_playback_volume(volume: u8) -> Result<AudioVolumeResult> {
         }
     })();
 
+    // SAFETY: CoUninitialize shuts down COM on this thread; safe because it was initialized above.
     unsafe {
         CoUninitialize();
     }
@@ -170,11 +179,13 @@ pub fn set_playback_mute(muted: bool) -> Result<AudioVolumeResult> {
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
     };
 
+    // SAFETY: CoInitializeEx initializes COM for this thread; safe because we call CoUninitialize before returning.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
     let result = (|| -> Result<AudioVolumeResult> {
+        // SAFETY: CoCreateInstance creates a known COM object; the returned interface pointers are valid. SetMute takes a raw pointer for notifications; passing null is safe per Windows API contract.
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -190,6 +201,7 @@ pub fn set_playback_mute(muted: bool) -> Result<AudioVolumeResult> {
         }
     })();
 
+    // SAFETY: CoUninitialize shuts down COM on this thread; safe because it was initialized above.
     unsafe {
         CoUninitialize();
     }
@@ -215,6 +227,7 @@ fn enumerate_devices(
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::Media::Audio::{eConsole, DEVICE_STATE_ACTIVE};
 
+    // SAFETY: All COM calls are made through the windows crate's safe wrappers. The IMMDeviceEnumerator and its children are valid COM pointers obtained from CoCreateInstance / EnumAudioEndpoints.
     unsafe {
         let collection = enumerator.EnumAudioEndpoints(data_flow, DEVICE_STATE_ACTIVE)?;
         let count = collection.GetCount()?;
@@ -252,6 +265,7 @@ fn enumerate_devices(
 
 #[cfg(windows)]
 fn get_device_friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Result<String> {
+    // SAFETY: device.GetId() is a COM method call through the windows crate; the IMMDevice pointer is valid as it was obtained from EnumAudioEndpoints.
     let id = unsafe { device.GetId()?.to_string()? };
     Ok(id)
 }
@@ -261,6 +275,7 @@ fn get_device_volume(device: &windows::Win32::Media::Audio::IMMDevice) -> Result
     use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
     use windows::Win32::System::Com::CLSCTX_ALL;
 
+    // SAFETY: device.Activate returns a valid IAudioEndpointVolume COM pointer; calls to GetMasterVolumeLevelScalar and GetMute through the windows crate are safe given a valid interface pointer.
     unsafe {
         let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
         let volume = endpoint.GetMasterVolumeLevelScalar()?;

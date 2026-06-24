@@ -196,11 +196,13 @@ fn persist_fan_registry(mode: &FanMode, speed_percent: u8) -> Result<()> {
             REG_OPTION_NON_VOLATILE,
         };
         unsafe {
+            // SAFETY: Null-terminated wide strings; MaybeUninit<HKEY> written by
+            // RegCreateKeyExW before assume_init. Stack-local DWORD values have valid alignment.
             let key_w: Vec<u16> = OsStr::new(FAN_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             RegCreateKeyExW(
                 HKEY_LOCAL_MACHINE,
                 PCWSTR(key_w.as_ptr()),
@@ -209,11 +211,12 @@ fn persist_fan_registry(mode: &FanMode, speed_percent: u8) -> Result<()> {
                 REG_OPTION_NON_VOLATILE,
                 KEY_WRITE,
                 None,
-                &mut hkey,
+                hkey.as_mut_ptr(),
                 None,
             )
             .ok()
             .context("Create fan reg key")?;
+            let hkey = hkey.assume_init();
 
             let mode_val: u32 = match mode {
                 FanMode::Auto => 0,
@@ -263,22 +266,25 @@ fn get_fan_mode_registry() -> Result<(FanMode, u8)> {
             RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, REG_VALUE_TYPE,
         };
         unsafe {
+            // SAFETY: Null-terminated wide strings; hkey is assume_init only after
+            // RegOpenKeyExW succeeds. The u32 pointer cast is valid for DWORD-sized stack buffer.
             let key_w: Vec<u16> = OsStr::new(FAN_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             if RegOpenKeyExW(
                 HKEY_LOCAL_MACHINE,
                 PCWSTR(key_w.as_ptr()),
                 0,
                 windows::Win32::System::Registry::KEY_READ,
-                &mut hkey,
+                hkey.as_mut_ptr(),
             )
             .is_err()
             {
                 return Ok((FanMode::Auto, 50));
             }
+            let hkey = hkey.assume_init();
 
             let mut mode_val: u32 = 0;
             let mut size = 4u32;
@@ -373,6 +379,9 @@ where
     use igcl_fan::*;
 
     crate::hw::display::with_igcl_device_pub(|device, lib| unsafe {
+        // SAFETY: device is a valid IGCL device handle from ctlEnumerateDevices. The
+        // ctlEnumFans function returns fan handles owned by IGCL; we iterate them immediately
+        // and do not retain handles after the closure ends.
         let ctl_enum_fans: libloading::Symbol<FnCtlEnumFans> =
             lib.get(b"ctlEnumFans\0").context("ctlEnumFans")?;
 
@@ -409,6 +418,9 @@ fn set_fan_auto_igcl() -> Result<()> {
     {
         use igcl_fan::*;
         let n = with_igcl_fans(|fan, lib| unsafe {
+            // SAFETY: fan is a valid IGCL fan handle from ctlEnumFans. The ctlFanSetDefaultMode
+            // function pointer is loaded from the IGCL DLL which is still borrowed by the outer
+            // with_igcl_device_pub closure.
             let set_default: libloading::Symbol<FnCtlFanSetDefaultMode> = lib
                 .get(b"ctlFanSetDefaultMode\0")
                 .context("ctlFanSetDefaultMode")?;
@@ -432,6 +444,9 @@ fn set_fan_fixed_igcl(speed_percent: u8) -> Result<()> {
         use igcl_fan::*;
         let clamped = speed_percent.clamp(20, 100) as i32;
         let n = with_igcl_fans(|fan, lib| unsafe {
+            // SAFETY: fan is a valid IGCL fan handle. CtlFanSpeed is a POD struct with correct
+            // layout (size, version, pad, units, value). The function pointer is loaded from
+            // the IGCL DLL which is still borrowed by the outer with_igcl_device_pub closure.
             let set_fixed: libloading::Symbol<FnCtlFanSetFixedSpeedMode> = lib
                 .get(b"ctlFanSetFixedSpeedMode\0")
                 .context("ctlFanSetFixedSpeedMode")?;

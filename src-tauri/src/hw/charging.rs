@@ -97,6 +97,8 @@ fn send_via_pipe(threshold: u8) -> Result<()> {
         };
 
         let bytes: &[u8] = unsafe {
+            // SAFETY: IotIpcMsg is #[repr(C, packed)] with known size; casting its address to a
+            // byte slice yields a valid, sized buffer for write_all to the pipe.
             std::slice::from_raw_parts(
                 &msg as *const IotIpcMsg as *const u8,
                 std::mem::size_of::<IotIpcMsg>(),
@@ -129,22 +131,26 @@ fn persist_threshold_registry(threshold: u8) -> Result<()> {
         };
 
         unsafe {
+            // SAFETY: The wide strings are null-terminated; hkey is initialized only after
+            // RegOpenKeyExW returns OK. The pointers reference valid stack-local data with
+            // correct alignment for REG_DWORD.
             let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             // If key doesn't exist, create it
             let res = RegOpenKeyExW(
                 HKEY_LOCAL_MACHINE,
                 PCWSTR(key_w.as_ptr()),
                 0,
                 KEY_WRITE,
-                &mut hkey,
+                hkey.as_mut_ptr(),
             );
             if res.is_err() {
                 return Ok(()); // Registry key doesn't exist — IoT driver may be absent
             }
+            let hkey = hkey.assume_init();
             let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE)
                 .encode_wide()
                 .chain(Some(0))
@@ -175,21 +181,25 @@ fn read_threshold_registry() -> Option<Result<u8>> {
     };
 
     unsafe {
+        // SAFETY: Same pattern as persist_threshold_registry — wide strings are null-terminated,
+        // hkey is only assume_init'd after RegOpenKeyExW succeeds, and the cast pointer to the
+        // 4-byte stack buffer is valid and aligned for RegQueryValueExW.
         let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY)
             .encode_wide()
             .chain(Some(0))
             .collect();
-        let mut hkey = std::mem::zeroed();
+        let mut hkey = std::mem::MaybeUninit::uninit();
         let res = RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
             PCWSTR(key_w.as_ptr()),
             0,
             windows::Win32::System::Registry::KEY_READ,
-            &mut hkey,
+            hkey.as_mut_ptr(),
         );
         if res.is_err() {
             return None;
         }
+        let hkey = hkey.assume_init();
         let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE)
             .encode_wide()
             .chain(Some(0))

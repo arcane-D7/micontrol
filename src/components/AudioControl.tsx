@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
+import { t } from '../hooks/useI18n';
 import type { AudioVolumeResult } from '../hooks/useHardware';
 
 interface AudioDevice {
@@ -45,6 +46,7 @@ export default function AudioControl({
         setDevices(list);
       } catch (e) {
         console.error('Failed to load audio devices:', e);
+        addToast(t('audio.loadDevicesError'), 'error');
       }
     })();
   }, []);

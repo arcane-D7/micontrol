@@ -165,6 +165,7 @@ impl IpcWireHeader {
     }
 
     fn as_bytes(&self) -> &[u8] {
+        // SAFETY: IpcWireHeader is a #[repr(C)] struct with no padding; casting to &[u8] of size_of<IpcWireHeader> is safe because the data is valid for reads and the size matches the actual struct layout.
         unsafe {
             std::slice::from_raw_parts(
                 self as *const IpcWireHeader as *const u8,
@@ -429,6 +430,7 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
             }
         }
 
+        // SAFETY: resp_header_buf is exactly IPC_HEADER_SIZE (12) bytes and was filled by read_exact_timeout. IpcWireHeader is #[repr(C)] with four fields matching the known wire format (two u16 + two u32 = 12 bytes, no padding), so the pointer cast is valid and aligned.
         let resp_header: &IpcWireHeader =
             unsafe { &*(resp_header_buf.as_ptr() as *const IpcWireHeader) };
 
@@ -507,6 +509,7 @@ fn read_exact_timeout(
         // are available without blocking. If data is available, read it;
         // otherwise sleep briefly and retry (with deadline check).
         let mut bytes_available: u32 = 0;
+        // SAFETY: PeekNamedPipe with a valid HANDLE (from a named pipe File opened via OpenOptions) is safe; passing null for the buffer is explicitly allowed per MSDN (query only, no data copied).
         let peek_ok = unsafe {
             PeekNamedPipe(handle, None, 0, None, Some(&mut bytes_available), None).is_ok()
         };
@@ -882,6 +885,7 @@ mod tests {
         let h = IpcWireHeader::new(0xAA, 0xBB, 0xDEADBEEF, 42);
         let bytes = h.as_bytes();
 
+        // SAFETY: bytes is from as_bytes() on a valid IpcWireHeader; the pointer cast back to the same #[repr(C)] type is safe because alignment and layout match exactly.
         let parsed: &IpcWireHeader = unsafe { &*(bytes.as_ptr() as *const IpcWireHeader) };
         assert_eq!(parsed.src_id, 0xAA);
         assert_eq!(parsed.dst_id, 0xBB);

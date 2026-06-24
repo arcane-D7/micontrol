@@ -212,6 +212,7 @@ fn find_iot_device_path() -> Result<String> {
         SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
     };
 
+    // SAFETY: SetupDiGetClassDevsW returns a valid HDEVINFO or fails with an error we check. SP_DEVICE_INTERFACE_DATA is zero-initialized via zeroed() and then cbSize is set — the standard pattern for SetupAPI structs. All pointer casts to SP_DEVICE_INTERFACE_DETAIL_DATA_W follow the documented two-call pattern (query size, allocate, fill).
     unsafe {
         let dev_info = SetupDiGetClassDevsW(
             Some(&IOT_GUID),
@@ -258,7 +259,7 @@ fn find_iot_device_path() -> Result<String> {
         let _ = SetupDiDestroyDeviceInfoList(dev_info);
         detail_result.context("SetupDiGetDeviceInterfaceDetailW")?;
 
-        // Parse the UTF-16 device path (starts at offset 4, after the cbSize u32)
+        // SAFETY: SetupAPI stores the device path as a null-terminated UTF-16 string at byte offset 4 in the SP_DEVICE_INTERFACE_DETAIL_DATA_W buffer. The buffer was allocated with `required` bytes from the SetupDiGetDeviceInterfaceDetailW size query, so the pointer arithmetic is valid. The slice length is bounded by the buffer size.
         let path_offset = 4usize;
         let wide_slice = std::slice::from_raw_parts(
             buf.as_ptr().add(path_offset) as *const u16,
@@ -296,6 +297,7 @@ fn read_ecram_inner(device_path: &str, phys_addr: u64, byte_count: usize) -> Res
         .chain(Some(0))
         .collect();
 
+    // SAFETY: All FFI calls (CreateFileW, DeviceIoControl, CloseHandle) use properly constructed parameters: path_w is a valid null-terminated wide string, access/mode flags are correct for driver device access. EcramBuf is #[repr(C)] with a compile-time size assertion for IOCTL_BUF_SIZE. handle is checked for INVALID_HANDLE_VALUE and closed after use.
     unsafe {
         let handle = CreateFileW(
             PCWSTR(path_w.as_ptr()),
@@ -327,6 +329,7 @@ fn read_ecram_inner(device_path: &str, phys_addr: u64, byte_count: usize) -> Res
         };
 
         let mut bytes_returned = 0u32;
+        // SAFETY: DeviceIoControl with IOCTL_ECRAM_READ sends a properly sized input buffer and receives output into a properly sized buffer. Both buffers are stack-allocated EcramBufs whose size matches IOCTL_BUF_SIZE per the compile-time assertion. &raw const/&raw mut ensure no aliasing violations.
         let result = DeviceIoControl(
             handle,
             IOCTL_ECRAM_READ,
@@ -403,6 +406,7 @@ fn write_ecram_inner(device_path: &str, phys_addr: u64, data: &[u8]) -> Result<(
         .chain(Some(0))
         .collect();
 
+    // SAFETY: Same as read_ecram_inner — path_w is a valid null-terminated wide string; CreateFileW opens the device handle; DeviceIoControl sends a properly sized EcramBuf with the write IOCTL. In-buffer data is copied from the caller's bounded &[u8] (validated ≤ 0x100 bytes). The handle is closed after use.
     unsafe {
         let handle = CreateFileW(
             PCWSTR(path_w.as_ptr()),
@@ -577,6 +581,7 @@ pub fn read_named_region(region: &str) -> Result<Vec<u8>> {
 #[cfg(windows)]
 pub fn is_process_elevated() -> bool {
     use windows::Win32::UI::Shell::IsUserAnAdmin;
+    // SAFETY: IsUserAnAdmin() is a simple Win32 check with no safety invariants — it always succeeds and returns a BOOL.
     unsafe { IsUserAnAdmin().as_bool() }
 }
 

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import MainWindow from './pages/MainWindow';
 import TrayPopup from './pages/TrayPopup';
 import BrightnessOsd from './components/BrightnessOsd';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { useHardware } from './hooks/useHardware';
 import { useLanguage } from './hooks/useI18n';
 import { ToastProvider } from './contexts/ToastContext';
@@ -67,21 +68,25 @@ export default function App() {
 
   if (isTrayPopup) {
     return (
-      <ToastProvider>
-        <TrayPopup hardware={hardware} />
-      </ToastProvider>
+      <ErrorBoundary>
+        <ToastProvider>
+          <TrayPopup hardware={hardware} />
+        </ToastProvider>
+      </ErrorBoundary>
     );
   }
 
   return (
-    <ToastProvider>
-      <MainWindow
-        hardware={hardware}
-        activeTab={activeTab}
-        onTabChange={handleTabChange}
-        themeMode={themeMode}
-        toggleTheme={toggleTheme}
-      />
-    </ToastProvider>
+    <ErrorBoundary>
+      <ToastProvider>
+        <MainWindow
+          hardware={hardware}
+          activeTab={activeTab}
+          onTabChange={handleTabChange}
+          themeMode={themeMode}
+          toggleTheme={toggleTheme}
+        />
+      </ToastProvider>
+    </ErrorBoundary>
   );
 }

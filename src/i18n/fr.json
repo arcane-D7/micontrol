@@ -66,7 +66,8 @@
     "save": "Enregistrer",
     "saving": "Enregistrement…",
     "saved": "Configuration enregistrée",
-    "saveError": "Échec de l'enregistrement"
+    "saveError": "Échec de l'enregistrement",
+    "loadError": "Échec du chargement de la configuration du clavier"
   },
   "overview": {
     "title": "Vue d'ensemble du système",
@@ -514,7 +515,7 @@
     "testing": "Test en cours…",
     "testOk": "Connexion réussie",
     "reset": "Restaurer les défauts",
-    "storageNote": "La clé API est stockée localement dans le localStorage de ce navigateur et ne quitte jamais votre appareil.",
+    "storageNote": "La clé API est stockée en toute sécurité dans le Gestionnaire d'informations d'identification Windows. Elle est envoyée au fournisseur d'IA lors des demandes d'analyse.",
     "apiKeyMissing": "Clé API non configurée. Allez dans Paramètres pour ajouter votre clé."
   },
   "ai": {
@@ -579,5 +580,9 @@
       "mode": "Mode",
       "loadMore": "Charger plus"
     }
+  },
+  "audio": {
+    "loadDevicesError": "Échec du chargement des périphériques audio",
+    "initError": "Échec de l'initialisation du contrôle audio"
   }
 }

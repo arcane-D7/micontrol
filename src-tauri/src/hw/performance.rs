@@ -119,22 +119,28 @@ fn read_mi_registry_mode() -> Option<PerformanceMode> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{RegQueryValueExW, KEY_READ, REG_VALUE_TYPE};
     unsafe {
+        // SAFETY: Wide strings are null-terminated; MaybeUninit<HKEY> is zero-sized before
+        // RegOpenKeyExW writes to it. The hkey is assume_init only after the call succeeds.
+        // The cast `(&mut data as *mut u32).cast()` is valid because u32 has no alignment
+        // requirements stricter than the byte buffer RegQueryValueExW expects and data lives
+        // on the stack.
         let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY)
             .encode_wide()
             .chain(Some(0))
             .collect();
-        let mut hkey = std::mem::zeroed();
+        let mut hkey = std::mem::MaybeUninit::uninit();
         if RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
             PCWSTR(key_w.as_ptr()),
             0,
             KEY_READ,
-            &mut hkey,
+            hkey.as_mut_ptr(),
         )
         .is_err()
         {
             return None;
         }
+        let hkey = hkey.assume_init();
         let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE)
             .encode_wide()
             .chain(Some(0))
@@ -199,6 +205,8 @@ fn read_windows_power_overlay() -> Option<PerformanceMode> {
 
     // Determine current power source: AC (plugged in) = 1, DC (battery) = 0
     let on_ac = unsafe {
+        // SAFETY: SYSTEM_POWER_STATUS is a POD struct; zero-initialization is valid for all
+        // fields. GetSystemPowerStatus writes the actual values before we read ACLineStatus.
         let mut sps = std::mem::zeroed::<SYSTEM_POWER_STATUS>();
         GetSystemPowerStatus(&mut sps).is_ok() && sps.ACLineStatus == 1
     };
@@ -209,22 +217,26 @@ fn read_windows_power_overlay() -> Option<PerformanceMode> {
     };
 
     unsafe {
+        // SAFETY: Null-terminated wide strings, stack buffer aligned for u16 (REG_SZ data).
+        // hkey is assume_init only after RegOpenKeyExW succeeds. buf is a fixed [u16; 64] on
+        // the stack — well within the typical REG_SZ size for a GUID string.
         let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY)
             .encode_wide()
             .chain(Some(0))
             .collect();
-        let mut hkey = std::mem::zeroed();
+        let mut hkey = std::mem::MaybeUninit::uninit();
         if RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
             PCWSTR(key_w.as_ptr()),
             0,
             windows::Win32::System::Registry::KEY_READ,
-            &mut hkey,
+            hkey.as_mut_ptr(),
         )
         .is_err()
         {
             return None;
         }
+        let hkey = hkey.assume_init();
         let val_w: Vec<u16> = OsStr::new(reg_value).encode_wide().chain(Some(0)).collect();
         let mut buf = [0u16; 64];
         let mut size = (buf.len() * 2) as u32;
@@ -315,6 +327,9 @@ pub fn set_windows_power_overlay(mode: PerformanceMode) {
 
     if let Some(guid) = guid_bytes {
         unsafe {
+            // SAFETY: WinGuid matches the native GUID layout (u32/u16/u16/[u8;8]) used by
+            // powrprof.dll. The Library reference lives on the stack for the duration of the call.
+            // PowerSetActiveOverlayScheme only reads the GUID and does not retain the pointer.
             use libloading::Library;
             type FnSetOverlay = unsafe extern "system" fn(*const WinGuid) -> u32;
             if let Ok(lib) = Library::new("powrprof.dll") {
@@ -334,28 +349,33 @@ pub fn set_windows_power_overlay(mode: PerformanceMode) {
     let guid_with_braces = guid_str.to_string();
     let val_utf16: Vec<u16> = guid_with_braces.encode_utf16().chain(Some(0)).collect();
     let val_bytes: &[u8] =
+        // SAFETY: val_utf16 is a Vec<u16> owned by this function; from_raw_parts creates a
+        // byte slice over its backing memory for the exact byte length. No aliasing occurs.
         unsafe { std::slice::from_raw_parts(val_utf16.as_ptr().cast(), val_utf16.len() * 2) };
 
     let reg_values = ["ActiveOverlayAcPowerScheme", "ActiveOverlayDcPowerScheme"];
 
     unsafe {
+        // SAFETY: Null-terminated wide strings; hkey is assume_init only after RegOpenKeyExW
+        // succeeds. RegSetValueExW reads from the byte slice without retaining the pointer.
         let key_w: Vec<u16> = OsStr::new(OVERLAY_REG_KEY)
             .encode_wide()
             .chain(Some(0))
             .collect();
-        let mut hkey = std::mem::zeroed();
+        let mut hkey = std::mem::MaybeUninit::uninit();
         if RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
             PCWSTR(key_w.as_ptr()),
             0,
             KEY_SET_VALUE,
-            &mut hkey,
+            hkey.as_mut_ptr(),
         )
         .is_err()
         {
             log::warn!("set_windows_power_overlay: cannot open registry key (needs elevation)");
             return;
         }
+        let hkey = hkey.assume_init();
         for val_name_str in &reg_values {
             let val_name: Vec<u16> = OsStr::new(val_name_str)
                 .encode_wide()
@@ -376,11 +396,14 @@ fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
     {
         use windows::core::PCWSTR;
         unsafe {
+            // SAFETY: Null-terminated wide strings; MaybeUninit<HKEY> written by RegCreateKeyExW
+            // before assume_init. The DWORD value is a stack-local byte array with valid
+            // alignment for RegSetValueExW.
             let key_w: Vec<u16> = OsStr::new(PERF_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             let mut disposition = REG_CREATE_KEY_DISPOSITION::default();
             // Use RegCreateKeyExW so the key is created if it does not yet exist
             RegCreateKeyExW(
@@ -391,11 +414,12 @@ fn persist_to_registry(mode: PerformanceMode) -> Result<()> {
                 REG_OPTION_NON_VOLATILE,
                 KEY_WRITE,
                 None,
-                &mut hkey,
+                hkey.as_mut_ptr(),
                 Some(&mut disposition),
             )
             .ok()
             .context("Create/open HKLM\\SOFTWARE\\MI\\PerformanceMode")?;
+            let hkey = hkey.assume_init();
 
             let val_w: Vec<u16> = OsStr::new(PERF_REG_VALUE)
                 .encode_wide()
@@ -462,6 +486,10 @@ fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
     let method_name = BSTR::from("SetPerformanceMode");
 
     unsafe {
+        // SAFETY: WMI COM pointers (class_obj, in_sig, in_params, out_params) are ref-counted
+        // and returned by the WMI infrastructure. All BSTRs and VARIANTs are stack-local and
+        // valid for the duration of each call. The raw pointers to in_sig are only used as
+        // output parameters for GetMethod and not dereferenced outside that call.
         // Get the class definition to spawn a parameter object
         let mut class_obj = None;
         wmi.svc
@@ -584,6 +612,10 @@ fn find_vhf_device_path() -> Result<String> {
     };
 
     unsafe {
+        // SAFETY: SP_DEVICE_INTERFACE_DATA is POD; zeroed is valid. SetupDiGetClassDevsW
+        // returns a valid HDEVINFO; SetupDiEnumDeviceInterfaces fills iface_data. The device
+        // path pointer arithmetic (offset 4 in the detail struct) matches the
+        // SP_DEVICE_INTERFACE_DETAIL_DATA_W layout documented by Microsoft.
         let dev_info = SetupDiGetClassDevsW(
             Some(&guid),
             None,
@@ -710,6 +742,9 @@ pub fn get_perf_debug() -> PerfDebugInfo {
             // Wrap in a closure so `?` propagates into anyhow::Result correctly.
             let test_ok: anyhow::Result<String> = (|| -> anyhow::Result<String> {
                 unsafe {
+                    // SAFETY: Same WMI COM pattern as send_via_hq_wmi — the class objects and
+                    // in/out params are ref-counted COM pointers. All BSTR/VARIANT temporaries
+                    // live on the stack for the duration of each call.
                     let mut class_obj = None;
                     wmi.svc
                         .GetObject(

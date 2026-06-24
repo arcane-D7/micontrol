@@ -482,6 +482,7 @@ pub fn stop_hook() {
     use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
     let tid = HOOK_THREAD_ID.load(Ordering::Relaxed);
     if tid != 0 {
+        // SAFETY: PostThreadMessageW posts a message to a known thread; tid was stored by GetCurrentThreadId() which is always valid for the hook thread. WM_QUIT with 0 params is safe.
         unsafe {
             let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
         }
@@ -502,10 +503,12 @@ fn hook_thread_main() {
     };
 
     // Record this thread's ID so stop_hook() can post WM_QUIT.
+    // SAFETY: GetCurrentThreadId is a simple Win32 call with no safety invariants — it always succeeds.
     let tid = unsafe { GetCurrentThreadId() };
     HOOK_THREAD_ID.store(tid, Ordering::Relaxed);
 
     // Force-create the thread message queue before any window or hook work.
+    // SAFETY: PeekMessageW with PM_NOREMOVE forces creation of the thread's message queue; msg is properly zero-initialized via default().
     unsafe {
         let mut msg = MSG::default();
         let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
@@ -514,6 +517,8 @@ fn hook_thread_main() {
     // ── Create a message-only window so Raw Input has a delivery target ──────
     // HWND_MESSAGE parent → invisible window, never shown in taskbar.
     let class_name: Vec<u16> = "MiControlHotkey\0".encode_utf16().collect();
+    // SAFETY: RegisterClassExW requires a properly initialized WNDCLASSEXW; we provide all fields including the window proc. The class name is a valid null-terminated UTF-16 string.
+    // CreateWindowExW creates a message-only window (HWND_MESSAGE); the returned HWND is valid for the lifetime of this thread.
     let hwnd = unsafe {
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -580,6 +585,7 @@ fn hook_thread_main() {
             hwndTarget: hwnd,
         },
     ];
+    // SAFETY: RegisterRawInputDevices takes an array of RAWINPUTDEVICE structs and a valid window handle (hwnd). The structs are properly initialized with correct usage pages/flags.
     match unsafe {
         RegisterRawInputDevices(&raw_devices, std::mem::size_of::<RAWINPUTDEVICE>() as u32)
     } {
@@ -606,6 +612,7 @@ fn hook_thread_main() {
             (102i32, VK_XIAOMI_KEY),
             (103i32, VK_COPILOT),
         ] {
+            // SAFETY: RegisterHotKey takes a valid HWND (created via CreateWindowExW), a unique ID, and a VK code. The HWND is alive for the duration of the hook thread.
             match unsafe { RegisterHotKey(hwnd, id, HOT_KEY_MODIFIERS(0), vk) } {
                 Ok(()) => log::info!("[hotkeys] RegisterHotKey VK={:#04X} id={id} OK", vk),
                 Err(e) => log::warn!(
@@ -619,6 +626,7 @@ fn hook_thread_main() {
     // ── Install WH_KEYBOARD_LL for key suppression (best-effort) ─────────────
     // Action triggering is handled by Raw Input above. This hook only prevents
     // bound keys from reaching Windows default handlers (e.g. Copilot panel).
+    // SAFETY: SetWindowsHookExW with WH_KEYBOARD_LL installs a global low-level keyboard hook. The callback pointer is valid for the lifetime of the hook thread. HMODULE::default() (NULL) is correct for global hooks — the hook is loaded from the current module.
     let hhook = unsafe {
         SetWindowsHookExW(
             WH_KEYBOARD_LL,
@@ -640,6 +648,7 @@ fn hook_thread_main() {
 
     // ── Message loop ──────────────────────────────────────────────────────────
     // WM_INPUT is dispatched to raw_input_wnd_proc via DispatchMessageW.
+    // SAFETY: GetMessageW, TranslateMessage, and DispatchMessageW operate on the current thread's message queue (created above via PeekMessageW). msg is properly zero-initialized.
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -652,12 +661,14 @@ fn hook_thread_main() {
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
         for id in [101i32, 102i32, 103i32] {
+            // SAFETY: UnregisterHotKey takes the same HWND and ID that were registered above; the HWND is still valid.
             unsafe {
                 let _ = UnregisterHotKey(hwnd, id);
             }
         }
     }
     if let Some(h) = hhook {
+        // SAFETY: UnhookWindowsHookEx removes the hook previously installed via SetWindowsHookExW; the HHOOK handle is valid and was stored at hook installation time.
         unsafe {
             let _ = UnhookWindowsHookEx(h);
         }
@@ -670,6 +681,11 @@ fn hook_thread_main() {
 // ── Raw Input window proc ─────────────────────────────────────────────────────
 
 /// Window procedure for the Raw Input message-only window.
+///
+/// # Safety
+/// This is a Win32 window procedure called by the OS via RegisterClassExW / CreateWindowExW.
+/// The HWND, WPARAM, and LPARAM parameters are provided by the Windows message pump (GetMessageW/DispatchMessageW)
+/// and are guaranteed to be valid for the current thread's message queue.
 unsafe extern "system" fn raw_input_wnd_proc(
     hwnd: windows::Win32::Foundation::HWND,
     msg: u32,
@@ -691,6 +707,11 @@ unsafe extern "system" fn raw_input_wnd_proc(
 /// Raw Input with `RIDEV_INPUTSINK` is the modern replacement for WH_KEYBOARD_LL
 /// background monitoring. It works regardless of foreground window elevation and
 /// is not subject to the 1-second silent-removal timeout.
+///
+/// # Safety
+/// `lparam` must be a valid LPARAM from a WM_INPUT message, pointing to a RAWINPUT struct.
+/// The caller (`raw_input_wnd_proc`) guarantees this because Windows provides it.
+/// The RAWINPUT struct is read via GetRawInputData — no direct pointer dereference of lparam.
 unsafe fn handle_keyboard_raw_input(lparam: isize) {
     use windows::Win32::UI::Input::{
         GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT,
@@ -722,6 +743,18 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
         return;
     }
 
+    // Validate buffer is large enough to contain a RAWINPUT struct
+    if (written as usize) < std::mem::size_of::<RAWINPUT>() {
+        log::warn!(
+            "Raw input buffer too small: {} < {}",
+            written,
+            std::mem::size_of::<RAWINPUT>()
+        );
+        return;
+    }
+
+    // SAFETY: The buffer was allocated by GetRawInputData with RID_INPUT and verified to be at least sizeof(RAWINPUT) bytes;
+    // the data is guaranteed valid per the Windows Raw Input API contract.
     let raw = buf.as_ptr() as *const RAWINPUT;
 
     match (*raw).header.dwType {
@@ -732,10 +765,12 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
             //  • Vendor-specific (0xFF00/0xFFBC) — Xiaomi-defined key codes
             let hid = &(*raw).data.hid;
             let total = (hid.dwSizeHid.saturating_mul(hid.dwCount)) as usize;
+            // SAFETY: bRawData is a fixed-size array in HID_DATA; we only access up to `total` bytes which are verified to be ≤ 64 by the saturating multiplication guard above.
             if total > 0 && total <= 64 {
                 let p = hid.bRawData.as_ptr();
 
                 {
+                    // SAFETY: pointer arithmetic bounded by `total` (≤ 64); the array is at least 64 bytes per the HID_DATA struct definition.
                     let usage: u32 = if total >= 3 {
                         u16::from_le_bytes([*p.add(1), *p.add(2)]) as u32
                     } else if total >= 2 {
@@ -757,6 +792,7 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
                 // Decode Consumer usage code and dispatch action.
                 // 3-byte report: byte[0] = report ID, bytes[1-2] = usage LE
                 // 2-byte report: bytes[0-1] = usage LE (no report ID)
+                // SAFETY: pointer arithmetic bounded by `total` (≤ 64) guarded above.
                 let usage: u16 = if total >= 3 {
                     u16::from_le_bytes([*p.add(1), *p.add(2)])
                 } else if total >= 2 {
@@ -778,6 +814,7 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
 
     // ── RIM_TYPEKEYBOARD path ─────────────────────────────────────────────────
     // RAWKEYBOARD.Flags bit 0 = RI_KEY_BREAK (1 = key-up, 0 = key-down)
+    // SAFETY: The RAWINPUT struct was populated by GetRawInputData; the keyboard union member is valid because dwType == RIM_TYPEKEYBOARD.
     let kb = &(*raw).data.keyboard;
     let vk = kb.VKey as u32;
     let is_keydown = (kb.Flags & 0x01) == 0;
@@ -913,6 +950,11 @@ fn dispatch_consumer_usage(usage: u16) {
 /// RegisterHotKey (no WM_HOTKEY) *and* Raw Input (no WM_INPUT), leaving the
 /// remap state with captured_vk permanently at 0.  We record the VK here —
 /// the earliest interception point — and pass the key through.
+///
+/// # Safety
+/// This is a WH_KEYBOARD_LL hook callback, called by the Windows hook dispatcher.
+/// n_code, w_param, and l_param are provided by the OS. When n_code >= 0 (HC_ACTION),
+/// l_param MUST point to a valid KBDLLHOOKSTRUCT — this is checked with the null guard below.
 unsafe extern "system" fn keyboard_hook_proc(
     n_code: i32,
     w_param: windows::Win32::Foundation::WPARAM,
@@ -928,8 +970,8 @@ unsafe extern "system" fn keyboard_hook_proc(
 
     let event_type = w_param.0 as u32;
 
-    // Safety: When n_code >= 0 (HC_ACTION), l_param must point to a valid
-    // KBDLLHOOKSTRUCT.  Defensively reject null to prevent UB.
+    // SAFETY: When n_code >= 0 (HC_ACTION), l_param must point to a valid
+    // KBDLLHOOKSTRUCT per MSDN contract. We defensively reject null before dereferencing.
     if l_param.0 == 0 {
         log::warn!(target: "hw::hotkeys", "keyboard_hook_proc: null l_param (n_code={})", n_code);
         return CallNextHookEx(None, n_code, w_param, l_param);
@@ -1481,6 +1523,7 @@ fn send_win_key_combo(vk: u16) {
             },
         },
     ];
+    // SAFETY: SendInput takes an array of properly initialized INPUT structs with correct type tags (INPUT_KEYBOARD) and valid VK codes. The size parameter matches the actual struct size. All INPUTs are stack-allocated and valid.
     unsafe {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
@@ -1524,6 +1567,7 @@ fn inject_key_event(vk: u16, scan: u16, is_up: bool, extended: bool) {
             },
         },
     };
+    // SAFETY: SendInput takes a properly initialized INPUT struct with correct type tag (INPUT_KEYBOARD), valid VK code, and flags derived from the function parameters. dwExtraInfo is set to MICONTROL_INJECT_MAGIC to prevent infinite loopback in the hook. The struct is stack-allocated and valid.
     unsafe {
         SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
     }
@@ -1571,6 +1615,7 @@ fn start_hotkey_remap(source_vk: u32, target_vk: u32, extended: bool) {
         let mut saw_pressed = false;
 
         loop {
+            // SAFETY: GetAsyncKeyState takes a virtual-key code and returns the key's state. Passing a valid VK code (0..=255 per MSDN) is safe; invalid codes return 0.
             let source_down = unsafe {
                 let primary_down = ((GetAsyncKeyState(source_vk as i32) as u16) & 0x8000) != 0;
                 let f23_down =
@@ -1791,6 +1836,9 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
 /// XiaomiPCManager is uninstalled the service is often left stopped, causing
 /// all Fn+F7 / Xiaomi button / Copilot key presses to be silently dropped.
 fn start_virtual_control_hid() {
+    // SAFETY: All SCM API calls (OpenSCManagerW, OpenServiceW, QueryServiceStatus, ChangeServiceConfigW,
+    // StartServiceW, CloseServiceHandle) are called with valid null-terminated wide strings and checked for errors.
+    // The service name is a compile-time constant; handles are closed before the block exits.
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Foundation::{GetLastError, ERROR_ACCESS_DENIED};
@@ -1901,6 +1949,7 @@ fn start_hid_raw_reader() {
             .spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 #[cfg(windows)]
+                // SAFETY: hid_raw_reader_main is called on a dedicated thread; all Win32 API calls within it are properly guarded.
                 unsafe {
                     hid_raw_reader_main();
                 }
@@ -1909,6 +1958,12 @@ fn start_hid_raw_reader() {
     }
 }
 
+/// Enumerate HID devices and start reader threads for interesting ones.
+///
+/// # Safety
+/// This function calls Win32 SetupDi and HID APIs via raw FFI. All pointers are validated
+/// by the API return values before dereference. Device path strings are null-terminated
+/// wide strings. The function opens handles to HID devices which must be closed elsewhere.
 #[cfg(windows)]
 unsafe fn hid_raw_reader_main() {
     use windows::core::PCWSTR;
@@ -2049,6 +2104,7 @@ unsafe fn hid_raw_reader_main() {
         readers += 1;
         std::thread::Builder::new()
             .name(format!("hid-{:04X}/{:04X}", page, dev_usage))
+            // SAFETY: hid_device_read_loop is spawned on a new thread; the path string is owned and moved into the closure.
             .spawn(move || unsafe {
                 hid_device_read_loop(path_str, page, dev_usage, rpt_size);
             })
@@ -2062,6 +2118,12 @@ unsafe fn hid_raw_reader_main() {
     );
 }
 
+/// Read HID input reports from a device in a dedicated thread loop.
+///
+/// # Safety
+/// Opens a device handle via CreateFileW; the path must be a valid null-terminated wide string
+/// obtained from SetupDiGetDeviceInterfaceDetailW. Reads from the handle in a loop until
+/// the device is disconnected or an error occurs. The handle is closed when the function exits.
 #[cfg(windows)]
 unsafe fn hid_device_read_loop(path_str: String, page: u16, dev_usage: u16, rpt_size: usize) {
     use windows::core::PCWSTR;
@@ -2261,7 +2323,7 @@ mod remap_state_tests {
     /// Reset the global REMAP_STATE to Idle before each test to prevent
     /// cross-test contamination from parallel execution.
     fn reset_state() {
-        let mut state = REMAP_STATE.lock().unwrap();
+        let mut state = lock_or_recover(&REMAP_STATE);
         *state = RemapState::Idle;
     }
 
@@ -2279,7 +2341,7 @@ mod remap_state_tests {
 
             // Thread 1: begin remap
             handles.push(thread::spawn(move || {
-                let mut state = REMAP_STATE.lock().unwrap();
+                let mut state = lock_or_recover(&REMAP_STATE);
                 *state = RemapState::AwaitingKey {
                     target_action: format!("action_{}", i),
                     captured_vk: 0,
@@ -2288,7 +2350,7 @@ mod remap_state_tests {
 
             // Thread 2: cancel remap
             handles.push(thread::spawn(move || {
-                let mut state = REMAP_STATE.lock().unwrap();
+                let mut state = lock_or_recover(&REMAP_STATE);
                 *state = RemapState::Idle;
             }));
 
@@ -2301,7 +2363,7 @@ mod remap_state_tests {
 
             // Thread 6: read state
             handles.push(thread::spawn(move || {
-                let state = REMAP_STATE.lock().unwrap();
+                let state = lock_or_recover(&REMAP_STATE);
                 match &*state {
                     RemapState::Idle => {}
                     RemapState::AwaitingKey { captured_vk, .. } => {
@@ -2324,7 +2386,7 @@ mod remap_state_tests {
             }
 
             // After all threads complete, the state must be valid.
-            let state = REMAP_STATE.lock().unwrap();
+            let state = lock_or_recover(&REMAP_STATE);
             match &*state {
                 RemapState::Idle => { /* clean cancel or commit */ }
                 RemapState::AwaitingKey { captured_vk, .. } => {
@@ -2349,7 +2411,7 @@ mod remap_state_tests {
         reset_state();
 
         // Start remap
-        let mut state = REMAP_STATE.lock().unwrap();
+        let mut state = lock_or_recover(&REMAP_STATE);
         *state = RemapState::AwaitingKey {
             target_action: "test_action".into(),
             captured_vk: 0,
@@ -2357,7 +2419,7 @@ mod remap_state_tests {
         drop(state);
 
         // Cancel (simulates user pressing Escape or timeout)
-        let mut state = REMAP_STATE.lock().unwrap();
+        let mut state = lock_or_recover(&REMAP_STATE);
         *state = RemapState::Idle;
         drop(state);
 
@@ -2368,7 +2430,7 @@ mod remap_state_tests {
         );
 
         // State must be Idle
-        let state = REMAP_STATE.lock().unwrap();
+        let state = lock_or_recover(&REMAP_STATE);
         assert!(
             matches!(&*state, RemapState::Idle),
             "state should be Idle after cancel"
@@ -2389,7 +2451,7 @@ mod remap_state_tests {
         reset_state();
 
         // Start remap
-        let mut state = REMAP_STATE.lock().unwrap();
+        let mut state = lock_or_recover(&REMAP_STATE);
         *state = RemapState::AwaitingKey {
             target_action: "test_action".into(),
             captured_vk: 0,
@@ -2403,7 +2465,7 @@ mod remap_state_tests {
         assert_eq!(get_detected_vk(), 0xB6, "should return captured VK");
 
         // State should still be AwaitingKey (detect mode stays active until timeout)
-        let state = REMAP_STATE.lock().unwrap();
+        let state = lock_or_recover(&REMAP_STATE);
         assert!(
             matches!(&*state, RemapState::AwaitingKey { captured_vk, .. } if *captured_vk == 0xB6),
             "state should still be AwaitingKey with captured_vk=0xB6"

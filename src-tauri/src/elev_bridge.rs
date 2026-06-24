@@ -281,6 +281,7 @@ fn launch_elevated_via_uac(request_id: &str) -> Result<(), String> {
             ..std::mem::zeroed()
         };
 
+        // SAFETY: ShellExecuteExW with SEE_MASK_NOCLOSEPROCESS launches the executable and returns a process handle. The verb ("runas"), file, and parameters are all valid null-terminated wide strings. hProcess is checked for validity before WaitForSingleObject/CloseHandle. zeroed() is safe for the remaining fields as cbSize is explicitly set and Windows ignores unspecified fields.
         ShellExecuteExW(&mut info).map_err(|e| format!("ShellExecuteExW: {e}"))?;
 
         if !info.hProcess.is_invalid() {
@@ -327,6 +328,7 @@ pub fn relaunch_self_as_admin() -> Result<(), String> {
             ..std::mem::zeroed()
         };
 
+        // SAFETY: ShellExecuteExW with "runas" verb launches the process with elevation request. The verb, file, and parameters are valid null-terminated wide strings. zeroed() is safe for remaining fields since cbSize is explicitly set.
         ShellExecuteExW(&mut info).map_err(|e| format!("ShellExecuteExW: {e}"))?;
     }
 
@@ -338,6 +340,7 @@ pub fn relaunch_self_as_admin() -> Result<(), String> {
 #[cfg(windows)]
 fn is_admin() -> bool {
     use windows::Win32::UI::Shell::IsUserAnAdmin;
+    // SAFETY: IsUserAnAdmin() is a simple Win32 check with no safety invariants — it always succeeds and returns a BOOL.
     unsafe { IsUserAnAdmin().as_bool() }
 }
 

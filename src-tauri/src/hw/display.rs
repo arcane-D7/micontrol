@@ -432,6 +432,10 @@ where
     use libloading::Library;
 
     unsafe {
+        // SAFETY: IGCL DLL function pointers (ctlInit, ctlEnumerateDevices, ctlClose) are
+        // loaded from the dynamically-linked ControlLib.dll — the Symbol objects guard the
+        // function lifetimes. CtlInitArgs is a POD struct with correct size/alignment.
+        // The api_handle and device pointers are opaque handles managed by IGCL.
         // Use the IGCL DLL path found during startup discovery; fall back to the system default.
         let igcl_path = crate::hw::discovery::global_profile()
             .and_then(|p| p.igcl_dll_path)
@@ -476,6 +480,9 @@ where
 fn get_brightness_igcl() -> Result<u8> {
     use igcl::*;
     with_igcl_device_pub(|device, lib| unsafe {
+        // SAFETY: device is a valid IGCL device handle obtained from ctlEnumerateDevices.
+        // CtlBrightnessArgs is POD with correctly set size field; the IGCL function only reads
+        // args and writes back the brightness value.
         let get_brightness: libloading::Symbol<FnCtlGetBrightnessSetting> = lib
             .get(b"ctlGetBrightnessSetting\0")
             .context("ctlGetBrightnessSetting")?;
@@ -503,6 +510,8 @@ fn get_brightness_igcl() -> Result<u8> {
 fn set_brightness_igcl(level: u8) -> Result<()> {
     use igcl::*;
     with_igcl_device_pub(|device, lib| unsafe {
+        // SAFETY: device is a valid IGCL device handle. The brightness args struct is sized
+        // correctly and both target_brightness and smooth_target_brightness are initialized.
         let set_brightness: libloading::Symbol<FnCtlSetBrightnessSetting> = lib
             .get(b"ctlSetBrightnessSetting\0")
             .context("ctlSetBrightnessSetting")?;
@@ -638,6 +647,12 @@ use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
 
 /// Call GetDisplayConfigBufferSizes + QueryDisplayConfig with retry on
 /// ERROR_INSUFFICIENT_BUFFER (display config may change between the two calls).
+///
+/// # Safety
+///
+/// This function calls raw Win32 CCD display API functions. The caller must ensure that
+/// the returned path/mode vectors are not modified while the underlying display config
+/// handle (which does not exist here — this is a one-shot query) remains in use.
 #[cfg(windows)]
 unsafe fn query_display_config_retry() -> anyhow::Result<(
     u32,
@@ -677,6 +692,9 @@ unsafe fn query_display_config_retry() -> anyhow::Result<(
 pub fn get_hdr_state() -> bool {
     #[cfg(windows)]
     unsafe {
+        // SAFETY: query_display_config_retry() returns valid paths with adapterId/id populated
+        // from the active display topology. The DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO struct
+        // is correctly initialized and its header points to its own base address.
         let (np, _nm, paths, _modes) = match query_display_config_retry() {
             Ok(x) => x,
             Err(_) => return false,
@@ -710,6 +728,10 @@ pub fn get_hdr_state() -> bool {
 fn set_hdr_ccd(enabled: bool) -> anyhow::Result<()> {
     #[cfg(windows)]
     unsafe {
+        // SAFETY: Same as get_hdr_state — paths are valid CCD topology data.
+        // DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE is correctly initialized with
+        // the enableAdvancedColor bit set. DisplayConfigSetDeviceInfo only reads the
+        // struct during the call and does not retain the pointer.
         let (np, _nm, paths, _modes) =
             query_display_config_retry().context("query display config")?;
         let mut last_err = 0i32;
@@ -835,6 +857,10 @@ pub fn get_available_refresh_rates() -> Vec<u32> {
         };
 
         unsafe {
+            // SAFETY: DEVMODEW is a POD struct with dmSize correctly set. EnumDisplaySettingsExW
+            // writes to the struct and does not retain the pointer. Comparison of dmPelsWidth,
+            // dmPelsHeight, dmBitsPerPel, and dmDisplayFrequency reads the fields Windows
+            // populated — no uninitialized data is read.
             let mut cur = DEVMODEW::default();
             cur.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
             // Query current mode to know the active resolution.
@@ -899,6 +925,9 @@ pub fn set_refresh_rate(hz: u32) -> Result<()> {
         const CDS_UPDATEREGISTRY_VAL: u32 = 0x00000001;
 
         unsafe {
+            // SAFETY: DEVMODEW is POD with dmSize set. EnumDisplaySettingsExW populates the
+            // current mode; we modify dmDisplayFrequency and dmFields before passing it to
+            // ChangeDisplaySettingsExW which does not retain the pointer.
             let mut mode = DEVMODEW::default();
             mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
             if !EnumDisplaySettingsExW(
@@ -973,21 +1002,25 @@ fn get_ai_brightness_registry() -> Result<bool> {
             RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, REG_VALUE_TYPE,
         };
         unsafe {
+            // SAFETY: Standard registry pattern — wide strings are null-terminated; hkey is
+            // assume_init only after RegOpenKeyExW succeeds. The u32 pointer cast for
+            // RegQueryValueExW is valid for a 4-byte DWORD on the stack.
             let key_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             let res = RegOpenKeyExW(
                 HKEY_LOCAL_MACHINE,
                 PCWSTR(key_w.as_ptr()),
                 0,
                 windows::Win32::System::Registry::KEY_READ,
-                &mut hkey,
+                hkey.as_mut_ptr(),
             );
             if res.is_err() {
                 return Ok(false);
             }
+            let hkey = hkey.assume_init();
             let val_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_VALUE)
                 .encode_wide()
                 .chain(Some(0))
@@ -1024,11 +1057,13 @@ fn persist_ai_brightness_registry(enabled: bool) -> Result<()> {
             REG_OPTION_NON_VOLATILE,
         };
         unsafe {
+            // SAFETY: RegCreateKeyExW creates or opens the key; hkey is assume_init after it
+            // succeeds. Null-terminated wide strings. DWORD value written from stack-local bytes.
             let key_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             RegCreateKeyExW(
                 HKEY_LOCAL_MACHINE,
                 PCWSTR(key_w.as_ptr()),
@@ -1037,11 +1072,12 @@ fn persist_ai_brightness_registry(enabled: bool) -> Result<()> {
                 REG_OPTION_NON_VOLATILE,
                 KEY_WRITE,
                 None,
-                &mut hkey,
+                hkey.as_mut_ptr(),
                 None,
             )
             .ok()
             .context("Create display settings key")?;
+            let hkey = hkey.assume_init();
             let val_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_VALUE)
                 .encode_wide()
                 .chain(Some(0))

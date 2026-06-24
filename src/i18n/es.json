@@ -66,7 +66,8 @@
     "save": "Guardar",
     "saving": "Guardando…",
     "saved": "Configuración guardada",
-    "saveError": "Error al guardar configuración"
+    "saveError": "Error al guardar configuración",
+    "loadError": "Error al cargar configuración de teclado"
   },
   "overview": {
     "title": "Resumen del Sistema",
@@ -514,7 +515,7 @@
     "testing": "Probando…",
     "testOk": "Conexión exitosa",
     "reset": "Restaurar predeterminados",
-    "storageNote": "La clave API se almacena localmente en el localStorage de este navegador y nunca sale de tu dispositivo.",
+    "storageNote": "La clave de API se almacena de forma segura en el Administrador de credenciales de Windows. Se envía al proveedor de IA al realizar solicitudes de análisis.",
     "apiKeyMissing": "Clave API no configurada. Ve a Ajustes para agregar tu clave."
   },
   "ai": {
@@ -579,5 +580,9 @@
       "mode": "Modo",
       "loadMore": "Cargar más"
     }
+  },
+  "audio": {
+    "loadDevicesError": "Error al cargar dispositivos de audio",
+    "initError": "Error al inicializar control de audio"
   }
 }

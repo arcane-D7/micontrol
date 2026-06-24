@@ -43,21 +43,58 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-
 
-      - name: Generate Tauri updater signing keypair (if not provided)
-        if: env.TAURI_SIGNING_PRIVATE_KEY == ''
-        run: |
-          echo "WARNING: No signing key provided. Generating ephemeral key for this build."
-          echo "For production releases, set TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets."
-          npx @tauri-apps/cli signer generate -w ${{ runner.temp }}/tauri-key
-          echo "TAURI_SIGNING_PRIVATE_KEY=$(cat ${{ runner.temp }}/tauri-key)" >> $GITHUB_ENV
+      - name: Verify signing key is provided
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is required for releases."
+            echo "::error::See docs/release.md for setup instructions."
+            echo "::error::Generate a keypair with: npx @tauri-apps/cli signer generate -w ~/.tauri/micontrol-key"
+            echo "::error::Then add the private key as a repository secret named TAURI_SIGNING_PRIVATE_KEY"
+            exit 1
+          fi
+          echo "Signing key is present."
 
       - name: Build Tauri app
         run: npm run tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Generate latest.json updater manifest
+        run: |
+          $version = node -p "require('./package.json').version"
+          $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+          # Find the .msi installer
+          $msi = Get-ChildItem -Path src-tauri/target/release/bundle -Filter "*.msi" -Recurse | Select-Object -First 1
+          $msiName = if ($msi) { $msi.Name } else { "micontrol_${version}_x64-setup.exe" }
+
+          # Find the signature file if it exists
+          $sigFile = "${msi}.sig"
+          $signature = if (Test-Path $sigFile) { Get-Content $sigFile -Raw } else { "" }
+
+          $repoOwner = "${{ github.repository_owner }}"
+          $repoName = "${{ github.event.repository.name }}"
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/latest/download/$msiName"
+
+          $manifest = @{
+            version = $version
+            notes = "See full changelog at https://github.com/${{ github.repository }}/releases"
+            pub_date = $pubDate
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $signature
+                url = $downloadUrl
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+
+          $manifest | Out-File -FilePath latest.json -Encoding utf8
+          Write-Host "Generated latest.json:"
+          Get-Content latest.json
+        shell: pwsh
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -75,5 +112,6 @@ jobs:
           generate_release_notes: true
           files: |
             src-tauri/target/release/bundle/**/*
+            latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

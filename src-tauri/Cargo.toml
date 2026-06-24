@@ -28,6 +28,7 @@ thiserror = "1"
 hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
+fs2 = "0.4"
 libloading = "0.8"
 keyring = "3"
 

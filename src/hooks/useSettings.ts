@@ -281,6 +281,13 @@ export function useSettings() {
     if (!settings.openai_api_key.trim()) {
       throw new Error('api_key_missing');
     }
+
+    // Check telemetry consent before sending any data to the API
+    const consent = await getTelemetryConsent();
+    if (consent !== 'granted') {
+      throw new Error('consent_denied');
+    }
+
     const baseUrl = settings.openai_base_url.replace(/\/+$/, '');
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',

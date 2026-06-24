@@ -97,7 +97,14 @@ const TEXT2_CLR: COLORREF = rgb(160, 160, 160); // secondary lighter text
 pub fn init() {
     std::thread::Builder::new()
         .name("osd-msg-loop".into())
-        .spawn(|| unsafe { run_message_loop() })
+        .spawn(|| {
+            // SAFETY: run_message_loop creates and manages a Win32 window on a
+            // dedicated thread. All Win32 calls (RegisterClassExW, CreateWindowExW,
+            // GetMessageW, DispatchMessageW) are FFI. The thread has no borrow
+            // conflicts with the main thread because shared state goes through
+            // atomics (OSD_HWND, OSD_ALPHA, etc.).
+            unsafe { run_message_loop() }
+        })
         .expect("osd thread spawn failed");
 }
 
@@ -111,6 +118,10 @@ pub fn show_brightness_osd(level: u8) {
         return;
     }
     let hwnd = HWND(raw as *mut core::ffi::c_void);
+    // SAFETY: hwnd was created by CreateWindowExW in run_message_loop and
+    // stored atomically in OSD_HWND; it remains valid for the window's lifetime.
+    // PostMessageW is thread-safe and does not require the calling thread to own
+    // the window (it merely queues a message).
     unsafe {
         let _ = PostMessageW(hwnd, WM_OSD_SHOW, WPARAM(0), LPARAM(0));
     }
@@ -165,6 +176,9 @@ fn show_notification_osd(mode: u8, icon_cp: u16) {
         return;
     }
     let hwnd = HWND(raw as *mut core::ffi::c_void);
+    // SAFETY: hwnd was created by CreateWindowExW and stored atomically in
+    // OSD_HWND; it remains valid for the OSD window's lifetime. PostMessageW
+    // is safe to call from any thread (merely queues a message to the queue).
     unsafe {
         let _ = PostMessageW(hwnd, WM_OSD_NOTIF, WPARAM(0), LPARAM(0));
     }
@@ -177,6 +191,12 @@ fn show_notification_osd(mode: u8, icon_cp: u16) {
 
 // ── Message loop (dedicated thread) ──────────────────────────────────────────
 
+/// # Safety
+///
+/// Must only be called once from a dedicated thread. Creates and owns a Win32
+/// window via RegisterClassExW/CreateWindowExW; the resulting HWND is stored in
+/// OSD_HWND for cross-thread message posting. The caller must ensure no concurrent
+/// window-procedure registration for the same class name.
 unsafe fn run_message_loop() {
     let hinstance = GetModuleHandleW(None).unwrap_or_default().into();
 
@@ -239,6 +259,13 @@ unsafe fn run_message_loop() {
 
 // ── Window procedure ──────────────────────────────────────────────────────────
 
+/// # Safety
+///
+/// This is a Win32 window procedure (WNDPROC) called by the OS on each message
+/// dispatch. hwnd must be a valid window handle created by CreateWindowExW.
+/// msg, wp, lp are provided by the OS message pump. The function calls Win32
+/// GDI painting functions (BeginPaint, EndPaint, etc.) which require a valid
+/// device context obtained within the same WM_PAINT handler.
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
@@ -277,6 +304,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 
 /// Resize + reposition the OSD window to bottom-centre of the primary monitor.
 /// Safe to call even when the window is already at the requested size.
+///
+/// # Safety
+///
+/// # Safety
+///
+/// hwnd must be a valid window handle created by CreateWindowExW and not yet
+/// destroyed. Calls GetMonitorInfoW, MonitorFromPoint, and SetWindowPos which
+/// are FFI functions that require valid pointers and handles.
 unsafe fn reposition_osd(hwnd: HWND, w: i32, h: i32) {
     let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
     let mut mi = MONITORINFO {
@@ -290,6 +325,11 @@ unsafe fn reposition_osd(hwnd: HWND, w: i32, h: i32) {
     let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
 }
 
+/// # Safety
+///
+/// hwnd must be a valid window handle created by CreateWindowExW. Calls Win32
+/// timer and show-window functions (SetTimer, KillTimer, ShowWindow,
+/// SetLayeredWindowAttributes, InvalidateRect) which require valid handles.
 unsafe fn start_show_animation(hwnd: HWND) {
     match OSD_ANIM_PHASE.load(Ordering::Relaxed) {
         1 => {
@@ -318,6 +358,11 @@ unsafe fn start_show_animation(hwnd: HWND) {
     }
 }
 
+/// # Safety
+///
+/// hwnd must be a valid window handle. Calls Win32 timer functions (KillTimer,
+/// SetTimer), SetLayeredWindowAttributes, InvalidateRect, and ShowWindow which
+/// are FFI calls that require valid handles.
 unsafe fn handle_anim_frame(hwnd: HWND) {
     match OSD_ANIM_PHASE.load(Ordering::Relaxed) {
         1 => {
@@ -363,6 +408,10 @@ unsafe fn handle_anim_frame(hwnd: HWND) {
 
 // ── GDI painting ─────────────────────────────────────────────────────────────
 
+/// # Safety
+///
+/// hwnd must be a valid window handle. Calls BeginPaint/EndPaint which require
+/// a valid HWND whose window class was registered with the calling thread.
 unsafe fn paint(hwnd: HWND) {
     if OSD_MODE.load(Ordering::Relaxed) == 0 {
         paint_brightness(hwnd);
@@ -374,6 +423,11 @@ unsafe fn paint(hwnd: HWND) {
 // ── GDI font helpers ──────────────────────────────────────────────────────────
 
 /// Create a Segoe MDL2 Assets icon font.  Positive `height` = cell height.
+///
+/// # Safety
+///
+/// Calls CreateFontW (FFI) which allocates a GDI font object. The returned
+/// HGDIOBJ must be deleted with DeleteObject when no longer needed.
 unsafe fn new_mdl2_font(height: i32) -> HGDIOBJ {
     HGDIOBJ(
         CreateFontW(
@@ -433,6 +487,22 @@ fn keyboard_level_info(raw: u8) -> (i32, &'static str) {
 // ── Notification OSD painting ─────────────────────────────────────────────────
 
 /// Draw mic-mute (mode 1/2) or keyboard-backlight (mode 3) notification OSD.
+///
+/// Mic layout  (368 × 92 pill):
+///   [mic icon 40 px, coloured]   Microphone  (small, muted-gray)
+///                                Muted / Active  (large, bold, coloured)
+///
+/// Keyboard layout:
+///   [kbd icon 28 px, white]   Keyboard Light       (small, muted-gray)
+///                             [████████░░░░░░]  50% (bar + percentage)
+///                             Medium               (small, muted-gray)
+///
+/// # Safety
+///
+/// hwnd must be a valid window handle created by CreateWindowExW. Calls Win32
+/// GDI functions (BeginPaint, CreateSolidBrush, SelectObject, RoundRect, etc.)
+/// which require a valid HDC obtained from BeginPaint. All GDI resources are
+/// cleaned up before the function returns.
 ///
 /// Mic layout  (368 × 92 pill):
 ///   [mic icon 40 px, coloured]   Microphone  (small, muted-gray)
@@ -592,6 +662,13 @@ unsafe fn paint_notification(hwnd: HWND) {
     let _ = EndPaint(hwnd, &ps);
 }
 
+/// # Safety
+///
+/// hwnd must be a valid window handle created by CreateWindowExW. Calls Win32
+/// GDI functions (BeginPaint, CreateSolidBrush, SelectObject, RoundRect,
+/// SetWorldTransform, TextOutW, etc.) which require a valid HDC and proper
+/// GDI object management. All created GDI objects (brushes, fonts) are deleted
+/// and the world transform is reset to identity before returning.
 unsafe fn paint_brightness(hwnd: HWND) {
     let level = OSD_LEVEL.load(Ordering::Relaxed) as i32;
     let spin_frame = OSD_SPIN_FRAME.load(Ordering::Relaxed);

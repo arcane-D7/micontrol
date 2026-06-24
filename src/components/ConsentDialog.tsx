@@ -8,12 +8,48 @@ interface ConsentDialogProps {
 }
 
 export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
   const allowRef = useRef<HTMLButtonElement>(null);
+  const denyRef = useRef<HTMLButtonElement>(null);
 
-  // Focus the Allow button on mount for keyboard accessibility
+  // Focus the dialog container on mount (neutral element, not the Allow button)
+  // This avoids the dark pattern of auto-focusing the "Allow" button.
   useEffect(() => {
-    allowRef.current?.focus();
+    dialogRef.current?.focus();
   }, []);
+
+  // Focus trap: cycle Tab within the dialog only
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onDeny();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusable || focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    },
+    [onDeny],
+  );
 
   const handlePrivacyClick = useCallback(
     (e: React.MouseEvent) => {
@@ -29,6 +65,7 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
       role="dialog"
       aria-modal="true"
       aria-labelledby="consent-title"
+      onKeyDown={handleKeyDown}
       style={{
         position: 'fixed',
         inset: 0,
@@ -42,6 +79,8 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
     >
       <div
         className="consent-dialog"
+        ref={dialogRef}
+        tabIndex={-1}
         style={{
           background: 'var(--color-surface, #1e1e2e)',
           border: '1px solid var(--color-border, #3a3a4e)',
@@ -121,7 +160,8 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
           <button
             type="button"
             onClick={onDeny}
-            className="btn-ghost"
+            className="btn-primary"
+            ref={denyRef}
             style={{
               padding: '8px 20px',
               borderRadius: 8,

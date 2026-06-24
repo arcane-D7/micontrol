@@ -80,7 +80,8 @@
     "save": "Save",
     "saving": "Saving…",
     "saved": "Key bindings saved",
-    "saveError": "Failed to save key bindings"
+    "saveError": "Failed to save key bindings",
+    "loadError": "Failed to load keyboard configuration"
   },
   "overview": {
     "title": "System Overview",
@@ -528,7 +529,7 @@
     "testing": "Testing…",
     "testOk": "Connection successful",
     "reset": "Reset to defaults",
-    "storageNote": "API key is stored locally in this browser's localStorage and never leaves your device.",
+    "storageNote": "API key is stored securely in Windows Credential Manager. It is sent to the AI provider when making analysis requests.",
     "apiKeyMissing": "API key not configured. Go to Settings to add your key.",
     "privacy": "Privacy",
     "consentStatus": "Consent Status",
@@ -639,5 +640,9 @@
       "mode": "Mode",
       "loadMore": "Load more"
     }
+  },
+  "audio": {
+    "loadDevicesError": "Failed to load audio devices",
+    "initError": "Failed to initialize audio control"
   }
 }

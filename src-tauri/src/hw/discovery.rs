@@ -673,6 +673,12 @@ fn installed_driver_providers() -> Vec<String> {
 #[cfg(windows)]
 fn enumerate_device_interfaces(guid: &GUID) -> Vec<String> {
     let mut paths = Vec::new();
+    // SAFETY: Calls SetupDiGetClassDevsW, SetupDiEnumDeviceInterfaces, and
+    // SetupDiGetDeviceInterfaceDetailW which are FFI functions from the Windows
+    // SetupAPI. The GUID pointer is valid for the call duration. SP_DEVICE_INTERFACE_DATA
+    // is zero-initialized (zeroed() is valid because the struct only has a cbSize field
+    // that must be set beforehand). Device detail buffers are properly sized and
+    // aligned. SetupDiDestroyDeviceInfoList is called at the end to clean up.
     unsafe {
         let Ok(dev_info) = SetupDiGetClassDevsW(
             Some(guid),
@@ -746,6 +752,13 @@ fn enumerate_device_interfaces(guid: &GUID) -> Vec<String> {
 /// Open a HID device (read-only, shared) and return its capability snapshot.
 #[cfg(windows)]
 fn hid_caps_for_path(path: &str) -> Option<HIDP_CAPS> {
+    // SAFETY: FFI calls to CreateFileW (opens device), HidD_GetPreparsedData
+    // (allocates preparsed data), HidP_GetCaps (reads caps from preparsed data),
+    // CloseHandle, and HidD_FreePreparsedData. The path_w wide string is
+    // null-terminated and backed by a Vec that lives for the call. The handle
+    // is checked against INVALID_HANDLE_VALUE. ppd is zero-initialized and
+    // only read after a successful HidD_GetPreparsedData. Caps is a plain
+    // struct with no destructor.
     unsafe {
         let path_w: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
         let handle = CreateFileW(
@@ -791,6 +804,10 @@ fn service_exists(name: &str) -> bool {
             CloseServiceHandle, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
             SERVICE_QUERY_STATUS,
         };
+        // SAFETY: FFI calls to OpenSCManagerW, OpenServiceW, and CloseServiceHandle.
+        // scm is a valid handle returned by OpenSCManagerW. name_w is a null-terminated
+        // wide string backed by a Vec that lives for the call. Both handles are closed
+        // via CloseServiceHandle before the function returns.
         unsafe {
             let Ok(scm) = OpenSCManagerW(None, None, SC_MANAGER_CONNECT) else {
                 return false;

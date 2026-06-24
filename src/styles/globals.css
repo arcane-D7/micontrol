@@ -1123,6 +1123,18 @@ input[type='range']:active::-webkit-slider-thumb {
   box-shadow: none !important;
 }
 
+/* WCAG 2.4.7: Focus Visible — visible focus indicators for keyboard users */
+*:focus-visible {
+  outline: 2px solid var(--color-accent, #6c8cff);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Remove default outline only when focus-visible is supported */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
 /* Chip/pill buttons (e.g. model selector) */
 .chip-btn {
   display: inline-flex;

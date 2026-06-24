@@ -119,6 +119,7 @@ function PerformanceTab({
   ai: AiSettings;
   onOpenSettings: () => void;
 }) {
+  const { addToast } = useToast();
   const aiApiKeySet = !!ai.settings.openai_api_key;
   const isAiMode = hw.performanceMode === 'smart' || hw.performanceMode === 'smart_acceleration';
 
@@ -197,6 +198,7 @@ function PerformanceTab({
     } catch (e) {
       setDebugInfo(null);
       console.error('get_perf_debug failed', e);
+      addToast(t('performance.error'), 'error');
     } finally {
       setLoadingDebug(false);
     }
@@ -840,6 +842,7 @@ function KeyBindingRow({
   binding: KeyBinding;
   onChange: (b: KeyBinding) => void;
 }) {
+  const { addToast } = useToast();
   const [detecting, setDetecting] = useState(false);
   const [detectedVk, setDetectedVk] = useState<string>('');
   const pollRef = useRef<number | null>(null);
@@ -959,6 +962,7 @@ function KeyBindingRow({
       pollRef.current = id;
     } catch (e) {
       console.error('[keyboard] start_key_detect failed:', e);
+      addToast(t('keyboard.loadError'), 'error');
       setDetecting(false);
       setDetectedVk('');
     }
@@ -1245,12 +1249,18 @@ function KeyboardTab() {
       .then(({ invoke }) => {
         invoke<HotkeyMap>('get_hotkey_config')
           .then(setConfig)
-          .catch((e) => console.error('get_hotkey_config', e));
+          .catch((e) => {
+            console.error('get_hotkey_config', e);
+            addToast(t('keyboard.loadError'), 'error');
+          });
         invoke<boolean>('is_hook_active')
           .then(setHookActive)
           .catch(() => setHookActive(false));
       })
-      .catch((e) => console.error('Failed to import Tauri core:', e));
+      .catch((e) => {
+        console.error('Failed to import Tauri core:', e);
+        addToast(t('keyboard.loadError'), 'error');
+      });
   }, []);
 
   async function save() {

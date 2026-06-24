@@ -86,6 +86,9 @@ fn is_charger_connected() -> bool {
     use windows::Win32::System::Power::GetSystemPowerStatus;
     let mut status = windows::Win32::System::Power::SYSTEM_POWER_STATUS::default();
     unsafe {
+        // SAFETY: GetSystemPowerStatus writes to the stack-local SYSTEM_POWER_STATUS struct
+        // which is POD; default-initialization is valid. The call returns an HRESULT indicating
+        // success before we read ACLineStatus.
         if GetSystemPowerStatus(&mut status).is_ok() {
             // ACLineStatus: 0 = offline, 1 = online, 255 = unknown
             return status.ACLineStatus == 1;
@@ -240,11 +243,13 @@ fn persist_reg_dword(value_name: &str, value: u32) -> Result<()> {
             REG_OPTION_NON_VOLATILE,
         };
         unsafe {
+            // SAFETY: Null-terminated wide strings; RegCreateKeyExW writes to MaybeUninit<HKEY>
+            // before assume_init. Stack-local DWORD values have valid alignment.
             let key_w: Vec<u16> = OsStr::new(TP_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             RegCreateKeyExW(
                 HKEY_CURRENT_USER,
                 PCWSTR(key_w.as_ptr()),
@@ -253,11 +258,12 @@ fn persist_reg_dword(value_name: &str, value: u32) -> Result<()> {
                 REG_OPTION_NON_VOLATILE,
                 KEY_WRITE,
                 None,
-                &mut hkey,
+                hkey.as_mut_ptr(),
                 None,
             )
             .ok()
             .context("Create touchpad reg key")?;
+            let hkey = hkey.assume_init();
             let val_w: Vec<u16> = OsStr::new(value_name)
                 .encode_wide()
                 .chain(Some(0))
@@ -286,17 +292,20 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
             RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, REG_VALUE_TYPE,
         };
         unsafe {
+            // SAFETY: Null-terminated wide strings; hkey is assume_init only after
+            // RegOpenKeyExW succeeds. The read_dword closure uses safe pointer casts for
+            // RegQueryValueExW with stack-local u32 values.
             let key_w: Vec<u16> = OsStr::new(TP_REG_KEY)
                 .encode_wide()
                 .chain(Some(0))
                 .collect();
-            let mut hkey = std::mem::zeroed();
+            let mut hkey = std::mem::MaybeUninit::uninit();
             if RegOpenKeyExW(
                 HKEY_CURRENT_USER,
                 PCWSTR(key_w.as_ptr()),
                 0,
                 windows::Win32::System::Registry::KEY_READ,
-                &mut hkey,
+                hkey.as_mut_ptr(),
             )
             .is_err()
             {
@@ -309,6 +318,7 @@ fn read_touchpad_registry() -> Result<TouchpadInfo> {
                     edge_slide: false,
                 });
             }
+            let hkey = hkey.assume_init();
 
             let read_dword = |name: &str, default: u32| -> u32 {
                 let mut ty = REG_VALUE_TYPE::default();
@@ -399,6 +409,9 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Resul
     let path_w: Vec<u16> = OsStr::new(&path).encode_wide().chain(Some(0)).collect();
 
     let handle = unsafe {
+        // SAFETY: CreateFileW is called with a null-terminated wide string for the HID device
+        // path discovered at startup. The returned HANDLE is checked for validity; it is used
+        // only within this function and closed explicitly.
         CreateFileW(
             PCWSTR(path_w.as_ptr()),
             (GENERIC_READ | GENERIC_WRITE).0,
@@ -413,6 +426,10 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Resul
 
     // Query feature report byte length from the device's HID descriptor.
     let feature_len = unsafe {
+        // SAFETY: HidD_GetPreparsedData allocates a preparsed data buffer associated with the
+        // HID handle. If it succeeds, we query the caps and immediately free the buffer.
+        // The HIDP_CAPS struct is POD with default initialization; only FeatureReportByteLength
+        // is read after HidP_GetCaps populates it.
         let mut preparsed = PHIDP_PREPARSED_DATA(0);
         let mut caps = HIDP_CAPS::default();
         if HidD_GetPreparsedData(handle, &mut preparsed).as_bool() && preparsed.0 != 0 {
@@ -435,9 +452,12 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Resul
     };
 
     let ok = unsafe {
+        // SAFETY: report is a valid Vec<u8> owned by this function; HidD_SetFeature copies
+        // the report data into the HID stack and does not retain the pointer.
         HidD_SetFeature(handle, report.as_mut_ptr() as *mut _, report.len() as u32).as_bool()
     };
     unsafe {
+        // SAFETY: CloseHandle is always safe on a valid HANDLE obtained from CreateFileW.
         let _ = CloseHandle(handle);
     }
 
@@ -448,7 +468,11 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Resul
         );
         Ok(())
     } else {
-        let err = unsafe { windows::Win32::Foundation::GetLastError() };
+        let err = unsafe {
+            // SAFETY: GetLastError is a lightweight call that returns the thread's last-error
+            // code; it always succeeds and requires no special state.
+            windows::Win32::Foundation::GetLastError()
+        };
         anyhow::bail!("HidD_SetFeature BLTP7853: {err:?}")
     }
 }
@@ -504,6 +528,15 @@ fn ensure_gesture_listener() {
 
 // ─── Raw Input gesture loop ───────────────────────────────────────────────────
 
+/// Raw input gesture listener thread loop.
+///
+/// # Safety
+///
+/// Must be called on a dedicated thread. Creates a message-only window and
+/// registers for Precision Touchpad raw input (Usage Page 0x000D, Usage 0x0005).
+/// The window procedure receives WM_INPUT messages and dispatches them to
+/// `process_raw_input`. This function runs an infinite message pump and never
+/// returns until the window is destroyed.
 #[cfg(windows)]
 unsafe fn win_gesture_loop() {
     use windows::core::PCWSTR;
@@ -602,6 +635,11 @@ unsafe fn win_gesture_loop() {
 }
 
 /// Window procedure for the gesture message-only window.
+///
+/// # Safety
+///
+/// Must be registered via RegisterClassExW and called by the Windows message dispatcher.
+/// Standard window procedure signature; receives WM_INPUT and forwards to process_raw_input.
 #[cfg(windows)]
 unsafe extern "system" fn gesture_wnd_proc(
     hwnd: windows::Win32::Foundation::HWND,
@@ -619,8 +657,11 @@ unsafe extern "system" fn gesture_wnd_proc(
 /// Low-level mouse hook proc — blocks WM_MOUSEMOVE while an edge gesture is
 /// active so the cursor does not drift while the user swipes the edge zone.
 ///
-/// This runs on the gesture thread (it was installed there), so reading the
-/// thread-local GESTURE_STATE is safe.
+/// # Safety
+///
+/// Must be installed via SetWindowsHookExW with WH_MOUSE_LL. Runs on the gesture
+/// thread and accesses the EDGE_GESTURE_ACTIVE atomic. Reads thread-local
+/// GESTURE_STATE which is safe because this runs on the gesture thread only.
 #[cfg(windows)]
 unsafe extern "system" fn mouse_hook_proc(
     code: i32,
@@ -808,6 +849,12 @@ fn is_touchpad_device_path(raw_input_path: &str, touchpad_path: &str) -> bool {
     }
 }
 
+/// Query the device name for a raw input device handle.
+///
+/// # Safety
+///
+/// `hdevice` must be a valid HANDLE returned by the WM_INPUT/RAWINPUTHEADER.
+/// The buffer length is validated (max 1024 wide chars) to prevent overreads.
 #[cfg(windows)]
 unsafe fn query_raw_input_device_name(
     hdevice: windows::Win32::Foundation::HANDLE,
@@ -836,6 +883,13 @@ unsafe fn query_raw_input_device_name(
     Some(String::from_utf16_lossy(&name_buf[..len]))
 }
 
+/// Process a single WM_INPUT message from the Precision Touchpad.
+///
+/// # Safety
+///
+/// `lparam` must be a valid HRAWINPUT handle from a WM_INPUT message.
+/// The function reads from preparsed HID data cached per device and from
+/// the raw input buffer. Buffer size is validated against RAWINPUTHEADER.
 #[cfg(windows)]
 unsafe fn process_raw_input(lparam: isize) {
     use windows::Win32::Devices::HumanInterfaceDevice::{
@@ -870,6 +924,11 @@ unsafe fn process_raw_input(lparam: isize) {
         std::mem::size_of::<RAWINPUTHEADER>() as u32,
     );
     if written == u32::MAX || written == 0 {
+        return;
+    }
+
+    // Validate buffer is large enough to contain a RAWINPUT struct
+    if (written as usize) < std::mem::size_of::<RAWINPUT>() {
         return;
     }
 
@@ -1573,6 +1632,8 @@ fn simulate_win_shift_s() {
         SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let inputs: [INPUT; 6] = unsafe {
+        // SAFETY: make_key_input initializes each INPUT struct with valid VK codes and
+        // flags. The array is fully initialized before being passed to SendInput.
         [
             make_key_input(VIRTUAL_KEY(0x5B), KEYBD_EVENT_FLAGS(0)), // VK_LWIN down
             make_key_input(VIRTUAL_KEY(0x10), KEYBD_EVENT_FLAGS(0)), // VK_SHIFT down
@@ -1583,6 +1644,9 @@ fn simulate_win_shift_s() {
         ]
     };
     unsafe {
+        // SAFETY: inputs is a fully initialized array of 6 INPUT structs with correct
+        // size parameter. SendInput copies the input data into the system queue and
+        // does not retain the pointer.
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
 }
@@ -1593,12 +1657,15 @@ fn simulate_volume_up() {
         SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let inputs: [INPUT; 2] = unsafe {
+        // SAFETY: Same pattern as simulate_win_shift_s — make_key_input initializes
+        // each INPUT struct fully with a VK code and flags.
         [
             make_key_input(VIRTUAL_KEY(0xAF), KEYBD_EVENT_FLAGS(0)), // VK_VOLUME_UP down
             make_key_input(VIRTUAL_KEY(0xAF), KEYEVENTF_KEYUP),      // VK_VOLUME_UP up
         ]
     };
     unsafe {
+        // SAFETY: Fully initialized array; SendInput does not retain the pointer.
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
 }
@@ -1609,12 +1676,15 @@ fn simulate_volume_down() {
         SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     let inputs: [INPUT; 2] = unsafe {
+        // SAFETY: Same pattern — make_key_input initializes each INPUT struct fully
+        // with a VK code and flags.
         [
             make_key_input(VIRTUAL_KEY(0xAE), KEYBD_EVENT_FLAGS(0)), // VK_VOLUME_DOWN down
             make_key_input(VIRTUAL_KEY(0xAE), KEYEVENTF_KEYUP),      // VK_VOLUME_DOWN up
         ]
     };
     unsafe {
+        // SAFETY: Fully initialized array; SendInput does not retain the pointer.
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
 }
@@ -1646,6 +1716,12 @@ fn show_brightness_osd(level: u8) {
 }
 
 /// Construct a keyboard `INPUT` struct for use with `SendInput`.
+///
+/// # Safety
+///
+/// The function uses unsafe `std::mem::zeroed()` internally for the union fields.
+/// The caller must ensure the returned INPUT is used only with SendInput and
+/// that the associated KEYBDINPUT ki fields are valid for the intended key event.
 #[cfg(windows)]
 #[inline]
 unsafe fn make_key_input(

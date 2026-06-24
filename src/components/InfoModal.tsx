@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom';
+import { useRef, useEffect, useCallback } from 'react';
 
 interface Props {
   open: boolean;
@@ -9,6 +10,49 @@ interface Props {
 
 /** Generic info modal rendered via portal. Click backdrop or × to close. */
 export default function InfoModal({ open, onClose, title, children }: Props) {
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  // Focus the modal container on mount (neutral element)
+  useEffect(() => {
+    if (open) {
+      // Small delay to ensure the portal is in the DOM
+      requestAnimationFrame(() => modalRef.current?.focus());
+    }
+  }, [open]);
+
+  // Focus trap + Escape handler
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+
+      const focusable = modalRef.current?.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusable || focusable.length === 0) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    },
+    [onClose],
+  );
+
   if (!open) return null;
 
   return createPortal(
@@ -25,8 +69,11 @@ export default function InfoModal({ open, onClose, title, children }: Props) {
         padding: '0 20px',
       }}
       onClick={onClose}
+      onKeyDown={handleKeyDown}
     >
       <div
+        ref={modalRef}
+        tabIndex={-1}
         style={{
           background: 'var(--surface)',
           border: '1px solid var(--border)',
