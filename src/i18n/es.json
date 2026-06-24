@@ -2,7 +2,7 @@
   "app": {
     "name": "MiControl",
     "version": "0.1.0",
-    "description": "Gestor de Hardware para Portátils Xiaomi"
+    "description": "Gestor de Hardware para Portátiles Xiaomi"
   },
   "tray": {
     "open": "Abrir MiControl",
@@ -19,7 +19,20 @@
     "brightnessPresets": "Preajustes",
     "fanMode": "Modo de Ventilador",
     "appearance": "Apariencia",
-    "opacity": "Opacidad"
+    "opacity": "Opacidad",
+    "crossDevice": "Dispositivos",
+    "mute": "Silenciar",
+    "unmute": "Activar Sonido",
+    "muted": "Silenciado",
+    "on": "Activado",
+    "fanAuto": "Auto",
+    "fanFixed": "Fijo",
+    "fanOff": "Apagado"
+  },
+  "theme": {
+    "auto": "Auto",
+    "light": "Claro",
+    "dark": "Oscuro"
   },
   "nav": {
     "overview": "Resumen",

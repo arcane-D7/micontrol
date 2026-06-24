@@ -2,5 +2,6 @@
 . "$(dirname -- "$0")/_/husky.sh"
 
 npx lint-staged
+cargo fmt --manifest-path src-tauri/Cargo.toml
 npx tsc --noEmit
 npm run version:check

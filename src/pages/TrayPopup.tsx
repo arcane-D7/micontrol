@@ -213,7 +213,7 @@ export default function TrayPopup({ hardware }: Props) {
 
         {/* Xiaomi-style quick cards */}
         <div className="tray-section">
-          <div className="tray-section-label">Cross-Device</div>
+          <div className="tray-section-label">{t('tray.crossDevice')}</div>
           <div className="tray-quick-grid">
             <div className="tray-quick-card">
               <div className="tray-quick-head">
@@ -224,11 +224,12 @@ export default function TrayPopup({ hardware }: Props) {
                   className="tray-chip-btn"
                   onClick={() => void setMasterMute(!(audioState?.muted ?? false))}
                 >
-                  {(audioState?.muted ?? false) ? 'Unmute' : 'Mute'}
+                  {(audioState?.muted ?? false) ? t('tray.unmute') : t('tray.mute')}
                 </button>
               </div>
               <div className="tray-quick-meta">
-                {audioState?.volume ?? 50}% • {(audioState?.muted ?? false) ? 'Muted' : 'On'}
+                {audioState?.volume ?? 50}% •{' '}
+                {(audioState?.muted ?? false) ? t('tray.muted') : t('tray.on')}
               </div>
               <input
                 type="range"
@@ -387,7 +388,11 @@ export default function TrayPopup({ hardware }: Props) {
                 <div className="tray-mode-row">
                   {(['auto', 'fixed', 'off'] as const).map((mode) => {
                     const shortLabel =
-                      mode === 'auto' ? 'Auto' : mode === 'fixed' ? 'Fixed' : 'Off';
+                      mode === 'auto'
+                        ? t('tray.fanAuto')
+                        : mode === 'fixed'
+                          ? t('tray.fanFixed')
+                          : t('tray.fanOff');
                     return (
                       <button
                         key={mode}

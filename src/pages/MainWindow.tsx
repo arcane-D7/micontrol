@@ -114,7 +114,9 @@ function ThemeIcon({ mode }: { mode: ThemeMode }) {
   );
 }
 
-const THEME_LABELS: Record<ThemeMode, string> = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+function getThemeLabel(mode: ThemeMode): string {
+  return t(`theme.${mode}` as Parameters<typeof t>[0]);
+}
 
 interface SidebarProps {
   activeTab: string;
@@ -184,7 +186,7 @@ const Sidebar = memo(function Sidebar({
         </div>
         <button className="theme-toggle" onClick={toggleTheme} title={`Theme: ${themeMode}`}>
           <ThemeIcon mode={themeMode} />
-          <span>{THEME_LABELS[themeMode]}</span>
+          <span>{getThemeLabel(themeMode)}</span>
         </button>
         {import.meta.env.DEV && (
           <button

@@ -4,8 +4,9 @@
 //! it to the frontend.
 
 use keyring::Entry;
+use std::time::Duration;
 
-const KEYRING_SERVICE: &str = "micontrol";
+const KEYRING_SERVICE: &str = "com.mipc.micontrol";
 const KEYRING_USER: &str = "openai_api_key";
 const TELEMETRY_CONSENT_KEY: &str = "telemetry_consent";
 
@@ -31,7 +32,10 @@ pub async fn analyze_system(
         .map_err(|e| format!("Failed to read API key: {e}"))?;
 
     // Build the request
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
     let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
 
     let body = serde_json::json!({
@@ -86,7 +90,10 @@ pub async fn test_connection(base_url: String, model: String) -> Result<String, 
         .get_password()
         .map_err(|e| format!("Failed to read API key: {e}"))?;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
     let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
 
     let body = serde_json::json!({

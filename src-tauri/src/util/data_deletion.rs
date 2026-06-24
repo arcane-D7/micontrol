@@ -30,7 +30,9 @@ pub fn delete_all_user_data(app: &tauri::AppHandle) -> Result<DeleteDataReport, 
     }
 
     // 2. Delete credential store entries
-    match keyring::Entry::new("micontrol", "openai_api_key").and_then(|e| e.delete_credential()) {
+    match keyring::Entry::new("com.mipc.micontrol", "openai_api_key")
+        .and_then(|e| e.delete_credential())
+    {
         Ok(()) => report.credentials_deleted = true,
         Err(keyring::Error::NoEntry) => report.credentials_deleted = true,
         Err(e) => report
@@ -59,7 +61,8 @@ pub fn delete_all_user_data(app: &tauri::AppHandle) -> Result<DeleteDataReport, 
     }
 
     // 5. Delete telemetry consent keyring entry
-    match keyring::Entry::new("micontrol", "telemetry_consent").and_then(|e| e.delete_credential())
+    match keyring::Entry::new("com.mipc.micontrol", "telemetry_consent")
+        .and_then(|e| e.delete_credential())
     {
         Ok(()) => report.credentials_deleted = true,
         Err(keyring::Error::NoEntry) => {}
@@ -71,6 +74,58 @@ pub fn delete_all_user_data(app: &tauri::AppHandle) -> Result<DeleteDataReport, 
     // 6. Purge consent audit log
     crate::util::consent_audit::purge_audit_log();
     report.audit_log_deleted = true;
+
+    // 7. Delete hardware profile
+    let hw_profile_path = app_data.join("hardware_profile.json");
+    if hw_profile_path.exists() {
+        match std::fs::remove_file(&hw_profile_path) {
+            Ok(()) => report.hardware_profile_deleted = true,
+            Err(e) => report
+                .errors
+                .push(format!("Failed to delete hardware profile: {e}")),
+        }
+    }
+
+    // 8. Delete hotkeys config
+    let hotkeys_path = app_data.join("hotkeys.json");
+    if hotkeys_path.exists() {
+        match std::fs::remove_file(&hotkeys_path) {
+            Ok(()) => report.hotkeys_deleted = true,
+            Err(e) => report.errors.push(format!("Failed to delete hotkeys: {e}")),
+        }
+    }
+
+    // 9. Delete nonces file
+    let nonces_path = app_data.join("nonces.json");
+    if nonces_path.exists() {
+        match std::fs::remove_file(&nonces_path) {
+            Ok(()) => report.nonces_deleted = true,
+            Err(e) => report.errors.push(format!("Failed to delete nonces: {e}")),
+        }
+    }
+
+    // 10. Delete elevated bridge HMAC key
+    let elev_key_path = app_data.join("elev_key.bin");
+    if elev_key_path.exists() {
+        match std::fs::remove_file(&elev_key_path) {
+            Ok(()) => report.elev_key_deleted = true,
+            Err(e) => report
+                .errors
+                .push(format!("Failed to delete elev key: {e}")),
+        }
+    }
+
+    // 11. Delete old elevated bridge key backup
+    let elev_key_old_path = app_data.join("elev_key.bin.old");
+    if elev_key_old_path.exists() {
+        let _ = std::fs::remove_file(&elev_key_old_path);
+    }
+
+    // 12. Delete AI config if it exists
+    let ai_config_path = app_data.join("ai_config.json");
+    if ai_config_path.exists() {
+        let _ = std::fs::remove_file(&ai_config_path);
+    }
 
     Ok(report)
 }
@@ -113,5 +168,9 @@ pub struct DeleteDataReport {
     pub schedule_deleted: bool,
     pub consent_deleted: bool,
     pub audit_log_deleted: bool,
+    pub hardware_profile_deleted: bool,
+    pub hotkeys_deleted: bool,
+    pub nonces_deleted: bool,
+    pub elev_key_deleted: bool,
     pub errors: Vec<String>,
 }

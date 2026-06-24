@@ -19,7 +19,20 @@
     "brightnessPresets": "Predefinições",
     "fanMode": "Modo de Ventilação",
     "appearance": "Aparência",
-    "opacity": "Opacidade"
+    "opacity": "Opacidade",
+    "crossDevice": "Dispositivos",
+    "mute": "Silenciar",
+    "unmute": "Ativar Som",
+    "muted": "Mudo",
+    "on": "Ligado",
+    "fanAuto": "Auto",
+    "fanFixed": "Fixo",
+    "fanOff": "Desligado"
+  },
+  "theme": {
+    "auto": "Auto",
+    "light": "Claro",
+    "dark": "Escuro"
   },
   "nav": {
     "overview": "Visão Geral",

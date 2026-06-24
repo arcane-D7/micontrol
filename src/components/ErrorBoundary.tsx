@@ -1,10 +1,7 @@
 import { Component, ErrorInfo, ReactNode } from 'react';
 import en from '../i18n/en.json';
-import pt from '../i18n/pt.json';
-import es from '../i18n/es.json';
-import fr from '../i18n/fr.json';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '1.0.0';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -14,9 +11,6 @@ interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
 }
-
-const LOCALES = { en, pt, es, fr } as const;
-type Locale = keyof typeof LOCALES;
 
 function getNestedValue(obj: Record<string, unknown>, path: string): string {
   const parts = path.split('.');
@@ -29,14 +23,7 @@ function getNestedValue(obj: Record<string, unknown>, path: string): string {
 }
 
 function getLocaleStrings() {
-  let lang: Locale = 'en';
-  try {
-    const stored = localStorage.getItem('micontrol_lang') as Locale | null;
-    if (stored && stored in LOCALES) lang = stored;
-  } catch {
-    /* localStorage unavailable */
-  }
-  const strings = LOCALES[lang] as Record<string, unknown>;
+  const strings = en as Record<string, unknown>;
   return {
     title: getNestedValue(strings, 'error.boundary.title') || 'Something went wrong',
     message:
@@ -72,7 +59,10 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       `## Error\n\n\`\`\`\n${error?.stack || error?.message || 'Unknown error'}\n\`\`\`\n\n` +
         `## Environment\n\n- Version: ${APP_VERSION}\n- OS: ${navigator.userAgent}\n- Timestamp: ${new Date().toISOString()}\n`,
     );
-    window.open(`https://github.com/mafsc/miPC/issues/new?title=${title}&body=${body}`, '_blank');
+    window.open(
+      `https://github.com/Freitas-MA/miPC/issues/new?title=${title}&body=${body}`,
+      '_blank',
+    );
   };
 
   render(): ReactNode {
@@ -105,6 +95,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           </p>
           {this.state.error && (
             <pre
+              role="alert"
               style={{
                 fontSize: 12,
                 color: 'var(--color-text-muted, #a6adc8)',
@@ -120,6 +111,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             </pre>
           )}
           <button
+            type="button"
             onClick={this.handleReload}
             style={{
               padding: '10px 24px',
@@ -135,6 +127,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             {t.reload}
           </button>
           <button
+            type="button"
             onClick={this.handleReportIssue}
             style={{
               padding: '10px 24px',
