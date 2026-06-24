@@ -1,3 +1,7 @@
+//! Tauri commands for direct hardware I/O (audio, charging, IoT, performance).
+//!
+//! Wraps IoTService IPC, audio, and performance control for frontend invocation.
+
 use crate::elev_bridge;
 use crate::hw::audio::{
     list_audio_devices as hw_list_audio, set_playback_mute as hw_set_mute,

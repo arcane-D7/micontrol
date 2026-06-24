@@ -432,6 +432,7 @@
     "disconnect": "Déconnecter",
     "connect": "Connecter",
     "password": "Mot de passe",
+    "passwordLabel": "Mot de passe WiFi",
     "availableNetworks": "Réseaux Disponibles",
     "noNetworks": "Aucun réseau trouvé. Cliquez sur Actualiser pour rechercher.",
     "refresh": "Actualiser",
@@ -560,7 +561,39 @@
     "deleting": "Suppression...",
     "deleteSuccess": "Toutes les données ont été supprimées avec succès.",
     "deleteError": "Échec de la suppression de toutes les données. Voir la console pour plus de détails.",
-    "confirmDelete": "Êtes-vous sûr ? Cela supprimera définitivement toutes vos données, y compris les clés API, les journaux et les paramètres. Cela ne peut pas être annulé."
+    "confirmDelete": "Êtes-vous sûr ? Cela supprimera définitivement toutes vos données, y compris les clés API, les journaux et les paramètres. Cela ne peut pas être annulé.",
+    "replayOnboarding": "Rejouer l'Introduction",
+    "onboarding": "Assistant d'Introduction",
+    "onboardingDesc": "Réafficher l'assistant de bienvenue pour revoir les fonctionnalités et préférences."
+  },
+  "onboarding": {
+    "welcome": {
+      "title": "Bienvenue sur miPC",
+      "description": "Votre centre de contrôle matériel tout-en-un pour laptops gaming.",
+      "getStarted": "Commencer"
+    },
+    "privacy": {
+      "title": "Confidentialité et Consentement",
+      "description": "miPC respecte votre vie privée. Choisissez les données que vous souhaitez partager.",
+      "allow": "Autoriser",
+      "deny": "Refuser"
+    },
+    "features": {
+      "title": "Aperçu des Fonctionnalités",
+      "hardwareControl": "Contrôle matériel — Courbes de ventilateur, batterie, écran, audio",
+      "driverManagement": "Gestion des pilotes — Analyser, installer et mettre à jour",
+      "systemInfo": "Infos système — Surveillance matérielle en temps réel",
+      "iotService": "Service IoT — Accès EC RAM, touches de raccourci, projection d'écran"
+    },
+    "ready": {
+      "title": "Vous êtes Prêt !",
+      "description": "miPC est prêt à l'emploi. Vous pouvez rejouer cet assistant à tout moment depuis Paramètres.",
+      "finish": "Terminer"
+    },
+    "step": "Étape {{current}} sur {{total}}",
+    "next": "Suivant",
+    "back": "Retour",
+    "skip": "Passer"
   },
   "ai": {
     "title": "Conseiller système IA",
@@ -588,7 +621,15 @@
     "columnGpu": "GPU°C",
     "columnTdp": "TDP W",
     "columnCpuPct": "CPU%",
-    "columnGpuPct": "GPU%"
+    "columnGpuPct": "GPU%",
+    "disclaimer": "Le contenu généré par IA peut être inexact. Vérifiez les informations critiques.",
+    "usage": {
+      "title": "Utilisation IA",
+      "requests": "Total des Requêtes",
+      "tokens": "Total des Tokens",
+      "estimatedCost": "Coût Estimé",
+      "reset": "Réinitialiser"
+    }
   },
   "consent": {
     "dialog": {
@@ -598,6 +639,7 @@
       "where": "API OpenAI — traitée sur leurs serveurs conformément à leur politique de confidentialité",
       "why": "Pour fournir des informations basées sur l'IA et des recommandations d'optimisation matérielle",
       "control": "Vous pouvez révoquer ce consentement à tout moment dans Paramètres → Confidentialité. Les fonctions IA s'arrêteront immédiatement.",
+      "sentryDisclosure": "Les rapports de plantage seront envoyés à Sentry pour aider à améliorer l'application. Aucune donnée personnelle n'est incluse.",
       "allow": "Autoriser",
       "deny": "Refuser",
       "privacyLink": "Lire notre Politique de Confidentialité"
@@ -677,17 +719,29 @@
       "deleteLog": "Supprimer cette entrée de journal"
     }
   },
+  "shortcuts": {
+    "tabSwitch": "Alt+1 à Alt+9 pour changer d'onglet"
+  },
   "audio": {
     "loadingDevices": "Chargement des périphériques audio...",
     "noDevices": "Aucun périphérique audio trouvé",
     "loadDevicesError": "Échec du chargement des périphériques audio",
     "initError": "Échec de l'initialisation du contrôle audio",
     "title": "🎵 Contrôle Audio",
+    "pageTitle": "Contrôle Audio",
     "subtitle": "Volume maître et gestion des périphériques",
     "mute": "Muet",
     "unmute": "Réactiver le son",
     "muted": "Muet",
     "playbackDevices": "Périphériques de Lecture",
     "defaultDevice": "Par défaut"
+  },
+  "error": {
+    "boundary": {
+      "title": "Quelque chose s'est mal passé",
+      "message": "Une erreur inattendue s'est produite. Essayez de recharger l'application.",
+      "reload": "Recharger",
+      "report": "Signaler un Problème"
+    }
   }
 }

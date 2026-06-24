@@ -531,7 +531,39 @@
     "deleting": "Excluindo...",
     "deleteSuccess": "Todos os dados foram excluídos com sucesso.",
     "deleteError": "Falha ao excluir todos os dados. Veja o console para detalhes.",
-    "confirmDelete": "Tem certeza? Isso excluirá permanentemente todos os seus dados incluindo chaves de API, logs e configurações. Isso não pode ser desfeito."
+    "confirmDelete": "Tem certeza? Isso excluirá permanentemente todos os seus dados incluindo chaves de API, logs e configurações. Isso não pode ser desfeito.",
+    "replayOnboarding": "Repetir Introdução",
+    "onboarding": "Assistente de Introdução",
+    "onboardingDesc": "Reexibir o assistente de boas-vindas para rever funcionalidades e preferências."
+  },
+  "onboarding": {
+    "welcome": {
+      "title": "Bem-vindo ao miPC",
+      "description": "O seu centro de controlo de hardware tudo-em-um para laptops gaming.",
+      "getStarted": "Começar"
+    },
+    "privacy": {
+      "title": "Privacidade e Consentimento",
+      "description": "O miPC respeita a sua privacidade. Escolha quais dados pretende partilhar.",
+      "allow": "Permitir",
+      "deny": "Negar"
+    },
+    "features": {
+      "title": "Visão Geral das Funcionalidades",
+      "hardwareControl": "Controlo de Hardware — Curvas de ventoinha, bateria, ecrã, áudio",
+      "driverManagement": "Gestão de Drivers — Analisar, instalar e atualizar drivers",
+      "systemInfo": "Informação do Sistema — Monitorização de hardware em tempo real",
+      "iotService": "Serviço IoT — Acesso a EC RAM, teclas de atalho, projeção de ecrã"
+    },
+    "ready": {
+      "title": "Tudo Pronto!",
+      "description": "O miPC está pronto a usar. Pode repetir este assistente a qualquer momento em Definições.",
+      "finish": "Concluir"
+    },
+    "step": "Passo {{current}} de {{total}}",
+    "next": "Seguinte",
+    "back": "Anterior",
+    "skip": "Saltar"
   },
   "ai": {
     "title": "Conselheiro de Sistema por IA",
@@ -559,7 +591,14 @@
     "columnGpu": "GPU°C",
     "columnTdp": "TDP W",
     "columnCpuPct": "CPU%",
-    "columnGpuPct": "GPU%"
+    "columnGpuPct": "GPU%",
+    "usage": {
+      "title": "Uso de IA",
+      "requests": "Total de Pedidos",
+      "tokens": "Total de Tokens",
+      "estimatedCost": "Custo Estimado",
+      "reset": "Reiniciar Uso"
+    }
   },
   "wifi": {
     "title": "Gestor WiFi",
@@ -569,6 +608,7 @@
     "disconnect": "Desligar",
     "connect": "Ligar",
     "password": "Palavra-passe",
+    "passwordLabel": "Senha do WiFi",
     "availableNetworks": "Redes Disponíveis",
     "noNetworks": "Nenhuma rede encontrada. Clique em Atualizar para procurar.",
     "refresh": "Atualizar",
@@ -598,6 +638,7 @@
       "where": "API da OpenAI — processada nos seus servidores de acordo com a sua política de privacidade",
       "why": "Para fornecer insights alimentados por IA e recomendações de otimização de hardware",
       "control": "Pode revogar este consentimento a qualquer momento em Definições → Privacidade. Os recursos de IA pararão imediatamente.",
+      "sentryDisclosure": "Relatórios de falhas serão enviados ao Sentry para ajudar a melhorar a aplicação. Nenhum dado pessoal é incluído.",
       "allow": "Permitir",
       "deny": "Negar",
       "privacyLink": "Leia a nossa Política de Privacidade"
@@ -677,17 +718,29 @@
       "deleteLog": "Eliminar esta entrada de registo"
     }
   },
+  "shortcuts": {
+    "tabSwitch": "Alt+1 a Alt+9 para alternar separadores"
+  },
   "audio": {
     "loadingDevices": "Carregando dispositivos de áudio...",
     "noDevices": "Nenhum dispositivo de áudio encontrado",
     "loadDevicesError": "Falha ao carregar dispositivos de áudio",
     "initError": "Falha ao inicializar controlo de áudio",
     "title": "🎵 Controlo de Áudio",
+    "pageTitle": "Controlo de Áudio",
     "subtitle": "Volume mestre e gestão de dispositivos",
     "mute": "Silenciar",
     "unmute": "Ativar som",
     "muted": "Silenciado",
     "playbackDevices": "Dispositivos de Reprodução",
     "defaultDevice": "Padrão"
+  },
+  "error": {
+    "boundary": {
+      "title": "Algo deu errado",
+      "message": "Ocorreu um erro inesperado. Tente recarregar a aplicação.",
+      "reload": "Recarregar",
+      "report": "Reportar Problema"
+    }
   }
 }

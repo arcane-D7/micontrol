@@ -1,8 +1,7 @@
 //! Safe wrappers for Windows registry operations.
 //!
-//! This module replaces the unsafe `std::mem::zeroed()` pattern for HKEY
-//! handles with `MaybeUninit`, ensuring that `RegCloseKey` is only called
-//! on handles that were successfully initialized.
+//! Replaces unsafe `std::mem::zeroed()` patterns with `MaybeUninit`,
+//! ensuring `RegCloseKey` is only called on successfully initialised handles.
 
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{

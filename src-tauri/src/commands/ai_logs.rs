@@ -3,7 +3,6 @@
 //! When Smart or Smart Acceleration is active the frontend writes a log entry
 //! every ~30 s via `write_ai_perf_log`.  Entries are appended as JSONL lines to
 //! `<AppData>\MiControl\ai_perf_logs\YYYY-MM-DD.jsonl`.
-//!
 //! The log directory is created automatically on first write.
 
 use serde::{Deserialize, Serialize};

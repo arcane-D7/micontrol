@@ -1,3 +1,8 @@
+//! Driver and BIOS update checking via Xiaomi PC Manager registry cache.
+//!
+//! Reuses XiaomiPCManager's own scan engine to check for official
+//! Xiaomi driver and BIOS updates without Windows Update.
+
 /// Update Nucleus — Phase 9
 ///
 /// This module acts as a lightweight "sandbox nucleus" that reuses XiaomiPCManager's

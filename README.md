@@ -1,222 +1,145 @@
-[![codecov](https://codecov.io/gh/mafsc/micontrol/branch/master/graph/badge.svg)](https://codecov.io/gh/mafsc/micontrol)
+# miPC
 
-# MiControl - Estado Atual da Documentação
+> Desktop hardware control for gaming laptops — fan curves, battery, display, audio, and more.
 
-## Aviso Importante
-
-Esta é a **única documentação ativa** do projeto neste momento.
-
-O projeto está **em construção** e este documento pode conter pontos **desatualizados** enquanto funcionalidades, arquitetura e fluxos internos continuam evoluindo.
-
-Toda documentação anterior foi movida para `docs/deprecated/`.
+[![CI](https://img.shields.io/github/actions/workflow/status/user/miPC/ci.yml?branch=main&style=flat-square)](https://github.com/user/miPC/actions)
+[![License](https://img.shields.io/github/license/user/miPC?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/github/v/release/user/miPC?style=flat-square)](https://github.com/user/miPC/releases)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](CONTRIBUTING.md)
 
 ---
 
-## Checklist de Reorganização
+## Features
 
-- [x] Consolidar documentação ativa em um único arquivo.
-- [x] Mover documentos antigos para `docs/deprecated/`.
-- [x] Marcar explicitamente o status "em construção" e risco de desatualização.
-- [x] Revisar este documento ao fim de cada ciclo de implementação relevante.
-- [x] Vincular cada mudança importante de backend/frontend a um item do roteiro técnico abaixo.
-- [ ] Definir critério de "documentação estável" para saída de beta interno.
-
----
-
-## Changelog Simples
-
-### 2026-05-29
-
-- **WiFi Manager reescrito** para gerenciar WiFi do próprio PC via `netsh wlan` (era gerenciador de WiFi de dispositivo IoT via IPC).
-- Novo módulo Rust `hw/wifi.rs` com funções `scan_networks`, `get_status`, `connect`, `disconnect`.
-- 4 novos comandos Tauri registrados: `wifi_scan`, `wifi_status`, `wifi_connect`, `wifi_disconnect`.
-- `WiFiManager.tsx` reescrito do zero: escaneia redes disponíveis, exibe sinal/segurança, conecta/desconecta com senha.
-- `ScreenCast.tsx` atualizado para usar i18n (`t("cast.*")`); lógica inalterada.
-- Card "EC Debug" removido do TrayPopup; substituído por card "WiFi" que navega para aba WiFi Manager.
-- Seções `"wifi"` e `"cast"` adicionadas a todos os 4 arquivos de locale (`en`, `pt`, `es`, `fr`).
-- Checks executados após mudanças:
-  - `cargo test -p micontrol` — 48 testes passando
-  - `npx tsc --noEmit` — 0 erros
-  - `cargo build --release` — build OK
-
-### 2026-05-23
-
-- Hardening do bridge elevado com `request_id` por chamada e arquivos de comando/resultado por requisição.
-- Serialização de chamadas elevadas para evitar corrida entre pedidos simultâneos.
-- Validação de `request_id` na leitura do resultado elevado.
-- Fluxo `install_driver` endurecido: backend elevado passa a aceitar `driver_name` e resolve/valida `.inf` internamente.
-- Adicionada validação de segurança de caminho para `.inf` canônico dentro de `resources`.
-- Escrita ECRAM protegida por regra de segurança:
-- allowlist para escritas conhecidas e seguras.
-- escrita avançada condicionada à variável `MICONTROL_ENABLE_RAW_ECRAM_WRITE=1`.
-- limite de payload e bloqueio de faixa fora de ERAM.
-- Testes adicionados para guard-rails de ECRAM.
-- Checks executados após mudanças:
-- `cargo fmt`
-- `cargo test`
-- `npm run build`
-- `npm test -- --run`
-- Atualização do perfil global de hardware para runtime após `rediscover` (sem reiniciar o app).
-- `global_profile` tornou-se atualizável em tempo de execução com leitura por snapshot.
-- `useHardware` ganhou sinalização granular de erro por subsistema (`refreshErrors`) e resumo de falhas no refresh.
-- Sidebar principal agora exibe falhas por subsistema para diagnóstico rápido.
-- Warnings limpos em `hotkeys.rs` (retorno de `PeekMessageW`, campo WMI não usado, variável default não usada).
-- Teste frontend `ChargingThreshold` ajustado para fluxo assíncrono com `userEvent`/`waitFor`, removendo warning de `act(...)`.
-- Checks executados após esta rodada:
-- `cargo fmt --all`
-- `cargo test`
-- `npm run build`
-- `npm test -- --run`
+- **Hardware Control** — Manage fan curves, battery charge thresholds, display brightness & HDR, audio volume & devices, keyboard backlight, and touchpad settings.
+- **IoT Service Integration** — Communicate with the embedded controller via EC RAM access, handle hotkeys, and cast the screen wirelessly.
+- **Driver Management** — Scan, install, and update hardware drivers with guided workflows.
+- **System Info Dashboard** — Real-time CPU, GPU, RAM, and storage monitoring at a glance.
+- **Privacy-First** — All data stays local by default. Telemetry requires explicit opt-in via the consent audit log. Every privileged operation is logged and integrity-verified with HMAC.
+- **Multi-Language** — Available in English, Portuguese, Spanish, and French.
 
 ---
 
-## Próximos Passos Imediatos
+## Installation
 
-- [x] Endurecer bridge elevado com correlação por requisição.
-- [x] Revalidar instalação de driver no processo elevado.
-- [x] Implementar controles de segurança para escrita ECRAM.
-- [x] Executar checks de build e testes após hardening.
-- [x] Atualizar perfil global de hardware em runtime após `rediscover`.
-- [x] Melhorar sinalização de erro por subsistema no `useHardware`.
-- [x] Reduzir warnings pendentes no backend (`hotkeys.rs`) e testes frontend (`act(...)`).
-- [x] Reescrever WiFi Manager para gerenciar WiFi do PC via `netsh wlan` (não IoT device).
-- [x] Adicionar i18n ao ScreenCast.tsx.
-- [x] Remover EC Debug do TrayPopup; adicionar card WiFi.
-- [x] Adicionar traduções `wifi` e `cast` para EN, PT, ES, FR.
-- [ ] Implementar enumeração de dispositivos Miracast via WinRT (atualmente retorna lista vazia).
-- [ ] Definir critério de "documentação estável" para saída de beta interno.
+### Download a Release
 
-## Roteiro Técnico Detalhado
+Grab the latest MSIX installer from the [Releases page](https://github.com/user/miPC/releases). No additional runtime is required.
 
-## 1. Objetivo Técnico do Produto
+### Build from Source
 
-Entregar um app desktop Tauri (Rust + React) para controle de hardware Xiaomi no Windows com foco em:
+#### Prerequisites
 
-- Performance mode (WMI/VHF/overlay Windows)
-- Charging threshold (IoT pipe/registry)
-- Telemetria de sistema (CPU/GPU/bateria/display/fan)
-- Descoberta e instalação guiada de drivers
-- Hotkeys e recursos avançados (touchpad, OSD, ECRAM)
+| Tool        | Version | Notes                       |
+| ----------- | ------- | --------------------------- |
+| Rust        | stable  | rustup default stable       |
+| Node.js     | 20+     | LTS recommended             |
+| Windows SDK | 10.0+   | Included with Visual Studio |
 
-## 2. Estado Arquitetural Atual
-
-### Frontend (`src/`)
-
-- React + TypeScript + Vite.
-- `useHardware` concentra chamadas Tauri (`invoke`) e estado de hardware.
-- `MainWindow.tsx` agrega múltiplas abas e parte relevante da lógica de UI/fluxo.
-- Testes existentes com Vitest para componentes-chave e i18n.
-
-### Backend (`src-tauri/src/`)
-
-- Camada `commands/*` como API Tauri.
-- Camada `hw/*` com integrações Win32/WMI/HID/IoT.
-- Fluxo de elevação de privilégio via bridge (`elev_bridge.rs` + `elevated.rs`).
-- Descoberta de hardware com cache de perfil.
-
-## 3. Prioridades Técnicas (Ordem Recomendada)
-
-## Fase 1 - Endurecimento de segurança da elevação
-
-1. Remover dependência de arquivos previsíveis de comando/resultado sem correlação robusta.
-2. Introduzir identificador único por requisição e validação de origem.
-3. Revalidar no processo elevado todos os argumentos sensíveis (especialmente instalação de driver e escrita de hardware).
-4. Limitar superfície de comandos elevados a uma allowlist estrita.
-
-## Fase 2 - Contenção de operações de alto risco (ECRAM)
-
-1. Restringir escrita bruta em ECRAM por feature flag de debug.
-2. Implementar allowlist por região/offset para operações de produção.
-3. Exigir confirmação forte e logging de auditoria local para cada escrita.
-4. Garantir limites de tamanho e sanitização completa dos payloads hex.
-
-## Fase 3 - Consistência de estado e sincronização
-
-1. Revisar `useHardware` para evitar estado silenciosamente stale em falhas parciais.
-2. Tornar status de erro granular por subsistema (bateria/display/fan/performance).
-3. Atualizar o perfil global de hardware em runtime após rediscovery (sem exigir restart, se viável).
-4. Definir política de polling/backoff e timeout por comando.
-
-## Fase 4 - Refatoração estrutural de módulos grandes
-
-1. Dividir `MainWindow.tsx` por domínio de aba e handlers dedicados.
-2. Dividir módulos Rust extensos (`hotkeys.rs`, `touchpad.rs`, `display.rs`) em submódulos orientados a responsabilidade.
-3. Padronizar contratos de erro entre `hw/*` e `commands/*`.
-4. Criar camadas utilitárias para conversão/serialização repetida.
-
-## Fase 5 - Qualidade e testes
-
-1. Ampliar cobertura de testes para:
-   - bridge elevado
-   - validação de comandos privilegiados
-   - discovery/install driver
-   - parsing e limites de operações ECRAM
-2. Adicionar lint e checks automáticos:
-   - frontend: lint + test + build
-   - backend: fmt + clippy + test
-3. Definir suite mínima obrigatória para merge.
-
-## Fase 6 - Observabilidade e diagnóstico
-
-1. Padronizar logs estruturados por subsistema (`security`, `performance`, `iot`, `ui`).
-2. Inserir códigos de erro estáveis para falhas críticas.
-3. Criar visão de diagnóstico no app para exportar snapshot técnico.
-4. Registrar métricas de latência e taxa de falha dos comandos Tauri.
-
-## Fase 7 - UX técnica e operação
-
-1. Melhorar feedback de erro acionável na UI para casos de permissão/driver ausente.
-2. Garantir fallback explícito quando canais primários (WMI/VHF/IoT) não estiverem disponíveis.
-3. Definir fluxo de recuperação pós-falha (re-scan, reinstalação driver, modo seguro).
-4. Revisar experiência de setup inicial em hardware não homologado.
-
-## Fase 8 - Critérios de prontidão
-
-Concluir beta interno somente quando:
-
-1. Operações elevadas estiverem com validação forte e rastreabilidade mínima.
-2. Escritas de hardware de risco estiverem protegidas por políticas de segurança.
-3. Cobertura de testes de fluxos críticos estiver estável.
-4. Falhas críticas tiverem mensagens de recuperação claras para usuário.
-
----
-
-## Política de Documentação a Partir de Agora
-
-1. Este arquivo permanece como fonte única de referência ativa.
-2. Toda documentação antiga ou parcialmente inválida deve ir para `docs/deprecated/`.
-3. Mudanças de arquitetura/segurança devem atualizar primeiro o checklist e o roteiro acima.
-
----
-
-## Development
-
-### Prerequisites
-
-- Node.js 20+
-- Rust (stable)
-- Windows SDK (for Tauri builds)
-
-### Running Checks Locally
-
-**Rust:**
+#### Steps
 
 ```bash
+# Clone the repository
+git clone https://github.com/user/miPC.git
+cd miPC
+
+# Install frontend dependencies
+npm install
+
+# Run in development mode
+npm run tauri dev
+
+# Build for production
+npm run tauri build
+```
+
+#### Running Checks
+
+```bash
+# Rust
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
-```
 
-**Frontend:**
-
-```bash
+# Frontend
 npm ci
 npx tsc --noEmit
 npm run lint
 npm run format:check
 npm run build
 ```
+
+---
+
+## Architecture Overview
+
+miPC is a Tauri v2 desktop application with a React 19 frontend and a Rust backend.
+
+```
+┌─────────────────────────────────────────────────┐
+│                  React 19 + TypeScript           │
+│  ┌──────────┐  ┌──────────────┐  ┌───────────┐  │
+│  │ Sidebar  │  │  TabContent  │  │  Tray UI  │  │
+│  └────┬─────┘  └──────┬───────┘  └─────┬─────┘  │
+│       └───────────────┼─────────────────┘        │
+│                       ▼                          │
+│              Custom Hooks (useHardware)           │
+│                       │                          │
+│              Tauri IPC (invoke)                   │
+├───────────────────────┼──────────────────────────┤
+│                 Rust Backend                      │
+│  ┌──────────┐  ┌──────────────┐  ┌───────────┐  │
+│  │Commands  │  │  hw/* (HAL)  │  │Elev Bridge│  │
+│  └──────────┘  └──────┬───────┘  └───────────┘  │
+│                       │                          │
+│          WMI ─ Registry ─ HID ─ EC RAM           │
+├───────────────────────┼──────────────────────────┤
+│                  Windows 10/11                    │
+└─────────────────────────────────────────────────┘
+```
+
+- **Frontend** — React 19 with TypeScript, Vite, and Tailwind CSS. Tab-based UI with lazy-loaded pages.
+- **Backend** — Rust modules organized by hardware domain (`hw/battery.rs`, `hw/display.rs`, etc.), exposed via Tauri command handlers.
+- **Elevated Bridge** — A secure subprocess for privileged operations (driver installs, EC RAM access). Every request is HMAC-signed, nonce-protected against replay, and logged to an integrity-verified audit trail.
+
+---
+
+## Privacy & Security
+
+miPC is designed with privacy and security as first-class concerns.
+
+| Principle            | Implementation                                                                                                           |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Local-First**      | All hardware state, profiles, and logs stay on your machine. No cloud dependency.                                        |
+| **Consent Audit**    | Every telemetry-capable operation is logged with a timestamp and HMAC integrity check.                                   |
+| **Telemetry Opt-In** | No data leaves your PC without explicit consent. You can review and revoke consent at any time.                          |
+| **Elevated Bridge**  | Privileged commands use a secure subprocess with HMAC signing, nonce replay protection, and per-request correlation IDs. |
+| **No Telemetry**     | The application does not phone home unless you explicitly enable it.                                                     |
+
+---
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+This project follows a [Code of Conduct](CODE_OF_CONDUCT.md) — be respectful, inclusive, and constructive.
+
+---
+
+## License
+
+[MIT](LICENSE) © miPC contributors
+
+---
+
+## Acknowledgments
+
+- [Tauri](https://tauri.app/) — Desktop application framework
+- [React](https://react.dev/) — UI library
+- [Vite](https://vitejs.dev/) — Frontend tooling
+- [Tailwind CSS](https://tailwindcss.com/) — Utility-first CSS
+- The open-source community for the tools and libraries that make this project possible
 
 **Full Tauri build:**
 

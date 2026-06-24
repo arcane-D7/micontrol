@@ -1,3 +1,8 @@
+//! Logging initialisation for development and production.
+//!
+//! Sets up `fern` logging to stdout (production) or a rolling file
+//! in `%LOCALAPPDATA%\MiControl\logs` (Tauri dev mode).
+
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::OnceLock;

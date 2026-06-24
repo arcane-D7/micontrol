@@ -780,10 +780,51 @@ input[type='range']:active::-webkit-slider-thumb {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .tab-content,
+  .tab-content .card {
+    animation: none !important;
+  }
+
+  .skeleton {
+    animation: none !important;
+  }
+
+  .toast {
+    animation: none !important;
+  }
+
   .mute-btn:hover,
-  .toggle-switch:hover {
-    transform: none;
-    transition: none;
+  .toggle-switch:hover,
+  .sidebar-item:hover,
+  .mode-btn:hover:not(:disabled),
+  .theme-toggle:hover,
+  .threshold-btn:hover,
+  .tray-mode-btn:hover,
+  .tray-icon-btn:hover:not(:disabled),
+  .tray-chip-btn:hover:not(:disabled),
+  .tray-link-btn:hover:not(:disabled) {
+    transform: none !important;
+  }
+
+  .mode-btn:hover:not(:disabled) {
+    transform: none !important;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    transform: none !important;
+  }
+
+  .mute-btn:active {
+    transform: none !important;
   }
 }
 
@@ -1574,6 +1615,19 @@ input::placeholder {
   justify-content: center;
   min-height: 200px;
   color: var(--text-secondary, var(--text-dim));
+}
+
+/* ── Screen-reader-only utility ──────────────────────────────────────────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ── Delete log button ──────────────────────────────────────────────────── */

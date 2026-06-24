@@ -1,3 +1,8 @@
+//! Shared application state managed by Tauri.
+//!
+//! Defines `AppState` holding performance mode, charging threshold,
+//! and the hardware profile cache.
+
 use crate::hw::discovery::HardwareProfile;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;

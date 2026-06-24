@@ -1,7 +1,6 @@
-// hw/screen_cast.rs
-//
-// Screen casting via Windows Miracast API.
-// Provides device discovery and casting control.
+//! Screen casting via Windows Miracast API.
+//!
+//! Provides device discovery and casting control to Miracast receivers.
 
 use crate::hw::errors::HardwareResult;
 use anyhow::Context;

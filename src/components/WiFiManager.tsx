@@ -163,6 +163,7 @@ export default function WiFiManager() {
                   <input
                     type="password"
                     placeholder={t('wifi.password')}
+                    aria-label={t('wifi.passwordLabel')}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     onClick={(e) => e.stopPropagation()}

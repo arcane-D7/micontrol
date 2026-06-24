@@ -1,3 +1,8 @@
+//! Tauri commands for system-level operations (display, fan, battery, etc.).
+//!
+//! Delegates to the `hw` module for each hardware domain and wraps
+//! results in Tauri-compatible response types.
+
 use crate::elev_bridge;
 use crate::hw::audio::{get_playback_volume as hw_get_audio, AudioVolumeResult};
 use crate::hw::battery::{get_battery_info as hw_get_battery, BatteryInfo};

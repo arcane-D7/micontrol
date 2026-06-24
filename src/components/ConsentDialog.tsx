@@ -143,6 +143,21 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
           </li>
         </ul>
 
+        <p
+          style={{
+            fontSize: 12,
+            lineHeight: 1.5,
+            color: 'var(--color-text-muted)',
+            marginBottom: 18,
+            padding: '8px 10px',
+            background: 'var(--color-surface-alt, rgba(255,255,255,0.03))',
+            borderRadius: 8,
+            border: '1px solid var(--color-border, #3a3a4e)',
+          }}
+        >
+          {t('consent.dialog.sentryDisclosure')}
+        </p>
+
         <p style={{ fontSize: 12, marginBottom: 20, color: 'var(--color-text-muted)' }}>
           <a
             href="#"
@@ -160,7 +175,7 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
           <button
             type="button"
             onClick={onDeny}
-            className="btn-primary"
+            className="btn-secondary"
             ref={denyRef}
             style={{
               padding: '8px 20px',

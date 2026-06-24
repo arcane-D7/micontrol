@@ -1,4 +1,7 @@
 //! Data deletion utilities for GDPR Art.17 (right to erasure).
+//!
+//! Deletes AI performance logs, credential store entries, and other
+//! user data when requested.
 
 use serde::Serialize;
 use tauri::Manager;

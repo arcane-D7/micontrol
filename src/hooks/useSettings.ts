@@ -20,6 +20,8 @@ const TELEMETRY_CONSENT_KEY = 'telemetry_consent';
 const POLICY_VERSION = 2;
 
 export interface AppSettings {
+  /** Whether the first-run onboarding wizard has been completed. */
+  onboardingCompleted: boolean;
   /** OpenAI (or compatible) API key */
   openai_api_key: string;
   /** Base URL — change to use Ollama, Azure, or any OpenAI-compatible endpoint */
@@ -43,6 +45,7 @@ export interface AppSettings {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  onboardingCompleted: false,
   openai_api_key: '',
   openai_base_url: 'https://api.openai.com/v1',
   openai_model: 'gpt-4o-mini',
@@ -393,10 +396,15 @@ Be concise. Use short paragraphs with emoji section headers. Max 300 words.`;
     }
   }
 
+  function setOnboardingCompleted(completed: boolean): void {
+    updateKey('onboardingCompleted', completed);
+  }
+
   return {
     settings,
     saveSettings,
     updateKey,
+    setOnboardingCompleted,
     analyzeSystem,
     analyzeWithLogs,
     testConnection,

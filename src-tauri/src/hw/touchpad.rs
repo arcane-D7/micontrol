@@ -1,3 +1,8 @@
+//! Touchpad configuration (sensitivity, haptics, gestures).
+//!
+//! Controls Precision Touchpad settings via Windows Touchpad API
+//! or IoT service for Xiaomi-specific features.
+
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

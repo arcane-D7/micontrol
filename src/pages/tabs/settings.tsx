@@ -26,6 +26,10 @@ export default function SettingsTab({ ai, onTabChange }: Props) {
     setTelemetryConsent('granted');
   }, [ai]);
 
+  const handleReplayOnboarding = useCallback(() => {
+    ai.setOnboardingCompleted(false);
+  }, [ai]);
+
   return (
     <>
       <PageHeader title={t('settings.title')} subtitle={t('settings.subtitle')} />
@@ -37,6 +41,7 @@ export default function SettingsTab({ ai, onTabChange }: Props) {
         onRevokeConsent={handleRevokeConsent}
         onGrantConsent={handleGrantConsent}
         onOpenPrivacyPolicy={() => onTabChange('privacy')}
+        onReplayOnboarding={handleReplayOnboarding}
       />
     </>
   );

@@ -104,18 +104,23 @@ jobs:
         run: |
           $version = node -p "require('./package.json').version"
           $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          $tagName = "${{ github.ref_name }}"
+          $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$tagName"
 
-          # Find the .msi installer
+          # Find installers — prefer .nsis (exe) over .msi
+          $nsis = Get-ChildItem -Path src-tauri/target/release/bundle -Filter "*.exe" -Recurse | Select-Object -First 1
           $msi = Get-ChildItem -Path src-tauri/target/release/bundle -Filter "*.msi" -Recurse | Select-Object -First 1
-          $msiName = if ($msi) { $msi.Name } else { "micontrol_${version}_x64-setup.exe" }
 
-          # Find the signature file if it exists
-          $sigFile = "${msi}.sig"
-          $signature = if (Test-Path $sigFile) { Get-Content $sigFile -Raw } else { "" }
+          $installerName = if ($nsis) { $nsis.Name } elseif ($msi) { $msi.Name } else { "micontrol_${version}_x64-setup.exe" }
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/latest/download/$installerName"
 
-          $repoOwner = "${{ github.repository_owner }}"
-          $repoName = "${{ github.event.repository.name }}"
-          $downloadUrl = "https://github.com/${{ github.repository }}/releases/latest/download/$msiName"
+          # Find the .sig signature file matching the installer
+          $installerBase = if ($nsis) { $nsis.FullName } elseif ($msi) { $msi.FullName } else { $null }
+          $signature = ""
+          if ($installerBase) {
+            $sigFile = "${installerBase}.sig"
+            if (Test-Path $sigFile) { $signature = Get-Content $sigFile -Raw }
+          }
 
           $manifest = @{
             version = $version
@@ -141,15 +146,15 @@ jobs:
           path: |
             src-tauri/target/release/bundle/**/*.msi
             src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.msix
-            src-tauri/target/release/bundle/**/*.appx
+            latest.json
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           files: |
-            src-tauri/target/release/bundle/**/*
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
             latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,3 +1,7 @@
+//! Tauri commands for keyboard hotkey configuration.
+//!
+//! Exposes hotkey config get/set and key detection to the frontend.
+
 use crate::hw::hotkeys::{save_config, update_in_memory, HotkeyMap};
 
 #[tauri::command]

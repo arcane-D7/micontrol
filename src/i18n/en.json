@@ -437,6 +437,7 @@
     "disconnect": "Disconnect",
     "connect": "Connect",
     "password": "Password",
+    "passwordLabel": "WiFi password",
     "availableNetworks": "Available Networks",
     "noNetworks": "No networks found. Click Refresh to scan.",
     "refresh": "Refresh",
@@ -565,7 +566,39 @@
     "deleting": "Deleting...",
     "deleteSuccess": "All data has been deleted successfully.",
     "deleteError": "Failed to delete all data. See console for details.",
-    "confirmDelete": "Are you sure? This will permanently delete all your data including API keys, logs, and settings. This cannot be undone."
+    "confirmDelete": "Are you sure? This will permanently delete all your data including API keys, logs, and settings. This cannot be undone.",
+    "replayOnboarding": "Replay Onboarding",
+    "onboarding": "Onboarding Wizard",
+    "onboardingDesc": "Re-display the first-run welcome wizard to review features and preferences."
+  },
+  "onboarding": {
+    "welcome": {
+      "title": "Welcome to miPC",
+      "description": "Your all-in-one hardware control center for gaming laptops.",
+      "getStarted": "Get Started"
+    },
+    "privacy": {
+      "title": "Privacy & Consent",
+      "description": "miPC respects your privacy. Choose what data you want to share.",
+      "allow": "Allow",
+      "deny": "Deny"
+    },
+    "features": {
+      "title": "Features Overview",
+      "hardwareControl": "Hardware Control — Fan curves, battery, display, audio",
+      "driverManagement": "Driver Management — Scan, install, and update drivers",
+      "systemInfo": "System Info — Real-time hardware monitoring",
+      "iotService": "IoT Service — EC RAM access, hotkeys, screen casting"
+    },
+    "ready": {
+      "title": "You're All Set!",
+      "description": "miPC is ready to use. You can replay this wizard anytime from Settings.",
+      "finish": "Finish"
+    },
+    "step": "Step {{current}} of {{total}}",
+    "next": "Next",
+    "back": "Back",
+    "skip": "Skip"
   },
   "ai": {
     "title": "AI System Advisor",
@@ -593,7 +626,15 @@
     "columnGpu": "GPU°C",
     "columnTdp": "TDP W",
     "columnCpuPct": "CPU%",
-    "columnGpuPct": "GPU%"
+    "columnGpuPct": "GPU%",
+    "disclaimer": "AI-generated content may be inaccurate. Verify critical information.",
+    "usage": {
+      "title": "AI Usage",
+      "requests": "Total Requests",
+      "tokens": "Total Tokens",
+      "estimatedCost": "Estimated Cost",
+      "reset": "Reset Usage"
+    }
   },
   "consent": {
     "dialog": {
@@ -603,6 +644,7 @@
       "where": "OpenAI API — processed on their servers in accordance with their privacy policy",
       "why": "To provide AI-powered insights and hardware optimisation recommendations",
       "control": "You can revoke this consent at any time in Settings \u2192 Privacy. AI features will stop immediately.",
+      "sentryDisclosure": "Crash reports will be sent to Sentry to help improve the app. No personal data is included.",
       "allow": "Allow",
       "deny": "Deny",
       "privacyLink": "Read our Privacy Policy"
@@ -682,17 +724,29 @@
       "deleteLog": "Delete this log entry"
     }
   },
+  "shortcuts": {
+    "tabSwitch": "Alt+1 to Alt+9 to switch tabs"
+  },
   "audio": {
     "loadingDevices": "Loading audio devices...",
     "noDevices": "No audio devices found",
     "loadDevicesError": "Failed to load audio devices",
     "initError": "Failed to initialize audio control",
     "title": "🎵 Audio Control",
+    "pageTitle": "Audio Control",
     "subtitle": "Master volume and device management",
     "mute": "Mute",
     "unmute": "Unmute",
     "muted": "Muted",
     "playbackDevices": "Playback Devices",
     "defaultDevice": "Default"
+  },
+  "error": {
+    "boundary": {
+      "title": "Something went wrong",
+      "message": "An unexpected error occurred. Try reloading the application.",
+      "reload": "Reload",
+      "report": "Report Issue"
+    }
   }
 }

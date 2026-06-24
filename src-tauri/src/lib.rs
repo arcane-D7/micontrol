@@ -1,3 +1,8 @@
+//! miPC Tauri application library.
+//!
+//! Sets up Tauri commands, application state, menu, tray, and event handling.
+//! This is the main entry point for the Tauri application runtime.
+
 mod commands;
 mod debug_log;
 mod elev_bridge;
@@ -6,7 +11,7 @@ mod hw;
 mod state;
 pub mod util;
 
-use commands::ai::{analyze_system, test_connection};
+use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection};
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
 use commands::hardware::{
     get_audio_devices, get_audio_volume, get_cast_devices, get_charging_threshold, get_ecram_map,
@@ -103,8 +108,10 @@ pub fn run() {
     // ── Sentry crash reporting ──────────────────────────────────────────────
     // Initialize before the Tauri builder so that panics during setup are caught.
     // The guard MUST leak by std::mem::forget to live for the entire process lifetime.
+    // Only initialize Sentry if the user has granted telemetry consent.
+    let sentry_consent = util::consent_audit::check_sentry_consent();
     if let Ok(dsn) = std::env::var("SENTRY_DSN") {
-        if !dsn.is_empty() {
+        if !dsn.is_empty() && sentry_consent {
             let guard = sentry::init((
                 dsn,
                 sentry::ClientOptions {
@@ -241,6 +248,8 @@ pub fn run() {
             // AI analysis
             analyze_system,
             test_connection,
+            get_ai_usage,
+            reset_ai_usage,
             // AI performance logs
             write_ai_perf_log,
             read_ai_perf_logs,

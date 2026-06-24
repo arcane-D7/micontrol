@@ -1,3 +1,8 @@
+//! MiControl binary entry point.
+//!
+//! Detects elevated helper mode (`--elevated`) and dispatches to
+//! the privileged command runner, or starts the full Tauri desktop application.
+
 #![windows_subsystem = "windows"]
 
 fn main() {

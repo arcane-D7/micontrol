@@ -1,4 +1,7 @@
 //! Retry utilities for flaky operations (WMI, pipe, HID).
+//!
+//! Provides a `with_retry` helper that retries a fallible operation once
+//! after a short delay, with logging.
 
 /// Execute a fallible operation with one retry after a short delay.
 /// Logs when a retry is used.

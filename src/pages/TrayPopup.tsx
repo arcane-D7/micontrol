@@ -66,14 +66,18 @@ export default function TrayPopup({ hardware }: Props) {
   );
   // Apply stored opacity on mount
   useEffect(() => {
-    document.documentElement.style.opacity = String(opacity);
+    if (rootRef.current) {
+      rootRef.current.style.opacity = String(opacity);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleOpacityChange(v: number) {
     setOpacityState(v);
     updateKey('tray_opacity', v);
-    document.documentElement.style.opacity = String(v);
+    if (rootRef.current) {
+      rootRef.current.style.opacity = String(v);
+    }
   }
 
   // Auto-resize the OS window to match content height, growing upward.

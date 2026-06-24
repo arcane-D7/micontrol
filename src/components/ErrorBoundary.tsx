@@ -1,4 +1,10 @@
 import { Component, ErrorInfo, ReactNode } from 'react';
+import en from '../i18n/en.json';
+import pt from '../i18n/pt.json';
+import es from '../i18n/es.json';
+import fr from '../i18n/fr.json';
+
+const APP_VERSION = '0.1.0';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -7,6 +13,38 @@ interface ErrorBoundaryProps {
 interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
+}
+
+const LOCALES = { en, pt, es, fr } as const;
+type Locale = keyof typeof LOCALES;
+
+function getNestedValue(obj: Record<string, unknown>, path: string): string {
+  const parts = path.split('.');
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current == null || typeof current !== 'object') return '';
+    current = (current as Record<string, unknown>)[part];
+  }
+  return typeof current === 'string' ? current : '';
+}
+
+function getLocaleStrings() {
+  let lang: Locale = 'en';
+  try {
+    const stored = localStorage.getItem('micontrol_lang') as Locale | null;
+    if (stored && stored in LOCALES) lang = stored;
+  } catch {
+    /* localStorage unavailable */
+  }
+  const strings = LOCALES[lang] as Record<string, unknown>;
+  return {
+    title: getNestedValue(strings, 'error.boundary.title') || 'Something went wrong',
+    message:
+      getNestedValue(strings, 'error.boundary.message') ||
+      'An unexpected error occurred. Try reloading the application.',
+    reload: getNestedValue(strings, 'error.boundary.reload') || 'Reload',
+    report: getNestedValue(strings, 'error.boundary.report') || 'Report Issue',
+  };
 }
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
@@ -27,8 +65,19 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     window.location.reload();
   };
 
+  handleReportIssue = (): void => {
+    const { error } = this.state;
+    const title = encodeURIComponent(`[Bug] Application crash: ${error?.name || 'Unknown'}`);
+    const body = encodeURIComponent(
+      `## Error\n\n\`\`\`\n${error?.stack || error?.message || 'Unknown error'}\n\`\`\`\n\n` +
+        `## Environment\n\n- Version: ${APP_VERSION}\n- OS: ${navigator.userAgent}\n- Timestamp: ${new Date().toISOString()}\n`,
+    );
+    window.open(`https://github.com/mafsc/miPC/issues/new?title=${title}&body=${body}`, '_blank');
+  };
+
   render(): ReactNode {
     if (this.state.hasError) {
+      const t = getLocaleStrings();
       return (
         <div
           style={{
@@ -43,7 +92,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             fontFamily: 'system-ui, -apple-system, sans-serif',
           }}
         >
-          <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 12 }}>Something went wrong</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 12 }}>{t.title}</h1>
           <p
             style={{
               fontSize: 14,
@@ -52,7 +101,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
               textAlign: 'center',
             }}
           >
-            An unexpected error occurred. Try reloading the application.
+            {t.message}
           </p>
           {this.state.error && (
             <pre
@@ -83,7 +132,22 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
               color: '#fff',
             }}
           >
-            Reload
+            {t.reload}
+          </button>
+          <button
+            onClick={this.handleReportIssue}
+            style={{
+              padding: '10px 24px',
+              fontSize: 14,
+              fontWeight: 600,
+              border: '1px solid var(--color-border, #3a3a4e)',
+              borderRadius: 8,
+              cursor: 'pointer',
+              background: 'transparent',
+              color: 'var(--color-text, #cdd6f4)',
+            }}
+          >
+            {t.report}
           </button>
         </div>
       );

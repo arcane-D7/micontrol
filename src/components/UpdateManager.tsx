@@ -11,7 +11,10 @@ export default function UpdateManager({ updateStatus, loadingUpdate, onRefreshUp
   if (loadingUpdate && !updateStatus) {
     return (
       <div className="card">
-        <div className="loading-spinner">{t('common.loading')}</div>
+        <div className="loading-spinner" role="status" aria-live="polite">
+          {t('common.loading')}
+          <span className="sr-only">{t('common.loading')}</span>
+        </div>
       </div>
     );
   }

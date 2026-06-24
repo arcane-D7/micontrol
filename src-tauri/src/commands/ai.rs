@@ -1,4 +1,7 @@
-//! Backend AI analysis command — keeps API key in backend only.
+//! Backend AI analysis command.
+//!
+//! Keeps the AI provider API key in the backend keyring; never exposes
+//! it to the frontend.
 
 use keyring::Entry;
 
@@ -34,7 +37,7 @@ pub async fn analyze_system(
     let body = serde_json::json!({
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are a hardware analysis assistant."},
+            {"role": "system", "content": "You are a hardware analysis assistant. Use inclusive, accessible language. Avoid jargon, slang, or culturally specific idioms that may exclude users. Note: AI-generated content may be inaccurate. Verify critical information before acting on it."},
             {"role": "user", "content": system_context}
         ],
         "max_tokens": 1000,
@@ -65,6 +68,11 @@ pub async fn analyze_system(
         .as_str()
         .ok_or("No content in response")?
         .to_string();
+
+    // Track usage — approximate estimation based on I/O
+    let input_tokens = system_context.len() as u64 / 4; // rough char→token estimate
+    let output_tokens = content.len() as u64 / 4;
+    crate::util::ai_usage::record_usage(input_tokens, output_tokens);
 
     Ok(content)
 }
@@ -103,6 +111,18 @@ pub async fn test_connection(base_url: String, model: String) -> Result<String, 
     }
 
     Ok("ok".to_string())
+}
+
+/// Get AI usage statistics.
+#[tauri::command]
+pub fn get_ai_usage() -> crate::util::ai_usage::AiUsageStats {
+    crate::util::ai_usage::get_usage()
+}
+
+/// Reset AI usage statistics.
+#[tauri::command]
+pub fn reset_ai_usage() {
+    crate::util::ai_usage::reset_usage();
 }
 
 /// Check telemetry consent from the credential store.

@@ -1,0 +1,12 @@
+# Rust backend
+src-tauri/                    @mafsc
+
+# Frontend
+src/                          @mafsc
+
+# CI/CD and workflows
+.github/                      @mafsc
+
+# Documentation
+docs/                         @mafsc
+*.md                          @mafsc

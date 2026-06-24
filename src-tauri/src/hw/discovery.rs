@@ -1,3 +1,8 @@
+//! Hardware discovery and profile persistence.
+//!
+//! Probes the system on first launch to detect hardware paths and
+//! saves the result to a JSON profile, refreshed at most once a week.
+
 /// Hardware Discovery — Phase 10
 ///
 /// On first launch (or when the profile is stale / missing), this module

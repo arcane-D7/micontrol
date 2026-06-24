@@ -1,3 +1,8 @@
+//! Native Win32 brightness OSD overlay.
+//!
+//! Renders a Windows 11-style pill-card OSD for brightness, mic mute,
+//! and keyboard backlight changes. No WebView2 dependency.
+
 // hw/osd.rs
 //
 // Native Win32 brightness OSD — Windows 11 style.

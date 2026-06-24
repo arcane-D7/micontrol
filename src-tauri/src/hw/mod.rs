@@ -1,3 +1,9 @@
+//! Hardware abstraction layer for MiControl.
+//!
+//! Each sub-module wraps a specific hardware domain (battery, display,
+//! fan, audio, etc.) accessed via WMI, IoTService IPC, IOCTL, or
+//! Windows API calls.
+
 pub mod audio;
 pub mod battery;
 pub mod charging;

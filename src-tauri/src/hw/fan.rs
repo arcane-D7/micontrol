@@ -1,3 +1,8 @@
+//! Fan control and temperature monitoring.
+//!
+//! Reads fan speed, CPU/GPU temperature, and power from WMI
+//! and Intel ESIF/DPTF, with support for setting fan modes.
+
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

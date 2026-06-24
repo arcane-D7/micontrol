@@ -9,6 +9,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
 import { getLanguage } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
@@ -341,6 +342,70 @@ function nextAnalysisIn(dailyAnalyses: number): string {
   } catch {
     return '—';
   }
+}
+
+// ── AI Usage Panel ───────────────────────────────────────────────────────────
+
+interface AiUsageStats {
+  total_requests: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  estimated_cost_usd: number;
+}
+
+function AiUsagePanel() {
+  const [usage, setUsage] = useState<AiUsageStats | null>(null);
+
+  useEffect(() => {
+    invoke<AiUsageStats>('get_ai_usage')
+      .then(setUsage)
+      .catch(() => {
+        /* ignore */
+      });
+  }, []);
+
+  const handleReset = async () => {
+    await invoke('reset_ai_usage');
+    const updated = await invoke<AiUsageStats>('get_ai_usage');
+    setUsage(updated);
+  };
+
+  if (!usage) return null;
+
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <div className="card-title" style={{ marginBottom: 2 }}>
+            {t('ai.usage.title')}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            {t('ai.usage.requests')}: <strong>{usage.total_requests}</strong>
+            {' · '}
+            {t('ai.usage.tokens')}:{' '}
+            <strong>{usage.total_input_tokens + usage.total_output_tokens}</strong>
+            {' · '}
+            {t('ai.usage.estimatedCost')}: <strong>${usage.estimated_cost_usd.toFixed(4)}</strong>
+          </div>
+        </div>
+        <button
+          onClick={handleReset}
+          style={{
+            background: 'none',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '4px 12px',
+            cursor: 'pointer',
+            fontSize: 11,
+            color: 'var(--text-muted)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {t('ai.usage.reset')}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -986,6 +1051,25 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
           </div>
         )}
       </div>
+
+      {/* ── AI disclaimer ──────────────────────────────────────────────────── */}
+      <div
+        style={{
+          fontSize: 11,
+          color: 'var(--color-text-muted)',
+          padding: '8px 14px',
+          marginBottom: 12,
+          background: 'var(--surface-2, rgba(255,255,255,0.03))',
+          borderRadius: 8,
+          border: '1px solid var(--color-border, #3a3a4e)',
+          lineHeight: 1.5,
+        }}
+      >
+        ⚠️ {t('ai.disclaimer')}
+      </div>
+
+      {/* ── AI Usage Panel ─────────────────────────────────────────────────── */}
+      <AiUsagePanel />
 
       {/* ── Log table card ────────────────────────────────────────────────── */}
       <div className="card">

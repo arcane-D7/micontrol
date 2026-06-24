@@ -1,8 +1,7 @@
-// hw/mic.rs
-//
-// System-level microphone mute/unmute via Windows Core Audio (WASAPI).
-// Sets the hardware mute on the default capture endpoint so no application
-// can record while the mic is muted regardless of per-app volume settings.
+//! System-level microphone mute via Windows Core Audio (WASAPI).
+//!
+//! Sets hardware mute on the default capture endpoint so no application
+//! can record while muted, regardless of per-app volume settings.
 
 #[cfg(windows)]
 pub fn set_system_mic_mute(muted: bool) {

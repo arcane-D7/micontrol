@@ -1,3 +1,8 @@
+//! Application autostart management.
+//!
+//! Reads and writes the MiControl autostart entry in the Windows
+//! Registry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
 use crate::hw::errors::HardwareResult;
 use anyhow::Context;
 

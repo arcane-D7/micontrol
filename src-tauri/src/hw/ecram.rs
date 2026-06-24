@@ -1,3 +1,8 @@
+//! ECRAM (Embedded Controller RAM) reader via IoTDriver.sys.
+//!
+//! Communicates with the kernel driver through IOCTL codes to read
+//! and write physical memory regions of the Embedded Controller.
+
 /// ECRAM (Embedded Controller RAM) reader via IoTDriver.sys
 ///
 /// IoTDriver.sys exposes physical ECRAM memory via two IOCTL codes:

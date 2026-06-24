@@ -1,3 +1,8 @@
+//! System information queries (CPU, memory, OS version).
+//!
+//! Uses PDH for CPU usage and WMI for memory and OS details,
+//! with caching via `OnceLock` and periodic refresh.
+
 use crate::hw::errors::HardwareResult;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};

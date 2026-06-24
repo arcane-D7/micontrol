@@ -3,7 +3,6 @@
 //! Caches WMI connections per-thread to eliminate per-query connection churn.
 //! WMI connections are COM objects (thread-affine), so we use `thread_local!`
 //! storage. All access must happen inside `spawn_blocking` (per S3-004).
-//!
 //! Two namespaces are cached:
 //! - `ROOT\CIMV2` — system info, display, discovery
 //! - `ROOT\WMI` — battery, brightness

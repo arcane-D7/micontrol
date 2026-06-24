@@ -1,3 +1,8 @@
+//! Performance mode selection and power profile management.
+//!
+//! Switches between Balanced, Performance, and Quiet modes via
+//! Intel ESIF thermal interface and Windows power scheme changes.
+
 use crate::hw::errors::HardwareResult;
 use crate::state::PerformanceMode;
 use anyhow::{Context, Result};

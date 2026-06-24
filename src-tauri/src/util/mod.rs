@@ -1,3 +1,9 @@
+//! Shared utility modules (auth, registry, retry, XML, etc.).
+//!
+//! Provides cross-cutting helpers used by both the hardware layer
+//! and command handlers.
+
+pub mod ai_usage;
 pub mod auth;
 pub mod consent_audit;
 pub mod data_deletion;

@@ -432,6 +432,7 @@
     "disconnect": "Desconectar",
     "connect": "Conectar",
     "password": "Contraseña",
+    "passwordLabel": "Contraseña del WiFi",
     "availableNetworks": "Redes Disponibles",
     "noNetworks": "No se encontraron redes. Haga clic en Actualizar para buscar.",
     "refresh": "Actualizar",
@@ -560,7 +561,39 @@
     "deleting": "Eliminando...",
     "deleteSuccess": "Todos los datos se han eliminado correctamente.",
     "deleteError": "Error al eliminar todos los datos. Vea la consola para más detalles.",
-    "confirmDelete": "¿Está seguro? Esto eliminará permanentemente todos sus datos incluyendo claves de API, registros y configuraciones. Esto no se puede deshacer."
+    "confirmDelete": "¿Está seguro? Esto eliminará permanentemente todos sus datos incluyendo claves de API, registros y configuraciones. Esto no se puede deshacer.",
+    "replayOnboarding": "Repetir Introducción",
+    "onboarding": "Asistente de Introducción",
+    "onboardingDesc": "Volver a mostrar el asistente de bienvenida para revisar funciones y preferencias."
+  },
+  "onboarding": {
+    "welcome": {
+      "title": "Bienvenido a miPC",
+      "description": "Su centro de control de hardware todo-en-uno para laptops gaming.",
+      "getStarted": "Comenzar"
+    },
+    "privacy": {
+      "title": "Privacidad y Consentimiento",
+      "description": "miPC respeta su privacidad. Elija qué datos desea compartir.",
+      "allow": "Permitir",
+      "deny": "Denegar"
+    },
+    "features": {
+      "title": "Resumen de Funcionalidades",
+      "hardwareControl": "Control de Hardware — Curvas de ventilador, batería, pantalla, audio",
+      "driverManagement": "Gestión de Controladores — Escanear, instalar y actualizar",
+      "systemInfo": "Información del Sistema — Monitorización en tiempo real",
+      "iotService": "Servicio IoT — Acceso a EC RAM, teclas de acceso rápido, proyección"
+    },
+    "ready": {
+      "title": "¡Todo Listo!",
+      "description": "miPC está listo para usar. Puede repetir este asistente en cualquier momento desde Ajustes.",
+      "finish": "Finalizar"
+    },
+    "step": "Paso {{current}} de {{total}}",
+    "next": "Siguiente",
+    "back": "Atrás",
+    "skip": "Saltar"
   },
   "ai": {
     "title": "Asesor de Sistema por IA",
@@ -588,7 +621,15 @@
     "columnGpu": "GPU°C",
     "columnTdp": "TDP W",
     "columnCpuPct": "CPU%",
-    "columnGpuPct": "GPU%"
+    "columnGpuPct": "GPU%",
+    "disclaimer": "El contenido generado por IA puede ser impreciso. Verifique la información crítica.",
+    "usage": {
+      "title": "Uso de IA",
+      "requests": "Total de Solicitudes",
+      "tokens": "Total de Tokens",
+      "estimatedCost": "Costo Estimado",
+      "reset": "Reiniciar Uso"
+    }
   },
   "consent": {
     "dialog": {
@@ -598,6 +639,7 @@
       "where": "API de OpenAI — procesada en sus servidores de acuerdo con su política de privacidad",
       "why": "Para proporcionar información basada en IA y recomendaciones de optimización de hardware",
       "control": "Puede revocar este consentimiento en cualquier momento en Configuración → Privacidad. Las funciones de IA se detendrán inmediatamente.",
+      "sentryDisclosure": "Los informes de fallos se enviarán a Sentry para ayudar a mejorar la aplicación. No se incluyen datos personales.",
       "allow": "Permitir",
       "deny": "Denegar",
       "privacyLink": "Lea nuestra Política de Privacidad"
@@ -677,17 +719,29 @@
       "deleteLog": "Eliminar esta entrada de registro"
     }
   },
+  "shortcuts": {
+    "tabSwitch": "Alt+1 a Alt+9 para cambiar de pestaña"
+  },
   "audio": {
     "loadingDevices": "Cargando dispositivos de audio...",
     "noDevices": "No se encontraron dispositivos de audio",
     "loadDevicesError": "Error al cargar dispositivos de audio",
     "initError": "Error al inicializar control de audio",
     "title": "🎵 Control de Audio",
+    "pageTitle": "Control de Audio",
     "subtitle": "Volumen maestro y gestión de dispositivos",
     "mute": "Silenciar",
     "unmute": "Activar sonido",
     "muted": "Silenciado",
     "playbackDevices": "Dispositivos de Reproducción",
     "defaultDevice": "Predeterminado"
+  },
+  "error": {
+    "boundary": {
+      "title": "Algo salió mal",
+      "message": "Ocurrió un error inesperado. Intente recargar la aplicación.",
+      "reload": "Recargar",
+      "report": "Reportar Problema"
+    }
   }
 }

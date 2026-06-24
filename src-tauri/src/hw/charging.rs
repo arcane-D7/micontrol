@@ -1,3 +1,8 @@
+//! Charging threshold control via IoTService IPC and registry fallback.
+//!
+//! Reads and sets the battery charging limit through the Xiaomi IoT
+//! service named pipe, with a Windows Registry fallback path.
+
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

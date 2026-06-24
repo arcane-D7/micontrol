@@ -1,3 +1,8 @@
+//! Tauri commands for secure credential storage.
+//!
+//! Uses the OS keyring (via `keyring` crate) to store and retrieve
+//! secrets like API keys, never exposing them to the frontend.
+
 use keyring::Entry;
 
 const SERVICE_NAME: &str = "com.mipc.micontrol";

@@ -1,3 +1,8 @@
+//! Display brightness, HDR, and refresh rate control.
+//!
+//! Uses IGCL (Intel Graphics Command Library) for brightness and WMI
+//! for display info queries on Windows.
+
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

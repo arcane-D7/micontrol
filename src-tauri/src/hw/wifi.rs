@@ -1,7 +1,7 @@
-// hw/wifi.rs
-//
-// PC WiFi management via Windows netsh wlan commands.
-// Provides network scanning, connection status, connect/disconnect.
+//! PC WiFi management via Windows netsh wlan.
+//!
+//! Provides network scanning, connection status, and connect/disconnect
+//! functionality by parsing `netsh wlan` command output.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
 use crate::util::xml;

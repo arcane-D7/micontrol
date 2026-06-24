@@ -112,9 +112,10 @@ export default function AudioControl({
 
       {/* Device List — loading state */}
       {devices === null && (
-        <div className="loading-container">
+        <div className="loading-container" role="status" aria-live="polite">
           <span className="spinner" />
           <span>{t('audio.loadingDevices')}</span>
+          <span className="sr-only">{t('common.loading')}</span>
         </div>
       )}
 

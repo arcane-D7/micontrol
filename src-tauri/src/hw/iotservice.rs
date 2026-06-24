@@ -1,3 +1,9 @@
+//! IoTService.exe IPC client for Xiaomi hardware control.
+//!
+//! Communicates with the official Xiaomi IoTService Windows service
+//! through its named pipe to control hardware features without direct
+//! IOCTL access.
+
 /// IoTService.exe IPC client
 ///
 /// Communicates with the official Xiaomi IoTService Windows service through

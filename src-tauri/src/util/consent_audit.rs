@@ -1,8 +1,15 @@
 //! Audit log for consent grant/revoke events (GDPR Art.30).
+//!
+//! Records timestamped entries when the user grants or revokes telemetry
+//! consent, stored in `%LOCALAPPDATA%\MiControl\consent_audit.log`.
 
+use keyring::Entry;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::SystemTime;
+
+const KEYRING_SERVICE: &str = "com.mipc.micontrol";
+const TELEMETRY_CONSENT_KEY: &str = "telemetry_consent";
 
 /// The current privacy policy version. Bump this when the privacy policy changes.
 pub const POLICY_VERSION: u32 = 2;
@@ -92,6 +99,27 @@ pub fn purge_audit_log() {
         if let Err(e) = std::fs::remove_file(&path) {
             log::warn!("Failed to purge consent audit log: {e}");
         }
+    }
+}
+
+/// Check whether the user has granted telemetry consent (via the keyring).
+/// Returns `true` if consent is granted, `false` if denied or not set.
+///
+/// Used at startup to decide whether to initialise Sentry crash reporting.
+pub fn check_sentry_consent() -> bool {
+    let entry = match Entry::new(KEYRING_SERVICE, TELEMETRY_CONSENT_KEY) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    match entry.get_password() {
+        Ok(val) => {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&val) {
+                parsed["value"].as_str() == Some("granted")
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
     }
 }
 

@@ -12,7 +12,7 @@
 //! **Dev-mode fallback**: when the scheduled task is absent (e.g. running
 //! straight from `cargo tauri dev` without an installer), step 2 falls back to
 //! `ShellExecuteExW` with verb "runas", which triggers a UAC prompt and runs
-//! the current binary as `micontrol.exe --elevated --request-id <id>`.  This is intentionally
+//! the current binary as `micontrol.exe --elevated --request-id <id>`.
 //! only a dev ergonomics aid; production always uses the scheduled task.
 
 use crate::util::auth;

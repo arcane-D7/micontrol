@@ -7,6 +7,7 @@ import { useSettings } from '../hooks/useSettings';
 import { useAnalysisLogger } from '../hooks/useAnalysisLogger';
 import { ConsentDialog } from '../components/ConsentDialog';
 import { MiControlIcon } from '../components/MiControlIcon';
+import OnboardingWizard from '../components/OnboardingWizard';
 import PrivacyPolicy from './PrivacyPolicy';
 
 // ── Lazy-loaded tab content ──────────────────────────────────────────────────
@@ -170,6 +171,17 @@ const Sidebar = memo(function Sidebar({
             {t('common.loading')}
           </div>
         )}
+        <div
+          style={{
+            padding: '4px 8px',
+            fontSize: 10,
+            color: 'var(--color-text-muted)',
+            opacity: 0.6,
+            textAlign: 'center',
+          }}
+        >
+          {t('shortcuts.tabSwitch')}
+        </div>
         <button className="theme-toggle" onClick={toggleTheme} title={`Theme: ${themeMode}`}>
           <ThemeIcon mode={themeMode} />
           <span>{THEME_LABELS[themeMode]}</span>
@@ -211,6 +223,7 @@ export default function MainWindow({
   toggleTheme,
 }: Props) {
   const aiSettings = useSettings();
+  const { onboardingCompleted } = aiSettings.settings;
   const [showTrayPreview, setShowTrayPreview] = useState(false);
   const [showConsentDialog, setShowConsentDialog] = useState(false);
   const [consentChecked, setConsentChecked] = useState(false);
@@ -242,7 +255,27 @@ export default function MainWindow({
     onTabChange('privacy');
   }, [onTabChange]);
 
+  const handleFinishOnboarding = useCallback(() => {
+    aiSettings.setOnboardingCompleted(true);
+  }, [aiSettings]);
+
   useAnalysisLogger(hardware, aiSettings);
+
+  // ── Keyboard shortcuts: Alt+1..9 to switch tabs ──────────────────────
+  useEffect(() => {
+    const tabIds = NAV_ITEMS.slice(0, 9).map((item) => item.id);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && e.key >= '1' && e.key <= '9') {
+        e.preventDefault();
+        const tabIndex = parseInt(e.key, 10) - 1;
+        if (tabIndex < tabIds.length) {
+          onTabChange(tabIds[tabIndex]);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onTabChange]);
 
   function renderTab() {
     switch (activeTab) {
@@ -326,7 +359,13 @@ export default function MainWindow({
 
       <main className="content-area">
         <div className="tab-content" key={activeTab}>
-          <Suspense fallback={<div className="loading-spinner">Loading...</div>}>
+          <Suspense
+            fallback={
+              <div className="loading-spinner" role="status" aria-live="polite">
+                {t('common.loading')}
+              </div>
+            }
+          >
             {renderTab()}
           </Suspense>
         </div>
@@ -418,6 +457,9 @@ export default function MainWindow({
           </div>
         </div>
       )}
+
+      {/* First-run onboarding wizard */}
+      {!onboardingCompleted && <OnboardingWizard onFinish={handleFinishOnboarding} />}
 
       {/* Telemetry consent dialog */}
       {showConsentDialog && (

@@ -1,7 +1,5 @@
-// hw/audio.rs
-//
-// Audio device enumeration and control via Windows Core Audio API.
-// Provides device listing, volume control, and mute toggle.
+//! Audio device enumeration and control via Windows Core Audio API.
+//! Provides device listing, volume control, and mute toggle.
 
 use crate::hw::errors::HardwareResult;
 #[cfg(windows)]

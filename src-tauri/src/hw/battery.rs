@@ -1,3 +1,8 @@
+//! Battery hardware interface.
+//!
+//! Provides functions to read battery status, charge level, and health
+//! from the system's WMI provider, with static data cached for performance.
+
 use crate::hw::errors::HardwareResult;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

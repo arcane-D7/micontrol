@@ -21,6 +21,7 @@ interface Props {
   onRevokeConsent: () => Promise<void>;
   onGrantConsent: () => Promise<void>;
   onOpenPrivacyPolicy: () => void;
+  onReplayOnboarding: () => void;
 }
 
 export default function SettingsPage({
@@ -31,6 +32,7 @@ export default function SettingsPage({
   onRevokeConsent,
   onGrantConsent,
   onOpenPrivacyPolicy,
+  onReplayOnboarding,
 }: Props) {
   const { locale, setLanguage, supported } = useLanguage();
   const [isDeleting, setIsDeleting] = useState(false);
@@ -93,6 +95,17 @@ export default function SettingsPage({
         deleteResult={deleteResult}
         isDeleting={isDeleting}
       />
+
+      {/* Replay onboarding */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title">{t('settings.onboarding')}</div>
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
+          {t('settings.onboardingDesc')}
+        </p>
+        <button className="btn btn-secondary" onClick={onReplayOnboarding}>
+          {t('settings.replayOnboarding')}
+        </button>
+      </div>
     </>
   );
 }
