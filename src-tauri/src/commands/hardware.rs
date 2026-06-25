@@ -34,7 +34,8 @@ const RAW_ECRAM_WRITE_MAX_BYTES: usize = 32;
 pub async fn get_performance_mode(
     _state: State<'_, AppState>,
 ) -> Result<PerformanceMode, ErrorResponse> {
-    hw_get_perf().map_err(ErrorResponse::from)
+    // S24-013: Wrap in run_blocking — hw_get_perf() does sync WMI/registry I/O.
+    run_blocking(hw_get_perf).await.map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
@@ -53,7 +54,10 @@ pub async fn set_performance_mode(
 
 #[tauri::command]
 pub async fn get_charging_threshold(_state: State<'_, AppState>) -> Result<u8, ErrorResponse> {
-    hw_get_charge().map_err(ErrorResponse::from)
+    // S24-013: Wrap in run_blocking — hw_get_charge() does sync WMI/registry I/O.
+    run_blocking(hw_get_charge)
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
@@ -80,7 +84,10 @@ pub async fn set_charging_threshold(
 /// This runs in the main (non-elevated) process since it's read-only.
 #[tauri::command]
 pub async fn get_perf_debug() -> Result<PerfDebugInfo, ErrorResponse> {
-    Ok(hw_perf_debug())
+    // S24-013: Wrap in run_blocking — hw_perf_debug() does sync I/O.
+    run_blocking(move || Ok(hw_perf_debug()))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 /// Read all ACPI ERAM fields via direct IoTDriver IOCTL access.
@@ -256,10 +263,10 @@ pub async fn send_iot_laptop_status(status: String) -> Result<(), ErrorResponse>
         "suspending" => LaptopStatus::Suspending,
         "shutting" => LaptopStatus::Shutting,
         _ => {
-            return Err(ErrorResponse {
-                code: "INVALID_STATUS".to_string(),
-                message: format!("Invalid laptop status: {status}"),
-            })
+            // S24-08: Use typed HardwareError instead of ad-hoc INVALID_STATUS code.
+            return Err(ErrorResponse::from(HardwareError::Other(format!(
+                "Invalid laptop status: {status}"
+            ))));
         }
     };
     run_blocking(move || iotservice::send_laptop_status(status))

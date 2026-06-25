@@ -38,6 +38,8 @@ pub fn run() -> ! {
             let json = serde_json::to_string(&result)
                 .unwrap_or_else(|_| r#"{"ok":false,"error":"serialize_error"}"#.to_string());
             let _ = std::fs::write(&fallback_result_path, json);
+            // S24-001: Flush nonces before exit to prevent nonce loss.
+            flush_nonces();
             std::process::exit(0);
         }
     };
@@ -126,6 +128,8 @@ pub fn run() -> ! {
     if let Err(e) = auth::restrict_file_acl(&pending.result_path) {
         log::warn!("Failed to restrict ACL on result file: {e}");
     }
+    // S24-001: Flush nonces before exit to prevent nonce loss.
+    flush_nonces();
     std::process::exit(0);
 }
 

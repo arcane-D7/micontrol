@@ -4,7 +4,7 @@
 //! - `lock_or_recover`: recover from poisoned mutexes instead of panicking
 //! - `install_panic_hook`: global panic hook that logs to file and stderr
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Lock a `Mutex`, recovering from poison instead of panicking.
 ///
@@ -21,6 +21,26 @@ use std::sync::{Mutex, MutexGuard};
 pub fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| {
         log::error!("Mutex poisoned, recovering with inner data: {}", e);
+        e.into_inner()
+    })
+}
+
+/// Lock a `RwLock` for reading, recovering from poison instead of panicking.
+///
+/// Similar to `lock_or_recover` but for `RwLock` read guards.
+pub fn lock_read_or_recover<T>(rwlock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    rwlock.read().unwrap_or_else(|e| {
+        log::error!("RwLock (read) poisoned, recovering with inner data: {}", e);
+        e.into_inner()
+    })
+}
+
+/// Lock a `RwLock` for writing, recovering from poison instead of panicking.
+///
+/// Similar to `lock_or_recover` but for `RwLock` write guards.
+pub fn lock_write_or_recover<T>(rwlock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    rwlock.write().unwrap_or_else(|e| {
+        log::error!("RwLock (write) poisoned, recovering with inner data: {}", e);
         e.into_inner()
     })
 }

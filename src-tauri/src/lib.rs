@@ -339,13 +339,21 @@ pub fn run() {
                 .ok();
             crate::hw::discovery::init(data_dir);
 
+            // S24-002: Check if HMAC key needs rotation.
+            if crate::util::auth::key_needs_rotation() {
+                log::warn!("HMAC key rotation needed — run with --rotate-key to rotate");
+            }
+
             // Sync the discovered profile into Tauri managed state
             if let Some(profile) = crate::hw::discovery::global_profile() {
                 app.state::<AppState>().set_profile(profile);
             }
 
             // Start keyboard hook (intercepts Xiaomi AI / PCManager / Copilot keys)
-            crate::hw::hotkeys::start_hook();
+            // S24-004: Handle error gracefully instead of panicking.
+            if let Err(e) = crate::hw::hotkeys::start_hook() {
+                log::warn!("Hotkey hook failed to start, continuing without hotkeys: {e}");
+            }
 
             // Register focus callback: Xiaomi key / AI key / Copilot key fires this.
             // We toggle the tray quick-access popup, exactly like XiaomiPCManager did.

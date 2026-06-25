@@ -107,7 +107,10 @@ pub async fn set_ai_brightness(enabled: bool) -> Result<(), ErrorResponse> {
 
 #[tauri::command]
 pub async fn get_ai_brightness_config() -> Result<AiBrightnessConfig, ErrorResponse> {
-    Ok(hw_get_ai_cfg())
+    // S24-013: Wrap in run_blocking — hw_get_ai_cfg() does sync registry I/O.
+    run_blocking(move || Ok(hw_get_ai_cfg()))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 #[tauri::command]

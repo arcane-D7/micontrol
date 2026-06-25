@@ -192,7 +192,8 @@ impl From<HardwareError> for ErrorResponse {
 impl From<String> for ErrorResponse {
     fn from(s: String) -> Self {
         ErrorResponse {
-            code: "UNKNOWN_ERROR".to_string(),
+            // S24-08: Standardized to "other" for all fallback codes.
+            code: "other".to_string(),
             message: s,
         }
     }
@@ -201,7 +202,8 @@ impl From<String> for ErrorResponse {
 impl From<anyhow::Error> for ErrorResponse {
     fn from(e: anyhow::Error) -> Self {
         ErrorResponse {
-            code: "INTERNAL_ERROR".to_string(),
+            // S24-08: Standardized to "other" for all fallback codes.
+            code: "other".to_string(),
             message: e.to_string(),
         }
     }

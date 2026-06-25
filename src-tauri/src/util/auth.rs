@@ -214,7 +214,17 @@ pub fn verify_payload(payload: &mut serde_json::Value, key: &[u8]) -> Result<(),
         .remove("hmac");
 
     let body = payload.to_string();
-    if !verify_hmac(key, body.as_bytes(), &expected_hmac) {
+
+    // S24-003: Try current key first, then old key for grace period.
+    if verify_hmac(key, body.as_bytes(), &expected_hmac) {
+        // Current key verified — continue to timestamp check.
+    } else if let Ok(old_key) = read_old_key() {
+        if verify_hmac(&old_key, body.as_bytes(), &expected_hmac) {
+            log::warn!("Payload verified with old key — key rotation in progress");
+        } else {
+            return Err("HMAC verification failed".to_string());
+        }
+    } else {
         return Err("HMAC verification failed".to_string());
     }
 

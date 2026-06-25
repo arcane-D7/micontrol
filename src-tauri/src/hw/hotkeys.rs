@@ -357,9 +357,9 @@ pub fn save_config(config: &HotkeyMap) -> HardwareResult<()> {
 /// Update the in-memory config (called by the `set_hotkey_config` Tauri command).
 pub fn update_in_memory(config: HotkeyMap) {
     if let Some(arc) = HOTKEY_CONFIG.get() {
-        if let Ok(mut guard) = arc.write() {
-            *guard = config;
-        }
+        // S24-006: Use lock_write_or_recover for consistent poison recovery.
+        let mut guard = crate::util::panic::lock_write_or_recover(arc);
+        *guard = config;
     }
 }
 
@@ -367,8 +367,8 @@ pub fn update_in_memory(config: HotkeyMap) {
 pub fn read_in_memory() -> HotkeyMap {
     HOTKEY_CONFIG
         .get()
-        .and_then(|arc| arc.read().ok())
-        .map(|g| g.clone())
+        // S24-006: Use lock_read_or_recover for consistent poison recovery.
+        .map(|arc| crate::util::panic::lock_read_or_recover(arc).clone())
         .unwrap_or_default()
 }
 
@@ -466,7 +466,10 @@ pub fn is_hook_active() -> bool {
 ///
 /// Call this once from `tauri::Builder::setup`. The thread keeps running until the
 /// process exits (or `stop_hook()` is called for a clean teardown).
-pub fn start_hook() {
+///
+/// Returns an error if the hotkey thread cannot be spawned (e.g. resource
+/// exhaustion). The caller should log a warning and continue without hotkeys.
+pub fn start_hook() -> Result<(), crate::hw::errors::HardwareError> {
     // Start the Xiaomi VHF bridge service.  This is the component that relays
     // ACPI-based special-key events (Fn+F7 / Xiaomi button / Copilot key) from
     // IoTSvc to Win32 as HID Consumer Control reports.
@@ -489,10 +492,15 @@ pub fn start_hook() {
     let initial = load_config();
     let _ = HOTKEY_CONFIG.set(Arc::new(RwLock::new(initial)));
 
+    // S24-004: Replace expect() with graceful error handling.
     std::thread::Builder::new()
         .name("hotkey-hook".into())
         .spawn(hook_thread_main)
-        .expect("spawn hotkey hook thread");
+        .map_err(|e| {
+            crate::hw::errors::HardwareError::Other(format!("Failed to spawn hotkey thread: {e}"))
+        })?;
+
+    Ok(())
 }
 
 /// Signal the hook thread to exit (sends WM_QUIT to its message loop).

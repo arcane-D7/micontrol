@@ -27,9 +27,9 @@ impl Default for AppState {
 impl AppState {
     /// Set the hardware profile.
     pub fn set_profile(&self, profile: HardwareProfile) {
-        if let Ok(mut guard) = self.hardware_profile.write() {
-            *guard = Some(profile);
-        }
+        // S24-006: Use lock_write_or_recover for consistent poison recovery.
+        let mut guard = crate::util::panic::lock_write_or_recover(&self.hardware_profile);
+        *guard = Some(profile);
     }
 }
 

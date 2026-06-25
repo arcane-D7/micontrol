@@ -491,7 +491,8 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 /// Check if an IPC write is allowed under the rate limit.
 /// Returns true if allowed, false if rate limited.
 fn check_rate_limit() -> bool {
-    let mut times = IPC_WRITE_TIMES.lock().unwrap_or_else(|e| e.into_inner());
+    // S24-006: Use lock_or_recover for consistent poison recovery with logging.
+    let mut times = crate::util::panic::lock_or_recover(&IPC_WRITE_TIMES);
     let now = Instant::now();
 
     // Remove entries older than the window
