@@ -1,5 +1,10 @@
 # Sprint 29 — P0 CRITICAL+HIGH: Pre-Release Security & GDPR Fixes
 
+> **Status:** ✅ Complete (commit `bec0d42`)
+> **Date Completed:** 2026-06-25
+> **Health Check:** 9/9 passing
+> **Tests:** 277 Rust lib + 23 integration = 300 total, all passing
+
 ## Sprint Metadata
 
 | Field                 | Value                                                                    |

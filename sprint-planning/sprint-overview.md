@@ -1,7 +1,7 @@
 # Sprint Plan Overview — Stability Report Remediation (v1 + v2)
 
 **Created:** 2026-06-25
-**Last Updated:** 2026-06-25 (Sprint 29 added — v4 CRITICAL+HIGH fixes)
+**Last Updated:** 2026-06-25 (Sprint 29 complete — v4 CRITICAL+HIGH fixed)
 **Sources:**
 
 - v1: `docs/stability-report-2026-06-24-post-sprints-13-15.md` (Sprints 16–19)
@@ -51,11 +51,11 @@
 | 27     | P3 LOW    | Polish & defense-in-depth       | 11      | ~2 days | ✅ eaf8e85 | `sprint-27-p3-low-polish-v3/sprint.md`    |
 | 28     | P3 LOW    | Deferred backlog cleanup        | 14      | ~5 days | ✅ 80872b5 | `sprint-28-p3-deferred-backlog/sprint.md` |
 
-### v4 Sprint (from Stability Report v4) — 🔄 PLANNED
+### v4 Sprint (from Stability Report v4) — ✅ COMPLETE
 
 | Sprint | Priority    | Focus                       | Tickets | Effort    | Status     | File                                   |
 | ------ | ----------- | --------------------------- | ------- | --------- | ---------- | -------------------------------------- |
-| 29     | P0 CRITICAL | Pre-release security & GDPR | 3       | ~1–2 days | 🔄 Planned | `sprint-29-p0-critical-high/sprint.md` |
+| 29     | P0 CRITICAL | Pre-release security & GDPR | 3       | ~1–2 days | ✅ bec0d42 | `sprint-29-p0-critical-high/sprint.md` |
 
 ---
 
