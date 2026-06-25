@@ -1,18 +1,19 @@
 # Sprint Plan Overview — Stability Report Remediation (v1 + v2)
 
 **Created:** 2026-06-25
-**Last Updated:** 2026-06-25 (Sprint 28 added — deferred backlog triaged)
+**Last Updated:** 2026-06-25 (Sprint 29 added — v4 CRITICAL+HIGH fixes)
 **Sources:**
 
 - v1: `docs/stability-report-2026-06-24-post-sprints-13-15.md` (Sprints 16–19)
 - v2: `docs/STABILITY_REPORT_v2.md` (Sprints 22–25)
 - v3: `docs/STABILITY_REPORT_v3.md` (Sprints 26–27)
 - Deferred: `sprint-planning/sprint-28-p3-deferred-backlog/sprint.md` (Sprint 28)
+- v4: `docs/STABILITY_REPORT_v4.md` (Sprint 29)
 - Sprints 20–21: Post-v1 audit CRITICAL/HIGH fixes (committed d514bdf)
 
-**Total findings addressed:** 63 (v1) + 44 (v2) + 19 (v3) + 20 (deferred) = 146
-**Total estimated tickets:** 63 (v1) + 44 (v2) + 19 (v3) + 14 (S28) = 140
-**Total estimated effort:** 9–13 days (v1) + 9–12 days (v2) + ~10 days (v3+S28) = 28–35 days
+**Total findings addressed:** 63 (v1) + 44 (v2) + 27 (v3) + 20 (deferred) + 27 (v4) = 181
+**Total estimated tickets:** 63 (v1) + 44 (v2) + 19 (v3) + 14 (S28) + 3 (S29) = 143
+**Total estimated effort:** 9–13 days (v1) + 9–12 days (v2) + ~10 days (v3+S28) + ~1–2 days (S29) = 29–37 days
 
 ---
 
@@ -42,13 +43,19 @@
 | 24     | P2 MEDIUM   | Architecture/UI/Perf/AI/DevOps | 19      | ~5 days | ✅ b4e467b (Batch A) / ✅ 5bd819b (Batch B+C) | `sprint-24-p2-medium-batch/sprint.md`       |
 | 25     | P3 LOW      | Polish & consistency           | 18      | ~3 days | ✅ 100a1d2                                    | `sprint-25-p3-low-polish/sprint.md`         |
 
-### v3 Sprints (from Stability Report v3) — 🔄 PLANNED
+### v3 Sprints (from Stability Report v3) — ✅ ALL COMPLETE
 
 | Sprint | Priority  | Focus                           | Tickets | Effort  | Status     | File                                      |
 | ------ | --------- | ------------------------------- | ------- | ------- | ---------- | ----------------------------------------- |
-| 26     | P2 MEDIUM | Residual blocking I/O, ACL gaps | 8       | ~3 days | 🔄 Planned | `sprint-26-p2-medium-residual/sprint.md`  |
-| 27     | P3 LOW    | Polish & defense-in-depth       | 11      | ~2 days | 🔄 Planned | `sprint-27-p3-low-polish-v3/sprint.md`    |
-| 28     | P3 LOW    | Deferred backlog cleanup        | 14      | ~5 days | 🔄 Planned | `sprint-28-p3-deferred-backlog/sprint.md` |
+| 26     | P2 MEDIUM | Residual blocking I/O, ACL gaps | 8       | ~3 days | ✅ a98a24a | `sprint-26-p2-medium-residual/sprint.md`  |
+| 27     | P3 LOW    | Polish & defense-in-depth       | 11      | ~2 days | ✅ eaf8e85 | `sprint-27-p3-low-polish-v3/sprint.md`    |
+| 28     | P3 LOW    | Deferred backlog cleanup        | 14      | ~5 days | ✅ 80872b5 | `sprint-28-p3-deferred-backlog/sprint.md` |
+
+### v4 Sprint (from Stability Report v4) — 🔄 PLANNED
+
+| Sprint | Priority    | Focus                       | Tickets | Effort    | Status     | File                                   |
+| ------ | ----------- | --------------------------- | ------- | --------- | ---------- | -------------------------------------- |
+| 29     | P0 CRITICAL | Pre-release security & GDPR | 3       | ~1–2 days | 🔄 Planned | `sprint-29-p0-critical-high/sprint.md` |
 
 ---
 
