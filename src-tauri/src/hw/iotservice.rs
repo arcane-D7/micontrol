@@ -364,43 +364,54 @@ fn default_true() -> bool {
 
 // ── WiFi password encryption ──────────────────────────────────────────────────
 //
-// WiFi passwords are encrypted before being sent over the local named pipe
-// to prevent plaintext sniffing (CWE-312). Uses XOR with a key derived from
-// the shared HMAC key — sufficient for local pipe protection.
+// WiFi passwords are encrypted with AES-256-GCM before being sent over the
+// local named pipe to prevent plaintext sniffing (CWE-312). The key is
+// derived from the shared HMAC key via SHA-256.
 
-/// Derive a 32-byte stream key from the HMAC key and a nonce.
-fn derive_stream_key(key: &[u8], nonce: &[u8]) -> [u8; 32] {
+/// Derive a 32-byte AES-256 key from the HMAC key.
+fn derive_aes_key(key: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
+    hasher.update(b"micontrol-wifi-aes256-v1");
     hasher.update(key);
-    hasher.update(nonce);
-    hasher.finalize().into()
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
 }
 
-/// XOR-encrypt `data` using the given `stream_key`.
-fn xor_crypt(data: &[u8], stream_key: &[u8; 32]) -> Vec<u8> {
-    data.iter()
-        .enumerate()
-        .map(|(i, &b)| b ^ stream_key[i % stream_key.len()])
-        .collect()
-}
-
-/// Encrypt a WiFi password using a raw key.
+/// Encrypt a WiFi password using AES-256-GCM with a raw key.
 ///
-/// Returns `{nonce_hex}:{encrypted_hex}`.
+/// Returns `{nonce_hex}:{ciphertext_hex}` (ciphertext includes the GCM tag).
 fn encrypt_with_key(password: &str, key: &[u8], nonce_hex: &str) -> Result<String, String> {
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+
     let nonce_bytes = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce: {e}"))?;
-    let stream_key = derive_stream_key(key, &nonce_bytes);
-    let encrypted = xor_crypt(password.as_bytes(), &stream_key);
-    let encrypted_hex: String = encrypted.iter().map(|b| format!("{b:02x}")).collect();
+    // AES-GCM requires a 12-byte nonce; truncate the 16-byte nonce to 12 bytes
+    let nonce_12: Vec<u8> = nonce_bytes.into_iter().take(12).collect();
+    if nonce_12.len() != 12 {
+        return Err("AES-GCM nonce must be at least 12 bytes".to_string());
+    }
+
+    let aes_key = derive_aes_key(key);
+    let cipher = Aes256Gcm::new_from_slice(&aes_key).map_err(|e| format!("AES key error: {e}"))?;
+    let nonce = Nonce::from_slice(&nonce_12);
+
+    let ciphertext = cipher
+        .encrypt(nonce, password.as_bytes())
+        .map_err(|e| format!("AES-GCM encryption failed: {e}"))?;
+
+    let encrypted_hex: String = ciphertext.iter().map(|b| format!("{b:02x}")).collect();
     Ok(format!("{nonce_hex}:{encrypted_hex}"))
 }
 
-/// Decrypt a WiFi password using a raw key.
+/// Decrypt a WiFi password using AES-256-GCM with a raw key.
 ///
-/// Input format: `{nonce_hex}:{encrypted_hex}`
+/// Input format: `{nonce_hex}:{ciphertext_hex}`
 #[allow(dead_code)]
 fn decrypt_with_key(encrypted: &str, key: &[u8]) -> Result<String, String> {
+    use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+
     let parts: Vec<&str> = encrypted.splitn(2, ':').collect();
     if parts.len() != 2 {
         return Err("Invalid encrypted password format".to_string());
@@ -409,12 +420,24 @@ fn decrypt_with_key(encrypted: &str, key: &[u8]) -> Result<String, String> {
     let encrypted_hex = parts[1];
 
     let nonce_bytes = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce: {e}"))?;
+    // AES-GCM requires a 12-byte nonce; truncate the 16-byte nonce to 12 bytes
+    let nonce_12: Vec<u8> = nonce_bytes.into_iter().take(12).collect();
+    if nonce_12.len() != 12 {
+        return Err("AES-GCM nonce must be at least 12 bytes".to_string());
+    }
+
     let encrypted_bytes =
         hex::decode(encrypted_hex).map_err(|e| format!("Invalid ciphertext: {e}"))?;
-    let stream_key = derive_stream_key(key, &nonce_bytes);
-    let decrypted = xor_crypt(&encrypted_bytes, &stream_key);
 
-    String::from_utf8(decrypted).map_err(|e| format!("Decrypted password is not valid UTF-8: {e}"))
+    let aes_key = derive_aes_key(key);
+    let cipher = Aes256Gcm::new_from_slice(&aes_key).map_err(|e| format!("AES key error: {e}"))?;
+    let nonce = Nonce::from_slice(&nonce_12);
+
+    let plaintext = cipher
+        .decrypt(nonce, encrypted_bytes.as_ref())
+        .map_err(|e| format!("AES-GCM decryption failed: {e}"))?;
+
+    String::from_utf8(plaintext).map_err(|e| format!("Decrypted password is not valid UTF-8: {e}"))
 }
 
 /// Encrypt a WiFi password using the shared HMAC key.
@@ -1221,11 +1244,15 @@ mod tests {
     }
 
     #[test]
-    fn test_xor_crypt_roundtrip() {
-        let data = b"Hello WiFi!";
-        let key = [0xABu8; 32];
-        let encrypted = xor_crypt(data, &key);
-        let decrypted = xor_crypt(&encrypted, &key);
-        assert_eq!(&decrypted, data, "XOR crypt should be its own inverse");
+    fn test_aes_gcm_encrypt_decrypt_roundtrip() {
+        let password = "MyWiFiPassword123!";
+        let key = TEST_KEY;
+        let nonce_hex = "aabbccddeeff00112233445566778899"; // 16-byte nonce hex
+        let encrypted = encrypt_with_key(password, key, nonce_hex).unwrap();
+        let decrypted = decrypt_with_key(&encrypted, key).unwrap();
+        assert_eq!(
+            decrypted, password,
+            "AES-GCM decrypt should recover original password"
+        );
     }
 }

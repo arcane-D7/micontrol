@@ -124,6 +124,67 @@ pub fn run() {
                         })
                         .into(),
                     ),
+                    before_send: Some(std::sync::Arc::new(|mut event| {
+                        // ── PII stripping (GDPR / privacy) ───────────────────────
+                        // Redact usernames in file paths:
+                        // C:\Users\{username}\ → C:\Users\<redacted>\
+                        let redact_path = |s: &str| -> String {
+                            if let Some(start) = s.find("C:\\Users\\") {
+                                if let Some(end) = s[start + 9..].find('\\') {
+                                    let username = &s[start + 9..start + 9 + end];
+                                    return s.replace(
+                                        &format!("C:\\Users\\{}", username),
+                                        "C:\\Users\\<redacted>",
+                                    );
+                                }
+                            }
+                            s.to_string()
+                        };
+
+                        // Redact in exception stacktrace frames
+                        for exception in event.exception.values.iter_mut() {
+                            if let Some(ref mut stacktrace) = exception.stacktrace {
+                                for frame in stacktrace.frames.iter_mut() {
+                                    if let Some(ref mut filename) = frame.filename {
+                                        *filename = redact_path(filename);
+                                    }
+                                    if let Some(ref mut abs_path) = frame.abs_path {
+                                        *abs_path = redact_path(abs_path);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Strip server_name (computer name)
+                        event.server_name = None;
+
+                        // Strip IP addresses from extra
+                        for (_key, val) in event.extra.iter_mut() {
+                            if let Some(s) = val.as_str() {
+                                let parts: Vec<&str> = s.split('.').collect();
+                                let is_ip = parts.len() == 4
+                                    && parts
+                                        .iter()
+                                        .all(|p| !p.is_empty() && p.parse::<u8>().is_ok());
+                                if is_ip {
+                                    *val = serde_json::Value::String("<redacted>".into());
+                                }
+                            }
+                        }
+
+                        // Strip IP addresses from contexts
+                        for (_key, _ctx) in event.contexts.iter_mut() {
+                            // Contexts don't carry IP in this Sentry version;
+                            // IP is in event.request.env["REMOTE_ADDR"].
+                        }
+
+                        // Strip IP address from the request environment
+                        if let Some(ref mut request) = event.request {
+                            request.env.remove("REMOTE_ADDR");
+                        }
+
+                        Some(event)
+                    })),
                     ..Default::default()
                 },
             ));

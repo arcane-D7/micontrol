@@ -1161,8 +1161,18 @@ fn resolve_action(vk: u32) -> Option<HotkeyAction> {
 //    a Tauri command before the hotkey is triggered.
 
 /// Allowlist of permitted interpreter executables (canonical System32 paths).
+///
+/// These are the exact paths that `validate_script_path` compares against
+/// after canonicalizing the user-supplied path.  Using canonical paths
+/// prevents `ends_with()` bypass attacks where an attacker places a
+/// malicious `cmd.exe` in `C:\Users\attacker\bin\` (CWE-22, CWE-426).
 #[cfg(windows)]
-const ALLOWED_INTERPRETERS: &[&str] = &["cmd.exe", "powershell.exe"];
+const ALLOWED_CANONICAL_PATHS: &[&str] = &[
+    "C:\\Windows\\System32\\cmd.exe",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "C:\\Windows\\System32\\wscript.exe",
+    "C:\\Windows\\System32\\cscript.exe",
+];
 
 /// Check if the script action feature flag is enabled.
 ///
@@ -1189,6 +1199,11 @@ fn is_script_action_enabled() -> bool {
 /// For `interpreter == "powershell"` or `"cmd"`, the built-in System32
 /// executable is used (always allowed).  For direct execution
 /// (`interpreter == ""`), the `path` must resolve to an allowlisted executable.
+///
+/// SECURITY: The path is canonicalized and compared against exact canonical
+/// paths of allowed System32 executables.  This prevents `ends_with()` bypass
+/// attacks where an attacker places a malicious `cmd.exe` in
+/// `C:\Users\attacker\bin\cmd.exe` (CWE-22, CWE-426).
 #[cfg(windows)]
 fn validate_script_path(interpreter: &str, path: &str) -> Result<(), String> {
     // Named interpreters are always allowed (they use System32 binaries).
@@ -1196,17 +1211,70 @@ fn validate_script_path(interpreter: &str, path: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    // Direct execution: validate the path against the allowlist.
-    let path_lower = path.to_lowercase();
-    for allowed in ALLOWED_INTERPRETERS {
-        if path_lower.ends_with(allowed) || path_lower.ends_with(&format!("\\{}", allowed)) {
-            return Ok(());
+    // Direct execution: validate the path against the canonical allowlist.
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => {
+            // Path exists — compare the canonical form against each allowed path.
+            for allowed in ALLOWED_CANONICAL_PATHS {
+                if let Ok(allowed_canonical) = std::fs::canonicalize(allowed) {
+                    if resolved == allowed_canonical {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(format!(
+                "Script executable '{path}' is not in the allowlist. \
+                 Only cmd.exe, powershell.exe, wscript.exe, and cscript.exe \
+                 from System32 are permitted."
+            ))
+        }
+        Err(_) => {
+            // Path does not exist (yet) — fall back to checking the file name
+            // component, but ONLY if the parent directory is System32 or the
+            // PowerShell v1.0 subdirectory.  This prevents
+            // `C:\Users\attacker\bin\cmd.exe` from matching.
+            let p = std::path::Path::new(path);
+            let file_name = match p.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_lowercase(),
+                None => {
+                    return Err(format!(
+                        "Script executable '{path}' has no valid file name component."
+                    ))
+                }
+            };
+
+            let allowed_names: &[(&str, &[&str])] = &[
+                ("cmd.exe", &["C:\\Windows\\System32"]),
+                (
+                    "powershell.exe",
+                    &["C:\\Windows\\System32\\WindowsPowerShell\\v1.0"],
+                ),
+                ("wscript.exe", &["C:\\Windows\\System32"]),
+                ("cscript.exe", &["C:\\Windows\\System32"]),
+            ];
+
+            for (name, allowed_parents) in allowed_names {
+                if file_name == *name {
+                    let parent = p
+                        .parent()
+                        .and_then(|d| d.to_str())
+                        .map(|s| s.to_lowercase())
+                        .unwrap_or_default();
+                    for allowed_parent in *allowed_parents {
+                        if parent.eq_ignore_ascii_case(allowed_parent) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            Err(format!(
+                "Script executable '{path}' is not in the allowlist. \
+                 Only cmd.exe, powershell.exe, wscript.exe, and cscript.exe \
+                 from System32 are permitted."
+            ))
         }
     }
-    Err(format!(
-        "Script executable '{path}' is not in the allowlist. \
-         Only cmd.exe and powershell.exe from System32 are permitted."
-    ))
 }
 
 #[cfg(not(windows))]
@@ -1347,14 +1415,24 @@ fn dispatch_action(action: &HotkeyAction) {
         }
 
         HotkeyAction::OpenUrl { url } => {
-            // Validate URL scheme — only http and https are allowed to prevent
+            // Validate URL — only http and https schemes are allowed to prevent
             // code execution via file://, javascript:, data: schemes (CWE-807).
-            let lower = url.to_lowercase();
-            if !lower.starts_with("http://") && !lower.starts_with("https://") {
-                log::warn!(
-                    "[hotkeys] OpenUrl rejected — invalid scheme (only http/https allowed): '{url}'"
-                );
-                return;
+            // Using url::Url::parse() instead of a prefix check prevents
+            // bypasses like "javascript://example.com/%0aalert(1)".
+            match url::Url::parse(url) {
+                Ok(parsed) => {
+                    let scheme = parsed.scheme();
+                    if scheme != "http" && scheme != "https" {
+                        log::warn!(
+                            "[hotkeys] OpenUrl rejected — invalid scheme '{scheme}' (only http/https allowed): '{url}'"
+                        );
+                        return;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[hotkeys] OpenUrl rejected — invalid URL: '{url}' ({e})");
+                    return;
+                }
             }
             // Use `explorer <url>` — works for http/https links.
             let result = std::process::Command::new("explorer")
@@ -2329,7 +2407,11 @@ mod script_security_tests {
     #[test]
     fn test_validate_allowlisted_executable_allowed() {
         assert!(validate_script_path("", "C:\\Windows\\System32\\cmd.exe").is_ok());
-        assert!(validate_script_path("", "C:\\Windows\\System32\\powershell.exe").is_ok());
+        assert!(validate_script_path(
+            "",
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        )
+        .is_ok());
     }
 
     #[cfg(windows)]

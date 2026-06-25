@@ -79,7 +79,6 @@ jobs:
 
       - name: Run npm audit
         run: npm audit --audit-level=moderate
-        continue-on-error: true
 
   coverage-rust:
     name: Rust coverage
@@ -104,7 +103,6 @@ jobs:
 
       - name: Run cargo-tarpaulin
         run: cargo tarpaulin --manifest-path src-tauri/Cargo.toml --out xml --output-dir coverage/
-        continue-on-error: true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@b9f0e1e4e5b1f3a7c9d2e8b6f4a1c3d5e7b9f2a6 # v4
@@ -132,7 +130,6 @@ jobs:
 
       - name: Run vitest with coverage
         run: npx vitest run --coverage
-        continue-on-error: true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@b9f0e1e4e5b1f3a7c9d2e8b6f4a1c3d5e7b9f2a6 # v4

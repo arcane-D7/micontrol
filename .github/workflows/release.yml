@@ -76,24 +76,29 @@ jobs:
           # Decode the certificate from base64
           echo "$WINDOWS_CERTIFICATE" | base64 -d > cert.pfx
 
-          # Find the MSI installer
-          MSI_PATH=$(find src-tauri/target/release/bundle -name "*.msi" -type f | head -1)
+          # Find the NSIS installer (only NSIS is supported, no MSI)
           EXE_PATH=$(find src-tauri/target/release/bundle -name "*.exe" -type f | head -1)
 
-          # Sign the MSI installer
-          if [ -n "$MSI_PATH" ]; then
-            echo "Signing $MSI_PATH..."
-            signtool sign /f cert.pfx /p "$WINDOWS_CERTIFICATE_PASSWORD" \
-              /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com \
-              "$MSI_PATH" || echo "::warning::MSI signing failed"
-          fi
-
-          # Sign the EXE if it exists
+          # Sign the EXE installer — fail the build if signing fails
           if [ -n "$EXE_PATH" ]; then
             echo "Signing $EXE_PATH..."
             signtool sign /f cert.pfx /p "$WINDOWS_CERTIFICATE_PASSWORD" \
               /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com \
-              "$EXE_PATH" || echo "::warning::EXE signing failed"
+              "$EXE_PATH"
+            if [ $? -ne 0 ]; then
+              echo "::error::Code signing failed for $EXE_PATH"
+              rm -f cert.pfx
+              exit 1
+            fi
+            # Verify the signature
+            signtool verify /pa /v "$EXE_PATH" || {
+              echo "::error::Signature verification failed for $EXE_PATH"
+              rm -f cert.pfx
+              exit 1
+            }
+            echo "Code signing successful and verified."
+          else
+            echo "::warning::No EXE installer found to sign"
           fi
 
           # Clean up the certificate file
@@ -107,15 +112,14 @@ jobs:
           $tagName = "${{ github.ref_name }}"
           $releaseUrl = "https://github.com/${{ github.repository }}/releases/tag/$tagName"
 
-          # Find installers — prefer .nsis (exe) over .msi
+          # Find the NSIS installer (only NSIS is supported)
           $nsis = Get-ChildItem -Path src-tauri/target/release/bundle -Filter "*.exe" -Recurse | Select-Object -First 1
-          $msi = Get-ChildItem -Path src-tauri/target/release/bundle -Filter "*.msi" -Recurse | Select-Object -First 1
 
-          $installerName = if ($nsis) { $nsis.Name } elseif ($msi) { $msi.Name } else { "micontrol_${version}_x64-setup.exe" }
+          $installerName = if ($nsis) { $nsis.Name } else { "micontrol_${version}_x64-setup.exe" }
           $downloadUrl = "https://github.com/${{ github.repository }}/releases/latest/download/$installerName"
 
           # Find the .sig signature file matching the installer
-          $installerBase = if ($nsis) { $nsis.FullName } elseif ($msi) { $msi.FullName } else { $null }
+          $installerBase = if ($nsis) { $nsis.FullName } else { $null }
           $signature = ""
           if ($installerBase) {
             $sigFile = "${installerBase}.sig"
