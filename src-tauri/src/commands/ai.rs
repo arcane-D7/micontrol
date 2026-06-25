@@ -106,6 +106,9 @@ pub async fn analyze_system(
     validate_base_url(&base_url)?;
 
     // S24-016: Backend-enforced daily analysis limit.
+    // AI-L02: Backend rate limiting is enforced here via check_daily_limit().
+    // The frontend also tracks usage, but this is the authoritative check
+    // that cannot be bypassed by a modified client.
     crate::util::ai_usage::check_daily_limit(ai_daily_analyses)?;
 
     // S18-13: Sanitize input — strip control chars and limit length.

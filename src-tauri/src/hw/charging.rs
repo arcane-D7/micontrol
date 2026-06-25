@@ -142,49 +142,24 @@ fn send_via_pipe(threshold: u8) -> HardwareResult<()> {
 fn persist_threshold_registry(threshold: u8) -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::System::Registry::{
-            RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD,
-        };
-
-        unsafe {
-            // SAFETY: The wide strings are null-terminated; hkey is initialized only after
-            // RegOpenKeyExW returns OK. The pointers reference valid stack-local data with
-            // correct alignment for REG_DWORD.
-            let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
-            let mut hkey = std::mem::MaybeUninit::uninit();
-            // If key doesn't exist, create it
-            let res = RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(key_w.as_ptr()),
-                0,
-                KEY_WRITE,
-                hkey.as_mut_ptr(),
-            );
-            if res.is_err() {
-                return Ok(()); // Registry key doesn't exist — IoT driver may be absent
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        // S25-006: Use RegKeyGuard instead of raw RegOpenKeyExW/RegCloseKey.
+        // create_write opens with KEY_ALL_ACCESS which includes KEY_WRITE.
+        match RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY) {
+            Ok(key) => {
+                key.write_u32(CHARGE_REG_VALUE, threshold as u32)
+                    .map_err(|e| {
+                        HardwareError::Registry(format!(
+                            "Write charging threshold to registry: {e}"
+                        ))
+                    })?;
             }
-            let hkey = hkey.assume_init();
-            let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
-            let val = threshold as u32;
-            RegSetValueExW(
-                hkey,
-                PCWSTR(val_w.as_ptr()),
-                0,
-                REG_DWORD,
-                Some(&val.to_le_bytes()),
-            )
-            .ok()
-            .context("Write charging threshold to registry")?;
-            let _ = RegCloseKey(hkey).ok();
+            Err(e) => {
+                // Key doesn't exist or can't be opened — IoT driver may be absent
+                log::debug!("Cannot open charging registry key for write: {e}");
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -192,52 +167,15 @@ fn persist_threshold_registry(threshold: u8) -> HardwareResult<()> {
 
 #[cfg(windows)]
 fn read_threshold_registry() -> Option<HardwareResult<u8>> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, REG_VALUE_TYPE,
-    };
-
-    unsafe {
-        // SAFETY: Same pattern as persist_threshold_registry — wide strings are null-terminated,
-        // hkey is only assume_init'd after RegOpenKeyExW succeeds, and the cast pointer to the
-        // 4-byte stack buffer is valid and aligned for RegQueryValueExW.
-        let key_w: Vec<u16> = OsStr::new(CHARGE_REG_KEY)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        let mut hkey = std::mem::MaybeUninit::uninit();
-        let res = RegOpenKeyExW(
-            HKEY_LOCAL_MACHINE,
-            PCWSTR(key_w.as_ptr()),
-            0,
-            windows::Win32::System::Registry::KEY_READ,
-            hkey.as_mut_ptr(),
-        );
-        if res.is_err() {
-            return None;
-        }
-        let hkey = hkey.assume_init();
-        let val_w: Vec<u16> = OsStr::new(CHARGE_REG_VALUE)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        let mut data: u32 = 0;
-        let mut data_size = 4u32;
-        let mut ty = REG_VALUE_TYPE::default();
-        let res = RegQueryValueExW(
-            hkey,
-            PCWSTR(val_w.as_ptr()),
-            None,
-            Some(&mut ty),
-            Some((&mut data as *mut u32).cast()),
-            Some(&mut data_size),
-        );
-        let _ = RegCloseKey(hkey).ok();
-        if res.is_err() {
-            return None;
-        }
-        Some(Ok(data.clamp(40, 100) as u8))
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    // S25-006: Use RegKeyGuard instead of raw RegOpenKeyExW/RegCloseKey.
+    let key = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY).ok()??;
+    match key.read_u32(CHARGE_REG_VALUE) {
+        Ok(Some(data)) => Some(Ok(data.clamp(40, 100) as u8)),
+        Ok(None) => None,
+        Err(e) => Some(Err(HardwareError::Registry(format!(
+            "Read charging threshold: {e}"
+        )))),
     }
 }

@@ -22,6 +22,8 @@ export const LOGS_KEY = 'micontrol_analysis_logs_v1';
 export const LAST_KEY = 'micontrol_last_analysis_v1';
 export const SCHEDULE_KEY = 'micontrol_analysis_schedule_v1';
 const MAX_LOGS = 500;
+/** Logs older than this (in milliseconds) are pruned on save. */
+const LOG_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 export interface LastAnalysis {
   ts: string; // ISO-8601
@@ -49,7 +51,15 @@ export function loadLogs(): AnalysisLogEntry[] {
 }
 
 export function saveLogs(logs: AnalysisLogEntry[]) {
-  const trimmed = logs.slice(-MAX_LOGS);
+  const now = Date.now();
+  const pruned = logs.filter((log) => {
+    try {
+      return now - new Date(log.ts).getTime() < LOG_EXPIRY_MS;
+    } catch {
+      return false; // remove entries with invalid timestamps
+    }
+  });
+  const trimmed = pruned.slice(-MAX_LOGS);
   localStorage.setItem(LOGS_KEY, JSON.stringify(trimmed));
 }
 

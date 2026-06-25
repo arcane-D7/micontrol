@@ -9,10 +9,16 @@ use serde::{Deserialize, Serialize};
 ///
 /// Each variant maps to a stable `code` string that the frontend can switch on,
 /// plus a human-readable message.
-#[derive(Debug, thiserror::Error)]
+///
+/// S25-008: `Debug` includes WMI query strings (developer-facing), but `Display`
+/// (user-facing) does not expose them.
+#[derive(thiserror::Error)]
 pub enum HardwareError {
     /// WMI query failed (COM, namespace binding, or query syntax).
-    #[error("WMI query failed: {query}: {source}")]
+    ///
+    /// S25-008: The `query` field is included in `Debug` but NOT in `Display`
+    /// to avoid leaking WMI query strings to end users.
+    #[error("WMI query failed: {source}")]
     WmiQuery {
         query: String,
         #[source]
@@ -91,6 +97,38 @@ pub enum HardwareError {
     /// Generic hardware error (catch-all for uncategorized failures).
     #[error("Hardware error: {0}")]
     Other(String),
+}
+
+// S25-008: Manual Debug impl that includes WMI query strings for developers.
+// The Display impl (via #[error(...)]) omits query strings for end users.
+impl std::fmt::Debug for HardwareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WmiQuery { query, source } => f
+                .debug_struct("WmiQuery")
+                .field("query", query)
+                .field("source", source)
+                .finish(),
+            Self::WmiConnection(arg0) => f.debug_tuple("WmiConnection").field(arg0).finish(),
+            Self::Io(arg0) => f.debug_tuple("Io").field(arg0).finish(),
+            Self::Hid(arg0) => f.debug_tuple("Hid").field(arg0).finish(),
+            Self::InvalidConfig(arg0) => f.debug_tuple("InvalidConfig").field(arg0).finish(),
+            Self::Timeout(arg0) => f.debug_tuple("Timeout").field(arg0).finish(),
+            Self::NotSupported(arg0) => f.debug_tuple("NotSupported").field(arg0).finish(),
+            Self::Ecram(arg0) => f.debug_tuple("Ecram").field(arg0).finish(),
+            Self::Wifi(arg0) => f.debug_tuple("Wifi").field(arg0).finish(),
+            Self::Display(arg0) => f.debug_tuple("Display").field(arg0).finish(),
+            Self::Touchpad(arg0) => f.debug_tuple("Touchpad").field(arg0).finish(),
+            Self::Battery(arg0) => f.debug_tuple("Battery").field(arg0).finish(),
+            Self::Hotkey(arg0) => f.debug_tuple("Hotkey").field(arg0).finish(),
+            Self::Registry(arg0) => f.debug_tuple("Registry").field(arg0).finish(),
+            Self::ElevatedBridge(arg0) => f.debug_tuple("ElevatedBridge").field(arg0).finish(),
+            Self::AiRequest(arg0) => f.debug_tuple("AiRequest").field(arg0).finish(),
+            Self::HotkeyConfig(arg0) => f.debug_tuple("HotkeyConfig").field(arg0).finish(),
+            Self::TaskJoin(arg0) => f.debug_tuple("TaskJoin").field(arg0).finish(),
+            Self::Other(arg0) => f.debug_tuple("Other").field(arg0).finish(),
+        }
+    }
 }
 
 impl HardwareError {
@@ -232,6 +270,38 @@ mod tests {
             source: "COM error".into(),
         };
         assert_eq!(e.code(), "wmi_query");
+    }
+
+    #[test]
+    fn test_wmi_query_display_omits_query_string() {
+        // S25-008: Display must NOT contain the WMI query string (user-facing).
+        let e = HardwareError::WmiQuery {
+            query: "SELECT * FROM Win32_Battery".to_string(),
+            source: "COM error".into(),
+        };
+        let display = format!("{e}");
+        assert!(
+            !display.contains("SELECT * FROM Win32_Battery"),
+            "Display should not contain WMI query string, got: {display}"
+        );
+        assert!(
+            display.contains("WMI query failed"),
+            "Display should contain error description, got: {display}"
+        );
+    }
+
+    #[test]
+    fn test_wmi_query_debug_includes_query_string() {
+        // S25-008: Debug MUST contain the WMI query string (developer-facing).
+        let e = HardwareError::WmiQuery {
+            query: "SELECT * FROM Win32_Battery".to_string(),
+            source: "COM error".into(),
+        };
+        let debug = format!("{e:?}");
+        assert!(
+            debug.contains("SELECT * FROM Win32_Battery"),
+            "Debug should contain WMI query string, got: {debug}"
+        );
     }
 
     #[test]

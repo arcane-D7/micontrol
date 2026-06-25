@@ -1197,11 +1197,18 @@ const ALLOWED_CANONICAL_PATHS: &[&str] = &[
 /// Returns `false` if the key is absent or the value is 0.
 #[cfg(windows)]
 fn is_script_action_enabled() -> bool {
-    use winreg::enums::*;
-    use winreg::RegKey;
-    let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\miPC\\hotkeys");
-    match key {
-        Ok(k) => k.get_value::<u32, _>("EnableScriptActions").unwrap_or(0) != 0,
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    // S25-007: Use RegKeyGuard instead of winreg::RegKey.
+    match RegKeyGuard::open_read(HKEY_CURRENT_USER, "Software\\miPC\\hotkeys") {
+        Ok(Some(key)) => {
+            key.read_u32("EnableScriptActions")
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+                != 0
+        }
+        Ok(None) => false,
         Err(_) => false,
     }
 }

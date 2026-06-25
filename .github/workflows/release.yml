@@ -33,6 +33,27 @@ jobs:
       - name: Sync versions
         run: npm run version:sync
 
+      - name: Verify git tag matches package.json version
+        shell: pwsh
+        run: |
+          $pkgVersion = node -p "require('./package.json').version"
+          $tagName = "${{ github.ref_name }}"
+          # Strip leading 'v' from tag for comparison
+          $tagVersion = $tagName -replace '^v', ''
+          if ($pkgVersion -ne $tagVersion) {
+            Write-Host "::error::Version mismatch: package.json=$pkgVersion, git tag=$tagVersion"
+            exit 1
+          }
+          Write-Host "Version verified: $pkgVersion"
+
+      - name: Run cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --deny warnings
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:

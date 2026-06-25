@@ -375,18 +375,21 @@ fn default_true() -> bool {
 /// encrypted WiFi entries.
 fn derive_aes_key(key: &[u8]) -> [u8; 32] {
     // Try HKDF-derived sub-key first (S19-17)
-    if let Ok(subkey) = crate::util::auth::derive_subkey_from_key(key, "wifi_encryption") {
-        return subkey;
+    match crate::util::auth::derive_subkey_from_key(key, "wifi_encryption") {
+        Ok(subkey) => subkey,
+        Err(e) => {
+            // S25-003: Log the fallback so security audits can detect weak key derivation.
+            log::warn!("HKDF key derivation failed, falling back to legacy SHA-256: {e}");
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(b"micontrol-wifi-aes256-v1");
+            hasher.update(key);
+            let result = hasher.finalize();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&result);
+            out
+        }
     }
-    // Fallback: legacy SHA-256 derivation for backward compatibility
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(b"micontrol-wifi-aes256-v1");
-    hasher.update(key);
-    let result = hasher.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&result);
-    out
 }
 
 /// Encrypt a WiFi password using AES-256-GCM with a raw key.

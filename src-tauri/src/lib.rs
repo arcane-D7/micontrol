@@ -127,30 +127,15 @@ pub fn run() {
                     ),
                     before_send: Some(std::sync::Arc::new(|mut event| {
                         // ── PII stripping (GDPR / privacy) ───────────────────────
-                        // Redact usernames in file paths:
-                        // C:\Users\{username}\ → C:\Users\<redacted>\
-                        let redact_path = |s: &str| -> String {
-                            if let Some(start) = s.find("C:\\Users\\") {
-                                if let Some(end) = s[start + 9..].find('\\') {
-                                    let username = &s[start + 9..start + 9 + end];
-                                    return s.replace(
-                                        &format!("C:\\Users\\{}", username),
-                                        "C:\\Users\\<redacted>",
-                                    );
-                                }
-                            }
-                            s.to_string()
-                        };
-
                         // Redact in exception stacktrace frames
                         for exception in event.exception.values.iter_mut() {
                             if let Some(ref mut stacktrace) = exception.stacktrace {
                                 for frame in stacktrace.frames.iter_mut() {
                                     if let Some(ref mut filename) = frame.filename {
-                                        *filename = redact_path(filename);
+                                        *filename = redact_pii(filename);
                                     }
                                     if let Some(ref mut abs_path) = frame.abs_path {
-                                        *abs_path = redact_path(abs_path);
+                                        *abs_path = redact_pii(abs_path);
                                     }
                                 }
                             }
@@ -159,16 +144,23 @@ pub fn run() {
                         // Strip server_name (computer name)
                         event.server_name = None;
 
-                        // Strip IP addresses from extra
+                        // Strip IP addresses from extra (IPv4 and IPv6)
                         for (_key, val) in event.extra.iter_mut() {
                             if let Some(s) = val.as_str() {
+                                // IPv4 redaction
                                 let parts: Vec<&str> = s.split('.').collect();
-                                let is_ip = parts.len() == 4
+                                let is_ipv4 = parts.len() == 4
                                     && parts
                                         .iter()
                                         .all(|p| !p.is_empty() && p.parse::<u8>().is_ok());
-                                if is_ip {
-                                    *val = serde_json::Value::String("<redacted>".into());
+                                if is_ipv4 {
+                                    *val = serde_json::Value::String("[REDACTED_IP]".into());
+                                } else {
+                                    // IPv6 redaction
+                                    let redacted = redact_ipv6(s);
+                                    if redacted != s {
+                                        *val = serde_json::Value::String(redacted);
+                                    }
                                 }
                             }
                         }
@@ -785,4 +777,162 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
     let y = (work_bottom - ph - gap).max(0.0).round() as i32;
     log::info!("[tray] position_popup_at_tray: scale={scale:.2} pw={pw:.0} ph={ph:.0} work=({work_right:.0},{work_bottom:.0}) → pos=({x},{y})");
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+// ── PII redaction helpers (S25-002) ──────────────────────────────────────────
+
+/// Redact usernames in file paths for all drive letters (A: through Z:).
+///
+/// `C:\Users\{username}\` → `C:\Users\<redacted>\`
+/// `D:\Users\{username}\` → `D:\Users\<redacted>\`
+fn redact_path_username(s: &str) -> String {
+    for drive in (b'A'..=b'Z').map(|c| c as char) {
+        let prefix = format!("{drive}:\\Users\\");
+        if let Some(start) = s.find(&prefix) {
+            let user_start = start + prefix.len();
+            if let Some(end) = s[user_start..].find('\\') {
+                let username = &s[user_start..user_start + end];
+                return s.replace(
+                    &format!("{prefix}{username}"),
+                    &format!("{prefix}<redacted>"),
+                );
+            }
+        }
+    }
+    s.to_string()
+}
+
+/// Redact UNC paths: `\\server\share\` → `\\[REDACTED_PATH]\`
+fn redact_unc_path(s: &str) -> String {
+    if !s.contains("\\\\") {
+        return s.to_string();
+    }
+    let mut result = s.to_string();
+    if let Some(start) = result.find("\\\\") {
+        // Find the end of \\server\share\ (two backslash-separated components)
+        let after = &result[start + 2..];
+        if let Some(first_bs) = after.find('\\') {
+            let after_server = &after[first_bs + 1..];
+            if let Some(second_bs) = after_server.find('\\') {
+                let end = start + 2 + first_bs + 1 + second_bs;
+                let unc_prefix = &result[start..end];
+                result = result.replace(unc_prefix, "\\\\[REDACTED_PATH]");
+            } else {
+                // \\server\share without trailing backslash
+                let end = start + 2 + first_bs;
+                let unc_prefix = &result[start..end];
+                result = result.replace(unc_prefix, "\\\\[REDACTED_PATH]");
+            }
+        }
+    }
+    result
+}
+
+/// Redact IPv6 addresses (e.g., `2001:db8::1` → `[REDACTED_IP]`).
+///
+/// Detects sequences of hex digits and colons with at least 2 colons.
+fn redact_ipv6(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_hexdigit() {
+            let mut j = i;
+            let mut colon_count = 0;
+            while j < chars.len() && (chars[j].is_ascii_hexdigit() || chars[j] == ':') {
+                if chars[j] == ':' {
+                    colon_count += 1;
+                }
+                j += 1;
+            }
+            // IPv6 has at least 2 colons and is at least 5 chars (e.g., ::1)
+            if colon_count >= 2 && j > i + 4 {
+                result.push_str("[REDACTED_IP]");
+                i = j;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
+/// Combined PII redaction for a single string.
+fn redact_pii(s: &str) -> String {
+    let s = redact_path_username(s);
+    let s = redact_unc_path(&s);
+    redact_ipv6(&s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_redact_path_username_c_drive() {
+        let input = r"C:\Users\johnsmith\AppData\Local\file.txt";
+        let result = redact_path_username(input);
+        assert!(result.contains("<redacted>"));
+        assert!(!result.contains("johnsmith"));
+    }
+
+    #[test]
+    fn test_redact_path_username_d_drive() {
+        let input = r"D:\Users\alice\Documents\file.txt";
+        let result = redact_path_username(input);
+        assert!(result.contains("<redacted>"));
+        assert!(!result.contains("alice"));
+    }
+
+    #[test]
+    fn test_redact_path_username_z_drive() {
+        let input = r"Z:\Users\bob\data.txt";
+        let result = redact_path_username(input);
+        assert!(result.contains("<redacted>"));
+        assert!(!result.contains("bob"));
+    }
+
+    #[test]
+    fn test_redact_unc_path() {
+        let input = r"\\server\share\file.txt";
+        let result = redact_unc_path(input);
+        assert!(result.contains("[REDACTED_PATH]"));
+        assert!(!result.contains("server"));
+        assert!(!result.contains("share"));
+    }
+
+    #[test]
+    fn test_redact_ipv6_full() {
+        let input = "2001:db8::1";
+        let result = redact_ipv6(input);
+        assert_eq!(result, "[REDACTED_IP]");
+    }
+
+    #[test]
+    fn test_redact_ipv6_in_text() {
+        let input = "Connecting to fe80::1%eth0 from host";
+        let result = redact_ipv6(input);
+        assert!(result.contains("[REDACTED_IP]"));
+        assert!(!result.contains("fe80::1"));
+    }
+
+    #[test]
+    fn test_redact_ipv6_not_triggered_for_non_ipv6() {
+        let input = "version 1.2.3";
+        let result = redact_ipv6(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_redact_pii_combined() {
+        let input = r"\\fileserver\share\C:\Users\charlie\2001:db8::1";
+        let result = redact_pii(input);
+        assert!(result.contains("[REDACTED_PATH]"));
+        assert!(result.contains("<redacted>"));
+        assert!(result.contains("[REDACTED_IP]"));
+        assert!(!result.contains("charlie"));
+        assert!(!result.contains("fileserver"));
+        assert!(!result.contains("2001:db8"));
+    }
 }

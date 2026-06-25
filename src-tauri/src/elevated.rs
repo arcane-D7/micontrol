@@ -141,16 +141,29 @@ fn nonce_store_path() -> std::path::PathBuf {
     elev_dir().join("nonces.json")
 }
 
-/// Persist nonces to disk.
+/// Persist nonces to disk atomically (temp file + rename).
+///
+/// Writes to a temporary file in the same directory, then renames it to the
+/// final path. This prevents the elevated helper from reading a partially
+/// written nonce store if the process is interrupted mid-write.
 fn save_nonces(nonces: &HashMap<String, u64>) {
     let path = nonce_store_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string(nonces) {
-        if std::fs::write(&path, json).is_ok() {
-            if let Err(e) = auth::restrict_file_acl(&path) {
-                log::warn!("Failed to restrict ACL on nonce store: {e}");
+        // S25-001: Write to a temp file in the same directory, then rename
+        // for atomicity. Same pattern as elev_bridge.rs command file writes.
+        let tmp_path = path.with_extension("json.tmp");
+        if std::fs::write(&tmp_path, &json).is_ok() {
+            if std::fs::rename(&tmp_path, &path).is_ok() {
+                if let Err(e) = auth::restrict_file_acl(&path) {
+                    log::warn!("Failed to restrict ACL on nonce store: {e}");
+                }
+            } else {
+                // Rename failed — clean up the temp file to avoid littering.
+                let _ = std::fs::remove_file(&tmp_path);
+                log::warn!("Failed to atomically rename nonce store");
             }
         }
     }

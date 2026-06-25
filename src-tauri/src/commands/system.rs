@@ -231,10 +231,11 @@ pub async fn get_process_list() -> Result<Vec<ProcessInfo>, ErrorResponse> {
 }
 
 #[tauri::command]
-pub async fn get_available_refresh_rates() -> Vec<u32> {
-    run_blocking(move || Ok(hw_get_refresh_rates()))
+pub async fn get_available_refresh_rates() -> Result<Vec<u32>, ErrorResponse> {
+    // S25-009: Propagate errors instead of silently returning empty vec.
+    run_blocking(hw_get_refresh_rates)
         .await
-        .unwrap_or_default()
+        .map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
@@ -290,7 +291,14 @@ pub async fn trigger_driver_scan() -> Result<String, ErrorResponse> {
 
 #[tauri::command]
 pub async fn get_hardware_profile() -> Option<HardwareProfile> {
-    global_profile()
+    // A-L06: Log when profile is None so missing hardware discovery is visible.
+    let profile = global_profile();
+    if profile.is_none() {
+        log::warn!(
+            "get_hardware_profile: hardware profile not available (discovery not initialized)"
+        );
+    }
+    profile
 }
 
 #[tauri::command]

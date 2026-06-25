@@ -108,6 +108,11 @@ pub async fn export_user_data(app: AppHandle) -> Result<String, String> {
     zip.finish()
         .map_err(|e| format!("Cannot finalize ZIP archive: {e}"))?;
 
+    // S25-004: Restrict ACL on the export ZIP file to prevent other users from reading it.
+    if let Err(e) = crate::util::auth::restrict_file_acl(&zip_path) {
+        log::warn!("Failed to restrict ACL on export ZIP file: {e}");
+    }
+
     Ok(zip_path.to_string_lossy().into_owned())
 }
 

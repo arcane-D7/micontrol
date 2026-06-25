@@ -30,40 +30,43 @@ where
     let mut delay = initial_delay;
     let mut rng = rand::thread_rng();
 
-    for attempt in 0..=max_retries {
+    // S25-010: Restructured to avoid unreachable!() — the final attempt is
+    // handled by the loop's natural fall-through, not a panic.
+    for attempt in 0..max_retries {
         match f() {
             Ok(result) => return Ok(result),
             Err(e) => {
-                if attempt < max_retries {
-                    // Apply ±20% jitter to prevent thundering herd
-                    let jitter_factor = 1.0 + rng.gen_range(-0.2..0.2);
-                    let jittered_ms = (delay.as_millis() as f64 * jitter_factor).max(0.0);
-                    let sleep_duration = Duration::from_millis(jittered_ms as u64);
+                // Apply ±20% jitter to prevent thundering herd
+                let jitter_factor = 1.0 + rng.gen_range(-0.2..0.2);
+                let jittered_ms = (delay.as_millis() as f64 * jitter_factor).max(0.0);
+                let sleep_duration = Duration::from_millis(jittered_ms as u64);
 
-                    log::warn!(
-                        "Operation failed (attempt {}/{}): {}, retrying in {:?}...",
-                        attempt + 1,
-                        max_retries + 1,
-                        e,
-                        sleep_duration
-                    );
+                log::warn!(
+                    "Operation failed (attempt {}/{}): {}, retrying in {:?}...",
+                    attempt + 1,
+                    max_retries + 1,
+                    e,
+                    sleep_duration
+                );
 
-                    std::thread::sleep(sleep_duration);
+                std::thread::sleep(sleep_duration);
 
-                    // Compute next delay with exponential backoff, capped at max_delay
-                    let next_ms = (delay.as_millis() as f64 * backoff_multiplier)
-                        .min(max_delay.as_millis() as f64);
-                    delay = Duration::from_millis(next_ms as u64);
-                } else {
-                    log::error!("Operation failed after {} retries: {}", max_retries, e);
-                    return Err(e);
-                }
+                // Compute next delay with exponential backoff, capped at max_delay
+                let next_ms = (delay.as_millis() as f64 * backoff_multiplier)
+                    .min(max_delay.as_millis() as f64);
+                delay = Duration::from_millis(next_ms as u64);
             }
         }
     }
 
-    // Unreachable: the last iteration (attempt == max_retries) always returns.
-    unreachable!("retry loop must return on the final attempt")
+    // Final attempt (no retry after this).
+    match f() {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            log::error!("Operation failed after {} retries: {}", max_retries, e);
+            Err(e)
+        }
+    }
 }
 
 /// Execute a fallible operation with default retry settings.

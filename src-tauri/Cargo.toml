@@ -91,5 +91,5 @@ tauri-build = { version = "2", features = [] }
 panic = "unwind"
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = 3
 strip = true

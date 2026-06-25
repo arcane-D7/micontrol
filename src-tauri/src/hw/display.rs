@@ -114,7 +114,8 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     let brightness = get_brightness_wmi().unwrap_or_else(|_| get_brightness_igcl().unwrap_or(80));
     let hdr_enabled = get_hdr_state();
     let refresh_rate_hz = get_refresh_rate().unwrap_or(120);
-    let available_refresh_rates = get_available_refresh_rates();
+    // S25-009: Propagate error from get_available_refresh_rates.
+    let available_refresh_rates = get_available_refresh_rates()?;
     // DRR is active when the display is set to its highest supported refresh rate.
     let dynamic_refresh_rate_capable = available_refresh_rates
         .last()
@@ -175,9 +176,10 @@ pub fn set_ai_brightness(enabled: bool) -> HardwareResult<()> {
 fn read_display_dword(name: &str, default: u32) -> u32 {
     #[cfg(windows)]
     {
-        use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
-        if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(AI_BRIGHTNESS_REG_KEY) {
-            if let Ok(v) = key.get_value::<u32, _>(name) {
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        if let Ok(Some(key)) = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, AI_BRIGHTNESS_REG_KEY) {
+            if let Ok(Some(v)) = key.read_u32(name) {
                 return v;
             }
         }
@@ -188,11 +190,12 @@ fn read_display_dword(name: &str, default: u32) -> u32 {
 fn write_display_dword(name: &str, value: u32) -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
-        let (key, _) = RegKey::predef(HKEY_LOCAL_MACHINE)
-            .create_subkey(AI_BRIGHTNESS_REG_KEY)
-            .context("create display settings key")?;
-        key.set_value(name, &value).context("write dword")?;
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        let key = RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, AI_BRIGHTNESS_REG_KEY)
+            .map_err(|e| HardwareError::Registry(format!("create display settings key: {e}")))?;
+        key.write_u32(name, value)
+            .map_err(HardwareError::Registry)?;
     }
     Ok(())
 }
@@ -236,6 +239,30 @@ fn get_ambient_lux() -> Option<f32> {
 
 // ── Adaptive brightness background loop ──────────────────────────────────────
 
+/// Returns `true` when the monitor is powered on.
+///
+/// Uses `GetSystemMetrics(SM_MONITORPOWER)`:
+/// -1 = display is on
+///  1 = display is going to power-off
+///  2 = display is off
+///
+/// On non-Windows or if the call fails, we assume the display is on.
+#[cfg(windows)]
+fn is_display_on() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SYSTEM_METRICS_INDEX};
+    // SM_MONITORPOWER is not exposed by the windows 0.58 crate; the raw value is 112.
+    const SM_MONITORPOWER: i32 = 112;
+    // SAFETY: GetSystemMetrics is a thread-safe Win32 API call.
+    let val = unsafe { GetSystemMetrics(SYSTEM_METRICS_INDEX(SM_MONITORPOWER)) };
+    // -1 means the display is on; anything else means off or transitioning.
+    val == -1
+}
+
+#[cfg(not(windows))]
+fn is_display_on() -> bool {
+    true
+}
+
 /// Spawned once at startup. Every 2 s it reads the ambient light sensor and
 /// adjusts screen brightness according to the user-configured sensitivity curve.
 /// Config changes are picked up automatically on each iteration.
@@ -250,6 +277,16 @@ pub async fn adaptive_brightness_loop() {
     let mut adaptbright_suppressed = false;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // Skip the iteration when the display is off (lid closed, sleep, etc.)
+        // to avoid wasting CPU and fighting with the OS power manager.
+        let display_on = tokio::task::spawn_blocking(is_display_on)
+            .await
+            .unwrap_or(true);
+        if !display_on {
+            continue;
+        }
+
         // Run blocking hardware calls on the blocking thread pool to avoid
         // starving the tokio runtime worker threads.
         let Ok((cfg, brightness_actual)) = tokio::task::spawn_blocking(|| {
@@ -816,14 +853,16 @@ const DRRS_REG_VALUE: &str = "Psr2DrrsEnable";
 
 #[cfg(windows)]
 fn find_intel_arc_driver_key() -> Option<String> {
-    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
-    let class = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(INTEL_GPU_CLASS)
-        .ok()?;
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    // Check that the GPU class key exists before iterating subkeys.
+    let _ = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, INTEL_GPU_CLASS).ok()?;
     for i in 0..=9u32 {
         let name = format!("{:04}", i);
-        if let Ok(sub) = class.open_subkey(&name) {
-            if let Ok(desc) = sub.get_value::<String, _>("DriverDesc") {
+        if let Ok(Some(sub)) =
+            RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, &format!("{INTEL_GPU_CLASS}\\{name}"))
+        {
+            if let Ok(Some(desc)) = sub.read_string("DriverDesc") {
                 let dl = desc.to_lowercase();
                 if dl.contains("intel")
                     && (dl.contains("arc") || dl.contains("uhd") || dl.contains("iris"))
@@ -840,10 +879,11 @@ fn find_intel_arc_driver_key() -> Option<String> {
 pub fn get_intel_drrs() -> bool {
     #[cfg(windows)]
     {
-        use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
         if let Some(path) = find_intel_arc_driver_key() {
-            if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(&path) {
-                if let Ok(v) = key.get_value::<u32, _>(DRRS_REG_VALUE) {
+            if let Ok(Some(key)) = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, &path) {
+                if let Ok(Some(v)) = key.read_u32(DRRS_REG_VALUE) {
                     return v != 0;
                 }
             }
@@ -858,18 +898,17 @@ pub fn get_intel_drrs() -> bool {
 pub fn set_intel_drrs(enabled: bool) -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use winreg::{
-            enums::{HKEY_LOCAL_MACHINE, KEY_WRITE},
-            RegKey,
-        };
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
         let path = find_intel_arc_driver_key().ok_or_else(|| {
             HardwareError::Display("Intel Arc driver registry key not found".to_string())
         })?;
-        let key = RegKey::predef(HKEY_LOCAL_MACHINE)
-            .open_subkey_with_flags(&path, KEY_WRITE)
-            .context("open Intel Arc driver key for write")?;
-        key.set_value(DRRS_REG_VALUE, &(enabled as u32))
-            .context("set Psr2DrrsEnable")?;
+        // RegKeyGuard::create_write opens with KEY_ALL_ACCESS which includes KEY_WRITE.
+        let key = RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, &path).map_err(|e| {
+            HardwareError::Registry(format!("open Intel Arc driver key for write: {e}"))
+        })?;
+        key.write_u32(DRRS_REG_VALUE, enabled as u32)
+            .map_err(|e| HardwareError::Registry(format!("set Psr2DrrsEnable: {e}")))?;
     }
     Ok(())
 }
@@ -879,7 +918,7 @@ pub fn set_intel_drrs(enabled: bool) -> HardwareResult<()> {
 /// Uses `EnumDisplaySettingsExW` (Win32 GDI) which is the same source the
 /// Windows Display Settings page uses when building the "Choose a refresh
 /// rate" dropdown.
-pub fn get_available_refresh_rates() -> Vec<u32> {
+pub fn get_available_refresh_rates() -> HardwareResult<Vec<u32>> {
     #[cfg(windows)]
     {
         use std::collections::HashSet;
@@ -934,12 +973,18 @@ pub fn get_available_refresh_rates() -> Vec<u32> {
             }
             let mut rates: Vec<u32> = seen.into_iter().collect();
             rates.sort_unstable();
-            rates
+            // S25-009: Return error if no refresh rates were found.
+            if rates.is_empty() {
+                return Err(HardwareError::Display(
+                    "No refresh rates found for current display mode".to_string(),
+                ));
+            }
+            Ok(rates)
         }
     }
     #[cfg(not(windows))]
     {
-        vec![60, 120]
+        Ok(vec![60, 120])
     }
 }
 
@@ -1033,50 +1078,14 @@ fn get_refresh_rate() -> HardwareResult<u32> {
 fn get_ai_brightness_registry() -> HardwareResult<bool> {
     #[cfg(windows)]
     {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::System::Registry::{
-            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, REG_VALUE_TYPE,
-        };
-        unsafe {
-            // SAFETY: Standard registry pattern — wide strings are null-terminated; hkey is
-            // assume_init only after RegOpenKeyExW succeeds. The u32 pointer cast for
-            // RegQueryValueExW is valid for a 4-byte DWORD on the stack.
-            let key_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_KEY)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
-            let mut hkey = std::mem::MaybeUninit::uninit();
-            let res = RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(key_w.as_ptr()),
-                0,
-                windows::Win32::System::Registry::KEY_READ,
-                hkey.as_mut_ptr(),
-            );
-            if res.is_err() {
-                return Ok(false);
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        if let Ok(Some(key)) = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, AI_BRIGHTNESS_REG_KEY) {
+            if let Ok(Some(v)) = key.read_u32(AI_BRIGHTNESS_REG_VALUE) {
+                return Ok(v != 0);
             }
-            let hkey = hkey.assume_init();
-            let val_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_VALUE)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
-            let mut data: u32 = 0;
-            let mut data_size = 4u32;
-            let mut ty = REG_VALUE_TYPE::default();
-            let _ = RegQueryValueExW(
-                hkey,
-                PCWSTR(val_w.as_ptr()),
-                None,
-                Some(&mut ty),
-                Some((&mut data as *mut u32).cast()),
-                Some(&mut data_size),
-            );
-            let _ = RegCloseKey(hkey).ok();
-            Ok(data != 0)
         }
+        Ok(false)
     }
     #[cfg(not(windows))]
     {
@@ -1087,51 +1096,13 @@ fn get_ai_brightness_registry() -> HardwareResult<bool> {
 fn persist_ai_brightness_registry(enabled: bool) -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
-        use windows::Win32::System::Registry::{
-            RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD,
-            REG_OPTION_NON_VOLATILE,
-        };
-        unsafe {
-            // SAFETY: RegCreateKeyExW creates or opens the key; hkey is assume_init after it
-            // succeeds. Null-terminated wide strings. DWORD value written from stack-local bytes.
-            let key_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_KEY)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
-            let mut hkey = std::mem::MaybeUninit::uninit();
-            RegCreateKeyExW(
-                HKEY_LOCAL_MACHINE,
-                PCWSTR(key_w.as_ptr()),
-                0,
-                None,
-                REG_OPTION_NON_VOLATILE,
-                KEY_WRITE,
-                None,
-                hkey.as_mut_ptr(),
-                None,
-            )
-            .ok()
-            .context("Create display settings key")?;
-            let hkey = hkey.assume_init();
-            let val_w: Vec<u16> = OsStr::new(AI_BRIGHTNESS_REG_VALUE)
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
-            let val: u32 = if enabled { 1 } else { 0 };
-            RegSetValueExW(
-                hkey,
-                PCWSTR(val_w.as_ptr()),
-                0,
-                REG_DWORD,
-                Some(&val.to_le_bytes()),
-            )
-            .ok()
-            .context("Write AI brightness")?;
-            let _ = RegCloseKey(hkey).ok();
-        }
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        let key = RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, AI_BRIGHTNESS_REG_KEY)
+            .map_err(|e| HardwareError::Registry(format!("Create display settings key: {e}")))?;
+        let val: u32 = if enabled { 1 } else { 0 };
+        key.write_u32(AI_BRIGHTNESS_REG_VALUE, val)
+            .map_err(|e| HardwareError::Registry(format!("Write AI brightness: {e}")))?;
     }
     Ok(())
 }

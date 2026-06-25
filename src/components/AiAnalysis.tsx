@@ -24,6 +24,7 @@ import {
   LOGS_KEY,
   type LastAnalysis,
 } from '../hooks/useAnalysisLogger';
+import './AiAnalysis.css';
 
 type Hardware = ReturnType<typeof useHardware>;
 type AiSettings = ReturnType<typeof UseSettings>;
@@ -39,7 +40,7 @@ interface Props {
 function RenderAnalysis({ text }: { text: string }) {
   const lines = text.split('\n').filter((l) => l.trim());
   return (
-    <div style={{ lineHeight: 1.75, fontSize: 13 }}>
+    <div className="ai-analysis-render">
       {lines.map((line, i) => {
         const clean = line.replace(/^[-*•]\s*/, '').trim();
         const isBullet = /^[-*•]/.test(line.trim()) || /^\d+\./.test(line.trim());
@@ -47,21 +48,21 @@ function RenderAnalysis({ text }: { text: string }) {
         const cleanHeading = clean.replace(/\*\*/g, '').replace(/^#+\s*/, '');
         if (isHeading) {
           return (
-            <div key={i} style={{ fontWeight: 700, marginTop: i > 0 ? 14 : 0, marginBottom: 2 }}>
+            <div key={i} className="ai-analysis-render__heading">
               {cleanHeading}
             </div>
           );
         }
         if (isBullet) {
           return (
-            <div key={i} style={{ display: 'flex', gap: 8, marginLeft: 4 }}>
-              <span style={{ color: 'var(--color-accent)', flexShrink: 0 }}>›</span>
+            <div key={i} className="ai-analysis-render__bullet">
+              <span className="ai-analysis-render__bullet-marker">›</span>
               <span>{clean.replace(/\*\*/g, '')}</span>
             </div>
           );
         }
         return (
-          <div key={i} style={{ marginTop: 4 }}>
+          <div key={i} className="ai-analysis-render__paragraph">
             {clean.replace(/\*\*/g, '')}
           </div>
         );
@@ -89,16 +90,7 @@ function LineChart({
 }) {
   if (series.every((s) => s.values.length < 2)) {
     return (
-      <div
-        style={{
-          height,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'var(--text-dim)',
-          fontSize: 12,
-        }}
-      >
+      <div className="ai-line-chart__empty" style={{ height }}>
         {t('aiAnalysis.charts.noData')}
       </div>
     );
@@ -127,8 +119,9 @@ function LineChart({
   return (
     <svg
       viewBox={`0 0 ${W} ${H}`}
-      preserveAspectRatio="none"
-      style={{ width: '100%', height, display: 'block' }}
+      preserveAspectRatio="xMidYMid meet"
+      className="ai-line-chart__svg"
+      style={{ height }}
     >
       {/* Grid lines */}
       {ticks.map((tick, i) => (
@@ -189,34 +182,12 @@ function LineChart({
 
 function ChartLegend({ items }: { items: { color: string; label: string; last?: string }[] }) {
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 6 }}>
+    <div className="ai-chart-legend">
       {items.map((item) => (
-        <div
-          key={item.label}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 5,
-            fontSize: 11,
-            color: 'var(--text-muted)',
-          }}
-        >
-          <span
-            style={{
-              width: 10,
-              height: 2.5,
-              background: item.color,
-              borderRadius: 2,
-              display: 'inline-block',
-              flexShrink: 0,
-            }}
-          />
+        <div key={item.label} className="ai-chart-legend__item">
+          <span className="ai-chart-legend__swatch" style={{ background: item.color }} />
           {item.label}
-          {item.last !== undefined && (
-            <span style={{ color: 'var(--text)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>
-              ({item.last})
-            </span>
-          )}
+          {item.last !== undefined && <span className="ai-chart-legend__last">({item.last})</span>}
         </div>
       ))}
     </div>
@@ -231,66 +202,27 @@ function ProcessBars({
   processes: Array<{ name: string; cpu_pct: number; memory_mb: number }>;
 }) {
   if (!processes.length) {
-    return (
-      <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{t('aiAnalysis.charts.noData')}</div>
-    );
+    return <div className="ai-process-bars__empty">{t('aiAnalysis.charts.noData')}</div>;
   }
   const maxCpu = Math.max(...processes.map((p) => p.cpu_pct), 1);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+    <div className="ai-process-bars">
       {processes.slice(0, 8).map((p) => (
-        <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
-          <span
-            style={{
-              width: 140,
-              flexShrink: 0,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              color: 'var(--text-muted)',
-            }}
-            title={p.name}
-          >
+        <div key={p.name} className="ai-process-bars__row">
+          <span className="ai-process-bars__name" title={p.name}>
             {p.name}
           </span>
-          <div
-            style={{
-              flex: 1,
-              height: 6,
-              background: 'var(--surface-2)',
-              borderRadius: 3,
-              overflow: 'hidden',
-            }}
-          >
+          <div className="ai-process-bars__bar-track">
             <div
+              className="ai-process-bars__bar-fill"
               style={{
                 width: `${(p.cpu_pct / maxCpu) * 100}%`,
-                height: '100%',
                 background: p.cpu_pct > 50 ? 'var(--warning)' : 'var(--accent)',
-                borderRadius: 3,
-                transition: 'width 0.3s ease',
               }}
             />
           </div>
-          <span
-            style={{
-              width: 42,
-              textAlign: 'right',
-              fontFamily: 'var(--font-mono)',
-              color: 'var(--text-dim)',
-            }}
-          >
-            {p.cpu_pct.toFixed(1)}%
-          </span>
-          <span
-            style={{
-              width: 54,
-              textAlign: 'right',
-              fontFamily: 'var(--font-mono)',
-              color: 'var(--text-dim)',
-              fontSize: 10,
-            }}
-          >
+          <span className="ai-process-bars__cpu">{p.cpu_pct.toFixed(1)}%</span>
+          <span className="ai-process-bars__mem">
             {p.memory_mb >= 1024
               ? `${(p.memory_mb / 1024).toFixed(1)} GB`
               : `${p.memory_mb.toFixed(0)} MB`}
@@ -373,13 +305,11 @@ function AiUsagePanel() {
   if (!usage) return null;
 
   return (
-    <div className="card" style={{ marginTop: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+    <div className="card ai-usage-panel">
+      <div className="ai-usage-panel__header">
         <div>
-          <div className="card-title" style={{ marginBottom: 2 }}>
-            {t('ai.usage.title')}
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          <div className="card-title ai-usage-panel__title">{t('ai.usage.title')}</div>
+          <div className="ai-usage-panel__stats">
             {t('ai.usage.requests')}: <strong>{usage.total_requests}</strong>
             {' · '}
             {t('ai.usage.tokens')}:{' '}
@@ -388,19 +318,7 @@ function AiUsagePanel() {
             {t('ai.usage.estimatedCost')}: <strong>${usage.estimated_cost_usd.toFixed(4)}</strong>
           </div>
         </div>
-        <button
-          onClick={handleReset}
-          style={{
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: 6,
-            padding: '4px 12px',
-            cursor: 'pointer',
-            fontSize: 11,
-            color: 'var(--text-muted)',
-            whiteSpace: 'nowrap',
-          }}
-        >
+        <button onClick={handleReset} className="ai-usage-panel__reset">
           {t('ai.usage.reset')}
         </button>
       </div>
@@ -565,21 +483,12 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
     <>
       {/* ── Settings card ─────────────────────────────────────────────────── */}
       <div className="card">
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            marginBottom: 12,
-          }}
-        >
+        <div className="ai-settings-card__header">
           <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
+            <div className="card-title ai-settings-card__title">
               {t('aiAnalysis.settings.title')}
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              {t('aiAnalysis.settings.subtitle')}
-            </div>
+            <div className="ai-settings-card__subtitle">{t('aiAnalysis.settings.subtitle')}</div>
           </div>
           <label className="toggle-switch">
             <input
@@ -601,25 +510,19 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         </div>
 
         {ai.settings.ai_analysis_enabled && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="ai-settings-card__body">
             {/* Polling interval */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-              }}
-            >
+            <div className="ai-settings-row">
               <div>
-                <div style={{ fontSize: 13 }}>{t('aiAnalysis.settings.pollInterval')}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                <div className="ai-settings-row__label">
+                  {t('aiAnalysis.settings.pollInterval')}
+                </div>
+                <div className="ai-settings-row__desc">
                   {t('aiAnalysis.settings.pollIntervalDesc')}
                 </div>
               </div>
               <select
-                className="select-input"
-                style={{ minWidth: 130 }}
+                className="select-input ai-settings-row__select"
                 value={ai.settings.ai_poll_interval_sec}
                 onChange={(e) => ai.updateKey('ai_poll_interval_sec', Number(e.target.value))}
               >
@@ -632,23 +535,17 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
             </div>
 
             {/* Daily analyses */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-              }}
-            >
+            <div className="ai-settings-row">
               <div>
-                <div style={{ fontSize: 13 }}>{t('aiAnalysis.settings.dailyAnalyses')}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                <div className="ai-settings-row__label">
+                  {t('aiAnalysis.settings.dailyAnalyses')}
+                </div>
+                <div className="ai-settings-row__desc">
                   {t('aiAnalysis.settings.dailyAnalysesDesc')}
                 </div>
               </div>
               <select
-                className="select-input"
-                style={{ minWidth: 130 }}
+                className="select-input ai-settings-row__select"
                 value={ai.settings.ai_daily_analyses}
                 onChange={(e) => ai.updateKey('ai_daily_analyses', Number(e.target.value))}
               >
@@ -663,33 +560,14 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
 
             {/* Model hint */}
             {!ai.isConfigured ? (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: 'var(--warning, #ff9800)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
+              <div className="ai-settings-warning">
                 ⚠️ {t('ai.notConfigured')}{' '}
-                <button
-                  onClick={onOpenSettings}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: 'var(--accent)',
-                    cursor: 'pointer',
-                    fontSize: 12,
-                    padding: 0,
-                    textDecoration: 'underline',
-                  }}
-                >
+                <button onClick={onOpenSettings} className="ai-settings-link">
                   {t('settings.title')}
                 </button>
               </div>
             ) : (
-              <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+              <div className="ai-settings-model-hint">
                 🤖{' '}
                 {t('aiAnalysis.settings.modelHint', {
                   model: ai.settings.openai_model || 'gpt-4o-mini',
@@ -698,38 +576,16 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
             )}
 
             {/* Stats row */}
-            <div
-              style={{
-                display: 'flex',
-                gap: 16,
-                paddingTop: 6,
-                borderTop: '1px solid var(--border)',
-                flexWrap: 'wrap',
-              }}
-            >
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                {t('aiAnalysis.settings.logCount')}:{' '}
-                <strong style={{ color: 'var(--text)' }}>{logs.length}</strong> / {500}
+            <div className="ai-settings-stats">
+              <div className="ai-settings-stat">
+                {t('aiAnalysis.settings.logCount')}: <strong>{logs.length}</strong> / {500}
               </div>
               {spanLabel && (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  {t('aiAnalysis.settings.span')}:{' '}
-                  <strong style={{ color: 'var(--text)' }}>{spanLabel}</strong>
+                <div className="ai-settings-stat">
+                  {t('aiAnalysis.settings.span')}: <strong>{spanLabel}</strong>
                 </div>
               )}
-              <button
-                onClick={handleClearLogs}
-                style={{
-                  marginLeft: 'auto',
-                  background: 'none',
-                  border: '1px solid var(--border)',
-                  borderRadius: 6,
-                  padding: '2px 10px',
-                  cursor: 'pointer',
-                  fontSize: 11,
-                  color: 'var(--text-muted)',
-                }}
-              >
+              <button onClick={handleClearLogs} className="ai-settings-clear-logs">
                 {t('aiAnalysis.settings.clearLogs')}
               </button>
             </div>
@@ -737,18 +593,14 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         )}
 
         {!ai.settings.ai_analysis_enabled && (
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
-            {t('aiAnalysis.settings.disabledHint')}
-          </div>
+          <div className="ai-settings-disabled-hint">{t('aiAnalysis.settings.disabledHint')}</div>
         )}
       </div>
 
       {/* ── Charts card ───────────────────────────────────────────────────── */}
       <div className="card">
-        <div className="card-title" style={{ marginBottom: 2 }}>
-          {t('aiAnalysis.charts.title')}
-        </div>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
+        <div className="card-title ai-charts-card__title">{t('aiAnalysis.charts.title')}</div>
+        <div className="ai-charts-card__subtitle">
           {chartLogs.length > 0
             ? t('aiAnalysis.charts.subtitle', {
                 n: String(chartLogs.length),
@@ -758,32 +610,14 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         </div>
 
         {chartLogs.length >= 2 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <div className="ai-charts-container">
             {/* Temperature chart */}
             <div>
-              <div
-                style={{
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: 'var(--text-dim)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.07em',
-                  marginBottom: 6,
-                }}
-              >
+              <div className="ai-chart-section__label">
                 {t('aiAnalysis.charts.temperature')} (°C)
               </div>
               <LineChart series={[cpuTemps, gpuTemps]} height={100} unit="°" />
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  fontSize: 10,
-                  color: 'var(--text-dim)',
-                  marginTop: 2,
-                  paddingInline: 36,
-                }}
-              >
+              <div className="ai-chart-axis-labels">
                 <span>{fmtTime(chartLogs[0].ts)}</span>
                 <span>{fmtTime(chartLogs[chartLogs.length - 1].ts)}</span>
               </div>
@@ -806,29 +640,9 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
             {/* TDP chart */}
             {tdpSeries.values.length >= 2 && (
               <div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: 'var(--text-dim)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.07em',
-                    marginBottom: 6,
-                  }}
-                >
-                  {t('aiAnalysis.charts.tdp')} (W)
-                </div>
+                <div className="ai-chart-section__label">{t('aiAnalysis.charts.tdp')} (W)</div>
                 <LineChart series={[tdpSeries]} height={80} unit="W" />
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    fontSize: 10,
-                    color: 'var(--text-dim)',
-                    marginTop: 2,
-                    paddingInline: 36,
-                  }}
-                >
+                <div className="ai-chart-axis-labels">
                   <span>{fmtTime(chartLogs[0].ts)}</span>
                   <span>{fmtTime(chartLogs[chartLogs.length - 1].ts)}</span>
                 </div>
@@ -846,29 +660,9 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
 
             {/* CPU/GPU usage chart */}
             <div>
-              <div
-                style={{
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: 'var(--text-dim)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.07em',
-                  marginBottom: 6,
-                }}
-              >
-                {t('aiAnalysis.charts.usage')} (%)
-              </div>
+              <div className="ai-chart-section__label">{t('aiAnalysis.charts.usage')} (%)</div>
               <LineChart series={[cpuPct, gpuPct]} height={80} unit="%" />
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  fontSize: 10,
-                  color: 'var(--text-dim)',
-                  marginTop: 2,
-                  paddingInline: 36,
-                }}
-              >
+              <div className="ai-chart-axis-labels">
                 <span>{fmtTime(chartLogs[0].ts)}</span>
                 <span>{fmtTime(chartLogs[chartLogs.length - 1].ts)}</span>
               </div>
@@ -891,16 +685,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
             {/* Process bars */}
             {topProcs.length > 0 && (
               <div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: 'var(--text-dim)',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.07em',
-                    marginBottom: 8,
-                  }}
-                >
+                <div className="ai-chart-section__label ai-chart-section__label--processes">
                   {t('aiAnalysis.charts.topProcesses')}
                 </div>
                 <ProcessBars processes={topProcs} />
@@ -908,42 +693,24 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
             )}
           </div>
         ) : (
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '32px 0',
-              gap: 8,
-              color: 'var(--text-dim)',
-            }}
-          >
-            <span style={{ fontSize: 32 }} aria-hidden="true">
+          <div className="ai-charts-empty">
+            <span className="ai-charts-empty__icon" aria-hidden="true">
               📊
             </span>
-            <span style={{ fontSize: 13 }}>{t('aiAnalysis.charts.waitingForData')}</span>
-            <span style={{ fontSize: 11 }}>{t('aiAnalysis.charts.enableHint')}</span>
+            <span className="ai-charts-empty__title">{t('aiAnalysis.charts.waitingForData')}</span>
+            <span className="ai-charts-empty__hint">{t('aiAnalysis.charts.enableHint')}</span>
           </div>
         )}
       </div>
 
       {/* ── Analysis card ─────────────────────────────────────────────────── */}
       <div className="card">
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
-            gap: 12,
-            marginBottom: 12,
-          }}
-        >
+        <div className="ai-analysis-card__header">
           <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
+            <div className="card-title ai-analysis-card__title">
               {t('aiAnalysis.analysis.title')}
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            <div className="ai-analysis-card__meta">
               {lastAnalysis
                 ? t('aiAnalysis.analysis.lastAt', {
                     time: fmtDatetime(lastAnalysis.ts),
@@ -952,139 +719,62 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
                 : t('aiAnalysis.analysis.neverRun')}
             </div>
           </div>
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'flex-end',
-              gap: 4,
-              flexShrink: 0,
-            }}
-          >
+          <div className="ai-analysis-card__actions">
             <button
-              className="btn-primary"
-              style={{ fontSize: 12, minWidth: 100 }}
+              className="btn-primary ai-analysis-card__trigger"
               onClick={handleAnalyze}
               disabled={analyzing || logs.length < 2}
             >
               {analyzing ? t('aiAnalysis.analysis.analyzing') : t('aiAnalysis.analysis.trigger')}
             </button>
             {lastAnalysis && (
-              <div style={{ fontSize: 10, color: 'var(--text-dim)', textAlign: 'right' }}>
+              <div className="ai-analysis-card__next-in">
                 {t('aiAnalysis.analysis.nextIn')}: {nextIn}
               </div>
             )}
           </div>
         </div>
 
-        {analyzeError && (
-          <div
-            style={{
-              padding: '10px 14px',
-              background: 'color-mix(in srgb, var(--error, #f44336) 12%, transparent)',
-              borderRadius: 'var(--r-sm)',
-              borderLeft: '3px solid var(--error, #f44336)',
-              fontSize: 12,
-              color: 'var(--error, #f44336)',
-              marginBottom: 12,
-            }}
-          >
-            {analyzeError}
-          </div>
-        )}
+        {analyzeError && <div className="ai-analysis-error">{analyzeError}</div>}
 
         {analyzing && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '12px 0',
-              color: 'var(--text-muted)',
-              fontSize: 13,
-            }}
-          >
-            <span
-              style={{
-                display: 'inline-block',
-                width: 14,
-                height: 14,
-                border: '2px solid var(--accent)',
-                borderTopColor: 'transparent',
-                borderRadius: '50%',
-                animation: 'spin 0.8s linear infinite',
-              }}
-            />
+          <div className="ai-analysis-loading">
+            <span className="ai-analysis-loading__spinner" />
             {t('aiAnalysis.analysis.analyzing')}…
           </div>
         )}
 
         {lastAnalysis && !analyzing && (
-          <div
-            style={{
-              padding: '14px 16px',
-              background: 'var(--surface-2)',
-              borderRadius: 'var(--r-sm)',
-              borderLeft: '3px solid var(--accent)',
-            }}
-          >
+          <div className="ai-analysis-result">
             <RenderAnalysis text={lastAnalysis.text} />
           </div>
         )}
 
         {!lastAnalysis && !analyzing && !analyzeError && (
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '24px 0',
-              gap: 8,
-              color: 'var(--text-dim)',
-            }}
-          >
-            <span style={{ fontSize: 28 }} aria-hidden="true">
+          <div className="ai-analysis-empty">
+            <span className="ai-analysis-empty__icon" aria-hidden="true">
               🤖
             </span>
-            <span style={{ fontSize: 12 }}>{t('aiAnalysis.analysis.noResultYet')}</span>
+            <span className="ai-analysis-empty__text">{t('aiAnalysis.analysis.noResultYet')}</span>
           </div>
         )}
       </div>
 
       {/* ── AI disclaimer ──────────────────────────────────────────────────── */}
-      <div
-        style={{
-          fontSize: 11,
-          color: 'var(--color-text-muted)',
-          padding: '8px 14px',
-          marginBottom: 12,
-          background: 'var(--surface-2, rgba(255,255,255,0.03))',
-          borderRadius: 8,
-          border: '1px solid var(--color-border, #3a3a4e)',
-          lineHeight: 1.5,
-        }}
-      >
-        ⚠️ {t('ai.disclaimer')}
-      </div>
+      <div className="ai-disclaimer">⚠️ {t('ai.disclaimer')}</div>
 
       {/* ── AI Usage Panel ─────────────────────────────────────────────────── */}
       <AiUsagePanel />
 
       {/* ── Log table card ────────────────────────────────────────────────── */}
       <div className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div className="ai-log-table__header">
           <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
-              {t('aiAnalysis.logs.title')}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              {t('common.logs', { count: logs.length })}
-            </div>
+            <div className="card-title ai-log-table__title">{t('aiAnalysis.logs.title')}</div>
+            <div className="ai-log-table__count">{t('common.logs', { count: logs.length })}</div>
           </div>
           <button
-            className="btn-secondary"
-            style={{ fontSize: 12 }}
+            className="btn-secondary ai-log-table__toggle"
             onClick={() => setShowLogTable((v) => !v)}
           >
             {showLogTable ? t('common.hide') : t('common.show')}
@@ -1092,61 +782,28 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         </div>
 
         {showLogTable && (
-          <div style={{ marginTop: 14 }}>
+          <div className="ai-log-table__body">
             {logs.length === 0 ? (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: 'var(--text-dim)',
-                  textAlign: 'center',
-                  padding: '16px 0',
-                }}
-              >
-                {t('aiAnalysis.logs.noEntries')}
-              </div>
+              <div className="ai-log-table__empty">{t('aiAnalysis.logs.noEntries')}</div>
             ) : (
               <>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-                    <thead>
-                      <tr
-                        style={{
-                          color: 'var(--text-muted)',
-                          borderBottom: '1px solid var(--border)',
-                        }}
-                      >
-                        <th style={{ textAlign: 'left', padding: '4px 6px', fontWeight: 500 }}>
+                <div className="ai-log-table__wrapper">
+                  <table className="ai-log-table__table">
+                    <thead className="ai-log-table__thead">
+                      <tr>
+                        <th className="ai-log-table__cell ai-log-table__cell--left">
                           {t('aiAnalysis.logs.time')}
                         </th>
-                        <th style={{ textAlign: 'left', padding: '4px 6px', fontWeight: 500 }}>
+                        <th className="ai-log-table__cell ai-log-table__cell--left">
                           {t('aiAnalysis.logs.mode')}
                         </th>
-                        <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: 500 }}>
-                          CPU°C
-                        </th>
-                        <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: 500 }}>
-                          GPU°C
-                        </th>
-                        <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: 500 }}>
-                          TDP W
-                        </th>
-                        <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: 500 }}>
-                          CPU%
-                        </th>
-                        <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: 500 }}>
-                          GPU%
-                        </th>
-                        <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: 500 }}>
-                          🔋%
-                        </th>
-                        <th
-                          style={{
-                            textAlign: 'center',
-                            padding: '4px 6px',
-                            fontWeight: 500,
-                            width: 30,
-                          }}
-                        ></th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">CPU°C</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">GPU°C</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">TDP W</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">CPU%</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">GPU%</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">🔋%</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--action"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1154,75 +811,32 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
                         .slice(-logTableCount)
                         .reverse()
                         .map((e, i) => (
-                          <tr
-                            key={i}
-                            style={{ borderBottom: '1px solid var(--border-faint, var(--border))' }}
-                          >
-                            <td
-                              style={{
-                                padding: '3px 6px',
-                                fontFamily: 'var(--font-mono)',
-                                color: 'var(--text-dim)',
-                              }}
-                            >
+                          <tr key={i} className="ai-log-table__row">
+                            <td className="ai-log-table__cell ai-log-table__cell--time">
                               {fmtTime(e.ts)}
                             </td>
-                            <td style={{ padding: '3px 6px', color: 'var(--accent)' }}>{e.mode}</td>
-                            <td
-                              style={{
-                                padding: '3px 6px',
-                                textAlign: 'right',
-                                fontFamily: 'var(--font-mono)',
-                              }}
-                            >
+                            <td className="ai-log-table__cell ai-log-table__cell--mode">
+                              {e.mode}
+                            </td>
+                            <td className="ai-log-table__cell ai-log-table__cell--num">
                               {e.cpu_temp.toFixed(0)}
                             </td>
-                            <td
-                              style={{
-                                padding: '3px 6px',
-                                textAlign: 'right',
-                                fontFamily: 'var(--font-mono)',
-                              }}
-                            >
+                            <td className="ai-log-table__cell ai-log-table__cell--num">
                               {e.gpu_temp.toFixed(0)}
                             </td>
-                            <td
-                              style={{
-                                padding: '3px 6px',
-                                textAlign: 'right',
-                                fontFamily: 'var(--font-mono)',
-                              }}
-                            >
+                            <td className="ai-log-table__cell ai-log-table__cell--num">
                               {e.tdp_watts != null ? e.tdp_watts.toFixed(1) : '—'}
                             </td>
-                            <td
-                              style={{
-                                padding: '3px 6px',
-                                textAlign: 'right',
-                                fontFamily: 'var(--font-mono)',
-                              }}
-                            >
+                            <td className="ai-log-table__cell ai-log-table__cell--num">
                               {e.cpu_pct.toFixed(0)}
                             </td>
-                            <td
-                              style={{
-                                padding: '3px 6px',
-                                textAlign: 'right',
-                                fontFamily: 'var(--font-mono)',
-                              }}
-                            >
+                            <td className="ai-log-table__cell ai-log-table__cell--num">
                               {e.gpu_pct.toFixed(0)}
                             </td>
-                            <td
-                              style={{
-                                padding: '3px 6px',
-                                textAlign: 'right',
-                                fontFamily: 'var(--font-mono)',
-                              }}
-                            >
+                            <td className="ai-log-table__cell ai-log-table__cell--num">
                               {e.battery_level != null ? e.battery_level.toFixed(0) : '—'}
                             </td>
-                            <td style={{ padding: '3px 4px', textAlign: 'center' }}>
+                            <td className="ai-log-table__cell ai-log-table__cell--action">
                               <button
                                 onClick={() => handleDeleteLog(e.id)}
                                 className="delete-log-button"
@@ -1239,8 +853,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
                 </div>
                 {logs.length > logTableCount && (
                   <button
-                    className="btn-secondary"
-                    style={{ marginTop: 10, fontSize: 11 }}
+                    className="btn-secondary ai-log-table__load-more"
                     onClick={() => setLogTableCount((n) => n + 50)}
                   >
                     {t('aiAnalysis.logs.loadMore')}

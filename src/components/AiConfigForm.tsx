@@ -132,6 +132,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             onClick={() => setShowKey((v) => !v)}
             className="btn-ghost btn-sm"
             title={showKey ? t('settings.hideKey') : t('settings.showKey')}
+            aria-label={showKey ? 'Hide API key' : 'Show API key'}
           >
             {showKey ? '🙈' : '👁'}
           </button>

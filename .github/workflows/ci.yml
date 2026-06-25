@@ -45,10 +45,22 @@ jobs:
       - name: cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Run cargo audit
+      - name: Cache cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
+
+      - name: Install cargo-audit
         run: |
-          cargo install cargo-audit --locked
-          cargo audit --deny warnings
+          if ! command -v cargo-audit &>/dev/null; then
+            cargo install cargo-audit --locked
+          fi
+        env:
+          CARGO_AUDIT_VERSION: '0.18.3'
+
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
 
   frontend:
     name: Frontend (build + lint + format)
@@ -89,8 +101,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo-tarpaulin
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tarpaulin
+          key: ${{ runner.os }}-cargo-tarpaulin-${{ env.CARGO_TARPAULIN_VERSION }}
+
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: |
+          if ! command -v cargo-tarpaulin &>/dev/null; then
+            cargo install cargo-tarpaulin
+          fi
+        env:
+          CARGO_TARPAULIN_VERSION: '0.27.3'
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -105,6 +128,8 @@ jobs:
         run: cargo tarpaulin --manifest-path src-tauri/Cargo.toml --out xml --output-dir coverage/
 
       - name: Upload coverage to Codecov
+        # CODECOV_TOKEN must be configured as a repository secret.
+        # See: https://docs.codecov.com/docs/adding-the-codecov-token
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage/cobertura.xml
@@ -132,6 +157,8 @@ jobs:
         run: npx vitest run --coverage
 
       - name: Upload coverage to Codecov
+        # CODECOV_TOKEN must be configured as a repository secret.
+        # See: https://docs.codecov.com/docs/adding-the-codecov-token
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage/lcov.info

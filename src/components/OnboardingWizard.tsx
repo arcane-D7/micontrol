@@ -102,6 +102,11 @@ export default function OnboardingWizard({ onFinish }: Props) {
 
         {/* Dots */}
         <div
+          role="progressbar"
+          aria-label="Onboarding progress"
+          aria-valuenow={step + 1}
+          aria-valuemin={1}
+          aria-valuemax={total}
           style={{
             display: 'flex',
             justifyContent: 'center',
