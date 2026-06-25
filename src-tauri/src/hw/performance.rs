@@ -458,10 +458,7 @@ fn find_hq_wmi_instance_name(wmi: &wmi::WMIConnection) -> Result<String> {
         .context("WMI query HQWmiCommonInterface")?;
     rows.into_iter()
         .next()
-        .and_then(|row| match row.get("InstanceName") {
-            Some(wmi::Variant::String(s)) => Some(s.clone()),
-            _ => None,
-        })
+        .and_then(|row| crate::util::wmi_extract::extract_string(&row, "InstanceName"))
         .context("No active HQWmiCommonInterface instance found in ROOT\\WMI")
 }
 
@@ -562,6 +559,10 @@ fn send_via_vhf(mode: PerformanceMode) -> Result<()> {
     let hw_val = mode.to_hw_value();
 
     unsafe {
+        // SAFETY: path_w is a null-terminated wide string owned by this function.
+        // CreateFileW returns a valid HANDLE or INVALID_HANDLE_VALUE. The payload
+        // is a stack-local byte array; DeviceIoControl copies it without retaining
+        // the pointer. CloseHandle is called before the handle goes out of scope.
         let path_w: Vec<u16> = OsStr::new(&device_path)
             .encode_wide()
             .chain(Some(0))

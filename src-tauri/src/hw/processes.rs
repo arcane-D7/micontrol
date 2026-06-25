@@ -33,6 +33,7 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
+        use crate::util::wmi_extract;
         use std::collections::HashMap;
 
         let logical_cpus = *CPU_LOGICAL_PROCESSORS.get_or_init(|| {
@@ -44,11 +45,8 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
                     .unwrap_or_default();
                 Ok(cpu_q
                     .first()
-                    .and_then(|r| r.get("NumberOfLogicalProcessors"))
-                    .map(|v| match v {
-                        wmi::Variant::UI4(n) => *n as f64,
-                        _ => 1.0,
-                    })
+                    .and_then(|r| wmi_extract::extract_u32(r, "NumberOfLogicalProcessors"))
+                    .map(|n| n as f64)
                     .unwrap_or(1.0)
                     .max(1.0))
             })
@@ -73,18 +71,12 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
         let mut procs: Vec<ProcessInfo> = rows
             .into_iter()
             .filter_map(|row| {
-                let name = match row.get("Name") {
-                    Some(wmi::Variant::String(s)) => s.clone(),
-                    _ => return None,
-                };
+                let name = wmi_extract::extract_string(&row, "Name")?;
                 // Skip pseudo-processes
                 if name == "_Total" || name == "Idle" {
                     return None;
                 }
-                let pid = match row.get("IDProcess") {
-                    Some(wmi::Variant::UI4(v)) => *v,
-                    _ => 0,
-                };
+                let pid = wmi_extract::extract_u32_or(&row, "IDProcess", 0);
                 // PercentProcessorTime is across all CPUs (0 – logical_cpus * 100).
                 let raw_cpu = match row.get("PercentProcessorTime") {
                     Some(wmi::Variant::UI8(v)) => *v as f64,
@@ -94,11 +86,9 @@ pub fn get_process_list() -> Vec<ProcessInfo> {
                 };
                 let cpu_percent = (raw_cpu / logical_cpus).clamp(0.0, 100.0);
 
-                let memory_mb = match row.get("WorkingSet") {
-                    Some(wmi::Variant::UI8(v)) => *v as f64 / (1024.0 * 1024.0),
-                    Some(wmi::Variant::UI4(v)) => *v as f64 / (1024.0 * 1024.0),
-                    _ => 0.0,
-                };
+                let memory_mb = wmi_extract::extract_u64(&row, "WorkingSet")
+                    .map(|v| v as f64 / (1024.0 * 1024.0))
+                    .unwrap_or(0.0);
 
                 Some(ProcessInfo {
                     name,

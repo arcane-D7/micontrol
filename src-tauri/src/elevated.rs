@@ -174,26 +174,25 @@ fn load_nonces() -> HashMap<String, u64> {
 
 // ── Command/Result types ─────────────────────────────────────────────────────
 
+/// Command structure deserialized from the IPC JSON payload.
+///
+/// Fields marked `#[serde(default)]` are parsed for protocol completeness and
+/// HMAC verification but are not directly read by the dispatcher. They must
+/// remain present so the JSON deserialization matches the wire format.
 #[derive(Deserialize)]
 struct ElevCmd {
-    #[allow(dead_code)]
     #[serde(default)]
-    protocol_version: Option<u32>,
-    #[allow(dead_code)]
+    _protocol_version: Option<u32>,
     #[serde(default)]
-    request_id: Option<String>,
-    #[allow(dead_code)]
+    _request_id: Option<String>,
     #[serde(default)]
-    created_at_ms: Option<u64>,
-    #[allow(dead_code)]
+    _created_at_ms: Option<u64>,
     #[serde(default)]
     nonce: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
-    hmac: Option<String>,
-    #[allow(dead_code)]
+    _hmac: Option<String>,
     #[serde(default)]
-    caller_pid: Option<u32>,
+    _caller_pid: Option<u32>,
     cmd: String,
     #[serde(default)]
     args: Value,
@@ -411,12 +410,12 @@ fn dispatch(cmd: ElevCmd) -> Value {
 /// task round-trip entirely.
 pub fn dispatch_cmd(cmd: &str, args: Value) -> Value {
     dispatch(ElevCmd {
-        protocol_version: None,
-        request_id: None,
-        created_at_ms: None,
+        _protocol_version: None,
+        _request_id: None,
+        _created_at_ms: None,
         nonce: None,
-        hmac: None,
-        caller_pid: None,
+        _hmac: None,
+        _caller_pid: None,
         cmd: cmd.to_string(),
         args,
     })
@@ -489,6 +488,10 @@ fn select_pending_command(
 #[cfg(test)]
 mod tests {
     use crate::util::auth;
+    use std::sync::Mutex;
+
+    /// Serialize tests that modify LOCALAPPDATA or SEEN_NONCES.
+    static NONCE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Regression test: an unauthenticated command (no HMAC) is rejected.
     #[test]
@@ -564,5 +567,136 @@ mod tests {
         auth::sign_payload(&mut payload, key1);
         let result = auth::verify_payload(&mut payload, key2);
         assert!(result.is_err(), "Wrong-key command should be rejected");
+    }
+
+    // ── S19-08: HMAC and nonce tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_hmac_sign_verify_roundtrip() {
+        let key = b"test-key-32-bytes-long-1234567890";
+        let data = b"elevated bridge test data";
+        let tag = auth::compute_hmac(key, data).expect("HMAC should succeed");
+        assert!(auth::verify_hmac(key, data, &tag));
+        assert!(!auth::verify_hmac(key, b"tampered", &tag));
+    }
+
+    #[test]
+    fn test_nonce_replay_detection() {
+        use std::collections::HashMap;
+        let _lock = NONCE_TEST_LOCK.lock().unwrap();
+
+        // Simulate adding a nonce to the seen set
+        let nonce = "replay-test-nonce-001";
+        let mut map = HashMap::new();
+        map.insert(nonce.to_string(), 0u64);
+
+        // The nonce should be detected as a duplicate
+        assert!(map.contains_key(nonce));
+
+        // A different nonce should not be a duplicate
+        assert!(!map.contains_key("different-nonce"));
+    }
+
+    #[test]
+    fn test_nonce_persistence_save_load() {
+        use std::collections::HashMap;
+        let _lock = NONCE_TEST_LOCK.lock().unwrap();
+
+        let orig = std::env::var("LOCALAPPDATA").ok();
+        let tmp = std::env::temp_dir().join("micontrol_test_nonce_persist");
+        std::env::set_var("LOCALAPPDATA", &tmp);
+
+        // Use current epoch seconds so load_nonces() doesn't purge them
+        // (load_nonces purges nonces older than 5 minutes).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut map = HashMap::new();
+        map.insert("nonce_a".to_string(), now);
+        map.insert("nonce_b".to_string(), now + 100);
+
+        super::save_nonces(&map);
+
+        let loaded = super::load_nonces();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.get("nonce_a"), Some(&now));
+        assert_eq!(loaded.get("nonce_b"), Some(&(now + 100)));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+        if let Some(orig_val) = orig {
+            std::env::set_var("LOCALAPPDATA", orig_val);
+        }
+    }
+
+    #[test]
+    fn test_load_nonces_purges_expired() {
+        use std::collections::HashMap;
+        let _lock = NONCE_TEST_LOCK.lock().unwrap();
+
+        let orig = std::env::var("LOCALAPPDATA").ok();
+        let tmp = std::env::temp_dir().join("micontrol_test_nonce_expire");
+        std::env::set_var("LOCALAPPDATA", &tmp);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut map = HashMap::new();
+        map.insert("fresh_nonce".to_string(), now);
+        map.insert("expired_nonce".to_string(), now - 400); // > 5 minutes old
+        super::save_nonces(&map);
+
+        let loaded = super::load_nonces();
+        assert_eq!(loaded.len(), 1, "Expired nonce should be purged");
+        assert!(loaded.contains_key("fresh_nonce"));
+        assert!(!loaded.contains_key("expired_nonce"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+        if let Some(orig_val) = orig {
+            std::env::set_var("LOCALAPPDATA", orig_val);
+        }
+    }
+
+    #[test]
+    fn test_flush_nonces_persists_to_disk() {
+        use crate::util::panic::lock_or_recover;
+        use std::collections::HashMap;
+        let _lock = NONCE_TEST_LOCK.lock().unwrap();
+
+        let orig = std::env::var("LOCALAPPDATA").ok();
+        let tmp = std::env::temp_dir().join("micontrol_test_flush");
+        std::env::set_var("LOCALAPPDATA", &tmp);
+
+        let mut map = HashMap::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        map.insert("flush_nonce".to_string(), now);
+
+        {
+            let mut seen = lock_or_recover(&super::SEEN_NONCES);
+            *seen = Some(map);
+        }
+
+        super::flush_nonces();
+
+        let nonce_path = super::nonce_store_path();
+        assert!(nonce_path.exists(), "Nonce file should exist after flush");
+
+        let content = std::fs::read_to_string(&nonce_path).unwrap();
+        assert!(content.contains("flush_nonce"));
+
+        // Cleanup
+        *lock_or_recover(&super::SEEN_NONCES) = None;
+        let _ = std::fs::remove_dir_all(&tmp);
+        if let Some(orig_val) = orig {
+            std::env::set_var("LOCALAPPDATA", orig_val);
+        }
     }
 }

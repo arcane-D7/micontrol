@@ -51,6 +51,7 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
+        use crate::util::wmi_extract;
         use std::collections::HashMap;
 
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_cache::with_wmi(|wmi| {
@@ -60,15 +61,13 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
         })?;
 
         let extract_int = |row: &HashMap<String, wmi::Variant>, key: &str| -> Option<i64> {
-            match row.get(key) {
-                Some(wmi::Variant::I4(v)) if *v > 0 => Some(*v as i64),
-                Some(wmi::Variant::UI4(v)) if *v > 0 => Some(*v as i64),
-                _ => None,
-            }
+            wmi_extract::extract_i32(row, key)
+                .filter(|&v| v > 0)
+                .map(|v| v as i64)
         };
 
         let instance_suffix = |row: &HashMap<String, wmi::Variant>, suffix: &str| -> bool {
-            matches!(row.get("InstanceName"), Some(wmi::Variant::String(s)) if s.ends_with(suffix))
+            wmi_extract::extract_string(row, "InstanceName").is_some_and(|s| s.ends_with(suffix))
         };
 
         // CPU temp: max non-zero Temperature (participants _0/_1/_2 are hotspot)
@@ -169,6 +168,7 @@ fn get_fan_rpm_wmi() -> HardwareResult<u32> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
+        use crate::util::wmi_extract;
         use std::collections::HashMap;
 
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_cache::with_cimv2(|wmi| {
@@ -177,10 +177,8 @@ fn get_fan_rpm_wmi() -> HardwareResult<u32> {
                 .unwrap_or_default())
         })?;
         if let Some(row) = results.first() {
-            match row.get("CurrentReading") {
-                Some(wmi::Variant::UI4(v)) => return Ok(*v),
-                Some(wmi::Variant::I4(v)) => return Ok(*v as u32),
-                _ => {}
+            if let Some(rpm) = wmi_extract::extract_u32(row, "CurrentReading") {
+                return Ok(rpm);
             }
         }
         Ok(0)

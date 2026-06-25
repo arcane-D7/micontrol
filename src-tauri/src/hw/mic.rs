@@ -6,6 +6,9 @@
 #[cfg(windows)]
 pub fn set_system_mic_mute(muted: bool) {
     // Spawn a dedicated thread so we don't inherit the WMI COM apartment model.
+    // SAFETY: set_mute_inner is an unsafe fn that performs COM initialization and
+    // WASAPI calls on a dedicated thread. The thread owns all COM resources and
+    // cleans them up before exiting. No shared mutable state is accessed.
     std::thread::spawn(move || unsafe { set_mute_inner(muted) });
 }
 

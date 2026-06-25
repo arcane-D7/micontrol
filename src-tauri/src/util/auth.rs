@@ -421,6 +421,38 @@ pub fn read_old_key() -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+// ── HKDF sub-key derivation (S19-17) ─────────────────────────────────────────
+
+/// Derive a purpose-specific sub-key from the master HMAC key using HKDF-SHA256.
+///
+/// Uses the existing HMAC key as input key material (IKM) and `purpose` as
+/// the info parameter to derive a 32-byte sub-key.
+///
+/// # Purposes
+/// - `"hmac_signing"` — for HMAC payload signing
+/// - `"audit_integrity"` — for consent audit log HMAC
+/// - `"wifi_encryption"` — for AES-256-GCM WiFi password encryption
+pub fn derive_subkey(purpose: &str) -> Result<[u8; 32], String> {
+    let ikm = get_or_create_key()?;
+    derive_subkey_from_key(&ikm, purpose)
+}
+
+/// Derive a sub-key from an explicit key using HKDF-SHA256.
+///
+/// This is the testable core of [`derive_subkey`] that doesn't touch disk.
+/// Uses the provided key as input key material (IKM) with no salt and
+/// `purpose` as the info parameter.
+pub fn derive_subkey_from_key(key: &[u8], purpose: &str) -> Result<[u8; 32], String> {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    let hk = Hkdf::<Sha256>::new(None, key);
+    let mut okm = [0u8; 32];
+    hk.expand(purpose.as_bytes(), &mut okm)
+        .map_err(|e| format!("HKDF expansion failed: {e}"))?;
+    Ok(okm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +589,51 @@ mod tests {
         // When no key file exists, rotation is not needed (will be created)
         // This test just verifies the function doesn't panic
         let _ = key_needs_rotation();
+    }
+
+    // ── HKDF sub-key derivation tests (S19-17) ──────────────────────────────
+
+    #[test]
+    fn test_derive_subkey_produces_32_bytes() {
+        let key = b"test-key-32-bytes-long-1234567890";
+        let subkey =
+            derive_subkey_from_key(key, "test_purpose").expect("HKDF derivation should succeed");
+        assert_eq!(subkey.len(), 32);
+    }
+
+    #[test]
+    fn test_derive_subkey_different_purposes_produce_different_keys() {
+        let key = b"test-key-32-bytes-long-1234567890";
+        let k1 = derive_subkey_from_key(key, "hmac_signing").unwrap();
+        let k2 = derive_subkey_from_key(key, "audit_integrity").unwrap();
+        let k3 = derive_subkey_from_key(key, "wifi_encryption").unwrap();
+        assert_ne!(k1, k2, "Different purposes should produce different keys");
+        assert_ne!(k1, k3, "Different purposes should produce different keys");
+        assert_ne!(k2, k3, "Different purposes should produce different keys");
+    }
+
+    #[test]
+    fn test_derive_subkey_is_deterministic() {
+        let key = b"test-key-32-bytes-long-1234567890";
+        let k1 = derive_subkey_from_key(key, "test_purpose").unwrap();
+        let k2 = derive_subkey_from_key(key, "test_purpose").unwrap();
+        assert_eq!(k1, k2, "Same input should produce same output");
+    }
+
+    #[test]
+    fn test_derive_subkey_different_keys_produce_different_output() {
+        let key1 = b"test-key-32-bytes-long-1234567890";
+        let key2 = b"other-key-32-bytes-long-1234567890";
+        let k1 = derive_subkey_from_key(key1, "test_purpose").unwrap();
+        let k2 = derive_subkey_from_key(key2, "test_purpose").unwrap();
+        assert_ne!(k1, k2, "Different keys should produce different output");
+    }
+
+    #[test]
+    fn test_derive_subkey_empty_purpose() {
+        let key = b"test-key-32-bytes-long-1234567890";
+        let subkey =
+            derive_subkey_from_key(key, "").expect("HKDF with empty purpose should succeed");
+        assert_eq!(subkey.len(), 32);
     }
 }

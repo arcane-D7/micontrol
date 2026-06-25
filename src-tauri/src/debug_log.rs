@@ -108,3 +108,41 @@ fn resolve_log_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("Cannot derive parent directory for log path"))?;
     Ok(parent.join("logs"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_logging_does_not_panic() {
+        // init_logging may fail if the logger is already initialized
+        // (e.g., when running multiple tests). That's OK — we just want
+        // to verify it doesn't panic.
+        let _ = init_logging();
+    }
+
+    #[test]
+    fn test_dev_trace_enabled_returns_bool() {
+        // Just verify the function runs and returns a bool
+        let _ = dev_trace_enabled();
+    }
+
+    #[test]
+    fn test_resolve_log_dir_with_localappdata() {
+        let orig = std::env::var_os("LOCALAPPDATA");
+        let tmp = std::env::temp_dir().join("micontrol_test_logdir");
+        std::env::set_var("LOCALAPPDATA", &tmp);
+
+        let dir = resolve_log_dir().expect("resolve_log_dir should succeed");
+        assert!(
+            dir.starts_with(&tmp),
+            "Log dir should be under LOCALAPPDATA"
+        );
+
+        // Cleanup
+        match orig {
+            Some(v) => std::env::set_var("LOCALAPPDATA", v),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+    }
+}

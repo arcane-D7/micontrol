@@ -30,6 +30,8 @@ const SettingsTab = lazy(() => import('./tabs/settings'));
 const AiAnalysisTab = lazy(() => import('./tabs/ai-analysis'));
 const AboutTab = lazy(() => import('./tabs/about'));
 
+type Hardware = ReturnType<typeof useHardware>;
+
 interface Props {
   hardware: Hardware;
   activeTab: string;
@@ -58,16 +60,6 @@ const NAV_ITEMS = [
   { id: 'settings', icon: '⚙️', label: 'nav.settings' },
   { id: 'about', icon: 'ℹ️', label: 'nav.about' },
 ] as const;
-
-type Hardware = ReturnType<typeof useHardware>;
-
-interface Props {
-  hardware: Hardware;
-  activeTab: string;
-  onTabChange: (tab: string) => void;
-  themeMode: ThemeMode;
-  toggleTheme: () => void;
-}
 
 function ThemeIcon({ mode }: { mode: ThemeMode }) {
   if (mode === 'light')

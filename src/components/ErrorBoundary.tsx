@@ -1,7 +1,8 @@
 import { Component, ErrorInfo, ReactNode } from 'react';
 import en from '../i18n/en.json';
 
-const APP_VERSION = '1.0.0';
+/** Dynamic app version from package.json, injected at build time by Vite (S19-15). */
+const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
 
 interface ErrorBoundaryProps {
   children: ReactNode;

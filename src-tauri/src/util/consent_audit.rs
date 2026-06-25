@@ -119,14 +119,14 @@ pub fn log_consent_event(event: &str, policy_version: u32) {
     let ts = unix_timestamp();
     let entry = format!("{ts}\t{event}\tpolicy_version={policy_version}");
 
-    // Compute HMAC for integrity protection
-    let hmac_tag = match crate::util::auth::get_or_create_key() {
+    // Compute HMAC for integrity protection using HKDF-derived sub-key (S19-17)
+    let hmac_tag = match crate::util::auth::derive_subkey("audit_integrity") {
         Ok(key) => crate::util::auth::compute_hmac(&key, entry.as_bytes()).unwrap_or_else(|e| {
             log::error!("Failed to compute HMAC for audit log: {e}");
             String::new()
         }),
         Err(e) => {
-            log::error!("Failed to get HMAC key for audit log: {e}");
+            log::error!("Failed to derive audit HMAC key: {e}");
             // Write without HMAC if key is unavailable — better to log than to lose the entry
             String::new()
         }
@@ -210,7 +210,7 @@ pub fn verify_audit_log() -> Result<(), String> {
         return Ok(());
     }
 
-    let key = crate::util::auth::get_or_create_key()?;
+    let key = crate::util::auth::derive_subkey("audit_integrity")?;
 
     let content =
         std::fs::read_to_string(&path).map_err(|e| format!("Cannot read audit log: {e}"))?;

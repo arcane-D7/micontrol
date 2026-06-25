@@ -357,6 +357,7 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
+        use crate::util::wmi_extract;
         use std::collections::HashMap;
 
         // Start the PDH pollers on first call (no-op on subsequent calls)
@@ -385,10 +386,8 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
             let gpu_name = gpu_query
                 .into_iter()
                 .next()
-                .and_then(|r| match r.get("Name") {
-                    Some(wmi::Variant::String(s)) => Some(s.trim().to_string()),
-                    _ => None,
-                })
+                .and_then(|r| wmi_extract::extract_string(&r, "Name"))
+                .map(|s| s.trim().to_string())
                 .unwrap_or_else(|| "Unknown GPU".to_string());
 
             // ── GPU 3D engine utilization (from PDH background poller) ───────────
@@ -405,12 +404,8 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
                 .unwrap_or_default();
             let vram_used_mb = vram_q
                 .first()
-                .and_then(|r| r.get("DedicatedUsage"))
-                .map(|v| match v {
-                    wmi::Variant::UI8(n) => *n as f64 / (1024.0 * 1024.0),
-                    wmi::Variant::UI4(n) => *n as f64 / (1024.0 * 1024.0),
-                    _ => 0.0,
-                })
+                .and_then(|r| wmi_extract::extract_u64(r, "DedicatedUsage"))
+                .map(|n| n as f64 / (1024.0 * 1024.0))
                 .unwrap_or(0.0);
 
             // ── Physical memory total ─────────────────────────────────────────
@@ -421,8 +416,7 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
                 .iter()
                 .filter_map(|row| match row.get("Capacity") {
                     Some(wmi::Variant::String(s)) => s.parse::<u64>().ok(),
-                    Some(wmi::Variant::UI8(v)) => Some(*v),
-                    _ => None,
+                    _ => wmi_extract::extract_u64(row, "Capacity"),
                 })
                 .sum();
 
@@ -432,37 +426,28 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
                 .unwrap_or_default();
             let os_row = os_info.into_iter().next().unwrap_or_default();
 
-            let cpu_name = match cpu.get("Name") {
-                Some(wmi::Variant::String(s)) => s.trim().to_string(),
-                _ => "Unknown CPU".to_string(),
-            };
-            let cpu_cores = match cpu.get("NumberOfCores") {
-                Some(wmi::Variant::UI4(v)) => *v,
-                _ => 0,
-            };
-            let cpu_threads = match cpu.get("NumberOfLogicalProcessors") {
-                Some(wmi::Variant::UI4(v)) => *v,
-                _ => 0,
-            };
+            let cpu_name = wmi_extract::extract_string(&cpu, "Name")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "Unknown CPU".to_string());
+            let cpu_cores = wmi_extract::extract_u32_or(&cpu, "NumberOfCores", 0);
+            let cpu_threads = wmi_extract::extract_u32_or(&cpu, "NumberOfLogicalProcessors", 0);
             let ram_total_gb = ram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
             let free_kb = match os_row.get("FreePhysicalMemory") {
-                Some(wmi::Variant::UI8(v)) => *v,
                 Some(wmi::Variant::String(s)) => s.parse().unwrap_or(0),
-                _ => 0,
+                _ => wmi_extract::extract_u64(&os_row, "FreePhysicalMemory").unwrap_or(0),
             };
             let total_kb = match os_row.get("TotalVisibleMemorySize") {
-                Some(wmi::Variant::UI8(v)) => *v,
                 Some(wmi::Variant::String(s)) => s.parse().unwrap_or(0),
-                _ => ram_total_bytes / 1024,
+                _ => wmi_extract::extract_u64(&os_row, "TotalVisibleMemorySize")
+                    .unwrap_or(ram_total_bytes / 1024),
             };
             let used_kb = total_kb.saturating_sub(free_kb);
             let ram_used_gb = used_kb as f64 / (1024.0 * 1024.0);
 
-            let os_version = match os_row.get("Caption") {
-                Some(wmi::Variant::String(s)) => s.trim().to_string(),
-                _ => "Windows 11".to_string(),
-            };
+            let os_version = wmi_extract::extract_string(&os_row, "Caption")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "Windows 11".to_string());
 
             Ok(SystemInfo {
                 cpu_name,

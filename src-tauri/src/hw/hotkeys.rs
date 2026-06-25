@@ -77,6 +77,9 @@ fn is_key_down(vk: u32) -> bool {
     extern "system" {
         fn GetAsyncKeyState(v_key: i32) -> i16;
     }
+    // SAFETY: GetAsyncKeyState is a lightweight Win32 query with no safety
+    // invariants — it reads the async key state and returns a short. The FFI
+    // signature matches the Win32 API exactly.
     let state = unsafe { GetAsyncKeyState(vk as i32) };
     // High-order bit is set if the key is down
     (state as u16 & 0x8000) != 0
@@ -422,6 +425,9 @@ pub fn start_detect_mode() {
 
 /// Cancel key-detect mode immediately, discarding any captured key.
 /// Safe to call even when not in detect mode.
+///
+/// Public API: available for frontend-initiated cancellation of key detection.
+/// Cancel detect mode (used by frontend via Tauri command).
 #[allow(dead_code)]
 pub fn cancel_detect_mode() {
     let mut state = lock_or_recover(&REMAP_STATE);
@@ -490,6 +496,9 @@ pub fn start_hook() {
 }
 
 /// Signal the hook thread to exit (sends WM_QUIT to its message loop).
+///
+/// Public API: available for clean shutdown of the hotkey hook thread.
+/// Stop the low-level keyboard hook (used on shutdown).
 #[allow(dead_code)]
 pub fn stop_hook() {
     use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -1328,7 +1337,7 @@ fn has_consent(interpreter: &str, path: &str, args: &[String]) -> bool {
 ///
 /// Called by the frontend Tauri command when the user clicks "Always Allow"
 /// in the consent dialog.
-#[allow(dead_code)]
+#[cfg(test)]
 fn grant_consent(interpreter: &str, path: &str, args: &[String]) -> Result<(), String> {
     let hash = script_hash(interpreter, path, args);
     let consent_file = consent_path();

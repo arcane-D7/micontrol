@@ -246,4 +246,114 @@ mod tests {
         ));
         assert!(!is_connection_error(&err));
     }
+
+    // ── S19-07: Cache lifecycle and thread-local tests ───────────────────────
+
+    #[test]
+    fn test_invalidate_clears_thread_local_cache() {
+        // invalidate() should set the thread_local cache to None
+        invalidate();
+        WMI_CACHE.with(|cell| {
+            assert!(
+                cell.borrow().is_none(),
+                "Cache should be None after invalidate()"
+            );
+        });
+    }
+
+    #[test]
+    fn test_invalidate_is_idempotent() {
+        // Calling invalidate() multiple times should not panic
+        invalidate();
+        invalidate();
+        invalidate();
+        WMI_CACHE.with(|cell| {
+            assert!(cell.borrow().is_none());
+        });
+    }
+
+    #[test]
+    fn test_thread_local_cache_isolation() {
+        // Invalidate on the main thread
+        invalidate();
+
+        // Spawn a thread that also invalidates its own cache
+        let handle = std::thread::spawn(|| {
+            invalidate();
+            WMI_CACHE.with(|cell| {
+                assert!(
+                    cell.borrow().is_none(),
+                    "Cache should be None on spawned thread"
+                );
+            });
+        });
+        handle.join().unwrap();
+
+        // The main thread's cache should still be None (unchanged by the other thread)
+        WMI_CACHE.with(|cell| {
+            assert!(
+                cell.borrow().is_none(),
+                "Main thread cache should be unaffected"
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_with_wmi_transient_error_preserves_cache() {
+        // First, try to initialize the cache with a successful query
+        let init_result = with_wmi(|_conn| Ok::<(), anyhow::Error>(()));
+        if init_result.is_err() {
+            eprintln!("WMI not available in this environment, skipping test");
+            return;
+        }
+
+        // Verify cache is initialized
+        WMI_CACHE.with(|cell| {
+            assert!(
+                cell.borrow().is_some(),
+                "Cache should be initialized after success"
+            );
+        });
+
+        // Run a query that returns a transient error
+        let result =
+            with_wmi(|_conn| Err::<(), anyhow::Error>(anyhow::anyhow!("transient query error")));
+        assert!(result.is_err(), "Transient error should be returned");
+
+        // The cache should still be initialized (not invalidated for transient errors)
+        WMI_CACHE.with(|cell| {
+            assert!(
+                cell.borrow().is_some(),
+                "Cache should be preserved after transient error"
+            );
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_with_wmi_connection_error_invalidates_cache() {
+        // First, try to initialize the cache
+        let init_result = with_wmi(|_conn| Ok::<(), anyhow::Error>(()));
+        if init_result.is_err() {
+            eprintln!("WMI not available in this environment, skipping test");
+            return;
+        }
+
+        // Run a query that returns a connection-level error
+        let result = with_wmi(|_conn| {
+            Err::<(), anyhow::Error>(anyhow::Error::from(HardwareError::WmiConnection(
+                "forced connection error".to_string(),
+            )))
+        });
+        assert!(result.is_err(), "Connection error should be returned");
+
+        // The cache should be invalidated after a connection error
+        WMI_CACHE.with(|cell| {
+            assert!(
+                cell.borrow().is_none(),
+                "Cache should be invalidated after connection error"
+            );
+        });
+    }
 }

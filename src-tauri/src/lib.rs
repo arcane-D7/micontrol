@@ -28,6 +28,7 @@ use commands::hardware::{
 use commands::hotkeys::{
     get_detected_key, get_hotkey_config, is_hook_active, set_hotkey_config, start_key_detect,
 };
+use commands::privacy::{export_user_data, reveal_in_explorer};
 use commands::system::{
     debug_ecram_dump, get_ai_brightness_config, get_autostart, get_available_refresh_rates,
     get_battery_info, get_display_info, get_fan_info, get_hardware_profile,
@@ -326,6 +327,9 @@ pub fn run() {
             // Data deletion (S10-012)
             delete_all_user_data,
             rotate_logs,
+            // Data export — GDPR Art.20 (S19-16)
+            export_user_data,
+            reveal_in_explorer,
         ])
         .setup(|app| {
             // Hardware discovery — load cached profile or scan on first run
@@ -686,6 +690,10 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
             GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         };
         unsafe {
+            // SAFETY: MonitorFromPoint and GetMonitorInfoW are read-only Win32 display queries.
+            // POINT is a POD struct initialized from valid click coordinates. MONITORINFO is
+            // POD with cbSize explicitly set; zeroed() is valid for remaining fields.
+            // GetMonitorInfoW writes to the stack-local MONITORINFO before we read rcWork.
             let pt = POINT {
                 x: click_pos.x as i32,
                 y: click_pos.y as i32,
@@ -743,6 +751,9 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
             GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
         };
         unsafe {
+            // SAFETY: MonitorFromPoint and GetMonitorInfoW are read-only Win32 display queries.
+            // POINT { 0, 0 } targets the primary monitor. MONITORINFO is POD with cbSize
+            // explicitly set; zeroed() is valid for remaining fields.
             let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
             let mut info = MONITORINFO {
                 cbSize: std::mem::size_of::<MONITORINFO>() as u32,

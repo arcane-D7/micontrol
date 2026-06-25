@@ -2,6 +2,10 @@
 //!
 //! Replaces unsafe `std::mem::zeroed()` patterns with `MaybeUninit`,
 //! ensuring `RegCloseKey` is only called on successfully initialised handles.
+//!
+//! `RegKeyGuard` and its methods are a public utility API. Not all methods are
+//! currently called within this crate, but they are available for future
+//! registry operations without requiring API changes.
 
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{
@@ -10,7 +14,6 @@ use windows::Win32::System::Registry::{
 };
 
 /// A guard that closes the registry key when dropped.
-#[allow(dead_code)]
 pub struct RegKeyGuard {
     handle: Option<HKEY>,
 }
@@ -18,10 +21,12 @@ pub struct RegKeyGuard {
 impl RegKeyGuard {
     /// Open a registry key for reading.
     /// Returns `Ok(None)` if the key does not exist (not an error).
-    #[allow(dead_code)]
     pub fn open_read(parent: HKEY, subkey: &str) -> Result<Option<Self>, String> {
         let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
         let mut handle = std::mem::MaybeUninit::<HKEY>::uninit();
+        // SAFETY: subkey_w is a null-terminated wide string owned by this function.
+        // RegOpenKeyExW writes to the MaybeUninit<HKEY> only on success; we check
+        // result.is_err() before calling assume_init.
         let result = unsafe {
             RegOpenKeyExW(
                 parent,
@@ -43,11 +48,13 @@ impl RegKeyGuard {
     }
 
     /// Open or create a registry key for writing.
-    #[allow(dead_code)]
     pub fn create_write(parent: HKEY, subkey: &str) -> Result<Self, String> {
         let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
         let mut handle = std::mem::MaybeUninit::<HKEY>::uninit();
         let mut disposition = REG_CREATE_KEY_DISPOSITION::default();
+        // SAFETY: subkey_w is a null-terminated wide string owned by this function.
+        // RegCreateKeyExW writes to the MaybeUninit<HKEY> only on success; we check
+        // result.is_err() before calling assume_init.
         let result = unsafe {
             RegCreateKeyExW(
                 parent,
@@ -77,13 +84,15 @@ impl RegKeyGuard {
     }
 
     /// Read a string value from the registry.
-    #[allow(dead_code)]
     pub fn read_string(&self, name: &str) -> Result<Option<String>, String> {
         let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let mut buf_len: u32 = 512;
         let mut buf = vec![0u16; (buf_len / 2) as usize];
         let mut value_type = REG_VALUE_TYPE::default();
 
+        // SAFETY: name_w is a null-terminated wide string; buf is a Vec<u16> with
+        // sufficient capacity. RegQueryValueExW writes to buf and buf_len; we only
+        // read buf after checking result.is_ok().
         let result = unsafe {
             RegQueryValueExW(
                 self.as_raw(),
@@ -104,13 +113,14 @@ impl RegKeyGuard {
     }
 
     /// Read a u32 value from the registry.
-    #[allow(dead_code)]
     pub fn read_u32(&self, name: &str) -> Result<Option<u32>, String> {
         let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let mut value: u32 = 0;
         let mut buf_len: u32 = 4;
         let mut value_type = REG_VALUE_TYPE::default();
 
+        // SAFETY: name_w is a null-terminated wide string; value is a stack-local
+        // u32 with valid alignment. RegQueryValueExW writes to value only on success.
         let result = unsafe {
             RegQueryValueExW(
                 self.as_raw(),
@@ -128,9 +138,10 @@ impl RegKeyGuard {
     }
 
     /// Write a u32 value to the registry.
-    #[allow(dead_code)]
     pub fn write_u32(&self, name: &str, value: u32) -> Result<(), String> {
         let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: name_w is a null-terminated wide string; value.to_ne_bytes()
+        // is a stack-local byte array with valid alignment for REG_DWORD.
         let result = unsafe {
             RegSetValueExW(
                 self.as_raw(),
@@ -147,10 +158,12 @@ impl RegKeyGuard {
     }
 
     /// Write a string value to the registry.
-    #[allow(dead_code)]
     pub fn write_string(&self, name: &str, value: &str) -> Result<(), String> {
         let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let value_w: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: name_w and value_w are null-terminated wide strings owned by
+        // this function. ptr_cast_slice reinterprets value_w as a byte slice for
+        // RegSetValueExW, which copies the data without retaining the pointer.
         let result = unsafe {
             RegSetValueExW(
                 self.as_raw(),
@@ -178,7 +191,10 @@ impl Drop for RegKeyGuard {
     }
 }
 
-#[allow(dead_code)]
+/// Reinterpret a slice of `T` as a byte slice for registry APIs that expect `&[u8]`.
 fn ptr_cast_slice<T>(s: &[T]) -> &[u8] {
+    // SAFETY: s is a valid slice with known length; casting to *const u8 and
+    // using size_of_val gives a correct byte view of the same memory. The
+    // returned slice borrows s and cannot outlive it.
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
 }

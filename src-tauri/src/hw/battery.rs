@@ -57,6 +57,7 @@ static BATTERY_STATIC_DATA: Mutex<Option<BatteryStaticData>> = Mutex::new(None);
 #[cfg(windows)]
 pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
     use crate::hw::wmi_cache;
+    use crate::util::wmi_extract;
     use std::collections::HashMap;
 
     let started = Instant::now();
@@ -78,30 +79,18 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
                 let full_cap = full_cap_data.into_iter().next().unwrap_or_default();
 
                 Ok(BatteryStaticData {
-                    designed_capacity_mwh: match statics.get("DesignedCapacity") {
-                        Some(wmi::Variant::UI4(v)) => *v as u64,
-                        _ => 68224,
-                    },
-                    full_capacity_mwh: match full_cap.get("FullChargedCapacity") {
-                        Some(wmi::Variant::UI4(v)) => *v as u64,
-                        _ => 68224,
-                    },
-                    manufacturer: match statics.get("ManufactureName") {
-                        Some(wmi::Variant::String(s)) => s.trim().to_string(),
-                        _ => "COSMX".to_string(),
-                    },
-                    device_name: match statics.get("DeviceName") {
-                        Some(wmi::Variant::String(s)) => s.trim().to_string(),
-                        _ => "BX70".to_string(),
-                    },
-                    cycle_count: match statics.get("CycleCount") {
-                        Some(wmi::Variant::UI4(v)) => *v,
-                        _ => 0,
-                    },
-                    temperature_raw: match statics.get("Temperature") {
-                        Some(wmi::Variant::UI4(v)) => Some(*v),
-                        _ => None,
-                    },
+                    designed_capacity_mwh: wmi_extract::extract_u64(&statics, "DesignedCapacity")
+                        .unwrap_or(68224),
+                    full_capacity_mwh: wmi_extract::extract_u64(&full_cap, "FullChargedCapacity")
+                        .unwrap_or(68224),
+                    manufacturer: wmi_extract::extract_string(&statics, "ManufactureName")
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| "COSMX".to_string()),
+                    device_name: wmi_extract::extract_string(&statics, "DeviceName")
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| "BX70".to_string()),
+                    cycle_count: wmi_extract::extract_u32_or(&statics, "CycleCount", 0),
+                    temperature_raw: wmi_extract::extract_u32(&statics, "Temperature"),
                 })
             });
             match data {
@@ -128,24 +117,14 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
 
         let status = statuses.into_iter().next().unwrap_or_default();
 
-        let remaining_capacity = match status.get("RemainingCapacity") {
-            Some(wmi::Variant::UI4(v)) => *v,
-            _ => 0,
-        };
-        let charging_rate = match status.get("ChargeRate") {
-            Some(wmi::Variant::I4(v)) => *v,
-            _ => 0,
-        };
-        let voltage = match status.get("Voltage") {
-            Some(wmi::Variant::UI4(v)) => *v as f64 / 1000.0,
-            _ => 0.0,
-        };
+        let remaining_capacity = wmi_extract::extract_u32_or(&status, "RemainingCapacity", 0);
+        let charging_rate = wmi_extract::extract_i32(&status, "ChargeRate").unwrap_or(0);
+        let voltage = wmi_extract::extract_u32(&status, "Voltage")
+            .map(|v| v as f64 / 1000.0)
+            .unwrap_or(0.0);
 
         let is_charging = charging_rate > 0;
-        let is_plugged = match status.get("PowerOnline") {
-            Some(wmi::Variant::Bool(v)) => *v,
-            _ => false,
-        };
+        let is_plugged = wmi_extract::extract_bool(&status, "PowerOnline").unwrap_or(false);
         log::debug!(
             target: "hw::battery",
             "wmi snapshot: plugged={} charging={} remaining_capacity={} charge_rate_mw={} voltage_v={:.3}",
@@ -234,10 +213,7 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
             time_remaining_minutes,
             time_to_full_minutes,
             charge_rate_mw: charging_rate,
-            voltage_mv: match status.get("Voltage") {
-                Some(wmi::Variant::UI4(v)) => *v,
-                _ => 0,
-            },
+            voltage_mv: wmi_extract::extract_u32_or(&status, "Voltage", 0),
             ac_input_power_mw,
         })
     });

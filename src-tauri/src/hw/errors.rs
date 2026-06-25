@@ -76,6 +76,18 @@ pub enum HardwareError {
     #[error("Elevated bridge error: {0}")]
     ElevatedBridge(String),
 
+    /// AI request error (HTTP, keyring, response parsing).
+    #[error("AI request error: {0}")]
+    AiRequest(String),
+
+    /// Hotkey configuration error (invalid config, serialization).
+    #[error("Hotkey config error: {0}")]
+    HotkeyConfig(String),
+
+    /// Blocking task join error (spawn_blocking panic or cancellation).
+    #[error("Task join error: {0}")]
+    TaskJoin(String),
+
     /// Generic hardware error (catch-all for uncategorized failures).
     #[error("Hardware error: {0}")]
     Other(String),
@@ -103,6 +115,9 @@ impl HardwareError {
             Self::Hotkey(_) => "hotkey",
             Self::Registry(_) => "registry",
             Self::ElevatedBridge(_) => "elevated_bridge",
+            Self::AiRequest(_) => "ai_request",
+            Self::HotkeyConfig(_) => "hotkey_config",
+            Self::TaskJoin(_) => "task_join",
             Self::Other(_) => "other",
         }
     }
@@ -122,18 +137,6 @@ impl From<anyhow::Error> for HardwareError {
 impl From<serde_json::Error> for HardwareError {
     fn from(e: serde_json::Error) -> Self {
         Self::InvalidConfig(format!("JSON: {e}"))
-    }
-}
-
-impl From<String> for HardwareError {
-    fn from(s: String) -> Self {
-        Self::Other(s)
-    }
-}
-
-impl From<&str> for HardwareError {
-    fn from(s: &str) -> Self {
-        Self::Other(s.to_string())
     }
 }
 
@@ -159,6 +162,9 @@ impl ErrorResponse {
     }
 
     /// Create an `ErrorResponse` from any error implementing `Display`.
+    ///
+    /// Public API: useful for converting non-`HardwareError` failures into
+    /// a frontend-compatible error response.
     #[allow(dead_code)]
     pub fn from_display(e: &dyn std::fmt::Display) -> Self {
         Self {
@@ -268,7 +274,8 @@ mod tests {
 
     #[test]
     fn test_hardware_error_from_string() {
-        let e: HardwareError = "custom error".to_string().into();
+        // S19-03: blanket From<String> removed — use Other() directly.
+        let e = HardwareError::Other("custom error".to_string());
         assert_eq!(e.code(), "other");
         assert!(e.to_string().contains("custom error"));
     }
@@ -310,6 +317,9 @@ mod tests {
             HardwareError::Hotkey("".into()).code(),
             HardwareError::Registry("".into()).code(),
             HardwareError::ElevatedBridge("".into()).code(),
+            HardwareError::AiRequest("".into()).code(),
+            HardwareError::HotkeyConfig("".into()).code(),
+            HardwareError::TaskJoin("".into()).code(),
             HardwareError::Other("".into()).code(),
         ];
         for code in &codes {

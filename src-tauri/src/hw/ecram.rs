@@ -70,6 +70,8 @@ const IOT_GUID: windows::core::GUID = windows::core::GUID {
 
 /// Maximum valid byte index within the ACPI ERAM region.
 /// The ERAM is 0x100 bytes (indices 0x00..=0xFF).
+///
+/// Public API: exposed for external consumers that need to validate ERAM offsets.
 #[allow(dead_code)]
 pub const ECRAM_MAX_INDEX: usize = 0xFF;
 
@@ -458,7 +460,7 @@ fn check_bytes_returned(bytes_returned: u32, expected_size: usize) -> HardwareRe
 /// Validate that `index` is a valid byte offset within the ACPI ERAM region.
 ///
 /// Returns an error if `index > ECRAM_MAX_INDEX`.
-#[allow(dead_code)]
+#[cfg(test)]
 fn validate_eram_index(index: usize) -> HardwareResult<()> {
     if index <= ECRAM_MAX_INDEX {
         return Ok(());

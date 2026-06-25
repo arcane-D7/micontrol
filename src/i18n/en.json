@@ -580,6 +580,10 @@
     "deleteSuccess": "All data has been deleted successfully.",
     "deleteError": "Failed to delete all data. See console for details.",
     "confirmDelete": "Are you sure? This will permanently delete all your data including API keys, logs, and settings. This cannot be undone.",
+    "dataExport": "Data Export",
+    "dataExportDesc": "Download a copy of your data in a portable format (ZIP archive).",
+    "downloadData": "Download My Data",
+    "exporting": "Exporting...",
     "replayOnboarding": "Replay Onboarding",
     "onboarding": "Onboarding Wizard",
     "onboardingDesc": "Re-display the first-run welcome wizard to review features and preferences."

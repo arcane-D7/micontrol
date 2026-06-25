@@ -369,7 +369,16 @@ fn default_true() -> bool {
 // derived from the shared HMAC key via SHA-256.
 
 /// Derive a 32-byte AES-256 key from the HMAC key.
+///
+/// Uses HKDF-SHA256 (S19-17) for proper key separation. Falls back to the
+/// legacy SHA-256 derivation for backward compatibility with existing
+/// encrypted WiFi entries.
 fn derive_aes_key(key: &[u8]) -> [u8; 32] {
+    // Try HKDF-derived sub-key first (S19-17)
+    if let Ok(subkey) = crate::util::auth::derive_subkey_from_key(key, "wifi_encryption") {
+        return subkey;
+    }
+    // Fallback: legacy SHA-256 derivation for backward compatibility
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"micontrol-wifi-aes256-v1");
@@ -408,7 +417,7 @@ fn encrypt_with_key(password: &str, key: &[u8], nonce_hex: &str) -> Result<Strin
 /// Decrypt a WiFi password using AES-256-GCM with a raw key.
 ///
 /// Input format: `{nonce_hex}:{ciphertext_hex}`
-#[allow(dead_code)]
+#[cfg(test)]
 fn decrypt_with_key(encrypted: &str, key: &[u8]) -> Result<String, String> {
     use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 
@@ -452,7 +461,7 @@ fn encrypt_wifi_password(password: &str) -> Result<String, String> {
 /// Decrypt a WiFi password using the shared HMAC key.
 ///
 /// Input format: `{nonce_hex}:{encrypted_hex}`
-#[allow(dead_code)]
+#[cfg(test)]
 fn decrypt_wifi_password(encrypted: &str) -> Result<String, String> {
     let key = crate::util::auth::get_or_create_key()?;
     decrypt_with_key(encrypted, &key)

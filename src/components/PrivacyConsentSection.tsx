@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
 
 interface PrivacyConsentSectionProps {
@@ -19,6 +21,21 @@ export default function PrivacyConsentSection({
   deleteResult,
   isDeleting,
 }: PrivacyConsentSectionProps) {
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const handleExportData = async () => {
+    setIsExporting(true);
+    setExportError(null);
+    try {
+      const zipPath = await invoke<string>('export_user_data');
+      await invoke('reveal_in_explorer', { path: zipPath });
+    } catch (e) {
+      setExportError(String(e));
+    } finally {
+      setIsExporting(false);
+    }
+  };
   return (
     <>
       {/* Privacy & Consent */}
@@ -122,6 +139,39 @@ export default function PrivacyConsentSection({
           )}
         </div>
       )}
+
+      {/* Data Export — GDPR Art.20 (S19-16) */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="card-title">{t('settings.dataExport')}</div>
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 16 }}>
+          {t('settings.dataExportDesc')}
+        </p>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button
+            className="btn-ghost btn-sm"
+            onClick={() => void handleExportData()}
+            disabled={isExporting}
+          >
+            {isExporting ? t('settings.exporting') : `📦 ${t('settings.downloadData')}`}
+          </button>
+        </div>
+        {exportError && (
+          <div
+            role="alert"
+            className="text-sm"
+            style={{
+              marginTop: 12,
+              padding: '8px 12px',
+              borderRadius: 6,
+              background: 'rgba(248,113,113,0.1)',
+              color: 'var(--color-danger, #f87171)',
+              border: '1px solid rgba(248,113,113,0.3)',
+            }}
+          >
+            ✗ {exportError}
+          </div>
+        )}
+      </div>
     </>
   );
 }

@@ -555,6 +555,7 @@ fn get_brightness_wmi() -> HardwareResult<u8> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
+        use crate::util::wmi_extract;
         use std::collections::HashMap;
 
         let res = wmi_cache::with_wmi(|wmi| {
@@ -562,10 +563,9 @@ fn get_brightness_wmi() -> HardwareResult<u8> {
                 .raw_query("SELECT CurrentBrightness FROM WmiMonitorBrightness")
                 .context("WmiMonitorBrightness")?;
             let first = results.first().context("No monitor")?;
-            match first.get("CurrentBrightness") {
-                Some(wmi::Variant::UI1(v)) => Ok(*v),
-                _ => Ok(80),
-            }
+            Ok(wmi_extract::extract_u32(first, "CurrentBrightness")
+                .map(|v| v as u8)
+                .unwrap_or(80))
         });
         res
     }
