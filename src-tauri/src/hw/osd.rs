@@ -100,7 +100,8 @@ const TEXT2_CLR: COLORREF = rgb(160, 160, 160); // secondary lighter text
 
 /// Spawn the OSD message-loop thread.  Must be called once before any gesture.
 pub fn init() {
-    std::thread::Builder::new()
+    // S27-006: Graceful degradation — OSD is non-critical (brightness overlay).
+    if let Err(e) = std::thread::Builder::new()
         .name("osd-msg-loop".into())
         .spawn(|| {
             // SAFETY: run_message_loop creates and manages a Win32 window on a
@@ -110,7 +111,9 @@ pub fn init() {
             // atomics (OSD_HWND, OSD_ALPHA, etc.).
             unsafe { run_message_loop() }
         })
-        .expect("osd thread spawn failed");
+    {
+        log::warn!("OSD thread spawn failed, continuing without OSD: {e}");
+    }
 }
 
 /// Show (or refresh) the brightness OSD.  Safe to call from any thread.

@@ -789,20 +789,34 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
 /// `C:\Users\{username}\` → `C:\Users\<redacted>\`
 /// `D:\Users\{username}\` → `D:\Users\<redacted>\`
 fn redact_path_username(s: &str) -> String {
+    let mut result = s.to_string();
     for drive in (b'A'..=b'Z').map(|c| c as char) {
         let prefix = format!("{drive}:\\Users\\");
-        if let Some(start) = s.find(&prefix) {
+        // S27-001: Redact ALL occurrences, not just the first.
+        // Use a search offset to avoid re-matching the same prefix after replacement.
+        let mut search_from = 0;
+        while let Some(rel_start) = result[search_from..].find(&prefix) {
+            let start = search_from + rel_start;
             let user_start = start + prefix.len();
-            if let Some(end) = s[user_start..].find('\\') {
-                let username = &s[user_start..user_start + end];
-                return s.replace(
-                    &format!("{prefix}{username}"),
-                    &format!("{prefix}<redacted>"),
-                );
+            if let Some(end) = result[user_start..].find('\\') {
+                let username = result[user_start..user_start + end].to_string();
+                let full_match = format!("{prefix}{username}");
+                let replacement = format!("{prefix}<redacted>");
+                result = result.replacen(&full_match, &replacement, 1);
+                // Advance past the replacement (prefix + "<redacted>")
+                search_from = start + prefix.len() + "<redacted>".len();
+            } else {
+                // Username at end of string with no trailing backslash
+                let username = result[user_start..].to_string();
+                let full_match = format!("{prefix}{username}");
+                let replacement = format!("{prefix}<redacted>");
+                result = result.replacen(&full_match, &replacement, 1);
+                // No more matches possible after end of string
+                break;
             }
         }
     }
-    s.to_string()
+    result
 }
 
 /// Redact UNC paths: `\\server\share\` → `\\[REDACTED_PATH]\`
@@ -811,22 +825,31 @@ fn redact_unc_path(s: &str) -> String {
         return s.to_string();
     }
     let mut result = s.to_string();
-    if let Some(start) = result.find("\\\\") {
-        // Find the end of \\server\share\ (two backslash-separated components)
+    // S27-001: Redact ALL UNC path occurrences, not just the first.
+    // Use a search offset to avoid re-matching the replacement text.
+    let mut search_from = 0;
+    while let Some(rel_start) = result[search_from..].find("\\\\") {
+        let start = search_from + rel_start;
         let after = &result[start + 2..];
         if let Some(first_bs) = after.find('\\') {
             let after_server = &after[first_bs + 1..];
             if let Some(second_bs) = after_server.find('\\') {
                 let end = start + 2 + first_bs + 1 + second_bs;
-                let unc_prefix = &result[start..end];
-                result = result.replace(unc_prefix, "\\\\[REDACTED_PATH]");
+                let unc_prefix = result[start..end].to_string();
+                result = result.replacen(&unc_prefix, "\\\\[REDACTED_PATH]", 1);
             } else {
                 // \\server\share without trailing backslash
                 let end = start + 2 + first_bs;
-                let unc_prefix = &result[start..end];
-                result = result.replace(unc_prefix, "\\\\[REDACTED_PATH]");
+                let unc_prefix = result[start..end].to_string();
+                result = result.replacen(&unc_prefix, "\\\\[REDACTED_PATH]", 1);
             }
+        } else {
+            // \\server with no share — just redact what we have
+            let unc_prefix = result[start..].to_string();
+            result = result.replacen(&unc_prefix, "\\\\[REDACTED_PATH]", 1);
         }
+        // Advance past the replacement text
+        search_from = start + "\\\\[REDACTED_PATH]".len();
     }
     result
 }
@@ -937,5 +960,22 @@ mod tests {
         assert!(!result.contains("charlie"));
         assert!(!result.contains("fileserver"));
         assert!(!result.contains("2001:db8"));
+    }
+    #[test]
+    fn test_redact_multiple_unc_paths() {
+        let input = r"Error at \\server1\share1\file1 and also at \\server2\share2\file2";
+        let result = redact_unc_path(input);
+        assert!(result.contains("\\\\[REDACTED_PATH]"));
+        assert!(!result.contains("server1"));
+        assert!(!result.contains("server2"));
+    }
+
+    #[test]
+    fn test_redact_multiple_user_paths() {
+        let input = r"C:\Users\alice\file1 and D:\Users\bob\file2";
+        let result = redact_path_username(input);
+        assert!(result.contains("<redacted>"));
+        assert!(!result.contains("alice"));
+        assert!(!result.contains("bob"));
     }
 }

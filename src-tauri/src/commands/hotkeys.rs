@@ -11,7 +11,11 @@ pub async fn get_hotkey_config() -> Result<HotkeyMap, String> {
 
 #[tauri::command]
 pub async fn set_hotkey_config(config: HotkeyMap) -> Result<(), String> {
-    save_config(&config).map_err(|e| e.to_string())?;
+    // S27-005: Wrap in run_blocking — save_config() does sync filesystem I/O.
+    let config_for_save = config.clone();
+    crate::util::blocking::run_blocking(move || save_config(&config_for_save))
+        .await
+        .map_err(|e| e.to_string())?;
     update_in_memory(config);
     Ok(())
 }

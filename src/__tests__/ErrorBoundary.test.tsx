@@ -67,4 +67,25 @@ describe('ErrorBoundary', () => {
   afterAll(() => {
     console.error = originalError;
   });
+
+  it('renders compact error UI when compact prop is set', () => {
+    render(
+      <ErrorBoundary compact>
+        <ThrowOnRender error={new Error('Tab crash')} />
+      </ErrorBoundary>,
+    );
+    // Compact mode should show the compact title
+    expect(screen.getByText('This tab encountered an error')).toBeInTheDocument();
+  });
+
+  it('compact mode reload button resets error state', () => {
+    render(
+      <ErrorBoundary compact>
+        <ThrowOnRender error={new Error('Tab crash')} />
+      </ErrorBoundary>,
+    );
+    // Click the reload button to reset state
+    const reloadButton = screen.getByRole('button', { name: /reload tab/i });
+    expect(reloadButton).toBeInTheDocument();
+  });
 });

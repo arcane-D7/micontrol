@@ -62,6 +62,15 @@ jobs:
       - name: Run cargo audit
         run: cargo audit --deny warnings
 
+      - name: Install cargo-deny
+        run: |
+          if ! command -v cargo-deny &>/dev/null; then
+            cargo install cargo-deny --locked
+          fi
+
+      - name: Run cargo-deny
+        run: cargo deny --manifest-path src-tauri/Cargo.toml check
+
   frontend:
     name: Frontend (build + lint + format)
     runs-on: windows-latest

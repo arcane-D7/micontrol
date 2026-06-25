@@ -20,8 +20,17 @@ pub fn set_secret(key: String, value: String) -> Result<(), String> {
     Ok(())
 }
 
+/// S27-004: Allowlist of keyring keys that the frontend may read.
+const ALLOWED_SECRET_KEYS: &[&str] = &["openai_api_key", "telemetry_consent"];
+
 #[tauri::command]
 pub fn get_secret(key: String) -> Result<Option<String>, String> {
+    // S27-004: Reject keys not in the allowlist to prevent secret exfiltration.
+    if !ALLOWED_SECRET_KEYS.contains(&key.as_str()) {
+        return Err(format!(
+            "Access denied: key '{key}' is not in the allowlist"
+        ));
+    }
     let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(v) => Ok(Some(v)),

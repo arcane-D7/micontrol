@@ -17,7 +17,7 @@ const USER_DATA_FILES: &[&str] = &[
     "ai_config.json",
     "schedule.json",
     "consent.json",
-    "nonces.json",
+    // S27-003: nonces.json excluded — internal anti-replay cache, not user data.
 ];
 
 /// Export all user data as a ZIP archive (GDPR Art.20 — Right to data portability).
@@ -97,7 +97,6 @@ pub async fn export_user_data(app: AppHandle) -> Result<String, String> {
          - ai_config.json: AI analysis configuration\n\
          - schedule.json: Scheduled task configuration\n\
          - consent.json: Current consent state\n\
-         - nonces.json: Elevated bridge nonce store\n\
          - ai_perf_logs/: AI performance log entries\n"
     );
     zip.start_file("MANIFEST.txt", options)
@@ -147,8 +146,9 @@ pub async fn reveal_in_explorer(app: AppHandle, path: String) -> Result<(), Stri
 
     #[cfg(windows)]
     {
+        // S27-002: Pass canonical path to explorer.exe to prevent TOCTOU.
         std::process::Command::new("explorer.exe")
-            .args(["/select,", &path])
+            .args(["/select,", &canonical.to_string_lossy()])
             .spawn()
             .map_err(|e| format!("Cannot open explorer: {e}"))?;
     }

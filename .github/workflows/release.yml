@@ -46,9 +46,19 @@ jobs:
           }
           Write-Host "Version verified: $pkgVersion"
 
+      - name: Cache cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
+        env:
+          CARGO_AUDIT_VERSION: '0.18.3'
+
       - name: Run cargo audit
         run: |
-          cargo install cargo-audit --locked
+          if ! command -v cargo-audit &>/dev/null; then
+            cargo install cargo-audit --locked
+          fi
           cargo audit --deny warnings
 
       - name: Run npm audit
@@ -77,6 +87,15 @@ jobs:
             exit 1
           }
           Write-Host "Signing key is present."
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Frontend tests
+        run: npx vitest run
 
       - name: Build Tauri app
         run: npm run tauri build

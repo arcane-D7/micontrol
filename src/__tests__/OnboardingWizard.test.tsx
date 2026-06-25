@@ -88,4 +88,16 @@ describe('OnboardingWizard', () => {
 
     expect(mockOnFinish).toHaveBeenCalledTimes(1);
   });
+
+  it('pressing Escape calls onFinish', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+
+    // Focus the wizard and press Escape
+    const dialog = screen.getByRole('dialog');
+    dialog.focus();
+    await user.keyboard('{Escape}');
+
+    expect(mockOnFinish).toHaveBeenCalledTimes(1);
+  });
 });
