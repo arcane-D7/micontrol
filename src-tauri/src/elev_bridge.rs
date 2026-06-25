@@ -79,7 +79,12 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
     });
 
     // Sign the payload with HMAC-SHA256 using the shared key.
-    let key = auth::get_or_create_key().map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
+    // S22-002: Wrap in spawn_blocking — get_or_create_key() does sync file I/O
+    // with a 5-second polling loop, which would block the async runtime.
+    let key = tokio::task::spawn_blocking(auth::get_or_create_key)
+        .await
+        .map_err(|e| format!("HMAC key task panicked: {e}"))?
+        .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
     auth::sign_payload(&mut payload, &key);
 
     // Remove any stale result from a previous run for this request id.
@@ -118,7 +123,15 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
         // single UAC prompt lets us run `micontrol.exe --elevated`.
         #[cfg(windows)]
         {
-            if let Err(e) = launch_elevated_via_uac(&request_id) {
+            // S22-001: Wrap in spawn_blocking — launch_elevated_via_uac() calls
+            // WaitForSingleObject(hProcess, 30_000) which blocks for up to 30s.
+            let req_id_owned = request_id.clone();
+            let uac_result =
+                tokio::task::spawn_blocking(move || launch_elevated_via_uac(&req_id_owned))
+                    .await
+                    .map_err(|e| format!("UAC launch task panicked: {e}"))?;
+
+            if let Err(e) = uac_result {
                 let _ = tokio::fs::remove_file(&cmd_path).await;
                 return Err(format!(
                     "Scheduled task '{}' not found AND UAC fallback failed: {e}. \
