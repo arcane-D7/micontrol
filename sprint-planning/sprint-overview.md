@@ -1,16 +1,18 @@
 # Sprint Plan Overview — Stability Report Remediation (v1 + v2)
 
 **Created:** 2026-06-25
-**Last Updated:** 2026-06-25 (v2 sprints added)
+**Last Updated:** 2026-06-25 (Sprint 28 added — deferred backlog triaged)
 **Sources:**
 
 - v1: `docs/stability-report-2026-06-24-post-sprints-13-15.md` (Sprints 16–19)
 - v2: `docs/STABILITY_REPORT_v2.md` (Sprints 22–25)
+- v3: `docs/STABILITY_REPORT_v3.md` (Sprints 26–27)
+- Deferred: `sprint-planning/sprint-28-p3-deferred-backlog/sprint.md` (Sprint 28)
 - Sprints 20–21: Post-v1 audit CRITICAL/HIGH fixes (committed d514bdf)
 
-**Total findings addressed:** 63 (v1) + 44 (v2) = 107
-**Total estimated tickets:** 63 (v1) + 44 (v2) = 107
-**Total estimated effort:** 9–13 days (v1) + 9–12 days (v2) = 18–25 days
+**Total findings addressed:** 63 (v1) + 44 (v2) + 19 (v3) + 20 (deferred) = 146
+**Total estimated tickets:** 63 (v1) + 44 (v2) + 19 (v3) + 14 (S28) = 140
+**Total estimated effort:** 9–13 days (v1) + 9–12 days (v2) + ~10 days (v3+S28) = 28–35 days
 
 ---
 
@@ -33,12 +35,20 @@
 
 ### v2 Sprints (from Stability Report v2) — 🔄 PLANNED
 
-| Sprint | Priority    | Focus                          | Tickets | Effort  | Status     | File                                        |
-| ------ | ----------- | ------------------------------ | ------- | ------- | ---------- | ------------------------------------------- |
-| 22     | P0 CRITICAL | Async blocking I/O             | 2       | ~1 day  | 🔄 Planned | `sprint-22-p0-async-blocking/sprint.md`     |
-| 23     | P1 HIGH     | Stability & security edges     | 5       | ~3 days | 🔄 Planned | `sprint-23-p1-stability-security/sprint.md` |
-| 24     | P2 MEDIUM   | Architecture/UI/Perf/AI/DevOps | 19      | ~5 days | 🔄 Planned | `sprint-24-p2-medium-batch/sprint.md`       |
-| 25     | P3 LOW      | Polish & consistency           | 18      | ~3 days | 🔄 Planned | `sprint-25-p3-low-polish/sprint.md`         |
+| Sprint | Priority    | Focus                          | Tickets | Effort  | Status                                        | File                                        |
+| ------ | ----------- | ------------------------------ | ------- | ------- | --------------------------------------------- | ------------------------------------------- |
+| 22     | P0 CRITICAL | Async blocking I/O             | 2       | ~1 day  | ✅ 3a73f4b                                    | `sprint-22-p0-async-blocking/sprint.md`     |
+| 23     | P1 HIGH     | Stability & security edges     | 5       | ~3 days | ✅ fef49f9                                    | `sprint-23-p1-stability-security/sprint.md` |
+| 24     | P2 MEDIUM   | Architecture/UI/Perf/AI/DevOps | 19      | ~5 days | ✅ b4e467b (Batch A) / ✅ 5bd819b (Batch B+C) | `sprint-24-p2-medium-batch/sprint.md`       |
+| 25     | P3 LOW      | Polish & consistency           | 18      | ~3 days | ✅ 100a1d2                                    | `sprint-25-p3-low-polish/sprint.md`         |
+
+### v3 Sprints (from Stability Report v3) — 🔄 PLANNED
+
+| Sprint | Priority  | Focus                           | Tickets | Effort  | Status     | File                                      |
+| ------ | --------- | ------------------------------- | ------- | ------- | ---------- | ----------------------------------------- |
+| 26     | P2 MEDIUM | Residual blocking I/O, ACL gaps | 8       | ~3 days | 🔄 Planned | `sprint-26-p2-medium-residual/sprint.md`  |
+| 27     | P3 LOW    | Polish & defense-in-depth       | 11      | ~2 days | 🔄 Planned | `sprint-27-p3-low-polish-v3/sprint.md`    |
+| 28     | P3 LOW    | Deferred backlog cleanup        | 14      | ~5 days | 🔄 Planned | `sprint-28-p3-deferred-backlog/sprint.md` |
 
 ---
 
@@ -148,47 +158,68 @@ Sprint 20–21 (P0/P1) ──► Stability Report v2
    ✅ d514bdf
 ```
 
-### v2 Sprints (PLANNED)
+### v2 Sprints (COMPLETE)
 
 ```
-Sprint 22 (P0) ──► Sprint 23 (P1) ──► Sprint 24 (P2) ──► Sprint 25 (P3) ──► Final Audit
+Sprint 22 (P0) ──► Sprint 23 (P1) ──► Sprint 24 (P2) ──► Sprint 25 (P3) ──► Audit v3
+   ✅ 3a73f4b        ✅ fef49f9        ✅ b4e467b         ✅ 100a1d2
    2 tickets         5 tickets         19 tickets         18 tickets
    ~1 day            ~3 days           ~5 days            ~3 days
 ```
 
-**Sprint 22 must execute first** (CRITICAL — async starvation).
-**Sprint 23 next** (HIGH — stability edge cases).
-**After S22+S23:** Run audit to verify 0 CRITICAL / 0 HIGH.
-**Sprint 24** batches all MEDIUM findings (3 parallel batches).
-**Sprint 25** batches all LOW findings (2 parallel batches).
-**After S25:** Run final audit to verify 0 CRITICAL / 0 HIGH / 0 MEDIUM.
+### v3 Sprints (PLANNED)
+
+```
+Sprint 26 (P2) ──► Sprint 27 (P3) ──► Sprint 28 (P3) ──► Final Audit
+   8 tickets         11 tickets         14 tickets
+   ~3 days           ~2 days            ~5 days
+```
+
+**Sprint 26** addresses 7 MEDIUM findings (residual blocking I/O, ACL gaps, rate limiting, key rotation).
+**Sprint 27** addresses 12 LOW findings (PII redaction, TOCTOU, accessibility, test gaps, DevOps).
+**Sprint 28** addresses 11 remaining deferred backlog items (i18n, architecture refactoring, E2E testing, RAI).
+**After S28:** Run final audit to verify 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW.
 
 ---
 
-## Deferred to Sprint 20+ (Not in this plan)
+## Deferred Backlog — Reviewed & Triaged (Sprint 28)
 
-These findings are lower priority and can be addressed in a future sprint:
+A thorough investigation of all deferred items was conducted post-v3 audit. Each item was verified against the current codebase to determine if it was already resolved or still an open issue.
 
-- U4: OnboardingWizard accessibility (role="dialog", focus trap)
-- U5: ConsentDialog focus ring
-- U6: Hardcoded English in EcrDebugPanel and AiConfigForm
-- U7-U22: Remaining UI/UX MEDIUM/LOW findings
-- Q6: useSettings God object refactor
-- Q10: Duplicate type definitions
-- Q11: TODO tech debt in hotkeys.rs
-- Q16: Co-located type definitions (no src/types/ directory)
-- S7: shell:default capability granularity
-- S10: write_iot_hex hardcoded safe list
-- S13: Support scripts in root
-- S14: Rust crate versions not pinned
-- A5: Global statics proliferation
-- A6: useSettings scope violation (AI prompt builder)
-- A7: IoT IPC commands excessively granular
-- A9-A12: Minor architecture improvements
-- T11: No E2E testing
-- T16-T19: Minor stability improvements
-- D11-D12: Minor DevOps improvements
-- R6-R12: Minor RAI improvements
+### ✅ Already Resolved (6 items — no action needed)
+
+| Finding                            | Resolution                                                              |
+| ---------------------------------- | ----------------------------------------------------------------------- |
+| U4: OnboardingWizard accessibility | ✅ Resolved in S24-010 (role="dialog", focus trap, Escape handler)      |
+| U5: ConsentDialog focus ring       | ✅ Resolved (global `*:focus-visible` CSS, no bare `outline: none`)     |
+| Q10: Duplicate type definitions    | ✅ Resolved (each type defined once, imported where needed)             |
+| S7: shell:default capability       | ✅ Resolved (only `core:default` granted, no shell permissions exposed) |
+| S13: Support scripts in root       | ✅ Resolved (all scripts in `scripts/` directory)                       |
+| S14: Rust crate versions           | ✅ Acceptable (Cargo.lock committed, standard practice)                 |
+
+### ⚠️ Partially Resolved (3 items — minor actions in S28)
+
+| Finding                 | Status                             | Action                                        |
+| ----------------------- | ---------------------------------- | --------------------------------------------- |
+| Q11: TODO in hotkeys.rs | Roadmap items, not broken code     | Documented as known roadmap (S28-009 context) |
+| T16-T19: Stability      | osd.rs expect() already in S27-006 | No additional action                          |
+| D11-D12: DevOps         | CI comprehensive, LICENSE missing  | S28-010                                       |
+
+### ❌ Still Open Issues (11 items — addressed in Sprint 28)
+
+| Finding                         | Sprint 28 Ticket   | Description                                                      |
+| ------------------------------- | ------------------ | ---------------------------------------------------------------- |
+| U6: Hardcoded English           | S28-001, S28-002   | EcrDebugPanel zero i18n; AiConfigForm PRESET labels + aria-label |
+| Q6: useSettings God object      | S28-004            | 430-line hook mixing settings, AI, consent                       |
+| Q16: Co-located types           | S28-003            | 17+ types in hook files, should be in src/types/                 |
+| S10: write_iot_hex hardcoded    | S28-008            | 9 EC RAM offsets hardcoded in source                             |
+| A5: Global statics              | S28-007            | 48 statics across 14 files                                       |
+| A6: useSettings scope violation | S28-004            | buildPrompt() in useSettings.ts                                  |
+| A7: IoT IPC granular            | S28-005            | ~25 IoT commands could be consolidated                           |
+| A9-A12: Minor architecture      | S28-006            | hotkeys.rs ~2700 lines, should be split                          |
+| T11: No E2E testing             | S28-009            | No playwright/cypress/puppeteer                                  |
+| D11-D12: LICENSE missing        | S28-010            | README references MIT LICENSE but file doesn't exist             |
+| R6-R12: RAI gaps                | S28-011 to S28-014 | No feedback, caching, model logging, or AI docs                  |
 
 ---
 
@@ -214,4 +245,4 @@ After completing Sprints 16-19:
 
 ---
 
-_Generated 2026-06-25 based on `docs/stability-report-2026-06-24-post-sprints-13-15.md` (v1) and `docs/STABILITY_REPORT_v2.md` (v2). Sprints 16–21 complete. Sprints 22–25 planned._
+_Generated 2026-06-25 based on `docs/stability-report-2026-06-24-post-sprints-13-15.md` (v1), `docs/STABILITY_REPORT_v2.md` (v2), `docs/STABILITY_REPORT_v3.md` (v3), and deferred backlog review. Sprints 16–25 complete. Sprints 26–28 planned._
