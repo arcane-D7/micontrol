@@ -28,7 +28,8 @@ use commands::hardware::{
     wifi_status, write_iot_hex,
 };
 use commands::hotkeys::{
-    get_detected_key, get_hotkey_config, is_hook_active, set_hotkey_config, start_key_detect,
+    get_detected_key, get_hotkey_config, grant_script_consent, is_hook_active, set_hotkey_config,
+    start_key_detect,
 };
 use commands::privacy::{export_user_data, reveal_in_explorer};
 use commands::system::{
@@ -299,6 +300,8 @@ pub fn run() {
             start_key_detect,
             get_detected_key,
             is_hook_active,
+            // S29-001: Script hotkey consent grant command
+            grant_script_consent,
             // Display refresh rate
             get_available_refresh_rates,
             set_refresh_rate,

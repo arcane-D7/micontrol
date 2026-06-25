@@ -38,3 +38,23 @@ pub async fn get_detected_key() -> u32 {
 pub async fn is_hook_active() -> bool {
     crate::hw::hotkeys::is_hook_active()
 }
+
+/// Grant "Always Allow" consent for a script hotkey action (S29-001).
+///
+/// Called by the frontend when the user clicks "Always Allow" in the
+/// consent dialog. This writes `true` into `hotkey_consent.json` for the
+/// given script hash, allowing future executions without re-prompting.
+#[tauri::command]
+pub async fn grant_script_consent(
+    interpreter: String,
+    path: String,
+    args: Vec<String>,
+) -> Result<(), String> {
+    crate::util::blocking::run_blocking(move || {
+        crate::hw::hotkeys::grant_consent(&interpreter, &path, &args).map_err(|e| {
+            crate::hw::errors::HardwareError::Other(format!("Failed to grant script consent: {e}"))
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())
+}

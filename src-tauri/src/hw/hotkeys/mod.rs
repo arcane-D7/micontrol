@@ -1352,8 +1352,10 @@ fn has_consent(interpreter: &str, path: &str, args: &[String]) -> bool {
 ///
 /// Called by the frontend Tauri command when the user clicks "Always Allow"
 /// in the consent dialog.
-#[cfg(test)]
-fn grant_consent(interpreter: &str, path: &str, args: &[String]) -> Result<(), String> {
+///
+/// S29-001: Removed `#[cfg(test)]` — this function must be available in production
+/// builds so the `grant_script_consent` Tauri command can call it.
+pub(crate) fn grant_consent(interpreter: &str, path: &str, args: &[String]) -> Result<(), String> {
     let hash = script_hash(interpreter, path, args);
     let consent_file = consent_path();
 

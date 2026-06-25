@@ -9,7 +9,12 @@ use tauri::{AppHandle, Manager};
 use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
-/// Files in the AppData directory that contain user data.
+/// Files that contain user data and should be included in the GDPR export.
+///
+/// S29-003: Added `ai_usage.json` — contains total_requests, token counts,
+/// estimated_cost_usd, and model_usage (per-model request counts). This is
+/// personal usage data under GDPR Art.20 (data portability).
+/// S27-003: nonces.json excluded — internal anti-replay cache, not user data.
 const USER_DATA_FILES: &[&str] = &[
     "hardware_profile.json",
     "hotkeys.json",
@@ -17,19 +22,30 @@ const USER_DATA_FILES: &[&str] = &[
     "ai_config.json",
     "schedule.json",
     "consent.json",
-    // S27-003: nonces.json excluded — internal anti-replay cache, not user data.
+    "ai_usage.json",
 ];
 
 /// Export all user data as a ZIP archive (GDPR Art.20 — Right to data portability).
 ///
-/// Collects all user data files from the AppData directory and creates a ZIP
-/// archive containing them. Returns the path to the created ZIP file.
+/// Collects all user data files and creates a ZIP archive containing them.
+/// Returns the path to the created ZIP file.
+///
+/// S29-003: Now searches both `app_data_dir()` (`%APPDATA%\com.micontrol.app`)
+/// AND `local_data_dir()` (`%LOCALAPPDATA%\MiControl`), because security-sensitive
+/// files (ai_usage.json, hotkeys.json, etc.) are stored in the latter.
 #[tauri::command]
 pub async fn export_user_data(app: AppHandle) -> Result<String, String> {
     let app_data = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("AppData dir unavailable: {e}"))?;
+
+    // S29-003: Also get the local data directory where security-sensitive files live.
+    let local_dir = {
+        let base =
+            std::env::var("LOCALAPPDATA").map_err(|e| format!("LOCALAPPDATA not set: {e}"))?;
+        PathBuf::from(base).join("MiControl")
+    };
 
     // Create the export in a temp directory
     let export_dir = std::env::temp_dir().join("micontrol_export");
@@ -49,17 +65,24 @@ pub async fn export_user_data(app: AppHandle) -> Result<String, String> {
 
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
-    // Add user data files
+    // Add user data files — search local_data_dir first (where they're actually written),
+    // then fall back to app_data_dir for older installations.
     for &filename in USER_DATA_FILES {
-        let file_path = app_data.join(filename);
-        if file_path.exists() {
-            let contents =
-                std::fs::read(&file_path).map_err(|e| format!("Cannot read {filename}: {e}"))?;
-            zip.start_file(filename, options)
-                .map_err(|e| format!("Cannot add {filename} to ZIP: {e}"))?;
-            zip.write_all(&contents)
-                .map_err(|e| format!("Cannot write {filename} to ZIP: {e}"))?;
-        }
+        let local_path = local_dir.join(filename);
+        let app_path = app_data.join(filename);
+
+        let contents = if local_path.exists() {
+            std::fs::read(&local_path).map_err(|e| format!("Cannot read {filename}: {e}"))?
+        } else if app_path.exists() {
+            std::fs::read(&app_path).map_err(|e| format!("Cannot read {filename}: {e}"))?
+        } else {
+            continue; // File doesn't exist in either location — skip.
+        };
+
+        zip.start_file(filename, options)
+            .map_err(|e| format!("Cannot add {filename} to ZIP: {e}"))?;
+        zip.write_all(&contents)
+            .map_err(|e| format!("Cannot write {filename} to ZIP: {e}"))?;
     }
 
     // Add AI performance logs if they exist
@@ -97,6 +120,7 @@ pub async fn export_user_data(app: AppHandle) -> Result<String, String> {
          - ai_config.json: AI analysis configuration\n\
          - schedule.json: Scheduled task configuration\n\
          - consent.json: Current consent state\n\
+         - ai_usage.json: AI usage statistics (request counts, token usage, cost estimates)\n\
          - ai_perf_logs/: AI performance log entries\n"
     );
     zip.start_file("MANIFEST.txt", options)
