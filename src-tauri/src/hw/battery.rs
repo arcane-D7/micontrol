@@ -304,6 +304,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires real battery hardware (WMI BatteryStaticData)"]
     fn battery_info_fields_valid() {
         let info = get_battery_info().expect("get_battery_info should succeed");
         assert!(
@@ -332,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires real battery hardware (WMI BatteryStaticData)"]
     fn battery_capacity_ratio_sane() {
         let info = get_battery_info().expect("get_battery_info should succeed");
         let ratio = info.full_capacity_mwh as f64 / info.designed_capacity_mwh as f64;
@@ -343,6 +345,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires real battery hardware (WMI BatteryStaticData)"]
     fn battery_info_serialization() {
         let info = get_battery_info().expect("get_battery_info should succeed");
         let json = serde_json::to_string(&info).expect("should serialize");
