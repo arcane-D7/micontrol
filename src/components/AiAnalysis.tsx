@@ -601,7 +601,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         <div className="ai-settings-docs-link">
           📖{' '}
           <a
-            href="https://github.com/Freitas-MA/miPC/blob/master/micontrol/docs/ai-features.md"
+            href="https://github.com/arcane-D7/micontrol/blob/main/docs/ai-features.md"
             target="_blank"
             rel="noopener noreferrer"
           >

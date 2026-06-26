@@ -53,7 +53,7 @@
       "active": true,
       "dialog": false,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZCQjc3MTVCMkVDNDEyRDQKUldUVUVzUXVXM0czKzl2bGpUdjFrc2Nsd0d3SUwwUmJ3WGIrVTRELyt6VFZ0UEpsTWpqV3lKbHMK",
-      "endpoints": ["https://github.com/Freitas-MA/micontrol/releases/latest/download/latest.json"]
+      "endpoints": ["https://github.com/arcane-D7/micontrol/releases/latest/download/latest.json"]
     }
   }
 }
