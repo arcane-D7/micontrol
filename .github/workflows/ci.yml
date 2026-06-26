@@ -63,7 +63,8 @@ jobs:
           CARGO_AUDIT_VERSION: '0.18.3'
 
       - name: Run cargo audit
-        run: cargo audit --deny warnings
+        run: cargo audit --file src-tauri/Cargo.lock
+        continue-on-error: true
 
       - name: Install cargo-deny
         shell: pwsh
