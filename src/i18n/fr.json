@@ -434,14 +434,19 @@
     "show": "Afficher",
     "hide": "Masquer",
     "retry": "Réessayer",
+    "items": "{count} éléments",
     "items_one": "{count} élément",
     "items_other": "{count} éléments",
+    "logs": "{count} entrées de journal",
     "logs_one": "{count} entrée de journal",
     "logs_other": "{count} entrées de journal",
+    "devices": "{count} appareils",
     "devices_one": "{count} appareil",
     "devices_other": "{count} appareils",
+    "seconds": "{count} secondes",
     "seconds_one": "{count} seconde",
     "seconds_other": "{count} secondes",
+    "minutes": "{count} minutes",
     "minutes_one": "{count} minute",
     "minutes_other": "{count} minutes"
   },
@@ -590,7 +595,11 @@
     "confirmDelete": "Êtes-vous sûr ? Cela supprimera définitivement toutes vos données, y compris les clés API, les journaux et les paramètres. Cela ne peut pas être annulé.",
     "replayOnboarding": "Rejouer l'Introduction",
     "onboarding": "Assistant d'Introduction",
-    "onboardingDesc": "Réafficher l'assistant de bienvenue pour revoir les fonctionnalités et préférences."
+    "onboardingDesc": "Réafficher l'assistant de bienvenue pour revoir les fonctionnalités et préférences.",
+    "dataExport": "Exportation de Données",
+    "dataExportDesc": "Téléchargez une copie de vos données dans un format portable (archive ZIP).",
+    "downloadData": "Télécharger Mes Données",
+    "exporting": "Exportation..."
   },
   "onboarding": {
     "welcome": {

@@ -1,0 +1,21 @@
+# Normalize line endings to LF in the repository.
+# Git will check out as-is on Linux/macOS and convert to CRLF on Windows
+# when core.autocrlf=true, but Prettier and ESLint see consistent LF in CI.
+
+* text=auto eol=lf
+
+# Binary files — never normalize
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.sys binary
+*.cat binary
+*.dll binary
+*.exe binary

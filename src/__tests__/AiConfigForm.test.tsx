@@ -78,8 +78,8 @@ describe('AiConfigForm', () => {
     const user = userEvent.setup();
     renderForm();
 
-    // Find the GPT-4o preset button (not mini)
-    const gpt4oButton = screen.getByText('GPT-4o (best quality)');
+    // Find the GPT-4o preset button (not mini) — mock i18n returns the key
+    const gpt4oButton = screen.getByText('settings.presetGpt4o');
     await user.click(gpt4oButton);
 
     // Clicking a preset marks the form dirty; then we need to click Save

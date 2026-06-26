@@ -55,3 +55,4 @@ acpi_dump/
 test-results/
 playwright-report/
 playwright/.cache/
+coverage/

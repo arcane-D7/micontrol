@@ -434,14 +434,19 @@
     "show": "Mostrar",
     "hide": "Ocultar",
     "retry": "Reintentar",
+    "items": "{count} elementos",
     "items_one": "{count} elemento",
     "items_other": "{count} elementos",
+    "logs": "{count} entradas de registro",
     "logs_one": "{count} entrada de registro",
     "logs_other": "{count} entradas de registro",
+    "devices": "{count} dispositivos",
     "devices_one": "{count} dispositivo",
     "devices_other": "{count} dispositivos",
+    "seconds": "{count} segundos",
     "seconds_one": "{count} segundo",
     "seconds_other": "{count} segundos",
+    "minutes": "{count} minutos",
     "minutes_one": "{count} minuto",
     "minutes_other": "{count} minutos"
   },
@@ -590,7 +595,11 @@
     "confirmDelete": "¿Está seguro? Esto eliminará permanentemente todos sus datos incluyendo claves de API, registros y configuraciones. Esto no se puede deshacer.",
     "replayOnboarding": "Repetir Introducción",
     "onboarding": "Asistente de Introducción",
-    "onboardingDesc": "Volver a mostrar el asistente de bienvenida para revisar funciones y preferencias."
+    "onboardingDesc": "Volver a mostrar el asistente de bienvenida para revisar funciones y preferencias.",
+    "dataExport": "Exportación de Datos",
+    "dataExportDesc": "Descargue una copia de sus datos en un formato portátil (archivo ZIP).",
+    "downloadData": "Descargar Mis Datos",
+    "exporting": "Exportando..."
   },
   "onboarding": {
     "welcome": {

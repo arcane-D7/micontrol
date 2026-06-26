@@ -434,14 +434,19 @@
     "show": "Mostrar",
     "hide": "Ocultar",
     "retry": "Tentar novamente",
+    "items": "{count} itens",
     "items_one": "{count} item",
     "items_other": "{count} itens",
+    "logs": "{count} entradas de registro",
     "logs_one": "{count} entrada de registro",
     "logs_other": "{count} entradas de registro",
+    "devices": "{count} dispositivos",
     "devices_one": "{count} dispositivo",
     "devices_other": "{count} dispositivos",
+    "seconds": "{count} segundos",
     "seconds_one": "{count} segundo",
     "seconds_other": "{count} segundos",
+    "minutes": "{count} minutos",
     "minutes_one": "{count} minuto",
     "minutes_other": "{count} minutos"
   },
@@ -560,7 +565,11 @@
     "confirmDelete": "Tem certeza? Isso excluirá permanentemente todos os seus dados incluindo chaves de API, logs e configurações. Isso não pode ser desfeito.",
     "replayOnboarding": "Repetir Introdução",
     "onboarding": "Assistente de Introdução",
-    "onboardingDesc": "Reexibir o assistente de boas-vindas para rever funcionalidades e preferências."
+    "onboardingDesc": "Reexibir o assistente de boas-vindas para rever funcionalidades e preferências.",
+    "dataExport": "Exportação de Dados",
+    "dataExportDesc": "Descarregue uma cópia dos seus dados num formato portátil (arquivo ZIP).",
+    "downloadData": "Descarregar os Meus Dados",
+    "exporting": "A exportar..."
   },
   "onboarding": {
     "welcome": {
@@ -618,6 +627,7 @@
     "columnTdp": "TDP W",
     "columnCpuPct": "CPU%",
     "columnGpuPct": "GPU%",
+    "disclaimer": "O conteúdo gerado por IA pode ser impreciso. Verifique informações críticas.",
     "usage": {
       "title": "Uso de IA",
       "requests": "Total de Pedidos",
