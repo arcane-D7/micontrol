@@ -18,6 +18,7 @@
     "version:sync": "node scripts/sync-version.cjs",
     "version:check": "node scripts/sync-version.cjs --check",
     "version:bump": "node scripts/sync-version.cjs",
+    "release": "node scripts/release.cjs",
     "prepare": "husky"
   },
   "lint-staged": {

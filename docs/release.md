@@ -40,38 +40,44 @@ If these secrets are not set, the release will succeed but the installer will be
 
 ## Cutting a Release
 
-1. **Ensure all versions are synced:**
+The release process is fully automated. Run a single command locally:
 
-   ```bash
-   npm run version:check
-   ```
+```bash
+# Bump patch version: 1.0.0 → 1.0.1
+pnpm release patch
 
-2. **Bump the version (if not already done):**
+# Bump minor version: 1.0.0 → 1.1.0
+pnpm release minor
 
-   ```bash
-   npm run version:bump 1.2.3
-   git add -A
-   git commit -m "chore: bump version to 1.2.3"
-   ```
+# Bump major version: 1.0.0 → 2.0.0
+pnpm release major
 
-3. **Create and push a tag:**
+# Or specify an explicit version
+pnpm release 1.2.3
+```
 
-   ```bash
-   git tag v1.2.3
-   git push origin v1.2.3
-   ```
+The script will:
 
-4. **The release workflow runs automatically:**
+1. Verify the working tree is clean and you're on `main` (in sync with remote)
+2. Bump the version in `package.json`, `Cargo.toml`, and `tauri.conf.json`
+3. Commit the version bump as `chore(release): vX.Y.Z`
+4. Create an annotated git tag `vX.Y.Z`
+5. Push the commit and tag to `origin`
 
-   - Builds the Tauri app for Windows
-   - Signs the update bundle with the Tauri signing key
-   - Creates a GitHub Release with the artifacts
+The tag push triggers the GitHub Actions release workflow which:
 
-5. **Verify the release:**
+- Builds the Tauri app for Windows (NSIS installer)
+- Signs the update bundle with the Tauri signing key
+- Signs the installer with Authenticode (if cert configured)
+- Generates `latest.json` for the auto-updater
+- Creates a GitHub Release with the installer `.exe` and `latest.json` attached
 
-   - Check the GitHub Actions run completed successfully
-   - Download the artifacts and verify the signature
-   - Test the updater by installing the previous version and updating
+### Verify the release
+
+- Check the Actions run: https://github.com/arcane-D7/micontrol/actions
+- Check the release: https://github.com/arcane-D7/micontrol/releases
+- Download the installer and verify the signature
+- Test the updater by installing the previous version and updating
 
 ## Key Rotation
 
@@ -110,7 +116,7 @@ If a release needs to be rolled back:
 
 ```bash
 git revert <release-commit-hash>
-git push origin master
+git push origin main
 ```
 
 ### 3. Re-publish Previous Version
