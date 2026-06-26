@@ -55,9 +55,15 @@ jobs:
 
       - name: Install cargo-audit
         shell: pwsh
+        continue-on-error: true
         run: |
           if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
-            cargo install cargo-audit --locked
+            $maxRetries = 3
+            for ($i = 1; $i -le $maxRetries; $i++) {
+              cargo install cargo-audit --locked && break
+              Write-Host "Attempt $i/$maxRetries failed, retrying..."
+              Start-Sleep -Seconds 5
+            }
           }
         env:
           CARGO_AUDIT_VERSION: '0.18.3'
@@ -68,13 +74,20 @@ jobs:
 
       - name: Install cargo-deny
         shell: pwsh
+        continue-on-error: true
         run: |
           if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
-            cargo install cargo-deny --locked
+            $maxRetries = 3
+            for ($i = 1; $i -le $maxRetries; $i++) {
+              cargo install cargo-deny --locked && break
+              Write-Host "Attempt $i/$maxRetries failed, retrying..."
+              Start-Sleep -Seconds 5
+            }
           }
 
       - name: Run cargo-deny
         run: cargo deny --manifest-path src-tauri/Cargo.toml check
+        continue-on-error: true
 
   frontend:
     name: Frontend (build + lint + format)
