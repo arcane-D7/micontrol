@@ -14,7 +14,7 @@ We take security vulnerabilities seriously. If you discover a security vulnerabi
 ### How to Report
 
 1. **Do NOT open a public GitHub issue.**
-2. Email: security@freitas-ma.dev (or use [GitHub Security Advisories](https://github.com/Freitas-MA/miPC/security/advisories/new))
+2. Email: security@freitas-ma.dev (or use [GitHub Security Advisories](https://github.com/arcane-D7/micontrol/security/advisories/new))
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce

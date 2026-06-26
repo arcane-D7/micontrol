@@ -694,7 +694,7 @@
     "section5Title": "5. Os Seus Direitos",
     "section5Body": "Tem controlo total sobre os seus dados:\n\n• Conceder ou negar consentimento a qualquer momento através de Definições → Privacidade\n• Revogar consentimento previamente concedido — isto interrompe imediatamente toda a transmissão de telemetria\n• Eliminar registos de desempenho armazenados localmente a partir do separador Análise IA\n• Desinstalar o MiControl para remover toda a configuração e registos armazenados localmente\n\nSe forneceu dados pessoais separadamente à OpenAI, deve contactá-los diretamente para exercer os seus direitos de dados nos termos da lei aplicável.",
     "section6Title": "6. Contacto",
-    "section6Body": "Para questões relacionadas com a privacidade sobre o MiControl, abra um issue no repositório GitHub: github.com/Freitas-MA/miPC",
+    "section6Body": "Para questões relacionadas com a privacidade sobre o MiControl, abra um issue no repositório GitHub: github.com/arcane-D7/micontrol",
     "consentStatus": "Estado de Consentimento",
     "consentGranted": "Concedido",
     "consentDenied": "Negado",

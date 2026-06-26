@@ -2,9 +2,9 @@
 
 > Desktop hardware control for gaming laptops — fan curves, battery, display, audio, and more.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Freitas-MA/miPC/ci.yml?branch=main&style=flat-square)](https://github.com/Freitas-MA/miPC/actions)
-[![License](https://img.shields.io/github/license/Freitas-MA/miPC?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/github/v/release/Freitas-MA/miPC?style=flat-square)](https://github.com/Freitas-MA/miPC/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/arcane-D7/micontrol/ci.yml?branch=main&style=flat-square)](https://github.com/arcane-D7/micontrol/actions)
+[![License](https://img.shields.io/github/license/arcane-D7/micontrol?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/github/v/release/arcane-D7/micontrol?style=flat-square)](https://github.com/arcane-D7/micontrol/releases)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](CONTRIBUTING.md)
 
 ---
@@ -25,7 +25,7 @@
 
 ### Download a Release
 
-Grab the latest NSIS installer from the [Releases page](https://github.com/Freitas-MA/miPC/releases). No additional runtime is required.
+Grab the latest NSIS installer from the [Releases page](https://github.com/arcane-D7/micontrol/releases). No additional runtime is required.
 
 ### Build from Source
 
@@ -41,7 +41,7 @@ Grab the latest NSIS installer from the [Releases page](https://github.com/Freit
 
 ```bash
 # Clone the repository
-git clone https://github.com/Freitas-MA/miPC.git
+git clone https://github.com/arcane-D7/micontrol.git
 cd miPC
 
 # Install frontend dependencies

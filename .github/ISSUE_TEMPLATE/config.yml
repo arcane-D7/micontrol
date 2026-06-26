@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security Vulnerability
-    url: https://github.com/Freitas-MA/miPC/security/advisories/new
+    url: https://github.com/arcane-D7/micontrol/security/advisories/new
     about: Report security vulnerabilities privately. Do NOT open public issues for security reports.
   - name: Discussions
-    url: https://github.com/Freitas-MA/miPC/discussions
+    url: https://github.com/arcane-D7/micontrol/discussions
     about: Ask questions and discuss ideas with the community.

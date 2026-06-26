@@ -694,7 +694,7 @@
     "section5Title": "5. Your Rights",
     "section5Body": "You have full control over your data:\n\n\u2022 Grant or deny consent at any time via Settings \u2192 Privacy\n\u2022 Revoke previously granted consent \u2014 this immediately stops all telemetry transmission\n\u2022 Delete locally stored performance logs from the AI Analysis tab\n\u2022 Uninstall MiControl to remove all locally stored configuration and logs\n\nIf you have separately provided personal data to OpenAI, you must contact them directly to exercise your data rights under applicable law.",
     "section6Title": "6. Contact",
-    "section6Body": "For privacy-related inquiries about MiControl, please open an issue on the GitHub repository: github.com/Freitas-MA/miPC",
+    "section6Body": "For privacy-related inquiries about MiControl, please open an issue on the GitHub repository: github.com/arcane-D7/micontrol",
     "consentStatus": "Consent Status",
     "consentGranted": "Granted",
     "consentDenied": "Denied",
