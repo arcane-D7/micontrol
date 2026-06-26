@@ -43,7 +43,9 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
       - name: cargo test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+        env:
+          RUST_TEST_THREADS: "1"
 
       - name: Cache cargo-audit
         uses: actions/cache@v4
@@ -52,10 +54,11 @@ jobs:
           key: ${{ runner.os }}-cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
 
       - name: Install cargo-audit
+        shell: pwsh
         run: |
-          if ! command -v cargo-audit &>/dev/null; then
+          if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
             cargo install cargo-audit --locked
-          fi
+          }
         env:
           CARGO_AUDIT_VERSION: '0.18.3'
 
@@ -63,10 +66,11 @@ jobs:
         run: cargo audit --deny warnings
 
       - name: Install cargo-deny
+        shell: pwsh
         run: |
-          if ! command -v cargo-deny &>/dev/null; then
+          if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
             cargo install cargo-deny --locked
-          fi
+          }
 
       - name: Run cargo-deny
         run: cargo deny --manifest-path src-tauri/Cargo.toml check
@@ -117,10 +121,11 @@ jobs:
           key: ${{ runner.os }}-cargo-tarpaulin-${{ env.CARGO_TARPAULIN_VERSION }}
 
       - name: Install cargo-tarpaulin
+        shell: pwsh
         run: |
-          if ! command -v cargo-tarpaulin &>/dev/null; then
+          if (-not (Get-Command cargo-tarpaulin -ErrorAction SilentlyContinue)) {
             cargo install cargo-tarpaulin
-          fi
+          }
         env:
           CARGO_TARPAULIN_VERSION: '0.27.3'
 
