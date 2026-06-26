@@ -2,7 +2,7 @@
 
 > Desktop hardware control for gaming laptops — fan curves, battery, display, audio, and more.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Freitas-MA/miPC/ci.yml?branch=master&style=flat-square)](https://github.com/Freitas-MA/miPC/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/Freitas-MA/miPC/ci.yml?branch=main&style=flat-square)](https://github.com/Freitas-MA/miPC/actions)
 [![License](https://img.shields.io/github/license/Freitas-MA/miPC?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/github/v/release/Freitas-MA/miPC?style=flat-square)](https://github.com/Freitas-MA/miPC/releases)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](CONTRIBUTING.md)

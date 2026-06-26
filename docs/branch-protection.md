@@ -1,10 +1,10 @@
 # Branch Protection Rules
 
-This document describes the required branch protection configuration for the `master` branch to ensure code quality and prevent unauthorized changes.
+This document describes the required branch protection configuration for the `main` branch to ensure code quality and prevent unauthorized changes.
 
 ## Required Status Checks
 
-The following CI checks MUST pass before a pull request can be merged to `master`:
+The following CI checks MUST pass before a pull request can be merged to `main`:
 
 | Check           | Job           | Description                                                          |
 | --------------- | ------------- | -------------------------------------------------------------------- |
@@ -28,7 +28,7 @@ The following CI checks MUST pass before a pull request can be merged to `master
 
 ## Branch Protection Rules
 
-### `master` branch
+### `main` branch
 
 1. **Require pull request before merging**
    - Require at least 1 approval
@@ -45,7 +45,7 @@ The following CI checks MUST pass before a pull request can be merged to `master
    - Administrators must follow the same rules
 
 5. **Restrict who can push to matching branches**
-   - No direct pushes to `master` — all changes via pull request
+   - No direct pushes to `main` — all changes via pull request
 
 ## Setup Instructions
 
@@ -53,7 +53,7 @@ The following CI checks MUST pass before a pull request can be merged to `master
 
 1. Navigate to repository **Settings** → **Branches**
 2. Click **Add rule** under "Branch protection rules"
-3. Branch name pattern: `master`
+3. Branch name pattern: `main`
 4. Enable:
    - ☑ Require a pull request before merging (set required reviewers to 1)
    - ☑ Require status checks to pass before merging
@@ -64,7 +64,7 @@ The following CI checks MUST pass before a pull request can be merged to `master
 ### Via GitHub CLI
 
 ```bash
-gh api repos/{owner}/{repo}/branches/master/protection \
+gh api repos/{owner}/{repo}/branches/main/protection \
   --method PUT \
   --field required_pull_request_reviews='{"required_approving_review_count":1,"dismiss_stale_reviews":true}' \
   --field required_status_checks='{"strict":true,"contexts":["rust","frontend","version:check"]}' \
