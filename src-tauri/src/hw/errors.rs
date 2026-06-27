@@ -58,6 +58,10 @@ pub enum HardwareError {
     #[error("WiFi error: {0}")]
     Wifi(String),
 
+    /// Screen casting error (Miracast device discovery, connection).
+    #[error("Cast error: {0}")]
+    Cast(String),
+
     /// Display/graphics error (IGCL, brightness, HDR).
     #[error("Display error: {0}")]
     Display(String),
@@ -117,6 +121,7 @@ impl std::fmt::Debug for HardwareError {
             Self::NotSupported(arg0) => f.debug_tuple("NotSupported").field(arg0).finish(),
             Self::Ecram(arg0) => f.debug_tuple("Ecram").field(arg0).finish(),
             Self::Wifi(arg0) => f.debug_tuple("Wifi").field(arg0).finish(),
+            Self::Cast(arg0) => f.debug_tuple("Cast").field(arg0).finish(),
             Self::Display(arg0) => f.debug_tuple("Display").field(arg0).finish(),
             Self::Touchpad(arg0) => f.debug_tuple("Touchpad").field(arg0).finish(),
             Self::Battery(arg0) => f.debug_tuple("Battery").field(arg0).finish(),
@@ -147,6 +152,7 @@ impl HardwareError {
             Self::NotSupported(_) => "not_supported",
             Self::Ecram(_) => "ecram",
             Self::Wifi(_) => "wifi",
+            Self::Cast(_) => "cast",
             Self::Display(_) => "display",
             Self::Touchpad(_) => "touchpad",
             Self::Battery(_) => "battery",

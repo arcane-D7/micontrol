@@ -6,7 +6,11 @@
 use crate::hw::errors::{HardwareError, HardwareResult};
 use crate::util::xml;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::Command;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// A WiFi network (SSID) visible to the PC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,8 +32,11 @@ pub struct WifiStatus {
 
 /// Scan for available WiFi networks using netsh wlan.
 pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
-    let output = Command::new("netsh")
-        .args(["wlan", "show", "networks", "mode=bssid"])
+    let mut cmd = Command::new("netsh");
+    cmd.args(["wlan", "show", "networks", "mode=bssid"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .output()
         .map_err(|e| HardwareError::Wifi(format!("Failed to run netsh: {e}")))?;
 
@@ -39,8 +46,11 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
 
 /// Get current WiFi connection status.
 pub fn get_status() -> HardwareResult<WifiStatus> {
-    let output = Command::new("netsh")
-        .args(["wlan", "show", "interfaces"])
+    let mut cmd = Command::new("netsh");
+    cmd.args(["wlan", "show", "interfaces"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .output()
         .map_err(|e| HardwareError::Wifi(format!("Failed to run netsh: {e}")))?;
 
@@ -116,9 +126,12 @@ pub fn connect(ssid: &str, password: Option<&str>) -> HardwareResult<()> {
             std::fs::write(&profile_path, &profile_xml).map_err(HardwareError::Io)?;
 
             // Add profile
-            let add = Command::new("netsh")
-                .args(["wlan", "add", "profile", "filename"])
-                .arg(&profile_path)
+            let mut cmd = Command::new("netsh");
+            cmd.args(["wlan", "add", "profile", "filename"])
+                .arg(&profile_path);
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let add = cmd
                 .output()
                 .map_err(|e| HardwareError::Wifi(format!("Failed to add profile: {e}")))?;
 
@@ -139,9 +152,11 @@ pub fn connect(ssid: &str, password: Option<&str>) -> HardwareResult<()> {
     }
 
     // Connect
-    let connect = Command::new("netsh")
-        .args(["wlan", "connect", "name"])
-        .arg(ssid)
+    let mut cmd = Command::new("netsh");
+    cmd.args(["wlan", "connect", "name"]).arg(ssid);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let connect = cmd
         .output()
         .map_err(|e| HardwareError::Wifi(format!("Failed to connect: {e}")))?;
 
@@ -155,8 +170,11 @@ pub fn connect(ssid: &str, password: Option<&str>) -> HardwareResult<()> {
 
 /// Disconnect from current WiFi network.
 pub fn disconnect() -> HardwareResult<()> {
-    let output = Command::new("netsh")
-        .args(["wlan", "disconnect"])
+    let mut cmd = Command::new("netsh");
+    cmd.args(["wlan", "disconnect"]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .output()
         .map_err(|e| HardwareError::Wifi(format!("Failed to disconnect: {e}")))?;
 

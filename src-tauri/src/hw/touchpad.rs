@@ -43,9 +43,17 @@ const TOUCHPAD_HID_PATH_DEFAULT: &str =
 /// Return the active touchpad HID path.
 /// Uses the discovery profile when available; falls back to the BLTP7853 default.
 fn touchpad_hid_path() -> String {
-    crate::hw::discovery::global_profile()
-        .and_then(|p| p.touchpad_hid_path.clone())
-        .unwrap_or_else(|| TOUCHPAD_HID_PATH_DEFAULT.to_string())
+    // Try discovery profile first (the discovery module enumerates HID devices
+    // at first launch and populates touchpad_hid_path via SetupAPI).
+    if let Some(p) = crate::hw::discovery::global_profile() {
+        if let Some(path) = &p.touchpad_hid_path {
+            return path.clone();
+        }
+    }
+
+    // Fall back to hardcoded default
+    log::warn!("[touchpad] Using fallback HID path — device may not respond");
+    TOUCHPAD_HID_PATH_DEFAULT.to_string()
 }
 
 const TP_REG_KEY: &str = r"SOFTWARE\MI\Touchpad";
@@ -165,7 +173,7 @@ pub fn set_touchpad_haptics(enabled: bool) -> HardwareResult<()> {
             .map(|i| i.haptics_intensity)
             .unwrap_or(HapticsIntensity::Medium);
         send_haptics_hid_report(enabled, &intensity)
-            .unwrap_or_else(|e| log::debug!("[touchpad] haptics HID: {e}"));
+            .unwrap_or_else(|e| log::warn!("[touchpad] haptics HID report failed: {e} — registry updated but hardware may not reflect change"));
     }
     Ok(())
 }
@@ -186,7 +194,7 @@ pub fn set_touchpad_haptics_intensity(intensity: HapticsIntensity) -> HardwareRe
             .map(|i| i.haptics_enabled)
             .unwrap_or(true);
         send_haptics_hid_report(enabled, &intensity)
-            .unwrap_or_else(|e| log::debug!("[touchpad] haptics HID: {e}"));
+            .unwrap_or_else(|e| log::warn!("[touchpad] intensity HID report failed: {e} — registry updated but hardware may not reflect change"));
     }
     Ok(())
 }
@@ -440,6 +448,7 @@ fn get_haptics_handle() -> windows::core::Result<windows::Win32::Foundation::HAN
 
     // Open a new handle
     let device_path = touchpad_hid_path();
+    log::info!("[touchpad] Opening HID device: {device_path}");
     let path_w: Vec<u16> = OsStr::new(&device_path)
         .encode_wide()
         .chain(Some(0))
@@ -456,7 +465,15 @@ fn get_haptics_handle() -> windows::core::Result<windows::Win32::Foundation::HAN
             FILE_ATTRIBUTE_NORMAL,
             None,
         )
-    }?;
+    };
+
+    let handle = match handle {
+        Ok(h) => h,
+        Err(e) => {
+            log::error!("[touchpad] Failed to open HID device at path: {device_path} — {e}");
+            return Err(e);
+        }
+    };
 
     *guard = Some(SendHandle(handle));
     Ok(handle)

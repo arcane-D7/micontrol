@@ -263,9 +263,34 @@ fn enumerate_devices(
 
 #[cfg(windows)]
 fn get_device_friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Result<String> {
-    // SAFETY: device.GetId() is a COM method call through the windows crate; the IMMDevice pointer is valid as it was obtained from EnumAudioEndpoints.
-    let id = unsafe { device.GetId()?.to_string()? };
-    Ok(id)
+    use windows::Win32::System::Com::STGM_READ;
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
+
+    // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, 14
+    const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+        pid: 14,
+    };
+
+    // SAFETY: device.OpenPropertyStore is a COM method call through the windows crate;
+    // the IMMDevice pointer is valid as it was obtained from EnumAudioEndpoints.
+    unsafe {
+        let store: IPropertyStore = device.OpenPropertyStore(STGM_READ)?;
+
+        let prop = store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME)?;
+
+        let bstr = windows::core::BSTR::try_from(&prop)
+            .map_err(|e| anyhow::anyhow!("Failed to convert PROPVARIANT to string: {e}"))?;
+        let name = bstr.to_string();
+
+        if name.is_empty() {
+            // Fallback to device ID if friendly name is unavailable
+            let id = device.GetId()?.to_string()?;
+            return Ok(id);
+        }
+
+        Ok(name)
+    }
 }
 
 #[cfg(windows)]

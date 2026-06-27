@@ -56,7 +56,7 @@ const NAV_ITEMS = [
   { id: 'updates', icon: '🔄', label: 'nav.updates' },
   { id: 'keyboard', icon: '⌨️', label: 'nav.keyboard' },
   { id: 'setup', icon: '🔍', label: 'nav.setup' },
-  { id: 'ecrdebug', icon: '🔧', label: 'nav.ecrdebug' },
+  ...(import.meta.env.DEV ? [{ id: 'ecrdebug', icon: '🔧', label: 'nav.ecrdebug' }] : []),
   { id: 'ai_analysis', icon: '🤖', label: 'nav.aiAnalysis' },
   { id: 'settings', icon: '⚙️', label: 'nav.settings' },
   { id: 'about', icon: 'ℹ️', label: 'nav.about' },
