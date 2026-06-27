@@ -90,6 +90,14 @@ struct IotIpcMsg {
 /// Compile-time assertion: IotIpcMsg must be exactly 16 bytes.
 const _: () = assert!(std::mem::size_of::<IotIpcMsg>() == 16);
 
+/// Send a charging threshold command to the IoTService IPC pipe.
+///
+/// This is intentionally fire-and-forget: the IoTService pipe protocol
+/// does not return a response for charging threshold commands (msg_type
+/// `0x1003`). The command is validated before sending, and the registry
+/// is updated separately. If the pipe send fails, the registry value
+/// still reflects the user's intent and will be applied on the next
+/// IoTService restart.
 fn send_via_pipe(threshold: u8) -> HardwareResult<()> {
     #[cfg(windows)]
     {

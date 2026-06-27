@@ -1047,7 +1047,7 @@ unsafe fn process_raw_input(lparam: isize) {
             // Device name query may transiently fail. Be conservative: ignore
             // this frame to avoid accepting packets from the wrong HID source.
             // Do not cache this result so a later successful query can recover.
-            log::debug!(target: "hw::touchpad", "raw input device name query failed for device_key={device_key}");
+            log::warn!(target: "hw::touchpad", "raw input device name query failed for device_key={device_key}");
             return false;
         };
         let matched = is_touchpad_device_path(name, &expected_touchpad);

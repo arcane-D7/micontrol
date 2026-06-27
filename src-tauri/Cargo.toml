@@ -15,6 +15,11 @@ path = "src/main.rs"
 [[bin]]
 name = "test_perf"
 path = "src/bin/test_perf.rs"
+required-features = ["test-bin"]
+
+[features]
+default = []
+test-bin = []
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }

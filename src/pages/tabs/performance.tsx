@@ -441,141 +441,153 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
         )}
       </div>
 
-      {/* Performance channel diagnostics */}
-      <div className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
-              {t('performance.channels.title')}
+      {/* Performance channel diagnostics — dev only */}
+      {import.meta.env.DEV && (
+        <div className="card">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div className="card-title" style={{ marginBottom: 2 }}>
+                {t('performance.channels.title')}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                {t('performance.channels.subtitle')}
+              </div>
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              {t('performance.channels.subtitle')}
-            </div>
+            <button
+              className="btn-secondary"
+              style={{ fontSize: 12 }}
+              onClick={() => void runPerfDebug()}
+              disabled={loadingDebug}
+            >
+              {loadingDebug
+                ? t('performance.channels.checking')
+                : t('performance.channels.checkNow')}
+            </button>
           </div>
-          <button
-            className="btn-secondary"
-            style={{ fontSize: 12 }}
-            onClick={() => void runPerfDebug()}
-            disabled={loadingDebug}
-          >
-            {loadingDebug ? t('performance.channels.checking') : t('performance.channels.checkNow')}
-          </button>
-        </div>
 
-        {debugInfo && (
-          <div
-            style={{
-              marginTop: 14,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 8,
-              fontSize: 13,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-muted)' }}>{t('performance.channels.hqWmi')}</span>
-              <span
-                style={{
-                  color: debugInfo.hq_wmi_works
-                    ? 'var(--success, #4caf50)'
-                    : 'var(--error, #f44336)',
-                  fontWeight: 600,
-                }}
-              >
-                {debugInfo.hq_wmi_works
-                  ? `✓ ${t('performance.channels.functional')}`
-                  : `✗ ${t('performance.channels.unavailable')}`}
-              </span>
-            </div>
-            {debugInfo.hq_wmi_instance && (
+          {debugInfo && (
+            <div
+              style={{
+                marginTop: 14,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                fontSize: 13,
+              }}
+            >
               <div
-                style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
               >
                 <span style={{ color: 'var(--text-muted)' }}>
-                  {t('performance.channels.instance')}
+                  {t('performance.channels.hqWmi')}
                 </span>
-                <code
+                <span
                   style={{
-                    color: 'var(--text-dim)',
-                    fontFamily: 'var(--font-mono)',
-                    maxWidth: 260,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
+                    color: debugInfo.hq_wmi_works
+                      ? 'var(--success, #4caf50)'
+                      : 'var(--error, #f44336)',
+                    fontWeight: 600,
                   }}
                 >
-                  {debugInfo.hq_wmi_instance}
-                </code>
+                  {debugInfo.hq_wmi_works
+                    ? `✓ ${t('performance.channels.functional')}`
+                    : `✗ ${t('performance.channels.unavailable')}`}
+                </span>
               </div>
-            )}
-            {debugInfo.hq_wmi_test_ret && (
+              {debugInfo.hq_wmi_instance && (
+                <div
+                  style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
+                >
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    {t('performance.channels.instance')}
+                  </span>
+                  <code
+                    style={{
+                      color: 'var(--text-dim)',
+                      fontFamily: 'var(--font-mono)',
+                      maxWidth: 260,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {debugInfo.hq_wmi_instance}
+                  </code>
+                </div>
+              )}
+              {debugInfo.hq_wmi_test_ret && (
+                <div
+                  style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
+                >
+                  <span style={{ color: 'var(--text-muted)' }}>
+                    {t('performance.channels.response')}
+                  </span>
+                  <code style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                    {debugInfo.hq_wmi_test_ret}
+                  </code>
+                </div>
+              )}
               <div
-                style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
               >
+                <span style={{ color: 'var(--text-muted)' }}>{t('performance.channels.vhf')}</span>
+                <span
+                  style={{
+                    color: debugInfo.vhf_device_path
+                      ? 'var(--success, #4caf50)'
+                      : 'var(--text-dim)',
+                    fontWeight: 600,
+                  }}
+                >
+                  {debugInfo.vhf_device_path
+                    ? `✓ ${t('performance.channels.found')}`
+                    : `— ${t('performance.channels.notFound')}`}
+                </span>
+              </div>
+              {debugInfo.vhf_device_path && (
+                <div
+                  style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
+                >
+                  <span style={{ color: 'var(--text-muted)' }}>Path</span>
+                  <code
+                    style={{
+                      color: 'var(--text-dim)',
+                      fontFamily: 'var(--font-mono)',
+                      maxWidth: 260,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {debugInfo.vhf_device_path}
+                  </code>
+                </div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <span style={{ color: 'var(--text-muted)' }}>
-                  {t('performance.channels.response')}
+                  {t('performance.channels.registry')}
                 </span>
                 <code style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                  {debugInfo.hq_wmi_test_ret}
+                  {debugInfo.registry_mode}
                 </code>
               </div>
-            )}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--text-muted)' }}>{t('performance.channels.vhf')}</span>
-              <span
-                style={{
-                  color: debugInfo.vhf_device_path ? 'var(--success, #4caf50)' : 'var(--text-dim)',
-                  fontWeight: 600,
-                }}
-              >
-                {debugInfo.vhf_device_path
-                  ? `✓ ${t('performance.channels.found')}`
-                  : `— ${t('performance.channels.notFound')}`}
-              </span>
-            </div>
-            {debugInfo.vhf_device_path && (
-              <div
-                style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
-              >
-                <span style={{ color: 'var(--text-muted)' }}>Path</span>
-                <code
-                  style={{
-                    color: 'var(--text-dim)',
-                    fontFamily: 'var(--font-mono)',
-                    maxWidth: 260,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {debugInfo.vhf_device_path}
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {t('performance.channels.overlay')}
+                </span>
+                <code style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                  {debugInfo.overlay_mode}
                 </code>
               </div>
-            )}
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-              <span style={{ color: 'var(--text-muted)' }}>
-                {t('performance.channels.registry')}
-              </span>
-              <code style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                {debugInfo.registry_mode}
-              </code>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-              <span style={{ color: 'var(--text-muted)' }}>
-                {t('performance.channels.overlay')}
-              </span>
-              <code style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                {debugInfo.overlay_mode}
-              </code>
+          )}
+          {debugInfo && (
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.5 }}>
+              {t('performance.channels.note')}
             </div>
-          </div>
-        )}
-        {debugInfo && (
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.5 }}>
-            {t('performance.channels.note')}
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </>
   );
 }

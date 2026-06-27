@@ -54,7 +54,7 @@ export default defineConfig(async () => ({
       output: {
         manualChunks: {
           'react-vendor': ['react', 'react-dom'],
-          'tauri-vendor': ['@tauri-apps/api', '@tauri-apps/plugin-shell'],
+          'tauri-vendor': ['@tauri-apps/api'],
           sentry: ['@sentry/react'],
         },
       },

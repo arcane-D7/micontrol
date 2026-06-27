@@ -1072,13 +1072,27 @@ pub fn get_device_info() -> IotDeviceInfo {
 
     IotDeviceInfo {
         pipe_available,
-        model: get_model().ok(),
-        fw_version: get_fw_version().ok(),
-        bind_status: get_bind_status().ok(),
-        device_id: get_device_id().ok(),
-        device_status: get_device_status().ok(),
-        wifi_status: read_wifi_status().ok(),
-        wifi_network_count: read_wifi_count().ok(),
+        model: get_model()
+            .map_err(|e| log::warn!("[iot] Failed to query model: {e}"))
+            .ok(),
+        fw_version: get_fw_version()
+            .map_err(|e| log::warn!("[iot] Failed to query firmware version: {e}"))
+            .ok(),
+        bind_status: get_bind_status()
+            .map_err(|e| log::warn!("[iot] Failed to query bind status: {e}"))
+            .ok(),
+        device_id: get_device_id()
+            .map_err(|e| log::warn!("[iot] Failed to query device ID: {e}"))
+            .ok(),
+        device_status: get_device_status()
+            .map_err(|e| log::warn!("[iot] Failed to query device status: {e}"))
+            .ok(),
+        wifi_status: read_wifi_status()
+            .map_err(|e| log::warn!("[iot] Failed to read WiFi status: {e}"))
+            .ok(),
+        wifi_network_count: read_wifi_count()
+            .map_err(|e| log::warn!("[iot] Failed to read WiFi network count: {e}"))
+            .ok(),
     }
 }
 
