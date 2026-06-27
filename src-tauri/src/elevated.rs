@@ -25,6 +25,12 @@ use std::sync::Mutex;
 /// Called from `main()` when `--elevated` is present in argv.
 /// Always terminates via `std::process::exit`.
 pub fn run() -> ! {
+    // Initialize logging so elevated helper errors are visible in the dev trace log.
+    if let Err(e) = crate::debug_log::init_logging() {
+        eprintln!("Elevated helper: failed to initialize logging: {e}");
+    }
+    log::info!("Elevated helper started");
+
     let dir = elev_dir();
     let wanted_request = request_id_from_argv();
     let pending = match select_pending_command(&dir, wanted_request.as_deref()) {
@@ -86,7 +92,18 @@ pub fn run() -> ! {
                                             if map.len().is_multiple_of(3) {
                                                 save_nonces(map);
                                             }
-                                            dispatch(cmd)
+                                            log::info!(
+                                                "Elevated dispatching command: {} (request_id={})",
+                                                cmd.cmd,
+                                                pending.request_id
+                                            );
+                                            let result = dispatch(cmd);
+                                            log::info!(
+                                                "Elevated command result: ok={} error={:?}",
+                                                result["ok"].as_bool().unwrap_or(false),
+                                                result["error"].as_str()
+                                            );
+                                            result
                                         }
                                     } else {
                                         log::warn!(
@@ -124,6 +141,10 @@ pub fn run() -> ! {
 
     let json = serde_json::to_string(&wrapped)
         .unwrap_or_else(|_| r#"{"ok":false,"error":"serialize_error"}"#.to_string());
+    log::info!(
+        "Elevated writing result to: {}",
+        pending.result_path.display()
+    );
     let _ = std::fs::write(&pending.result_path, json);
     if let Err(e) = auth::restrict_file_acl(&pending.result_path) {
         log::warn!("Failed to restrict ACL on result file: {e}");

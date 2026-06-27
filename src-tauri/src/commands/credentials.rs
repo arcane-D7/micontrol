@@ -13,7 +13,7 @@ pub fn set_secret(key: String, value: String) -> Result<(), String> {
     entry.set_password(&value).map_err(|e| e.to_string())?;
 
     // Audit log for telemetry consent grant/revoke
-    if key == "telemetry_consent" && value.contains("\"granted\"") {
+    if key == "telemetry_consent" && (value == "granted" || value.contains("\"granted\"")) {
         crate::util::consent_audit::log_consent_granted(crate::util::consent_audit::POLICY_VERSION);
     }
 

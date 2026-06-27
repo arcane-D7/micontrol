@@ -277,6 +277,12 @@ fn get_telemetry_consent() -> Result<String, Box<dyn std::error::Error>> {
     let entry = Entry::new(KEYRING_SERVICE, TELEMETRY_CONSENT_KEY)?;
     match entry.get_password() {
         Ok(val) => {
+            // Handle both plain values ("granted"/"denied") and legacy JSON
+            // payloads ({"value":"granted",...}).
+            if val == "granted" || val == "denied" {
+                return Ok(val);
+            }
+            // Try parsing as JSON for backwards compatibility
             let parsed: serde_json::Value = serde_json::from_str(&val)?;
             Ok(parsed["value"].as_str().unwrap_or("denied").to_string())
         }

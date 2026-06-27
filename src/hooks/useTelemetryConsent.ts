@@ -9,9 +9,6 @@ import { invoke } from '@tauri-apps/api/core';
 
 const TELEMETRY_CONSENT_KEY = 'telemetry_consent';
 
-/** Privacy policy version — must match POLICY_VERSION in src-tauri/src/util/consent_audit.rs */
-const POLICY_VERSION = 2;
-
 export type TelemetryConsentValue = 'granted' | 'denied' | null;
 
 export function useTelemetryConsent() {
@@ -19,8 +16,18 @@ export function useTelemetryConsent() {
   async function getTelemetryConsent(): Promise<TelemetryConsentValue> {
     try {
       const result = await invoke<string | null>('get_secret', { key: TELEMETRY_CONSENT_KEY });
+      if (!result) return null;
+      // Handle both plain values ("granted"/"denied") and legacy JSON
+      // payloads ({"value":"granted","date":"...","policyVersion":2}).
       if (result === 'granted') return 'granted';
       if (result === 'denied') return 'denied';
+      try {
+        const parsed = JSON.parse(result);
+        if (parsed?.value === 'granted') return 'granted';
+        if (parsed?.value === 'denied') return 'denied';
+      } catch {
+        // Not JSON — treat as unknown
+      }
       return null;
     } catch {
       return null;
@@ -30,12 +37,7 @@ export function useTelemetryConsent() {
   /** Store telemetry consent in the OS credential store. */
   async function setTelemetryConsent(value: 'granted' | 'denied'): Promise<void> {
     try {
-      const payload = JSON.stringify({
-        value,
-        date: new Date().toISOString(),
-        policyVersion: POLICY_VERSION,
-      });
-      await invoke('set_secret', { key: TELEMETRY_CONSENT_KEY, value: payload });
+      await invoke('set_secret', { key: TELEMETRY_CONSENT_KEY, value });
     } catch (err) {
       console.error('[settings] Failed to store telemetry consent:', err);
     }
