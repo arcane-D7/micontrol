@@ -109,48 +109,31 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
     }
 
     // Launch the scheduled task (returns immediately; task runs asynchronously).
-    // Stdout/stderr are explicitly silenced — schtasks prints
-    // "ERROR: The system cannot find the file specified." when the task is
-    // absent (dev mode), which would otherwise pollute the console.
-    let task_ok = tokio::process::Command::new("schtasks")
-        .args(["/run", "/tn", TASK_NAME])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // CREATE_NO_WINDOW prevents the flash of a console window on every call.
+    let task_ok = run_schtasks_run().await;
 
     if !task_ok {
-        // Fallback: in dev mode (or when the task is unregistered), launch the
-        // current binary as administrator via ShellExecuteExW "runas" so that a
-        // single UAC prompt lets us run `micontrol.exe --elevated`.
-        #[cfg(windows)]
-        {
-            // S22-001: Wrap in spawn_blocking — launch_elevated_via_uac() calls
-            // WaitForSingleObject(hProcess, 30_000) which blocks for up to 30s.
-            let req_id_owned = request_id.clone();
-            let uac_result =
-                tokio::task::spawn_blocking(move || launch_elevated_via_uac(&req_id_owned))
-                    .await
-                    .map_err(|e| format!("UAC launch task panicked: {e}"))?;
+        // Self-healing: try to re-register the scheduled task with the correct
+        // path before falling back to UAC. This fixes the case where the task
+        // was registered during `cargo tauri dev` and points to the debug exe.
+        let healed = tokio::task::spawn_blocking(ensure_task_correct_path)
+            .await
+            .map_err(|e| format!("task heal task panicked: {e}"))?
+            || false;
 
-            if let Err(e) = uac_result {
-                let _ = tokio::fs::remove_file(&cmd_path).await;
-                return Err(format!(
-                    "Scheduled task '{}' not found AND UAC fallback failed: {e}. \
-                     Reinstall MiControl to register the scheduled task.",
-                    TASK_NAME
-                ));
+        if healed {
+            // Retry the task after healing.
+            let retry_ok = run_schtasks_run().await;
+            if retry_ok {
+                // Task ran successfully after healing — skip UAC fallback,
+                // fall through to the polling loop below.
+            } else {
+                log::warn!("Scheduled task still failed after self-healing, falling back to UAC");
+                launch_uac_fallback(&request_id, &cmd_path).await?;
             }
-            // The UAC-elevated process is synchronous (we wait for it inside
-            // launch_elevated_via_uac), so by the time we reach the poll loop
-            // below the result file should already be there.
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = tokio::fs::remove_file(&cmd_path).await;
-            return Err(format!("Scheduled task '{TASK_NAME}' not found."));
+        } else {
+            // Healing failed (not admin or other error) — fall back to UAC.
+            launch_uac_fallback(&request_id, &cmd_path).await?;
         }
     }
 
@@ -264,6 +247,56 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
                 ));
             }
         }
+    }
+}
+
+/// Run `schtasks /run /tn MiControlElevated` with CREATE_NO_WINDOW to avoid
+/// flashing a console window on every elevated operation.
+async fn run_schtasks_run() -> bool {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        tokio::process::Command::new("schtasks")
+            .args(["/run", "/tn", TASK_NAME])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// UAC fallback: launch the current binary as administrator via ShellExecuteExW
+/// "runas" so that a single UAC prompt lets us run `micontrol.exe --elevated`.
+async fn launch_uac_fallback(request_id: &str, cmd_path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let req_id_owned = request_id.to_string();
+        let uac_result =
+            tokio::task::spawn_blocking(move || launch_elevated_via_uac(&req_id_owned))
+                .await
+                .map_err(|e| format!("UAC launch task panicked: {e}"))?;
+
+        if let Err(e) = uac_result {
+            let _ = tokio::fs::remove_file(cmd_path).await;
+            return Err(format!(
+                "Scheduled task '{}' not found AND UAC fallback failed: {e}. \
+                 Reinstall MiControl to register the scheduled task.",
+                TASK_NAME
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = tokio::fs::remove_file(cmd_path).await;
+        Err(format!("Scheduled task '{TASK_NAME}' not found."))
     }
 }
 
@@ -417,4 +450,178 @@ fn cleanup_stale_elev_files(dir: &std::path::Path) {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Check if the scheduled task exists and points to the current executable.
+/// If the task is missing or points to a different path (e.g. debug exe from
+/// `cargo tauri dev`), re-register it with the correct path.
+///
+/// Tries non-elevated `schtasks` first. If that fails (Access Denied), falls
+/// back to `ShellExecuteExW "runas"` to elevate just the schtasks command.
+///
+/// Returns `true` if the task was (re-)registered successfully.
+#[cfg(windows)]
+fn ensure_task_correct_path() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Get the current executable path.
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Cannot get current exe path for task healing: {e}");
+            return false;
+        }
+    };
+    let current_path = current_exe.to_string_lossy().to_string();
+
+    // Query the existing task's action path.
+    let output = std::process::Command::new("schtasks")
+        .args(["/query", "/tn", TASK_NAME, "/xml"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let need_reregister = match output {
+        Ok(out) => {
+            let xml = String::from_utf8_lossy(&out.stdout);
+            // Check if the task points to the current exe.
+            let path_matches =
+                xml.contains(&current_path) || xml.contains(&current_path.replace('\\', "/"));
+            if path_matches {
+                false
+            } else {
+                log::info!(
+                    "Scheduled task points to wrong path, re-registering with: {current_path}"
+                );
+                true
+            }
+        }
+        Err(_) => {
+            log::info!("Scheduled task not found, registering with: {current_path}");
+            true
+        }
+    };
+
+    if !need_reregister {
+        return false;
+    }
+
+    // Build the task XML with the correct path.
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT30S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>"{current_path}"</Command><Arguments>--elevated</Arguments></Exec></Actions></Task>"#
+    );
+
+    let temp_dir = std::env::temp_dir();
+    let xml_path = temp_dir.join("MCElev_heal.xml");
+    if let Err(e) = std::fs::write(&xml_path, &xml) {
+        log::warn!("Cannot write task XML for healing: {e}");
+        return false;
+    }
+    let xml_str = xml_path.to_string_lossy().to_string();
+
+    // Try 1: non-elevated schtasks (works if user has rights or is already admin)
+    let _ = std::process::Command::new("schtasks")
+        .args(["/delete", "/tn", TASK_NAME, "/f"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+
+    let create_ok = std::process::Command::new("schtasks")
+        .args(["/create", "/tn", TASK_NAME, "/xml", &xml_str, "/f"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let success = match create_ok {
+        Ok(out) if out.status.success() => true,
+        _ => {
+            // Try 2: elevated schtasks via UAC prompt
+            log::info!("Non-elevated schtasks failed, trying UAC elevation...");
+            let xml_path_owned = xml_str.clone();
+            let uac_result = std::thread::spawn(move || run_schtasks_elevated(&xml_path_owned))
+                .join()
+                .unwrap_or(false);
+            uac_result
+        }
+    };
+
+    let _ = std::fs::remove_file(&xml_path);
+
+    if success {
+        log::info!("Scheduled task re-registered successfully with correct path");
+    } else {
+        log::warn!("Failed to re-register scheduled task (UAC may have been declined)");
+    }
+    success
+}
+
+/// Run `schtasks /delete` + `schtasks /create` elevated via ShellExecuteExW "runas".
+/// Shows a single UAC prompt to the user.
+#[cfg(windows)]
+fn run_schtasks_elevated(xml_path: &str) -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::WaitForSingleObject;
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
+
+    // Build a batch script that deletes + creates the task, then signals completion.
+    let script = format!(
+        r#"@echo off
+schtasks /delete /tn "MiControlElevated" /f 2>nul
+schtasks /create /tn "MiControlElevated" /xml "{xml_path}" /f
+exit /b %ERRORLEVEL%"#
+    );
+
+    let temp_dir = std::env::temp_dir();
+    let bat_path = temp_dir.join("MCElev_heal.bat");
+    if let Err(e) = std::fs::write(&bat_path, &script) {
+        log::warn!("Cannot write healing batch script: {e}");
+        return false;
+    }
+
+    let bat_str = bat_path.to_string_lossy().to_string();
+    let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = OsStr::new(&bat_str).encode_wide().chain(Some(0)).collect();
+
+    let result = unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            hwnd: HWND(std::ptr::null_mut()),
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR::null(),
+            nShow: 0, // SW_HIDE
+            ..std::mem::zeroed()
+        };
+
+        // SAFETY: ShellExecuteExW with "runas" verb launches the batch script
+        // elevated. The verb and file are valid null-terminated wide strings.
+        if let Err(e) = ShellExecuteExW(&mut info) {
+            log::warn!("ShellExecuteExW for task healing failed: {e}");
+            return false;
+        }
+
+        if !info.hProcess.is_invalid() {
+            WaitForSingleObject(info.hProcess, 30_000);
+            let _ = CloseHandle(info.hProcess);
+        }
+        true
+    };
+
+    let _ = std::fs::remove_file(&bat_path);
+    result
+}
+
+#[cfg(not(windows))]
+fn ensure_task_correct_path() -> bool {
+    false
 }
