@@ -72,7 +72,7 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
 ] }
-wmi = "0.13"
+wmi = "0.18"
 winreg = "0.52"
 
 [lints.clippy]

@@ -6085,17 +6085,17 @@ dependencies = [
 
 [[package]]
 name = "wmi"
-version = "0.13.4"
+version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff00ac1309d4c462be86f03a55e409509e8bf4323ec296aeb4b381dd9aabe6ec"
+checksum = "7c81b85c57a57500e56669586496bf2abd5cf082b9d32995251185d105208b64"
 dependencies = [
  "chrono",
  "futures",
  "log",
  "serde",
- "thiserror 1.0.69",
- "windows 0.58.0",
- "windows-core 0.58.0",
+ "thiserror 2.0.18",
+ "windows 0.61.3",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
