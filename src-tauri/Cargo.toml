@@ -12,6 +12,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "micontrol"
 path = "src/main.rs"
 
+[[bin]]
+name = "test_perf"
+path = "src/bin/test_perf.rs"
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-shell = "2"
