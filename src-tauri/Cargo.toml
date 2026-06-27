@@ -73,7 +73,7 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio_Endpoints",
 ] }
 wmi = "0.13"
-winreg = "0.52"
+winreg = "0.55"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
