@@ -1,7 +1,7 @@
-# Sprint Plan Overview — Stability Report Remediation (v1 + v2)
+# Sprint Plan Overview — Stability Report Remediation (v1 + v2) + Audit_Final
 
 **Created:** 2026-06-25
-**Last Updated:** 2026-06-25 (Sprint 29 complete — v4 CRITICAL+HIGH fixed)
+**Last Updated:** 2026-06-27 (Sprints 30–33 planned from Audit_Final.md)
 **Sources:**
 
 - v1: `docs/stability-report-2026-06-24-post-sprints-13-15.md` (Sprints 16–19)
@@ -10,9 +10,10 @@
 - Deferred: `sprint-planning/sprint-28-p3-deferred-backlog/sprint.md` (Sprint 28)
 - v4: `docs/STABILITY_REPORT_v4.md` (Sprint 29)
 - Sprints 20–21: Post-v1 audit CRITICAL/HIGH fixes (committed d514bdf)
+- **Audit_Final**: `C:\Users\mafsc\Documents\Audit_Final.md` (Sprints 30–33) — 26 issues, 2 regressions + 24 pre-existing
 
-**Total findings addressed:** 63 (v1) + 44 (v2) + 27 (v3) + 20 (deferred) + 27 (v4) = 181
-**Total estimated tickets:** 63 (v1) + 44 (v2) + 19 (v3) + 14 (S28) + 3 (S29) = 143
+**Total findings addressed:** 63 (v1) + 44 (v2) + 27 (v3) + 20 (deferred) + 27 (v4) + 26 (Audit_Final) = 207
+**Total estimated tickets:** 63 (v1) + 44 (v2) + 19 (v3) + 14 (S28) + 3 (S29) + 26 (S30–33) = 169
 **Total estimated effort:** 9–13 days (v1) + 9–12 days (v2) + ~10 days (v3+S28) + ~1–2 days (S29) = 29–37 days
 
 ---
@@ -56,6 +57,24 @@
 | Sprint | Priority    | Focus                       | Tickets | Effort    | Status     | File                                   |
 | ------ | ----------- | --------------------------- | ------- | --------- | ---------- | -------------------------------------- |
 | 29     | P0 CRITICAL | Pre-release security & GDPR | 3       | ~1–2 days | ✅ bec0d42 | `sprint-29-p0-critical-high/sprint.md` |
+
+### Audit_Final Sprints (from `Audit_Final.md`) — 📌 PLANNED
+
+| Sprint | Priority    | Focus                           | Tickets | Effort    | Status    | File                                  |
+| ------ | ----------- | ------------------------------- | ------- | --------- | --------- | ------------------------------------- |
+| 30     | P0 CRITICAL | Audit regressions & UX blockers | 4       | ~2 days   | 📌 Active | `sprint-30-p0-critical-fixes/plan.md` |
+| 31     | P1 HIGH     | UX fixes + FULL stub impls      | 8       | ~4–5 days | 📌 Active | `sprint-31-p1-high-stubs/plan.md`     |
+| 32     | P2 MEDIUM   | Hardware reliability & security | 7       | ~3–4 days | 📌 Active | `sprint-32-p2-medium-fixes/plan.md`   |
+| 33     | P3 LOW      | Code cleanup & dead code        | 7       | ~1–2 days | 📌 Active | `sprint-33-p3-low-cleanup/plan.md`    |
+
+**Audit_Final totals:** 4 (S30) + 8 (S31) + 7 (S32) + 7 (S33) = 26 tickets, ~10–13 days effort
+
+**Key highlights:**
+
+- **S30:** Fixes 2 regressions (useHardware polling, check_sentry_consent) + 2 UX blockers (consent F5 race, sidebar scroll)
+- **S31:** FULL implementation of ALL stubs — Miracast via WinRT (Option B, not wrapper), ECRAM WMI discovery, audio device names, WiFi CREATE_NO_WINDOW, touchpad HID logging, startup autostart, EC Debug dev-gate
+- **S32:** Adaptive brightness logging, auto-discovery, IoT bridge, battery powercfg fallback, credential allowlist
+- **S33:** Dead code removal, dependency cleanup, dev-gating, documentation
 
 ---
 
@@ -186,6 +205,20 @@ Sprint 26 (P2) ──► Sprint 27 (P3) ──► Sprint 28 (P3) ──► Final
 **Sprint 27** addresses 12 LOW findings (PII redaction, TOCTOU, accessibility, test gaps, DevOps).
 **Sprint 28** addresses 11 remaining deferred backlog items (i18n, architecture refactoring, E2E testing, RAI).
 **After S28:** Run final audit to verify 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 LOW.
+
+### Audit_Final Sprints (PLANNED)
+
+```
+Sprint 30 (P0) ──► Sprint 31 (P1) ──► Sprint 32 (P2) ──► Sprint 33 (P3)
+   4 tickets         8 tickets          7 tickets          7 tickets
+   ~2 days           ~4–5 days          ~3–4 days           ~1–2 days
+```
+
+**Sprint 30** fixes 2 regressions (useHardware polling, check_sentry_consent) + 2 UX blockers (consent F5 race, sidebar scroll).
+**Sprint 31** fixes 7 HIGH issues + implements ALL stubs (Miracast WinRT Option B, ECRAM WMI discovery, audio PKEY_Device_FriendlyName, WiFi CREATE_NO_WINDOW, touchpad HID logging, startup autostart, EC Debug dev-gate).
+**Sprint 32** fixes 7 MEDIUM issues (adaptive brightness, auto-discovery, IoT bridge, battery powercfg, diagnostics note, IoT retry, credential allowlist).
+**Sprint 33** fixes 7 LOW issues (logging upgrades, dead code removal, dependency cleanup, dev-gating, documentation).
+**After S33:** Zero stubs remaining in codebase. Zero CRITICAL / HIGH / MEDIUM / LOW from Audit_Final.
 
 ---
 
