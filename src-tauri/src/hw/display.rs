@@ -161,13 +161,20 @@ pub fn set_ai_brightness(enabled: bool) -> HardwareResult<()> {
     // Toggle the enabled flag while preserving all other config values.
     let mut cfg = get_ai_brightness_config();
     cfg.enabled = enabled;
-    set_ai_brightness_config(cfg)?;
+    set_ai_brightness_config(cfg).map_err(|e| {
+        log::error!("[display] set_ai_brightness_config failed: {e}");
+        e
+    })?;
     if enabled {
         // Windows has its own ALS-based adaptive brightness (ADAPTBRIGHT power plan setting).
         // If both are active they fight over the same backlight knob, causing the 90% cap
         // symptom. Disable Windows adaptive brightness while our loop is in charge.
         disable_windows_adaptive_brightness();
     }
+    log::info!(
+        "[display] AI brightness {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
     Ok(())
 }
 
@@ -228,8 +235,11 @@ pub fn set_ai_brightness_config(config: AiBrightnessConfig) -> HardwareResult<()
 fn get_ambient_lux() -> Option<f32> {
     use windows::Devices::Sensors::LightSensor;
     let sensor = LightSensor::GetDefault().ok()?;
+    log::debug!("[display] Ambient light sensor found");
     let reading = sensor.GetCurrentReading().ok()?;
-    reading.IlluminanceInLux().ok()
+    let lux = reading.IlluminanceInLux().ok()?;
+    log::debug!("[display] Ambient lux: {lux}");
+    Some(lux)
 }
 
 #[cfg(not(windows))]
@@ -348,7 +358,12 @@ pub async fn adaptive_brightness_loop() {
             Ok(Some(_)) => continue,
             Ok(None) => {
                 if !no_sensor_warned {
-                    log::warn!("adaptive_brightness: no ambient light sensor found — loop idle");
+                    log::warn!(
+                        "adaptive_brightness: no ambient light sensor found — loop idle. \
+                         LightSensor::GetDefault() returned None. \
+                         Check: (1) sensor driver installed, (2) sensor enabled in Device Manager, \
+                         (3) Devices_Sensors feature in Cargo.toml (confirmed present)."
+                    );
                     no_sensor_warned = true;
                 }
                 continue;

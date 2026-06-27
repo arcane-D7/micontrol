@@ -65,14 +65,12 @@ const ERAM_KNOWN_WRITES: {
 ];
 
 function IotModulePanel({ hw }: { hw: HardwareInstance }) {
-  const [elevated, setElevated] = useState<boolean | null>(null);
   const [ecramMap, setEcramMap] = useState<import('../../hooks/useHardware').EramMap | null>(null);
   const [regions, setRegions] = useState<
     Partial<Record<import('../../hooks/useHardware').IotRegionName, string>>
   >({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [relaunching, setRelaunching] = useState(false);
   const [rawReadAddr, setRawReadAddr] = useState('0xFE0B0300');
   const [rawReadCount, setRawReadCount] = useState('16');
   const [rawReadResult, setRawReadResult] = useState<string | null>(null);
@@ -88,15 +86,6 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
       timeoutRefs.current = [];
     };
   }, []);
-
-  const checkElevation = useCallback(async () => {
-    try {
-      const elev = await hw.isElevated();
-      setElevated(elev);
-    } catch {
-      setElevated(false);
-    }
-  }, [hw]);
 
   const refreshIot = useCallback(async () => {
     setLoading(true);
@@ -116,25 +105,9 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
   }, [hw]);
 
   useEffect(() => {
-    void checkElevation().then(() => {
-      if (elevated !== false) void refreshIot();
-    });
+    void refreshIot();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (elevated === true) void refreshIot();
-  }, [elevated, refreshIot]);
-
-  const handleRelaunch = useCallback(async () => {
-    setRelaunching(true);
-    try {
-      await hw.relaunchAsAdmin();
-    } catch (e) {
-      setRelaunching(false);
-      setError(`Re-launch failed: ${String(e)}`);
-    }
-  }, [hw]);
 
   const handleKnownWrite = useCallback(
     async (offset: number, byte: number) => {
@@ -179,43 +152,6 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
     }
   }, [hw, rawReadAddr, rawReadCount]);
 
-  if (elevated === false) {
-    return (
-      <div className="card" style={{ marginTop: 14 }}>
-        <div className="card-title" style={{ marginBottom: 4 }}>
-          IoT Module
-        </div>
-        <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start', padding: '16px 0' }}>
-          <span style={{ fontSize: 40, lineHeight: 1 }} aria-hidden="true">
-            🔒
-          </span>
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>
-              Administrator required
-            </div>
-            <div
-              style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16, maxWidth: 420 }}
-            >
-              IoTDriver requires the process to have an elevated token. Click below to restart
-              MiControl as administrator.
-            </div>
-            {error && (
-              <div style={{ fontSize: 12, color: 'var(--error)', marginBottom: 10 }}>{error}</div>
-            )}
-            <button
-              className="btn-primary"
-              onClick={() => void handleRelaunch()}
-              disabled={relaunching}
-              style={{ minWidth: 240 }}
-            >
-              {relaunching ? 'Waiting for UAC…' : 'Re-launch as Administrator'}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="card" style={{ marginTop: 14 }}>
       <div
@@ -230,13 +166,6 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
         <div>
           <div className="card-title" style={{ marginBottom: 2 }}>
             IoT Module
-            {elevated && (
-              <span
-                style={{ marginLeft: 8, fontSize: 11, color: 'var(--success)', fontWeight: 500 }}
-              >
-                ● Elevated
-              </span>
-            )}
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             Full ECRAM access via IoTDriver.

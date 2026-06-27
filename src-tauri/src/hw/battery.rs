@@ -141,7 +141,11 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
         let designed_mah = battery_static.designed_capacity_mwh as u32;
         let manufacturer = battery_static.manufacturer.clone();
         let device_name = battery_static.device_name.clone();
-        let cycle_count = battery_static.cycle_count;
+        let cycle_count = if battery_static.cycle_count > 0 {
+            battery_static.cycle_count
+        } else {
+            get_cycle_count_powercfg().unwrap_or(0)
+        };
         let temperature_celsius = battery_static
             .temperature_raw
             .map(|t| (t as f64 / 10.0) - 273.15);
@@ -276,6 +280,41 @@ fn clear_ac_power_probe_cache() {
     let mut cache = crate::util::panic::lock_or_recover(ac_probe_cache());
     cache.last_probe_at = None;
     cache.last_value_mw = None;
+}
+
+/// Read battery cycle count from `powercfg /batteryreport /xml` output.
+///
+/// This is a fallback when WMI `BatteryStaticData.CycleCount` returns 0
+/// or is unavailable. The XML output contains a `<CycleCount>` element
+/// under `<BatteryReport>` -> `<Batteries>` -> `<Battery>`.
+#[cfg(windows)]
+fn get_cycle_count_powercfg() -> Option<u32> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut cmd = Command::new("powercfg");
+    cmd.args(["/batteryreport", "/xml", "/output", "-"]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd.output().ok()?;
+    let xml = String::from_utf8_lossy(&output.stdout);
+
+    // Parse <CycleCount> element from XML
+    if let Some(start) = xml.find("<CycleCount>") {
+        if let Some(end) = xml[start..].find("</CycleCount>") {
+            let value_str = &xml[start + "<CycleCount>".len()..start + end];
+            return value_str.trim().parse::<u32>().ok();
+        }
+    }
+
+    None
+}
+
+#[cfg(not(windows))]
+fn get_cycle_count_powercfg() -> Option<u32> {
+    None
 }
 
 #[cfg(not(windows))]

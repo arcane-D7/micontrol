@@ -570,6 +570,11 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
             </div>
           </div>
         )}
+        {debugInfo && (
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.5 }}>
+            {t('performance.channels.note')}
+          </div>
+        )}
       </div>
     </>
   );

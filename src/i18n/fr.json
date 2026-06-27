@@ -217,7 +217,8 @@
       "found": "Trouvé",
       "notFound": "Non trouvé",
       "registry": "Registre Mi",
-      "overlay": "Superposition d'alimentation"
+      "overlay": "Superposition d'alimentation",
+      "note": "Le registre MI stocke le mode de performance exact. Le Windows Power Overlay n'a que 3 niveaux (Efficacité, Équilibré, Performance), donc plusieurs modes MI partagent le même GUID d'overlay. Ce comportement est attendu."
     }
   },
   "battery": {

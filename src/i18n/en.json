@@ -217,7 +217,8 @@
       "found": "Found",
       "notFound": "Not found",
       "registry": "Mi Registry",
-      "overlay": "Power Overlay"
+      "overlay": "Power Overlay",
+      "note": "MI Registry stores the exact performance mode. The Windows Power Overlay has only 3 levels (Efficiency, Balanced, Performance), so multiple MI modes share the same overlay GUID. This is expected behavior."
     }
   },
   "battery": {

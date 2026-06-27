@@ -7,8 +7,17 @@ use keyring::Entry;
 
 const SERVICE_NAME: &str = "com.mipc.micontrol";
 
+/// S27-004: Allowlist of keyring keys that the frontend may read/write/delete.
+const ALLOWED_SECRET_KEYS: &[&str] = &["openai_api_key", "telemetry_consent"];
+
 #[tauri::command]
 pub fn set_secret(key: String, value: String) -> Result<(), String> {
+    // S32-007: Reject keys not in the allowlist to prevent arbitrary credential writes.
+    if !ALLOWED_SECRET_KEYS.contains(&key.as_str()) {
+        return Err(format!(
+            "Access denied: key '{key}' is not in the allowlist"
+        ));
+    }
     let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
     entry.set_password(&value).map_err(|e| e.to_string())?;
 
@@ -19,9 +28,6 @@ pub fn set_secret(key: String, value: String) -> Result<(), String> {
 
     Ok(())
 }
-
-/// S27-004: Allowlist of keyring keys that the frontend may read.
-const ALLOWED_SECRET_KEYS: &[&str] = &["openai_api_key", "telemetry_consent"];
 
 #[tauri::command]
 pub fn get_secret(key: String) -> Result<Option<String>, String> {
@@ -41,6 +47,12 @@ pub fn get_secret(key: String) -> Result<Option<String>, String> {
 
 #[tauri::command]
 pub fn delete_secret(key: String) -> Result<(), String> {
+    // S32-007: Reject keys not in the allowlist to prevent arbitrary credential deletion.
+    if !ALLOWED_SECRET_KEYS.contains(&key.as_str()) {
+        return Err(format!(
+            "Access denied: key '{key}' is not in the allowlist"
+        ));
+    }
     let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
     match entry.delete_credential() {
         Ok(_) => {

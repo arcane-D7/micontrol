@@ -1,16 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { IotDeviceInfo } from '../types/hardware';
 
 export default function IotDeviceCard() {
   const [info, setInfo] = useState<IotDeviceInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [retryCount, setRetryCount] = useState(0);
 
-  useEffect(() => {
-    void loadInfo();
-  }, []);
-
-  const loadInfo = async () => {
+  const loadInfo = useCallback(async () => {
     try {
       const data = await invoke<IotDeviceInfo>('get_iot_device_info');
       setInfo(data);
@@ -19,7 +16,22 @@ export default function IotDeviceCard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void loadInfo();
+  }, [loadInfo]);
+
+  // Auto-retry every 5 seconds when pipe is not available
+  useEffect(() => {
+    if (info?.pipe_available === false) {
+      const timer = setTimeout(() => {
+        setRetryCount((c) => c + 1);
+        void loadInfo();
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [info?.pipe_available, retryCount, loadInfo]);
 
   if (loading) {
     return (
@@ -37,6 +49,26 @@ export default function IotDeviceCard() {
         <p className="page-subtitle" style={{ color: 'var(--text-dim)' }}>
           IoT Service not available. The Xiaomi IoT chip was not detected on this system.
         </p>
+        <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+          <div>
+            Expected pipe: <code>{'\\\\.\\pipe\\LOCAL\\IoTService_IPC_Broker'}</code>
+          </div>
+          <div style={{ marginTop: 4 }}>
+            Status: Not found
+            {retryCount > 0 && ` (retry ${retryCount}...)`}
+          </div>
+          <div style={{ marginTop: 8, lineHeight: 1.5 }}>
+            Ensure Xiaomi PC Manager is installed and IoTService is running. The system will
+            automatically retry every 5 seconds.
+          </div>
+        </div>
+        <button
+          className="btn btn-secondary"
+          style={{ marginTop: 12, width: '100%' }}
+          onClick={() => void loadInfo()}
+        >
+          🔄 Refresh now
+        </button>
       </div>
     );
   }

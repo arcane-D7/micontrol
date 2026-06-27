@@ -187,6 +187,24 @@ export function useHardware() {
           if (perfMode) setPerformanceModeState(perfMode);
           setChargingThresholdState(chargeThreshold);
           setError(null);
+
+          // Load hardware profile, auto-discover if not cached
+          try {
+            const profile = await invoke<HardwareProfile | null>('get_hardware_profile');
+            if (profile) {
+              setHardwareProfile(profile);
+            } else {
+              // Profile not cached — trigger discovery automatically
+              try {
+                const discovered = await invoke<HardwareProfile>('run_hardware_discovery');
+                setHardwareProfile(discovered);
+              } catch (e) {
+                console.warn('[hardware] Auto-discovery failed:', e);
+              }
+            }
+          } catch (e) {
+            console.warn('[hardware] Failed to load profile:', e);
+          }
         } catch (e) {
           console.error('Initial hardware load failed:', e);
           setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
