@@ -378,6 +378,510 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        // ── Diagnostic commands ───────────────────────────────────────────
+        // These are read-only probes used by the test binary to verify which
+        // hardware access paths work when elevated.
+        "diag_ecram_read" => {
+            // Read ERAM (256 bytes) + IoTStatus (8 bytes) + Sensor block (0x78 bytes)
+            let eram = crate::hw::ecram::read_ecram(crate::hw::ecram::get_eram_base(), 0x100);
+            let iot_status = crate::hw::ecram::read_ecram(crate::hw::ecram::IOT_STATUS_BASE, 8);
+            let sensor = crate::hw::ecram::read_ecram(
+                crate::hw::ecram::ECRAM_SENSOR_BLOCK,
+                crate::hw::ecram::ECRAM_SENSOR_SIZE,
+            );
+
+            let mut result = serde_json::json!({});
+            match &eram {
+                Ok(data) => {
+                    let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
+                    result["eram"] = serde_json::json!({
+                        "ok": true,
+                        "size": data.len(),
+                        "hex": hex,
+                        "acin": (data[0x80] & 0x01) != 0,
+                        "adpw_watts": data[0x81],
+                        "btct_ma": u16::from_le_bytes([data[0x8C], data[0x8D]]),
+                        "btpr_mah": u16::from_le_bytes([data[0x8E], data[0x8F]]),
+                        "btvt_mv": u16::from_le_bytes([data[0x90], data[0x91]]),
+                        "qfan": format!("0x{:02x}", data[0x68]),
+                        "touchpad_0x40": format!("0x{:02x}", data[0x40]),
+                        "touchpad_0x42": format!("0x{:02x}", data[0x42]),
+                        "smart_mode_0x4a": format!("0x{:02x}", data[0x4A]),
+                        "smart_mode_0x4b": format!("0x{:02x}", data[0x4B]),
+                    });
+                }
+                Err(e) => {
+                    result["eram"] = serde_json::json!({ "ok": false, "error": e.to_string() });
+                }
+            }
+            match &iot_status {
+                Ok(data) => {
+                    let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
+                    result["iot_status"] = serde_json::json!({
+                        "ok": true,
+                        "hex": hex,
+                        "status_byte": format!("0x{:02x}", data[0]),
+                    });
+                }
+                Err(e) => {
+                    result["iot_status"] =
+                        serde_json::json!({ "ok": false, "error": e.to_string() });
+                }
+            }
+            match &sensor {
+                Ok(data) => {
+                    let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
+                    result["sensor"] = serde_json::json!({
+                        "ok": true,
+                        "size": data.len(),
+                        "hex": hex,
+                    });
+                }
+                Err(e) => {
+                    result["sensor"] = serde_json::json!({ "ok": false, "error": e.to_string() });
+                }
+            }
+            make_ok(result)
+        }
+
+        "diag_wmi_query" => {
+            // Test WMI access: query HQWmiCommonInterface and MICommonInterface
+            let mut result = serde_json::json!({});
+
+            // Test HQWmiCommonInterface (used by performance mode)
+            #[cfg(windows)]
+            {
+                use std::collections::HashMap;
+                let hq_result = crate::hw::wmi_cache::with_wmi(|wmi| {
+                    let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+                        .raw_query(
+                            "SELECT InstanceName FROM HQWmiCommonInterface WHERE Active = TRUE",
+                        )
+                        .unwrap_or_default();
+                    Ok(rows)
+                });
+                match hq_result {
+                    Ok(rows) if !rows.is_empty() => {
+                        let instances: Vec<String> = rows
+                            .iter()
+                            .filter_map(|r| {
+                                crate::util::wmi_extract::extract_string(r, "InstanceName")
+                            })
+                            .collect();
+                        result["hq_wmi"] = serde_json::json!({
+                            "ok": true,
+                            "instances": instances,
+                            "count": rows.len(),
+                        });
+                    }
+                    Ok(_) => {
+                        result["hq_wmi"] = serde_json::json!({
+                            "ok": true,
+                            "instances": [],
+                            "count": 0,
+                            "note": "No active HQWmiCommonInterface instances"
+                        });
+                    }
+                    Err(e) => {
+                        result["hq_wmi"] = serde_json::json!({
+                            "ok": false,
+                            "error": e.to_string(),
+                        });
+                    }
+                }
+
+                // Test MICommonInterface (IoTService WMI)
+                let mi_result = crate::hw::wmi_cache::with_wmi(|wmi| {
+                    let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+                        .raw_query("SELECT * FROM MICommonInterface")
+                        .unwrap_or_default();
+                    Ok(rows)
+                });
+                match mi_result {
+                    Ok(rows) if !rows.is_empty() => {
+                        let instances: Vec<String> = rows
+                            .iter()
+                            .filter_map(|r| {
+                                crate::util::wmi_extract::extract_string(r, "InstanceName")
+                            })
+                            .collect();
+                        result["mi_wmi"] = serde_json::json!({
+                            "ok": true,
+                            "instances": instances,
+                            "count": rows.len(),
+                        });
+                    }
+                    Ok(_) => {
+                        result["mi_wmi"] = serde_json::json!({
+                            "ok": true,
+                            "instances": [],
+                            "count": 0,
+                            "note": "No MICommonInterface instances found"
+                        });
+                    }
+                    Err(e) => {
+                        result["mi_wmi"] = serde_json::json!({
+                            "ok": false,
+                            "error": e.to_string(),
+                        });
+                    }
+                }
+
+                // Test EsifDeviceInformation (thermal readings)
+                let esif_result = crate::hw::wmi_cache::with_wmi(|wmi| {
+                    let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+                        .raw_query(
+                            "SELECT InstanceName, Temperature, Power FROM EsifDeviceInformation",
+                        )
+                        .unwrap_or_default();
+                    Ok(rows)
+                });
+                match esif_result {
+                    Ok(rows) => {
+                        let temps: Vec<serde_json::Value> = rows.iter().map(|r| {
+                            serde_json::json!({
+                                "instance": crate::util::wmi_extract::extract_string(r, "InstanceName").unwrap_or_default(),
+                                "temp_c": crate::util::wmi_extract::extract_i32(r, "Temperature").unwrap_or(0),
+                                "power_dw": crate::util::wmi_extract::extract_i32(r, "Power").unwrap_or(0),
+                            })
+                        }).collect();
+                        result["esif"] = serde_json::json!({
+                            "ok": true,
+                            "participants": temps,
+                            "count": rows.len(),
+                        });
+                    }
+                    Err(e) => {
+                        result["esif"] = serde_json::json!({
+                            "ok": false,
+                            "error": e.to_string(),
+                        });
+                    }
+                }
+
+                // Test Win32_Battery
+                let bat_result = crate::hw::wmi_cache::with_cimv2(|wmi| {
+                    let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+                        .raw_query("SELECT * FROM Win32_Battery")
+                        .unwrap_or_default();
+                    Ok(rows)
+                });
+                match bat_result {
+                    Ok(rows) if !rows.is_empty() => {
+                        let bat = &rows[0];
+                        result["battery"] = serde_json::json!({
+                            "ok": true,
+                            "estimated_charge": crate::util::wmi_extract::extract_u32(bat, "EstimatedChargeRemaining").unwrap_or(0),
+                            "battery_status": crate::util::wmi_extract::extract_u32(bat, "BatteryStatus").unwrap_or(0),
+                        });
+                    }
+                    Ok(_) => {
+                        result["battery"] =
+                            serde_json::json!({ "ok": true, "note": "No battery found" });
+                    }
+                    Err(e) => {
+                        result["battery"] =
+                            serde_json::json!({ "ok": false, "error": e.to_string() });
+                    }
+                }
+            }
+
+            #[cfg(not(windows))]
+            {
+                result["note"] = serde_json::json!("WMI only available on Windows");
+            }
+
+            make_ok(result)
+        }
+
+        "diag_perf_mode" => {
+            // Test setting performance mode via WMI (the path that works)
+            let mode: crate::state::PerformanceMode =
+                match serde_json::from_value(cmd.args["mode"].clone()) {
+                    Ok(m) => m,
+                    Err(e) => return make_err(format!("Bad mode arg: {e}")),
+                };
+            match crate::hw::performance::set_performance_mode(mode) {
+                Ok(r) => make_ok(serde_json::json!({
+                    "result": serde_json::to_value(r).unwrap_or(Value::Null),
+                    "mode_set": format!("{:?}", mode),
+                })),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "diag_ps" => {
+            // Run elevated PowerShell command
+            let script = cmd.args["script"].as_str().unwrap_or("");
+            if script.is_empty() {
+                return make_err("Missing 'script' argument".to_string());
+            }
+            let output = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .output();
+            match output {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                    make_ok(serde_json::json!({
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "exit_code": out.status.code().unwrap_or(-1),
+                    }))
+                }
+                Err(e) => make_err(format!("Failed to run PowerShell: {e}")),
+            }
+        }
+
+        "diag_mi_wmi" => {
+            // Test MICommonInterface.MiInterface WMI method
+            // This is the WMI class that IoTService uses for EC commands
+            #[cfg(windows)]
+            {
+                use windows::core::{BSTR, VARIANT};
+                use windows::Win32::System::Wmi::{
+                    WBEM_FLAG_RETURN_WBEM_COMPLETE, WBEM_GENERIC_FLAG_TYPE,
+                };
+                use wmi::{COMLibrary, WMIConnection};
+
+                let com = match COMLibrary::without_security() {
+                    Ok(c) => c,
+                    Err(e) => return make_err(format!("COM init failed: {e}")),
+                };
+                let wmi = match WMIConnection::with_namespace_path("ROOT\\WMI", com) {
+                    Ok(w) => w,
+                    Err(e) => return make_err(format!("WMI connect failed: {e}")),
+                };
+
+                // Find the MICommonInterface instance
+                let instance_name: String = {
+                    use std::collections::HashMap;
+                    let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+                        .raw_query("SELECT InstanceName FROM MICommonInterface")
+                        .unwrap_or_default();
+                    match rows
+                        .into_iter()
+                        .next()
+                        .and_then(|r| crate::util::wmi_extract::extract_string(&r, "InstanceName"))
+                    {
+                        Some(name) => name,
+                        None => return make_err("No MICommonInterface instance found".to_string()),
+                    }
+                };
+
+                let escaped = instance_name.replace('\\', "\\\\");
+                let instance_path =
+                    BSTR::from(format!("MICommonInterface.InstanceName=\"{escaped}\""));
+                let method_name = BSTR::from("MiInterface");
+
+                let mut result = serde_json::json!({
+                    "instance_name": instance_name,
+                    "instance_path": instance_path.to_string(),
+                    "method": "MiInterface",
+                });
+
+                // Try calling MiInterface with GetFwVersion command (cmd_id=0x0A)
+                // From Ghidra decompilation: InData = [0x55, cmd_id, 0x01, 0x01, 0x55, cmd_id, 0x01, 0x02]
+                // For GetFwVersion: cmd_id = 0x0A
+                let cmd_id: u8 = match cmd
+                    .args
+                    .get("cmd_id")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u8)
+                {
+                    Some(id) => id,
+                    None => 0x0A, // Default: GetFwVersion
+                };
+
+                let in_data: Vec<u8> = vec![0x55, cmd_id, 0x01, 0x01, 0x55, cmd_id, 0x01, 0x02];
+                result["cmd_id"] = serde_json::json!(format!("0x{:02x}", cmd_id));
+                result["in_data"] = serde_json::json!(in_data
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" "));
+
+                unsafe {
+                    // First, get the actual instance object (not the class)
+                    let mut instance_obj = None;
+                    if let Err(e) = wmi.svc.GetObject(
+                        &instance_path,
+                        WBEM_FLAG_RETURN_WBEM_COMPLETE,
+                        None,
+                        Some(&mut instance_obj),
+                        None,
+                    ) {
+                        result["error"] =
+                            serde_json::json!(format!("GetObject(instance) failed: {e}"));
+                        return make_ok(result);
+                    }
+                    let instance_obj = match instance_obj {
+                        Some(c) => c,
+                        None => {
+                            result["error"] = serde_json::json!("instance object is None");
+                            return make_ok(result);
+                        }
+                    };
+                    result["got_instance"] = serde_json::json!(true);
+
+                    // Get the class definition for method parameters
+                    let mut class_obj = None;
+                    if let Err(e) = wmi.svc.GetObject(
+                        &BSTR::from("MICommonInterface"),
+                        WBEM_FLAG_RETURN_WBEM_COMPLETE,
+                        None,
+                        Some(&mut class_obj),
+                        None,
+                    ) {
+                        result["error"] =
+                            serde_json::json!(format!("GetObject(class) failed: {e}"));
+                        return make_ok(result);
+                    }
+                    let class_obj = match class_obj {
+                        Some(c) => c,
+                        None => {
+                            result["error"] = serde_json::json!("class object is None");
+                            return make_ok(result);
+                        }
+                    };
+
+                    // Get the in-params class
+                    let mut in_sig: Option<windows::Win32::System::Wmi::IWbemClassObject> = None;
+                    let mut out_sig: Option<windows::Win32::System::Wmi::IWbemClassObject> = None;
+                    if let Err(e) = class_obj.GetMethod(
+                        &method_name,
+                        0,
+                        &mut in_sig as *mut _,
+                        &mut out_sig as *mut _,
+                    ) {
+                        result["error"] = serde_json::json!(format!("GetMethod failed: {e}"));
+                        // List available methods
+                        match class_obj.GetNames(
+                            None,
+                            windows::Win32::System::Wmi::WBEM_FLAG_NONSYSTEM_ONLY,
+                            std::ptr::null(),
+                        ) {
+                            Ok(psa) => {
+                                if !psa.is_null() {
+                                    let sa = &*psa;
+                                    let accessor =
+                                        wmi::safearray::SafeArrayAccessor::<BSTR>::new(sa);
+                                    if let Ok(acc) = accessor {
+                                        let names: Vec<String> =
+                                            acc.as_slice().iter().map(|b| b.to_string()).collect();
+                                        result["available_members"] = serde_json::json!(names);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                result["getnames_error"] = serde_json::json!(format!("{e}"));
+                            }
+                        }
+                    }
+                    let in_sig = match in_sig {
+                        Some(s) => s,
+                        None => {
+                            result["error"] = serde_json::json!("in-params class is None");
+                            return make_ok(result);
+                        }
+                    };
+
+                    // Spawn an instance
+                    let in_params = match in_sig.SpawnInstance(0) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            result["error"] =
+                                serde_json::json!(format!("SpawnInstance failed: {e}"));
+                            return make_ok(result);
+                        }
+                    };
+
+                    // Set InData parameter (uint8[])
+                    // Create a VARIANT containing a SAFEARRAY of UI1 (unsigned bytes)
+                    let in_data_variant = {
+                        use windows::Win32::System::Com::SAFEARRAYBOUND;
+                        use windows::Win32::System::Ole::{SafeArrayCreate, SafeArrayPutElement};
+                        use windows::Win32::System::Variant::*;
+
+                        let bounds = [SAFEARRAYBOUND {
+                            cElements: in_data.len() as u32,
+                            lLbound: 0,
+                        }];
+                        let psa = SafeArrayCreate(VT_UI1, 1, bounds.as_ptr());
+                        if psa.is_null() {
+                            result["error"] = serde_json::json!("SafeArrayCreate returned null");
+                            return make_ok(result);
+                        }
+                        for (i, &byte) in in_data.iter().enumerate() {
+                            let idx = [i as i32];
+                            let _ = SafeArrayPutElement(
+                                psa,
+                                idx.as_ptr(),
+                                &byte as *const u8 as *const _,
+                            );
+                        }
+                        // Build VARIANT manually by writing to raw memory
+                        // VARIANT is #[repr(transparent)] over imp::VARIANT
+                        // imp::VARIANT layout: vt(u16) at offset 0, then wReserved1-3 (3x u16),
+                        // then union at offset 8. parray is a pointer in the union.
+                        let mut vt = VARIANT::new();
+                        {
+                            let raw_ptr = &mut vt as *mut VARIANT as *mut u8;
+                            // vt field at offset 0
+                            *(raw_ptr as *mut u16) = (VT_ARRAY | VT_UI1).0;
+                            // parray pointer at offset 8 (after vt + 3 reserved u16s)
+                            let union_ptr = (raw_ptr as *const u8).add(8)
+                                as *mut *mut windows::Win32::System::Com::SAFEARRAY;
+                            *union_ptr = psa;
+                        }
+                        vt
+                    };
+                    if let Err(e) = in_params.Put(&BSTR::from("InData"), 0, &in_data_variant, 0) {
+                        result["error"] = serde_json::json!(format!("Put InData failed: {e}"));
+                        return make_ok(result);
+                    }
+                    result["in_data_set"] = serde_json::json!(true);
+
+                    // Execute the method on the instance object path
+                    let mut out_params = None;
+                    match wmi.svc.ExecMethod(
+                        &instance_path,
+                        &method_name,
+                        WBEM_GENERIC_FLAG_TYPE(0),
+                        None,
+                        Some(&in_params),
+                        Some(&mut out_params),
+                        None,
+                    ) {
+                        Ok(_) => {
+                            result["method_called"] = serde_json::json!(true);
+                            if let Some(out) = out_params {
+                                // Read ReturnCode
+                                let mut rc = VARIANT::default();
+                                let _ = out.Get(&BSTR::from("ReturnCode"), 0, &mut rc, None, None);
+                                result["return_code"] = serde_json::json!(format!("{:?}", rc));
+
+                                // Read OutData
+                                let mut od = VARIANT::default();
+                                let _ = out.Get(&BSTR::from("OutData"), 0, &mut od, None, None);
+                                result["out_data"] = serde_json::json!(format!("{:?}", od));
+                            }
+                        }
+                        Err(e) => {
+                            result["error"] = serde_json::json!(format!("ExecMethod failed: {e}"));
+                        }
+                    }
+                }
+
+                make_ok(result)
+            }
+
+            #[cfg(not(windows))]
+            {
+                make_err("WMI only available on Windows".to_string())
+            }
+        }
+
         unknown => make_err(format!("Unknown elevated command: {unknown}")),
     }
 }

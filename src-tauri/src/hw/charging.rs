@@ -68,24 +68,39 @@ pub fn get_charging_threshold() -> HardwareResult<u8> {
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
-/// IPC message layout discovered from IoTService.exe binary analysis.
+/// IPC message layout discovered from IoTService.exe binary analysis (v25.0.0.9).
 ///
-/// src_id=1 (MiControl), dst_id=2 (IoTDriver), msg_type=0x1003 (set charging limit)
+/// The IoTService validates the first 4 bytes against the magic "MCPI"
+/// (0x4950434D in little-endian) and rejects messages without it.
+///
+/// Header layout (16 bytes, from Ghidra decompilation of FUN_140043ac0):
+///   - magic: u32 (offset 0)  — MCPI magic (0x4950434D)
+///   - src_id: u16 (offset 4)
+///   - dst_id: u16 (offset 6)
+///   - type_lo: u16 (offset 8)  — low 16 bits of msg_type
+///   - routing: i16 (offset 10) — 0=normal unicast
+///   - field: u16 (offset 12)  — sub-type, 0 for normal
+///   - payload_len: u16 (offset 14) — total message size (header + payload)
+///
+/// src_id=1 (MiControl), dst_id=2 (IoTDriver), type_lo=0x1003 (set charging limit)
 ///
 /// # Safety
 ///
 /// This struct maps to the binary wire format used for IoTService IPC.
-/// The fields are already naturally aligned (two u16, two u32, [u8; 4])
-/// so `#[repr(C)]` is sufficient — no `packed` needed. All accesses via
-/// byte-slice casts are safe because the struct has no padding.
+/// The fields are naturally aligned with no padding.
 #[repr(C)]
 struct IotIpcMsg {
+    magic: u32,
     src_id: u16,
     dst_id: u16,
-    msg_type: u32,
-    payload_len: u32,
-    payload: [u8; 4],
+    type_lo: u16,
+    routing: i16,
+    field: u16,
+    payload_len: u16,
 }
+
+/// MCPI magic value: bytes `4D 43 50 49` = "MCPI" in ASCII.
+const MCPI_MAGIC: u32 = 0x4950434D;
 
 /// Compile-time assertion: IotIpcMsg must be exactly 16 bytes.
 const _: () = assert!(std::mem::size_of::<IotIpcMsg>() == 16);
@@ -101,26 +116,72 @@ const _: () = assert!(std::mem::size_of::<IotIpcMsg>() == 16);
 fn send_via_pipe(threshold: u8) -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use std::fs::OpenOptions;
         use std::io::Write;
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::Foundation::{
+            GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_READMODE_MESSAGE};
 
         // Use the IoT pipe path discovered at startup; fall back to the default constant.
         let pipe_path = crate::hw::discovery::global_profile()
             .and_then(|p| p.iot_pipe_path)
             .unwrap_or_else(|| IOT_PIPE.to_string());
 
-        let mut pipe = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&pipe_path)
-            .context("Open IoT IPC pipe")?;
+        // Open the pipe using CreateFileW so we can set MESSAGE mode.
+        let path_w: Vec<u16> = std::ffi::OsStr::new(&pipe_path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
+        // SAFETY: CreateFileW with a valid null-terminated wide string path.
+        let raw_handle = unsafe {
+            CreateFileW(
+                windows::core::PCWSTR(path_w.as_ptr()),
+                (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                HANDLE::default(),
+            )
+        };
+
+        let raw_handle = raw_handle.context("Open IoT IPC pipe")?;
+
+        if raw_handle == INVALID_HANDLE_VALUE {
+            return Err(anyhow::anyhow!(
+                "Open IoT IPC pipe returned INVALID_HANDLE_VALUE: {}",
+                pipe_path
+            )
+            .into());
+        }
+
+        // Set pipe to MESSAGE read mode (required by IoTService pipe server)
+        let mode = PIPE_READMODE_MESSAGE;
+        // SAFETY: raw_handle is a valid pipe handle from CreateFileW.
+        let _ = unsafe { SetNamedPipeHandleState(raw_handle, Some(&mode as *const _), None, None) };
+
+        // Wrap the raw handle in a std::fs::File for Write trait
+        // SAFETY: raw_handle is a valid file handle owned by us; std::fs::File will close it on drop.
+        let mut pipe = unsafe {
+            std::fs::File::from_raw_handle(raw_handle.0 as std::os::windows::io::RawHandle)
+        };
+
+        // Build the 16-byte MCPI header with 1-byte payload (threshold)
+        // payload_len = header(16) + payload(1) = 17
         let msg = IotIpcMsg {
+            magic: MCPI_MAGIC,
             src_id: 1,
             dst_id: 2,
-            msg_type: 0x1003,
-            payload_len: 1,
-            payload: [threshold, 0, 0, 0],
+            type_lo: 0x1003,
+            routing: 0,
+            field: 0,
+            payload_len: 17,
         };
 
         let bytes: &[u8] = unsafe {
@@ -131,7 +192,11 @@ fn send_via_pipe(threshold: u8) -> HardwareResult<()> {
                 std::mem::size_of::<IotIpcMsg>(),
             )
         };
-        pipe.write_all(bytes).context("Write to IoT pipe")?;
+        pipe.write_all(bytes)
+            .context("Write MCPI header to IoT pipe")?;
+        // Write the 1-byte payload (threshold value)
+        pipe.write_all(&[threshold])
+            .context("Write threshold payload to IoT pipe")?;
 
         // Do NOT block on a read here — IoTService does not send an
         // acknowledgment for 0x1003 (set-charging-limit) messages.

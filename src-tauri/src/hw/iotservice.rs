@@ -15,19 +15,29 @@
 ///
 /// ## IPC Message Format
 ///
-/// The wire format matches the working implementation in `charging.rs`:
+/// The wire format was reverse-engineered from IoTService.exe (v25.0.0.9)
+/// using Ghidra 12.1 decompilation. The IoTService validates the first 4
+/// bytes against the magic value `0x4950434d` ("MCPI" in little-endian)
+/// and rejects messages without it (logging "Invalid IPC message signature").
 ///
 /// ```text
-/// ┌──────────────┬──────────────┬──────────────┬──────────────┬───────────────────────────┐
-/// │ src_id: u16  │ dst_id: u16  │ msg_type: u32│ payload_len  │ payload: [u8; payload_len] │
-/// │              │              │              │ u32 LE       │ (JSON or binary data)     │
-/// ├──────────────┴──────────────┴──────────────┴──────────────┴───────────────────────────┤
-/// │ Header = 12 bytes                                                                     │
-/// └───────────────────────────────────────────────────────────────────────────────────────┘
+/// ┌──────────┬──────────┬──────────┬──────────────┬──────────┬──────────┬──────────────┬───────────────────────────┐
+/// │ MCPI     │ src_id   │ dst_id   │ type_lo      │ routing   │ field    │ payload_len  │ payload: [u8; payload_len] │
+/// │ u32 LE   │ u16 LE   │ u16 LE   │ u16 LE       │ i16 LE   │ u16 LE   │ u16 LE       │ (JSON or binary data)     │
+/// │ (4 bytes)│ (2 bytes)│ (2 bytes)│ (2 bytes)    │ (2 bytes)│ (2 bytes)│ (2 bytes)    │                           │
+/// ├──────────┴──────────┴──────────┴──────────────┴──────────┴──────────┴──────────────┴───────────────────────────┤
+/// │ Header = 16 bytes                                                                                       │
+/// └──────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 /// ```
 ///
-/// Total header size: 12 bytes. No signature field — the pipe name itself
-/// serves as the namespace delimiter.
+/// Total header size: 16 bytes. The MCPI magic (`0x4D435049` as u32 LE,
+/// bytes `4D 43 50 49`) must be at offset 0.
+///
+/// Field details (from Ghidra decompilation of FUN_140043ac0):
+/// - `routing` (offset 10): 0 = normal unicast, -1 (0xFFFF) = broadcast
+/// - `field` (offset 12): additional routing/sub-type field, 0 for normal
+/// - `payload_len` (offset 14): total message size (header + payload),
+///   must be >= 16 and <= 8192 (0x2000)
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -42,8 +52,13 @@ use anyhow::Result;
 /// Named pipe path to the IoTService IPC broker.
 pub const IOT_PIPE: &str = r"\\.\pipe\LOCAL\IoTService_IPC_Broker";
 
-/// Size of the fixed IPC header (src_id + dst_id + msg_type + payload_len)
-const IPC_HEADER_SIZE: usize = 12;
+/// MCPI magic value: bytes `4D 43 50 49` = "MCPI" in ASCII.
+/// Stored as u32 in little-endian: `0x4950434D`.
+/// The IoTService checks `*(int*)param_2 == 0x4950434d` to validate messages.
+const MCPI_MAGIC: u32 = 0x4950434D;
+
+/// Size of the fixed IPC header (MCPI magic + src_id + dst_id + type_lo + routing + field + payload_len)
+const IPC_HEADER_SIZE: usize = 16;
 
 /// Our client ID registered with the IoTService IPC broker.
 const CLIENT_ID: u16 = 1;
@@ -146,29 +161,37 @@ pub mod msg_type {
 
 // ── Raw IPC message ──────────────────────────────────────────────────────────
 
-/// Packed binary representation of an IPC message on the wire.
+/// Packed binary representation of an IPC message header on the wire.
 ///
-/// Layout matches the proven format in `charging.rs`:
-///   - src_id: u16 (offset 0)
-///   - dst_id: u16 (offset 2)
-///   - msg_type: u32 (offset 4)
-///   - payload_len: u32 (offset 8)
-///   - Total header: 12 bytes (naturally aligned, no padding)
+/// Layout (16 bytes total, from Ghidra decompilation of FUN_140043ac0):
+///   - magic: u32 (offset 0)  — must be `MCPI_MAGIC` (0x4950434D)
+///   - src_id: u16 (offset 4)
+///   - dst_id: u16 (offset 6)
+///   - type_lo: u16 (offset 8)  — low 16 bits of msg_type
+///   - routing: i16 (offset 10) — 0=normal, -1=broadcast
+///   - field: u16 (offset 12)  — sub-type/routing, 0 for normal
+///   - payload_len: u16 (offset 14) — total message size (header + payload)
 #[repr(C)]
 struct IpcWireHeader {
+    magic: u32,
     src_id: u16,
     dst_id: u16,
-    msg_type: u32,
-    payload_len: u32,
+    type_lo: u16,
+    routing: i16,
+    field: u16,
+    payload_len: u16,
 }
 
 impl IpcWireHeader {
     fn new(src_id: u16, dst_id: u16, msg_type: u32, payload_len: u32) -> Self {
         Self {
+            magic: MCPI_MAGIC,
             src_id,
             dst_id,
-            msg_type,
-            payload_len,
+            type_lo: (msg_type & 0xFFFF) as u16,
+            routing: 0, // normal unicast
+            field: 0,
+            payload_len: (IPC_HEADER_SIZE as u32 + payload_len) as u16,
         }
     }
 
@@ -180,6 +203,19 @@ impl IpcWireHeader {
                 std::mem::size_of::<IpcWireHeader>(),
             )
         }
+    }
+
+    /// Extract the full msg_type from the response header.
+    /// Currently only the low 16 bits are used.
+    fn msg_type(&self) -> u32 {
+        self.type_lo as u32
+    }
+
+    /// Extract the payload length from the response header.
+    /// The `payload_len` field contains the total message size (header + payload),
+    /// so we subtract the header size to get the actual payload bytes.
+    fn payload_bytes(&self) -> usize {
+        self.payload_len.saturating_sub(IPC_HEADER_SIZE as u16) as usize
     }
 }
 
@@ -539,8 +575,15 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
         }
 
         crate::util::retry::with_retry("IoT IPC send", || {
-            use std::fs::OpenOptions;
+            use std::os::windows::ffi::OsStrExt;
+            use std::os::windows::io::FromRawHandle;
             use std::time::Duration;
+            use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
+            use windows::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                OPEN_EXISTING,
+            };
+            use windows::Win32::System::Pipes::SetNamedPipeHandleState;
 
             let seq = REQUEST_SEQ.fetch_add(1, Ordering::SeqCst);
             log::debug!(
@@ -551,16 +594,59 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
 
             let pipe_path = resolve_pipe_path();
 
-            let mut pipe = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&pipe_path)
-                .context(format!("Open IoT IPC pipe: {pipe_path}"))?;
+            // Open the pipe using CreateFileW so we can set MESSAGE mode.
+            // The IoTService creates the pipe with PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE,
+            // so the client must also use MESSAGE mode for reads/writes to work correctly.
+            let path_w: Vec<u16> = std::ffi::OsStr::new(&pipe_path)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
 
-            // Build and send the 12-byte header
+            // SAFETY: CreateFileW with a valid null-terminated wide string path.
+            let raw_handle = unsafe {
+                CreateFileW(
+                    windows::core::PCWSTR(path_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            };
+
+            let raw_handle = raw_handle.context(format!("Open IoT IPC pipe: {pipe_path}"))?;
+
+            if raw_handle == windows::Win32::Foundation::INVALID_HANDLE_VALUE {
+                anyhow::bail!(
+                    "Open IoT IPC pipe returned INVALID_HANDLE_VALUE: {}",
+                    pipe_path
+                );
+            }
+
+            // Set pipe to MESSAGE read mode (required by IoTService pipe server)
+            let mode = windows::Win32::System::Pipes::PIPE_READMODE_MESSAGE;
+            // SAFETY: raw_handle is a valid pipe handle from CreateFileW.
+            let set_result =
+                unsafe { SetNamedPipeHandleState(raw_handle, Some(&mode as *const _), None, None) };
+            if set_result.is_err() {
+                log::warn!(
+                    target: "hw::iotservice",
+                    "Failed to set pipe to MESSAGE mode: {:?} — continuing in BYTE mode",
+                    set_result
+                );
+            }
+
+            // Wrap the raw handle in a std::fs::File for Read/Write traits
+            // SAFETY: raw_handle is a valid file handle owned by us; std::fs::File will close it on drop.
+            let mut pipe = unsafe {
+                std::fs::File::from_raw_handle(raw_handle.0 as std::os::windows::io::RawHandle)
+            };
+
+            // Build and send the 16-byte MCPI header
             let header = IpcWireHeader::new(CLIENT_ID, dst_id, msg_type, payload.len() as u32);
             pipe.write_all(header.as_bytes())
-                .context("Write IPC header")?;
+                .context("Write IPC MCPI header")?;
 
             // Send payload if any
             if !payload.is_empty() {
@@ -568,7 +654,7 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
             }
             pipe.flush().context("Flush IPC pipe")?;
 
-            // Read response header (12 bytes) with enforced timeout
+            // Read response header (16 bytes MCPI) with enforced timeout
             let mut resp_header_buf = [0u8; IPC_HEADER_SIZE];
             match read_exact_timeout(&mut pipe, &mut resp_header_buf, Duration::from_secs(5)) {
                 Ok(()) => {}
@@ -591,21 +677,33 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
             }
 
             // SAFETY: resp_header_buf has been validated to contain at least size_of::<IpcWireHeader>()
-            // bytes and was filled by read_exact_timeout. IpcWireHeader is #[repr(C)] with four fields
-            // matching the known wire format (two u16 + two u32 = 12 bytes, no padding). Using
+            // bytes and was filled by read_exact_timeout. IpcWireHeader is #[repr(C)] with seven fields
+            // matching the known wire format (u32 + four u16 + i16 + u16 = 16 bytes, no padding). Using
             // read_unaligned avoids alignment issues on the stack-allocated buffer.
             let resp_header: IpcWireHeader = unsafe {
                 std::ptr::read_unaligned(resp_header_buf.as_ptr() as *const IpcWireHeader)
             };
 
+            // Validate MCPI magic in response
+            if resp_header.magic != MCPI_MAGIC {
+                log::warn!(
+                    target: "hw::iotservice",
+                    "Invalid MCPI magic in response: 0x{:08X} — dropping",
+                    resp_header.magic
+                );
+                return Ok(Vec::new());
+            }
+
+            let resp_msg_type = resp_header.msg_type();
+
             // Fail-closed: reject responses with unknown message types.
             // This prevents processing unexpected or potentially malicious messages
             // from the IoTService pipe.
-            if !is_known_msg_type(resp_header.msg_type) {
+            if !is_known_msg_type(resp_msg_type) {
                 log::warn!(
                     target: "hw::iotservice",
                     "Unknown IoT message type 0x{:04X} in response — dropping (fail-closed)",
-                    resp_header.msg_type
+                    resp_msg_type
                 );
                 return Ok(Vec::new());
             }
@@ -617,7 +715,7 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
                 format!("Response auth failed for request #{seq} (msg_type=0x{msg_type:04X})")
             })?;
 
-            let payload_len = resp_header.payload_len as usize;
+            let payload_len = resp_header.payload_bytes();
             if payload_len > MAX_RESPONSE_PAYLOAD {
                 anyhow::bail!("Response payload too large: {payload_len} bytes");
             }
@@ -1165,16 +1263,22 @@ mod tests {
     #[test]
     fn test_header_default() {
         let h = IpcWireHeader::new(1, 2, 0x1001, 0);
+        assert_eq!(h.magic, MCPI_MAGIC);
         assert_eq!(h.src_id, 1);
         assert_eq!(h.dst_id, 2);
-        assert_eq!(h.msg_type, 0x1001);
-        assert_eq!(h.payload_len, 0);
+        assert_eq!(h.type_lo, 0x1001);
+        assert_eq!(h.routing, 0);
+        assert_eq!(h.field, 0);
+        // payload_len = header(16) + payload(0) = 16
+        assert_eq!(h.payload_len, 16);
     }
 
     #[test]
     fn test_header_with_payload() {
         let h = IpcWireHeader::new(1, 2, 0x4001, 256);
-        assert_eq!(h.payload_len, 256);
+        // payload_len = header(16) + payload(256) = 272
+        assert_eq!(h.payload_len, 272);
+        assert_eq!(h.payload_bytes(), 256);
     }
 
     #[test]
@@ -1184,10 +1288,12 @@ mod tests {
 
         // SAFETY: bytes is from as_bytes() on a valid IpcWireHeader; the pointer cast back to the same #[repr(C)] type is safe because alignment and layout match exactly.
         let parsed: &IpcWireHeader = unsafe { &*(bytes.as_ptr() as *const IpcWireHeader) };
+        assert_eq!(parsed.magic, MCPI_MAGIC);
         assert_eq!(parsed.src_id, 0xAA);
         assert_eq!(parsed.dst_id, 0xBB);
-        assert_eq!(parsed.msg_type, 0xDEADBEEF);
-        assert_eq!(parsed.payload_len, 42);
+        assert_eq!(parsed.type_lo, 0xBEEF); // low 16 bits of 0xDEADBEEF
+        assert_eq!(parsed.msg_type(), 0xBEEF);
+        assert_eq!(parsed.payload_bytes(), 42);
     }
 
     #[test]

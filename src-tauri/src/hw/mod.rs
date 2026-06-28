@@ -27,3 +27,4 @@ pub mod update;
 pub mod wifi;
 #[cfg(windows)]
 pub mod wmi_cache;
+pub mod wmi_ec;

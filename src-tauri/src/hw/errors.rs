@@ -98,6 +98,10 @@ pub enum HardwareError {
     #[error("Task join error: {0}")]
     TaskJoin(String),
 
+    /// Generic WMI error (method call, marshaling, COM).
+    #[error("WMI error: {0}")]
+    Wmi(String),
+
     /// Generic hardware error (catch-all for uncategorized failures).
     #[error("Hardware error: {0}")]
     Other(String),
@@ -131,6 +135,7 @@ impl std::fmt::Debug for HardwareError {
             Self::AiRequest(arg0) => f.debug_tuple("AiRequest").field(arg0).finish(),
             Self::HotkeyConfig(arg0) => f.debug_tuple("HotkeyConfig").field(arg0).finish(),
             Self::TaskJoin(arg0) => f.debug_tuple("TaskJoin").field(arg0).finish(),
+            Self::Wmi(arg0) => f.debug_tuple("Wmi").field(arg0).finish(),
             Self::Other(arg0) => f.debug_tuple("Other").field(arg0).finish(),
         }
     }
@@ -163,6 +168,7 @@ impl HardwareError {
             Self::HotkeyConfig(_) => "hotkey_config",
             Self::TaskJoin(_) => "task_join",
             Self::Other(_) => "other",
+            Self::Wmi(_) => "wmi",
         }
     }
 }

@@ -12,11 +12,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "micontrol"
 path = "src/main.rs"
 
-[[bin]]
-name = "test_perf"
-path = "src/bin/test_perf.rs"
-required-features = ["test-bin"]
-
 [features]
 default = []
 test-bin = []
@@ -57,6 +52,8 @@ windows = { version = "0.58", features = [
   "Win32_System_IO",
   "Win32_System_Com",
   "Win32_System_Wmi",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
   "Win32_System_Services",
   "Win32_System_Threading",
   "Win32_System_Pipes",
