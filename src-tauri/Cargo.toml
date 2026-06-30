@@ -56,7 +56,7 @@ url = "2"
 rayon = "1.10"
 aes-gcm = "0.10"
 zip = "2"
-hkdf = "0.12"
+hkdf = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
