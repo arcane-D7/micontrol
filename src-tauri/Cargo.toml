@@ -55,7 +55,7 @@ sentry = "0.34"
 url = "2"
 rayon = "1.10"
 aes-gcm = "0.10"
-zip = "2"
+zip = "4"
 hkdf = "0.12"
 
 [target.'cfg(windows)'.dependencies]
