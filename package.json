@@ -33,7 +33,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "react": "^19.1.0",
-    "@sentry/react": "^8.0.0",
+    "@sentry/react": "^10.62.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
