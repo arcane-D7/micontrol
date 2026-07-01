@@ -128,10 +128,12 @@ pub fn start_casting(device_id: &str) -> HardwareResult<CastResult> {
         log::info!("[screen_cast] No device ID provided — opening Connect panel directly");
     }
 
-    // Open the Windows Connect panel for the user to select a device and cast
+    // Open the Windows Connect panel via explorer.exe.
+    // Using explorer.exe to launch the protocol is more reliable than `cmd /c start`
+    // and avoids the `:project` suffix which is not a valid URI path component.
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/c", "start", "ms-settings-connectabledevices:project"]);
+    let mut cmd = std::process::Command::new("explorer.exe");
+    cmd.arg("ms-settings-connectabledevices:");
     cmd.creation_flags(CREATE_NO_WINDOW);
     let result = cmd
         .output()

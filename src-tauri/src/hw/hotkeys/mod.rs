@@ -1436,6 +1436,33 @@ fn check_script_action(interpreter: &str, path: &str, args: &[String]) -> Script
 
 // ── Action dispatch ───────────────────────────────────────────────────────────
 
+/// Dispatch a performance mode change through the elevated bridge.
+///
+/// Called when `set_performance_mode` fails because the main process is not
+/// elevated (cannot write to HKLM\SOFTWARE\MI\PerformanceMode).  Spawns an
+/// async task that goes through the scheduled-task elevated helper, which
+/// runs as admin and can write to HKLM and call PowerSetActiveOverlayScheme.
+fn spawn_elevated_performance_mode(mode: crate::state::PerformanceMode) {
+    let mode_str = serde_json::to_string(&mode).unwrap_or_default();
+    let mode_str = mode_str.trim_matches('"').to_string();
+    tauri::async_runtime::spawn(async move {
+        match crate::elev_bridge::run_elevated(
+            "set_performance_mode",
+            serde_json::json!({ "mode": mode_str }),
+        )
+        .await
+        {
+            Ok(_) => {
+                log::info!("[hotkeys] Elevated set_performance_mode({mode_str}) succeeded");
+                crate::hw::osd::show_performance_osd(mode);
+            }
+            Err(e) => {
+                log::warn!("[hotkeys] Elevated set_performance_mode({mode_str}) failed: {e}");
+            }
+        }
+    });
+}
+
 fn dispatch_action(action: &HotkeyAction) {
     match action {
         HotkeyAction::None => {}
@@ -1520,13 +1547,19 @@ fn dispatch_action(action: &HotkeyAction) {
             // Parse the snake_case mode name into the enum by round-tripping JSON.
             let quoted = format!("\"{}\"", mode);
             match serde_json::from_str::<PerformanceMode>(&quoted) {
-                Ok(pm) => match crate::hw::performance::set_performance_mode(pm) {
-                    Ok(res) => {
-                        log::info!("[hotkeys] SetPerformanceMode {:?}: {:?}", pm, res);
-                        crate::hw::osd::show_performance_osd(pm);
+                Ok(pm) => {
+                    // Try direct (works if elevated); fall back to elevated bridge.
+                    match crate::hw::performance::set_performance_mode(pm) {
+                        Ok(res) => {
+                            log::info!("[hotkeys] SetPerformanceMode {:?}: {:?}", pm, res);
+                            crate::hw::osd::show_performance_osd(pm);
+                        }
+                        Err(e) => {
+                            log::info!("[hotkeys] SetPerformanceMode direct failed ({e}), using elevated bridge");
+                            spawn_elevated_performance_mode(pm);
+                        }
                     }
-                    Err(e) => log::warn!("[hotkeys] SetPerformanceMode {:?} failed: {e}", pm),
-                },
+                }
                 Err(_) => log::warn!("[hotkeys] SetPerformanceMode: unknown mode '{mode}'"),
             }
         }
@@ -1563,10 +1596,13 @@ fn dispatch_action(action: &HotkeyAction) {
                         );
                         crate::hw::osd::show_performance_osd(pm);
                     }
-                    Err(e) => log::warn!(
-                        "[hotkeys] CyclePerformanceMode: set {} failed: {e}",
-                        next_mode_str
-                    ),
+                    Err(e) => {
+                        log::info!(
+                                "[hotkeys] CyclePerformanceMode: direct set {} failed ({e}), using elevated bridge",
+                                next_mode_str
+                            );
+                        spawn_elevated_performance_mode(pm);
+                    }
                 },
                 Err(_) => {
                     log::warn!("[hotkeys] CyclePerformanceMode: unknown mode '{next_mode_str}'")
@@ -2052,11 +2088,12 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
         }
         ("HID_EVENT20", 0x01) => {
             // Fn+F8: Project / display mode.
-            // ShellExecuteW("ms-project:") opens the Cast/Project quick action
-            // directly — more reliable than synthetic Win+P which Explorer often
-            // ignores due to UIPI.
-            log::info!("[hotkeys] WMI Fn+F8 → Project (ms-project:)");
-            shell_open(windows::core::w!("ms-project:"));
+            // Send Win+P via SendInput — opens the projection sidebar.
+            // The ms-project: protocol is not registered on all Windows builds
+            // (e.g. Win11 24H2/26200), causing "no app to open this link" errors.
+            // Win+P is the standard Windows shortcut for projection modes.
+            log::info!("[hotkeys] WMI Fn+F8 → Project (Win+P)");
+            send_win_key_combo(0x50); // VK_P = 0x50
             return;
         }
         ("HID_EVENT20", 0x1B) => {
