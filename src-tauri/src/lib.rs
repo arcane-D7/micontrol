@@ -405,6 +405,13 @@ pub fn run() {
                 log::warn!("Hotkey hook failed to start, continuing without hotkeys: {e}");
             }
 
+            // Apply Copilot key interception fixes (disables Windows Shell
+            // interception + writes Scancode Map for permanent remap).
+            // This is async because it dispatches through the elevated bridge.
+            tauri::async_runtime::spawn(async {
+                crate::hw::hotkeys::apply_copilot_fix().await;
+            });
+
             // Register focus callback: Xiaomi key / AI key / Copilot key fires this.
             // We toggle the tray quick-access popup, exactly like XiaomiPCManager did.
             // WebviewWindow show/hide/set_focus are thread-safe in Tauri v2 (dispatched

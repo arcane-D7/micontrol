@@ -633,6 +633,285 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        // ── Copilot key interception fixes ───────────────────────────────
+        // Windows 11 24H2+ intercepts the Copilot key (VK 0xC3) at the Shell
+        // level before any user-mode hook can see it. These commands provide
+        // two kernel/driver-level approaches to make the key visible:
+        //
+        // 1. set_scancode_map — writes a Scancode Map registry binary that
+        //    remaps the Copilot key's scan code to a different key at the
+        //    keyboard class driver level. Requires reboot but is permanent.
+        //
+        // 2. disable_copilot_key — sets registry policies that prevent
+        //    Windows Shell from intercepting the Copilot key, allowing it to
+        //    pass through to WH_KEYBOARD_LL and Raw Input.
+        "set_scancode_map" => {
+            #[cfg(windows)]
+            {
+                use windows::core::PCWSTR;
+                use windows::Win32::System::Registry::{
+                    RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_LOCAL_MACHINE,
+                    KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE,
+                };
+
+                // The Scancode Map binary format:
+                //   Bytes 0-3:  Signature (0x00000000)
+                //   Bytes 4-7:  Version (0x00000000 — but some docs say 0x00000100)
+                //   Bytes 8-11: Number of mappings (little-endian u32)
+                //   Then N × 4-byte entries: [source_scan_lo, source_scan_hi, target_scan_lo, target_scan_hi]
+                //   Terminated by a 4-byte null entry.
+                //
+                // The Copilot key on Win11 24H2+ keyboards emits scan code 0x6E
+                // (E0 6E — extended). We remap it to Right Ctrl (scan 0x1D, E0 1D).
+                //
+                // Args:
+                //   mappings: [[src_lo, src_hi, dst_lo, dst_hi], ...]
+                //   clear: bool — if true, delete the Scancode Map value instead
+
+                let clear: bool = cmd
+                    .args
+                    .get("clear")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                let subkey: Vec<u16> = "SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout\0"
+                    .encode_utf16()
+                    .collect();
+
+                if clear {
+                    // Delete the "Scancode Map" value
+                    let script = r#"
+                        $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout'
+                        if (Test-Path $key) {
+                            $val = Get-ItemProperty -Path $key -Name 'Scancode Map' -ErrorAction SilentlyContinue
+                            if ($null -ne $val) {
+                                Remove-ItemProperty -Path $key -Name 'Scancode Map' -Force
+                                Write-Output 'Scancode Map removed'
+                            } else {
+                                Write-Output 'Scancode Map not present'
+                            }
+                        }
+                    "#;
+                    let output = std::process::Command::new("powershell")
+                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                        .output();
+                    return match output {
+                        Ok(out) => {
+                            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                            make_ok(serde_json::json!({
+                                "stdout": stdout,
+                                "stderr": stderr,
+                                "exit_code": out.status.code().unwrap_or(-1),
+                            }))
+                        }
+                        Err(e) => make_err(format!("Failed to remove Scancode Map: {e}")),
+                    };
+                }
+
+                // Build the Scancode Map binary
+                let mappings: Vec<[u8; 4]> = match cmd.args.get("mappings") {
+                    Some(arr) => {
+                        let mut result = Vec::new();
+                        if let Some(items) = arr.as_array() {
+                            for item in items {
+                                if let Some(entry) = item.as_array() {
+                                    if entry.len() == 4 {
+                                        let mut e = [0u8; 4];
+                                        for (i, v) in entry.iter().enumerate() {
+                                            e[i] = v.as_u64().unwrap_or(0) as u8;
+                                        }
+                                        result.push(e);
+                                    }
+                                }
+                            }
+                        }
+                        result
+                    }
+                    None => {
+                        // Default: Copilot key (scan 0x6E, extended) → Right Ctrl (scan 0x1D, extended)
+                        // Entry format: [target_lo, target_hi, source_lo, source_hi]
+                        // For extended keys, the high byte is 0xE0.
+                        vec![[0x1D, 0xE0, 0x6E, 0xE0]]
+                    }
+                };
+
+                let num_mappings = mappings.len() as u32;
+                let mut binary: Vec<u8> = Vec::new();
+                // Signature (4 bytes) + Version (4 bytes) + Count (4 bytes)
+                binary.extend_from_slice(&0u32.to_le_bytes()); // Signature
+                binary.extend_from_slice(&0u32.to_le_bytes()); // Version
+                binary.extend_from_slice(&num_mappings.to_le_bytes()); // Count
+                                                                       // Mappings
+                for entry in &mappings {
+                    binary.extend_from_slice(entry);
+                }
+                // Null terminator entry
+                binary.extend_from_slice(&[0u8; 4]);
+
+                let value_name: Vec<u16> = "Scancode Map\0".encode_utf16().collect();
+
+                // Use RegCreateKeyExW + RegSetValueExW for direct registry write
+                let mut hkey = windows::Win32::System::Registry::HKEY::default();
+                let result = unsafe {
+                    RegCreateKeyExW(
+                        HKEY_LOCAL_MACHINE,
+                        PCWSTR(subkey.as_ptr()),
+                        0,
+                        None,
+                        REG_OPTION_NON_VOLATILE,
+                        KEY_SET_VALUE,
+                        None,
+                        &mut hkey,
+                        None,
+                    )
+                };
+
+                if result.is_err() {
+                    return make_err(format!("RegCreateKeyExW failed: {:?}", result));
+                }
+
+                let set_result = unsafe {
+                    RegSetValueExW(
+                        hkey,
+                        PCWSTR(value_name.as_ptr()),
+                        0,
+                        REG_BINARY,
+                        Some(&binary),
+                    )
+                };
+
+                unsafe {
+                    let _ = RegCloseKey(hkey);
+                }
+
+                if set_result.is_err() {
+                    return make_err(format!("RegSetValueExW failed: {:?}", set_result));
+                }
+
+                let hex: String = binary
+                    .iter()
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                log::info!(
+                    "[elevated] Scancode Map written: {} mappings, {} bytes: {}",
+                    num_mappings,
+                    binary.len(),
+                    hex
+                );
+                make_ok(serde_json::json!({
+                    "mappings": num_mappings,
+                    "bytes": binary.len(),
+                    "hex": hex,
+                    "note": "Reboot required for Scancode Map to take effect"
+                }))
+            }
+            #[cfg(not(windows))]
+            make_err("Scancode Map only available on Windows".to_string())
+        }
+
+        "disable_copilot_key" => {
+            // Set registry policies to prevent Windows Shell from intercepting
+            // the Copilot key (VK 0xC3). This allows the key to pass through
+            // to WH_KEYBOARD_LL and Raw Input hooks.
+            //
+            // Registry keys set:
+            // 1. HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarMn = 0
+            //    (disables Copilot taskbar button)
+            // 2. HKCU\Software\Policies\Microsoft\Windows\WindowsCopilot\TurnOffWindowsCopilot = 1
+            //    (Group Policy to disable Copilot)
+            // 3. HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot\TurnOffWindowsCopilot = 1
+            //    (machine-wide Group Policy)
+
+            #[cfg(windows)]
+            {
+                let enabled: bool = cmd
+                    .args
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+
+                // TurnOffWindowsCopilot = 1 to disable Copilot (enabled=true → value=1)
+                // TaskbarMn = 0 to hide Copilot taskbar button (enabled=true → inverted=0)
+                let copilot_off: u32 = if enabled { 1 } else { 0 };
+                let taskbar_mn: u32 = if enabled { 0 } else { 1 };
+
+                let script = format!(
+                    r#"
+                    $results = @()
+
+                    # 1. Disable Copilot taskbar button (HKCU)
+                    $key1 = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+                    if (Test-Path $key1) {{
+                        Set-ItemProperty -Path $key1 -Name 'TaskbarMn' -Value {taskbar_mn} -Type DWord -Force
+                        $results += "TaskbarMn set to {taskbar_mn}"
+                    }}
+
+                    # 2. Disable Copilot via Group Policy (HKCU)
+                    $key2 = 'HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot'
+                    if (!(Test-Path $key2)) {{ New-Item -Path $key2 -Force | Out-Null }}
+                    Set-ItemProperty -Path $key2 -Name 'TurnOffWindowsCopilot' -Value {copilot_off} -Type DWord -Force
+                    $results += "HKCU TurnOffWindowsCopilot set to {copilot_off}"
+
+                    # 3. Disable Copilot via Group Policy (HKLM)
+                    $key3 = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot'
+                    if (!(Test-Path $key3)) {{ New-Item -Path $key3 -Force | Out-Null }}
+                    Set-ItemProperty -Path $key3 -Name 'TurnOffWindowsCopilot' -Value {copilot_off} -Type DWord -Force
+                    $results += "HKLM TurnOffWindowsCopilot set to {copilot_off}"
+
+                    # 4. Set Copilot key behaviour to "Nothing" via Explorer Advanced
+                    # On Win11 24H2+, CopilotKey=0 means "do nothing" (let the key pass through)
+                    $key4 = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+                    if (Test-Path $key4) {{
+                        try {{
+                            Set-ItemProperty -Path $key4 -Name 'CopilotKey' -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                            $results += "CopilotKey set to 0 (do nothing)"
+                        }} catch {{
+                            $results += "CopilotKey not available"
+                        }}
+                    }}
+
+                    # 5. Restart Explorer to apply changes immediately
+                    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+                    Start-Process explorer.exe
+                    $results += "Explorer restarted"
+
+                    $results -join "`n"
+                "#
+                );
+
+                let output = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                    .output();
+
+                match output {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        let exit_code = out.status.code().unwrap_or(-1);
+                        log::info!(
+                            "[elevated] disable_copilot_key: exit={}, stdout={}",
+                            exit_code,
+                            stdout
+                        );
+                        if !stderr.is_empty() {
+                            log::warn!("[elevated] disable_copilot_key stderr: {}", stderr);
+                        }
+                        make_ok(serde_json::json!({
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "exit_code": exit_code,
+                            "enabled": enabled,
+                        }))
+                    }
+                    Err(e) => make_err(format!("Failed to set Copilot policies: {e}")),
+                }
+            }
+            #[cfg(not(windows))]
+            make_err("Copilot key policies only available on Windows".to_string())
+        }
+
         "diag_mi_wmi" => {
             // Test MICommonInterface.MiInterface WMI method
             // This is the WMI class that IoTService uses for EC commands

@@ -466,6 +466,225 @@ pub fn is_hook_active() -> bool {
     RAW_INPUT_ACTIVE.load(Ordering::Relaxed) || HOOK_HANDLE.load(Ordering::Relaxed) != 0
 }
 
+/// Apply Copilot key interception fixes at startup.
+///
+/// Windows 11 24H2+ intercepts the Copilot key (VK 0xC3) at the Shell level
+/// before any user-mode hook can see it. This function applies two fixes:
+///
+/// 1. **Disable Windows Copilot interception** via registry policies — this
+///    prevents the Windows Shell from consuming the key, allowing it to pass
+///    through to WH_KEYBOARD_LL and Raw Input.
+///
+/// 2. **Scancode Map remapping** (optional, requires reboot) — writes a
+///    Scancode Map registry entry that remaps the Copilot key's scan code
+///    to the target key at the keyboard class driver level. This is the most
+///    robust approach because it works even before Windows processes the key.
+///
+/// This function is async because it dispatches through the elevated bridge.
+/// It should be called once during app startup (from an async context).
+pub async fn apply_copilot_fix() {
+    // Only apply if the Copilot key binding is enabled and set to RemapToKey
+    let should_apply = {
+        let arc = HOTKEY_CONFIG.get();
+        if let Some(arc) = arc {
+            if let Ok(map) = arc.read() {
+                map.copilot_key.enabled
+                    && matches!(map.copilot_key.action, HotkeyAction::RemapToKey { .. })
+            } else {
+                false
+            }
+        } else {
+            // Config not loaded yet — check the config file directly
+            let cfg = load_config();
+            cfg.copilot_key.enabled
+                && matches!(cfg.copilot_key.action, HotkeyAction::RemapToKey { .. })
+        }
+    };
+
+    if !should_apply {
+        log::debug!("[hotkeys] Copilot key not bound to RemapToKey — skipping Copilot fix");
+        return;
+    }
+
+    // ── Step 1: Disable Windows Copilot key interception via registry ──────
+    // This tells Windows Shell not to consume the Copilot key, allowing it
+    // to pass through to our hooks.
+    log::info!("[hotkeys] Applying Copilot key fix: disabling Windows Copilot interception...");
+    match crate::elev_bridge::run_elevated(
+        "disable_copilot_key",
+        serde_json::json!({ "enabled": true }),
+    )
+    .await
+    {
+        Ok(result) => {
+            if let Some(stdout) = result.get("stdout").and_then(|v| v.as_str()) {
+                log::info!("[hotkeys] Copilot policy set: {}", stdout.trim());
+            }
+        }
+        Err(e) => {
+            log::warn!("[hotkeys] Failed to set Copilot policies: {e}");
+        }
+    }
+
+    // ── Step 2: Write Scancode Map for permanent remap ─────────────────────
+    // The Scancode Map remaps the Copilot key's scan code (0x6E extended) to
+    // the target key's scan code at the keyboard class driver level.
+    // This requires a reboot to take effect, but it's the most reliable method.
+    //
+    // We only write the Scancode Map if the target is a standard key with a
+    // known scan code. For Right Ctrl (VK 0xA3), the scan code is 0x1D extended.
+    let target_scan = {
+        let arc = HOTKEY_CONFIG.get();
+        if let Some(arc) = arc {
+            if let Ok(map) = arc.read() {
+                if let HotkeyAction::RemapToKey { vk, extended } = map.copilot_key.action {
+                    vk_to_scancode(vk, extended)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some((target_lo, target_hi)) = target_scan {
+        log::info!(
+            "[hotkeys] Writing Scancode Map: Copilot (0x6E/E0) → ({:#04X}/{:#04X})",
+            target_lo,
+            target_hi
+        );
+        // Scancode Map entry format: [target_lo, target_hi, source_lo, source_hi]
+        // Copilot key source: scan 0x6E, extended (0xE0)
+        let mappings = serde_json::json!([[target_lo, target_hi, 0x6E, 0xE0]]);
+        match crate::elev_bridge::run_elevated(
+            "set_scancode_map",
+            serde_json::json!({ "mappings": mappings, "clear": false }),
+        )
+        .await
+        {
+            Ok(result) => {
+                log::info!(
+                    "[hotkeys] Scancode Map written: {:?}",
+                    result.get("note").and_then(|v| v.as_str())
+                );
+            }
+            Err(e) => {
+                log::warn!("[hotkeys] Failed to write Scancode Map: {e}");
+            }
+        }
+    } else {
+        log::debug!("[hotkeys] No known scancode for remap target — skipping Scancode Map");
+    }
+}
+
+/// Map a virtual key code to its scan code for use in Scancode Map entries.
+/// Returns (scan_lo, scan_hi) where scan_hi is 0xE0 for extended keys.
+///
+/// Only covers the most common remap targets. Unknown VKs return None.
+fn vk_to_scancode(vk: u32, extended: bool) -> Option<(u8, u8)> {
+    let scan_lo: u8 = match vk {
+        // Right Ctrl = 0xA3
+        0xA3 => 0x1D,
+        // Right Alt = 0xA5
+        0xA5 => 0x38,
+        // Right Shift = 0xA1
+        0xA1 => 0x36,
+        // Left Ctrl = 0xA2
+        0xA2 => 0x1D,
+        // Left Alt = 0xA4
+        0xA4 => 0x38,
+        // Left Shift = 0xA0
+        0xA0 => 0x2A,
+        // Caps Lock = 0x14
+        0x14 => 0x3A,
+        // Num Lock = 0x90
+        0x90 => 0x45,
+        // Scroll Lock = 0x91
+        0x91 => 0x46,
+        // Escape = 0x1B
+        0x1B => 0x01,
+        // Space = 0x20
+        0x20 => 0x39,
+        // Enter = 0x0D
+        0x0D => 0x1C,
+        // Backspace = 0x08
+        0x08 => 0x0E,
+        // Tab = 0x09
+        0x09 => 0x0F,
+        // Letters A-Z (0x41-0x5A)
+        v if (0x41..=0x5A).contains(&v) => {
+            // Scan codes for letters are not alphabetical — use MapVirtualKey
+            #[cfg(windows)]
+            {
+                extern "system" {
+                    fn MapVirtualKeyA(vk: u32, map_type: u32) -> u32;
+                }
+                // MAPVK_VK_TO_VSC = 0
+                let sc = unsafe { MapVirtualKeyA(vk, 0) };
+                if sc != 0 {
+                    return Some((sc as u8, if extended { 0xE0 } else { 0x00 }));
+                }
+                return None;
+            }
+            #[cfg(not(windows))]
+            return None;
+        }
+        // Numbers 0-9 (0x30-0x39)
+        v if (0x30..=0x39).contains(&v) => {
+            #[cfg(windows)]
+            {
+                extern "system" {
+                    fn MapVirtualKeyA(vk: u32, map_type: u32) -> u32;
+                }
+                let sc = unsafe { MapVirtualKeyA(vk, 0) };
+                if sc != 0 {
+                    return Some((sc as u8, if extended { 0xE0 } else { 0x00 }));
+                }
+                return None;
+            }
+            #[cfg(not(windows))]
+            return None;
+        }
+        // F1-F24 (0x70-0x87)
+        v if (0x70..=0x87).contains(&v) => {
+            #[cfg(windows)]
+            {
+                extern "system" {
+                    fn MapVirtualKeyA(vk: u32, map_type: u32) -> u32;
+                }
+                let sc = unsafe { MapVirtualKeyA(vk, 0) };
+                if sc != 0 {
+                    return Some((sc as u8, if extended { 0xE0 } else { 0x00 }));
+                }
+                return None;
+            }
+            #[cfg(not(windows))]
+            return None;
+        }
+        _ => {
+            // For any other VK, try MapVirtualKey
+            #[cfg(windows)]
+            {
+                extern "system" {
+                    fn MapVirtualKeyA(vk: u32, map_type: u32) -> u32;
+                }
+                let sc = unsafe { MapVirtualKeyA(vk, 0) };
+                if sc != 0 {
+                    return Some((sc as u8, if extended { 0xE0 } else { 0x00 }));
+                }
+            }
+            return None;
+        }
+    };
+
+    // For the known scan codes above, set the extended flag
+    let scan_hi = if extended { 0xE0 } else { 0x00 };
+    Some((scan_lo, scan_hi))
+}
+
 /// Install the WH_KEYBOARD_LL hook and run the message loop on a dedicated thread.
 ///
 /// Call this once from `tauri::Builder::setup`. The thread keeps running until the
@@ -765,7 +984,7 @@ unsafe extern "system" fn raw_input_wnd_proc(
 /// The RAWINPUT struct is read via GetRawInputData — no direct pointer dereference of lparam.
 unsafe fn handle_keyboard_raw_input(lparam: isize) {
     use windows::Win32::UI::Input::{
-        GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT,
+        GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RAWKEYBOARD, RAWMOUSE, RID_INPUT,
     };
 
     // Step 1: get required buffer size
@@ -794,21 +1013,55 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
         return;
     }
 
-    // Validate buffer is large enough to contain a RAWINPUT struct
-    if (written as usize) < std::mem::size_of::<RAWINPUT>() {
+    // Validate buffer is large enough to contain at least the RAWINPUTHEADER
+    // (24 bytes). The full RAWINPUT union is 48 bytes, but keyboard events are
+    // only 40 bytes (header 24 + RAWKEYBOARD 16) and HID events vary. We must
+    // NOT reject events just because they're smaller than sizeof(RAWINPUT) —
+    // that would silently drop ALL keyboard events.
+    if (written as usize) < std::mem::size_of::<RAWINPUTHEADER>() {
         log::warn!(
-            "Raw input buffer too small: {} < {}",
+            "Raw input buffer too small for header: {} < {}",
             written,
-            std::mem::size_of::<RAWINPUT>()
+            std::mem::size_of::<RAWINPUTHEADER>()
         );
         return;
     }
 
-    // SAFETY: The buffer was allocated by GetRawInputData with RID_INPUT and verified to be at least sizeof(RAWINPUT) bytes;
-    // the data is guaranteed valid per the Windows Raw Input API contract.
+    // SAFETY: The buffer was allocated by GetRawInputData with RID_INPUT and
+    // verified to be at least sizeof(RAWINPUTHEADER) bytes. The header is always
+    // at offset 0 and is 24 bytes. We read dwType from the header to determine
+    // which union member to access, then bounds-check before accessing it.
     let raw = buf.as_ptr() as *const RAWINPUT;
+    let dw_type = (*raw).header.dwType;
 
-    match (*raw).header.dwType {
+    // For keyboard events (type 1), the data is 16 bytes (RAWKEYBOARD).
+    // For HID events (type 2), the data size is in hid.dwSizeHid * hid.dwCount.
+    // For mouse events (type 0), the data is 16 bytes (RAWMOUSE).
+    // We must verify the buffer is large enough for the specific union member.
+    let needed = match dw_type {
+        0 => std::mem::size_of::<RAWINPUTHEADER>() + std::mem::size_of::<RAWMOUSE>(),
+        1 => std::mem::size_of::<RAWINPUTHEADER>() + std::mem::size_of::<RAWKEYBOARD>(),
+        2 => {
+            // HID — size is variable, check after reading the header
+            std::mem::size_of::<RAWINPUTHEADER>()
+        }
+        _ => {
+            log::debug!("[hotkeys] Unknown raw input type: {}", dw_type);
+            return;
+        }
+    };
+
+    if (written as usize) < needed {
+        log::debug!(
+            "Raw input type {} buffer {} < needed {}",
+            dw_type,
+            written,
+            needed
+        );
+        return;
+    }
+
+    match dw_type {
         2 => {
             // RIM_TYPEHID — Consumer Controls or vendor-specific HID device.
             // On Xiaomi laptops, Fn+F4/F7/F10 and special keys arrive here via:
