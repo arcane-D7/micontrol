@@ -5,15 +5,27 @@ MiControl uses a fully automated semantic release pipeline. No manual version bu
 ## How It Works
 
 ```
-  Conventional Commits          release-please              release.yml
-  ────────────────────          ──────────────              ──────────
+  Conventional Commits          auto-release.yml             release.yml
+  ────────────────────          ────────────────             ──────────
   feat: add X
   fix: resolve Y
-  push to main ──────────────►  Maintains a "release PR"
-                                with version bump +
-                                CHANGELOG.md
+  push to main ──────────────►  Analyze commits since
+                                last tag
 
-  Merge release PR ──────────►  Creates git tag vX.Y.Z
+                                Determine bump type:
+                                  feat → minor
+                                  fix  → patch
+                                  !    → major
+
+                                Bump version in:
+                                  package.json
+                                  Cargo.toml
+                                  tauri.conf.json
+
+                                Update CHANGELOG.md
+
+                                Commit + tag vX.Y.Z
+                                Push to main
 
                                 tag push ──────────────►  Health checks
                                                           (fmt, clippy, test,
@@ -48,11 +60,12 @@ footer(s) (optional)
 | `perf`     | Patch (0.1.0 → 0.1.1) | `perf: optimize WMI cache refresh` |
 | `feat!`    | Major (0.1.0 → 1.0.0) | `feat!: redesign settings UI`      |
 | `fix!`     | Major (0.1.0 → 1.0.0) | `fix!: change ECRAM protocol`      |
+| `revert`   | Patch (0.1.0 → 0.1.1) | `revert: remove fan curve editor`  |
 | `chore`    | No release            | `chore: update dependencies`       |
 | `docs`     | No release            | `docs: update README`              |
 | `refactor` | No release            | `refactor: simplify IPC layer`     |
 | `test`     | No release            | `test: add battery unit tests`     |
-| `ci`       | No release            | `ci: add release-please workflow`  |
+| `ci`       | No release            | `ci: add auto-release workflow`    |
 | `style`    | No release            | `style: format imports`            |
 | `build`    | No release            | `build: update Cargo.toml deps`    |
 
@@ -74,11 +87,12 @@ BREAKING CHANGE: Settings schema changed, old configs need migration.
 
 ## Workflows
 
-### `release-please.yml`
+### `auto-release.yml`
 
 - **Trigger**: Push to `main`
-- **Action**: Analyzes commits since last release, maintains a "release PR"
-- **When release PR is merged**: Creates git tag `vX.Y.Z`, updates `package.json`, `Cargo.toml`, `tauri.conf.json`, `CHANGELOG.md`
+- **Action**: Analyzes conventional commits since the last tag, determines bump type (patch/minor/major), bumps version, updates CHANGELOG.md, creates and pushes git tag
+- **No PR needed**: Commits directly to main and creates the tag
+- **Can be manually triggered**: Use `workflow_dispatch` with `force=true` to force a patch release even without releasable commits
 
 ### `release.yml`
 

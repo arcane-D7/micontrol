@@ -1,0 +1,242 @@
+name: Auto Release
+
+# Analyzes conventional commits on push to main, automatically bumps
+# the version, updates CHANGELOG.md, creates a git tag, and pushes it.
+# The tag push then triggers release.yml to build + sign + publish.
+#
+# This workflow does NOT create a pull request (which would require
+# org-level "Allow GitHub Actions to create pull requests" permission).
+# Instead, it commits directly to main and creates the tag.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force a release even if no releasable commits found'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  auto-release:
+    runs-on: ubuntu-latest
+    # Skip if the push was made by this workflow itself (avoid infinite loop)
+    if: github.actor != 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for commit analysis
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Analyze commits and determine version bump
+        id: analyze
+        shell: node
+        run: |
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+
+          // Get the latest tag
+          let latestTag = '';
+          try {
+            latestTag = execSync('git describe --tags --abbrev=0', { encoding: 'utf8' }).trim();
+          } catch {
+            console.log('No previous tags found — this is the first release.');
+          }
+
+          // Get commits since the latest tag (or all commits if no tag)
+          const range = latestTag ? `${latestTag}..HEAD` : 'HEAD';
+          let commits;
+          try {
+            commits = execSync(`git log --format="%H%x1f%s%x1f%b%x1e" ${range}`, { encoding: 'utf8' });
+          } catch {
+            console.log('No commits to analyze.');
+            console.log('::set-output name=should_release::false');
+            process.exit(0);
+          }
+
+          // Parse commits
+          const commitEntries = commits.split('\x1e').filter(c => c.trim());
+          const parsed = commitEntries.map(entry => {
+            const [hash, subject, body] = entry.split('\x1f');
+            return { hash: hash.trim(), subject: subject.trim(), body: body.trim() };
+          });
+
+          // Conventional commit regex: type(scope)!: subject
+          const ccRegex = /^(feat|fix|perf|refactor|docs|chore|test|ci|style|build|revert)(\([^)]+\))?(!)?:\s*(.+)$/i;
+          const breakingRegex = /^BREAKING CHANGE:\s*(.+)$/im;
+
+          let hasFeat = false;
+          let hasFix = false;
+          let hasPerf = false;
+          let hasBreaking = false;
+          let hasRevert = false;
+          const changelogEntries = { feat: [], fix: [], perf: [], other: [] };
+
+          for (const commit of parsed) {
+            const match = commit.subject.match(ccRegex);
+            if (!match) {
+              // Non-conventional commit — skip for changelog but don't block
+              continue;
+            }
+
+            const [, type, scope, breaking, subject] = match;
+            const isBreaking = !!breaking || /BREAKING CHANGE:/i.test(commit.body);
+
+            if (isBreaking) hasBreaking = true;
+            if (type === 'feat') hasFeat = true;
+            if (type === 'fix') hasFix = true;
+            if (type === 'perf') hasPerf = true;
+            if (type === 'revert') hasRevert = true;
+
+            // Collect changelog entries
+            const entry = `- ${subject}${scope ? ` (${scope})` : ''}`;
+            if (['feat', 'fix', 'perf'].includes(type)) {
+              changelogEntries[type].push(entry);
+            }
+          }
+
+          // Determine bump type
+          let bumpType = 'none';
+          if (hasBreaking) bumpType = 'major';
+          else if (hasFeat) bumpType = 'minor';
+          else if (hasFix || hasPerf || hasRevert) bumpType = 'patch';
+
+          // Check for force release
+          const forceRelease = '${{ github.event.inputs.force }}' === 'true';
+          if (bumpType === 'none' && !forceRelease) {
+            console.log('No releasable commits found (need feat:, fix:, perf:, or revert:)');
+            console.log('::set-output name=should_release::false');
+            process.exit(0);
+          }
+
+          if (bumpType === 'none' && forceRelease) {
+            bumpType = 'patch';
+          }
+
+          // Read current version
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const currentVersion = pkg.version;
+          const [major, minor, patch] = currentVersion.split('.').map(Number);
+
+          let newVersion;
+          switch (bumpType) {
+            case 'major':
+              newVersion = `${major + 1}.0.0`;
+              break;
+            case 'minor':
+              newVersion = `${major}.${minor + 1}.0`;
+              break;
+            case 'patch':
+              newVersion = `${major}.${minor}.${patch + 1}`;
+              break;
+          }
+
+          console.log(`Bump type: ${bumpType}`);
+          console.log(`Current version: ${currentVersion}`);
+          console.log(`New version: ${newVersion}`);
+
+          // Build changelog section
+          const today = new Date().toISOString().split('T')[0];
+          let changelogSection = `## [${newVersion}] - ${today}\n\n`;
+
+          if (changelogEntries.feat.length > 0) {
+            changelogSection += `### Features\n\n${changelogEntries.feat.join('\n')}\n\n`;
+          }
+          if (changelogEntries.fix.length > 0) {
+            changelogSection += `### Bug Fixes\n\n${changelogEntries.fix.join('\n')}\n\n`;
+          }
+          if (changelogEntries.perf.length > 0) {
+            changelogSection += `### Performance\n\n${changelogEntries.perf.join('\n')}\n\n`;
+          }
+
+          // Write outputs for GitHub Actions
+          const outputs = {
+            should_release: 'true',
+            bump_type: bumpType,
+            current_version: currentVersion,
+            new_version: newVersion,
+            changelog_section: changelogSection,
+          };
+
+          for (const [key, value] of Object.entries(outputs)) {
+            // Use delimiter for multi-line values
+            const delimiter = value.includes('\n') ? 'EOF' : '';
+            console.log(`::set-output name=${key}::${value}`);
+          }
+
+          // Also write to GITHUB_ENV for multi-line values
+          fs.appendFileSync(process.env.GITHUB_ENV, `\nNEW_VERSION=${newVersion}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `\nBUMP_TYPE=${bumpType}\n`);
+
+          // Write changelog section to a temp file
+          fs.writeFileSync('/tmp/changelog_section.md', changelogSection);
+
+      - name: Skip release (no releasable commits)
+        if: steps.analyze.outputs.should_release != 'true'
+        run: |
+          echo "No releasable commits found. Skipping release."
+          echo "To force a release, use workflow_dispatch with force=true."
+
+      - name: Bump version
+        if: steps.analyze.outputs.should_release == 'true'
+        run: |
+          echo "Bumping version to ${{ steps.analyze.outputs.new_version }}"
+          node scripts/sync-version.cjs ${{ steps.analyze.outputs.new_version }}
+
+      - name: Update CHANGELOG.md
+        if: steps.analyze.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          $changelogPath = "CHANGELOG.md"
+          $newSection = Get-Content /tmp/changelog_section.md -Raw
+
+          if (Test-Path $changelogPath) {
+            $content = Get-Content $changelogPath -Raw
+            # Insert new section after the [Unreleased] line
+            $pattern = '(## \[Unreleased\][^\r\n]*)'
+            if ($content -match $pattern) {
+              $content = $content -replace $pattern, "`$1`r`n`r`n${newSection}"
+            } else {
+              # No [Unreleased] section — prepend after header
+              $content = "# Changelog`r`n`r`n${newSection}`r`n" + $content
+            }
+            $content | Out-File -FilePath $changelogPath -Encoding utf8 -NoNewline
+          } else {
+            "# Changelog`r`n`r`n${newSection}" | Out-File -FilePath $changelogPath -Encoding utf8
+          }
+          Write-Host "Updated CHANGELOG.md"
+          Get-Content $changelogPath | Select-Object -First 20
+
+      - name: Commit version bump and create tag
+        if: steps.analyze.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          $newVersion = "${{ steps.analyze.outputs.new_version }}"
+          $tagName = "v$newVersion"
+
+          git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
+          git commit -m "chore(release): $tagName
+
+          Release $tagName — ${{ steps.analyze.outputs.bump_type }} bump"
+          git tag -a $tagName -m "Release $tagName"
+          git push origin main
+          git push origin $tagName
+
+          Write-Host "Created and pushed tag $tagName"
+          Write-Host "This will trigger the release.yml workflow to build and publish."
