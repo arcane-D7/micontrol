@@ -5,6 +5,27 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/arcane-D7/micontrol/compare/v0.1.1...v0.2.0) (2026-07-03)
+
+
+### Features
+
+* implement WMI WMAA hardware access and fix MCPI IPC protocol ([e70e5f8](https://github.com/arcane-D7/micontrol/commit/e70e5f8c1a4ad962c7283283126f3f4a195c21ae))
+* **sprint-31:** implement 8 P1 high-priority fixes and eliminate all stubs ([9a8f9fc](https://github.com/arcane-D7/micontrol/commit/9a8f9fc38a5b9ff47673405b4f23e17a49a30f13))
+* **sprint-32:** implement 7 P2 medium-priority hardware reliability fixes ([8918a9c](https://github.com/arcane-D7/micontrol/commit/8918a9ce97cd33c3829875a539ebb753d3f19c23))
+* **v0.1.2:** custom IoTService.exe, ECRAM pipe client, RE documentation, keyboard tab ([83d0bcf](https://github.com/arcane-D7/micontrol/commit/83d0bcf3310bc170d0f51109734b42ac07301a9a))
+
+
+### Bug Fixes
+
+* elevated helper now finds pending commands without --request-id ([900b6bb](https://github.com/arcane-D7/micontrol/commit/900b6bb69fa4af515371ca1842c9abd5ed96724a))
+* **hotkeys:** fix Raw Input buffer bug and add Copilot key interception ([7b37d77](https://github.com/arcane-D7/micontrol/commit/7b37d77dd382f7cf4e2da75e9df6d58ef54cd13a))
+* **hotkeys:** use Win+P for F8 and elevated bridge for F7 performance mode ([d88cb0d](https://github.com/arcane-D7/micontrol/commit/d88cb0d0998cd7f31641d876c6bbe4ad6f5ee16d))
+* keyring using MockCredential + consent never persisting ([1548105](https://github.com/arcane-D7/micontrol/commit/154810543b00242c65713d26e51577670c5415e5))
+* remove Explorer restart from disable_copilot_key to fix tray ([4feb065](https://github.com/arcane-D7/micontrol/commit/4feb0658c4eac98fd0b21457fb58c696dd0213be))
+* resolve 6 hardware control issues ([92dca3d](https://github.com/arcane-D7/micontrol/commit/92dca3dbc35bf1109adabd1a66bc9f50032ae110))
+* **sprint-30:** resolve 4 P0 critical issues from Audit_Final ([b597d66](https://github.com/arcane-D7/micontrol/commit/b597d667f35b97385900a64845d4c2fda3952837))
+
 ## [Unreleased]
 
 ## [0.1.3] - 2026-07-03
