@@ -1,12 +1,25 @@
 name: Auto Release
 
-# Analyzes conventional commits on push to main, automatically bumps
-# the version, updates CHANGELOG.md, creates a git tag, and pushes it.
-# The tag push then triggers release.yml to build + sign + publish.
+# Fully automated semantic-release pipeline.
+#
+# On every push to main, analyzes conventional commits and determines
+# whether a release is needed (feat → minor, fix/perf/revert → patch,
+# BREAKING CHANGE → major).
+#
+# If a release is needed:
+#   1. Bumps version in package.json, Cargo.toml, tauri.conf.json
+#   2. Updates CHANGELOG.md
+#   3. Commits + tags + pushes to main
+#   4. Runs health checks (fmt, clippy, test, lint, tsc, build)
+#   5. Builds the Tauri app with signing
+#   6. Creates a GitHub Release with artifacts + latest.json
 #
 # This workflow does NOT create a pull request (which would require
 # org-level "Allow GitHub Actions to create pull requests" permission).
 # Instead, it commits directly to main and creates the tag.
+#
+# NOTE: We cannot use a separate release.yml triggered by tag push because
+# GitHub Actions does not trigger workflows on pushes made with GITHUB_TOKEN.
 
 on:
   push:
@@ -21,11 +34,20 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  auto-release:
+  # ─── Job 1: Analyze commits & create tag ───────────────────────────
+  analyze:
+    name: Analyze & Tag
     runs-on: ubuntu-latest
-    # Skip if the push was made by this workflow itself (avoid infinite loop)
     if: github.actor != 'github-actions[bot]' || github.event_name == 'workflow_dispatch'
+    outputs:
+      should_release: ${{ steps.analyze.outputs.should_release }}
+      new_version: ${{ steps.analyze.outputs.new_version }}
+      bump_type: ${{ steps.analyze.outputs.bump_type }}
+      tag_name: ${{ steps.analyze.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,7 +64,6 @@ jobs:
         run: |
           const { execSync } = require('child_process');
           const fs = require('fs');
-          const path = require('path');
 
           // Get the latest tag
           let latestTag = '';
@@ -59,7 +80,7 @@ jobs:
             commits = execSync(`git log --format="%H%x1f%s%x1f%b%x1e" ${range}`, { encoding: 'utf8' });
           } catch {
             console.log('No commits to analyze.');
-            console.log('::set-output name=should_release::false');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_release=false\n');
             process.exit(0);
           }
 
@@ -72,7 +93,6 @@ jobs:
 
           // Conventional commit regex: type(scope)!: subject
           const ccRegex = /^(feat|fix|perf|refactor|docs|chore|test|ci|style|build|revert)(\([^)]+\))?(!)?:\s*(.+)$/i;
-          const breakingRegex = /^BREAKING CHANGE:\s*(.+)$/im;
 
           let hasFeat = false;
           let hasFix = false;
@@ -83,10 +103,7 @@ jobs:
 
           for (const commit of parsed) {
             const match = commit.subject.match(ccRegex);
-            if (!match) {
-              // Non-conventional commit — skip for changelog but don't block
-              continue;
-            }
+            if (!match) continue;
 
             const [, type, scope, breaking, subject] = match;
             const isBreaking = !!breaking || /BREAKING CHANGE:/i.test(commit.body);
@@ -114,7 +131,7 @@ jobs:
           const forceRelease = '${{ github.event.inputs.force }}' === 'true';
           if (bumpType === 'none' && !forceRelease) {
             console.log('No releasable commits found (need feat:, fix:, perf:, or revert:)');
-            console.log('::set-output name=should_release::false');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_release=false\n');
             process.exit(0);
           }
 
@@ -140,9 +157,11 @@ jobs:
               break;
           }
 
+          const tagName = `v${newVersion}`;
           console.log(`Bump type: ${bumpType}`);
           console.log(`Current version: ${currentVersion}`);
           console.log(`New version: ${newVersion}`);
+          console.log(`Tag: ${tagName}`);
 
           // Build changelog section
           const today = new Date().toISOString().split('T')[0];
@@ -158,26 +177,20 @@ jobs:
             changelogSection += `### Performance\n\n${changelogEntries.perf.join('\n')}\n\n`;
           }
 
-          // Write outputs for GitHub Actions
+          // Write outputs to GITHUB_OUTPUT (replaces deprecated ::set-output)
           const outputs = {
             should_release: 'true',
             bump_type: bumpType,
             current_version: currentVersion,
             new_version: newVersion,
-            changelog_section: changelogSection,
+            tag_name: tagName,
           };
 
           for (const [key, value] of Object.entries(outputs)) {
-            // Use delimiter for multi-line values
-            const delimiter = value.includes('\n') ? 'EOF' : '';
-            console.log(`::set-output name=${key}::${value}`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
           }
 
-          // Also write to GITHUB_ENV for multi-line values
-          fs.appendFileSync(process.env.GITHUB_ENV, `\nNEW_VERSION=${newVersion}\n`);
-          fs.appendFileSync(process.env.GITHUB_ENV, `\nBUMP_TYPE=${bumpType}\n`);
-
-          // Write changelog section to a temp file
+          // Write changelog section to a temp file for the next step
           fs.writeFileSync('/tmp/changelog_section.md', changelogSection);
 
       - name: Skip release (no releasable commits)
@@ -194,45 +207,257 @@ jobs:
 
       - name: Update CHANGELOG.md
         if: steps.analyze.outputs.should_release == 'true'
-        shell: pwsh
+        shell: node {0}
         run: |
-          $changelogPath = "CHANGELOG.md"
-          $newSection = Get-Content /tmp/changelog_section.md -Raw
+          const fs = require('fs');
+          const changelogPath = 'CHANGELOG.md';
+          const newSection = fs.readFileSync('/tmp/changelog_section.md', 'utf8');
 
-          if (Test-Path $changelogPath) {
-            $content = Get-Content $changelogPath -Raw
-            # Insert new section after the [Unreleased] line
-            $pattern = '(## \[Unreleased\][^\r\n]*)'
-            if ($content -match $pattern) {
-              $content = $content -replace $pattern, "`$1`r`n`r`n${newSection}"
+          let content = '';
+          if (fs.existsSync(changelogPath)) {
+            content = fs.readFileSync(changelogPath, 'utf8');
+            // Insert new section after the [Unreleased] line
+            const pattern = /(## \[Unreleased\][^\r\n]*)/;
+            if (pattern.test(content)) {
+              content = content.replace(pattern, `$1\n\n${newSection}`);
             } else {
-              # No [Unreleased] section — prepend after header
-              $content = "# Changelog`r`n`r`n${newSection}`r`n" + $content
+              // No [Unreleased] section — prepend after header
+              content = `# Changelog\n\n${newSection}\n${content}`;
             }
-            $content | Out-File -FilePath $changelogPath -Encoding utf8 -NoNewline
           } else {
-            "# Changelog`r`n`r`n${newSection}" | Out-File -FilePath $changelogPath -Encoding utf8
+            content = `# Changelog\n\n${newSection}`;
           }
-          Write-Host "Updated CHANGELOG.md"
-          Get-Content $changelogPath | Select-Object -First 20
+          fs.writeFileSync(changelogPath, content, 'utf8');
+          console.log('Updated CHANGELOG.md');
+          console.log(content.split('\n').slice(0, 20).join('\n'));
 
       - name: Commit version bump and create tag
         if: steps.analyze.outputs.should_release == 'true'
-        shell: pwsh
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          $newVersion = "${{ steps.analyze.outputs.new_version }}"
-          $tagName = "v$newVersion"
+          new_version="${{ steps.analyze.outputs.new_version }}"
+          tag_name="${{ steps.analyze.outputs.tag_name }}"
+          bump_type="${{ steps.analyze.outputs.bump_type }}"
 
           git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
-          git commit -m "chore(release): $tagName
+          git commit -m "chore(release): ${tag_name}
 
-          Release $tagName — ${{ steps.analyze.outputs.bump_type }} bump"
-          git tag -a $tagName -m "Release $tagName"
+          Release ${tag_name} — ${bump_type} bump"
+          git tag -a "$tag_name" -m "Release $tag_name"
           git push origin main
-          git push origin $tagName
+          git push origin "$tag_name"
 
-          Write-Host "Created and pushed tag $tagName"
-          Write-Host "This will trigger the release.yml workflow to build and publish."
+          echo "Created and pushed tag $tag_name"
+
+  # ─── Job 2: Health checks ──────────────────────────────────────────
+  health-check:
+    name: Pre-Release Health Checks
+    runs-on: windows-latest
+    needs: analyze
+    if: needs.analyze.outputs.should_release == 'true'
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyze.outputs.tag_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Version consistency check
+        run: npm run version:check
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Rust formatting check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Rust type check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+        env:
+          RUST_TEST_THREADS: "1"
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier check
+        run: npm run format:check
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: i18n completeness check
+        run: node scripts/check-i18n.mjs
+
+  # ─── Job 3: Build & Publish ────────────────────────────────────────
+  release:
+    name: Build & Publish Release (Windows)
+    runs-on: windows-latest
+    needs: [analyze, health-check]
+    if: needs.analyze.outputs.should_release == 'true'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyze.outputs.tag_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Verify signing key is provided
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: pwsh
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Host "::error::TAURI_SIGNING_PRIVATE_KEY secret is required for releases."
+            exit 1
+          }
+          Write-Host "Signing key is present."
+
+      - name: Build Tauri app
+        run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Sign installer with Authenticode (optional)
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Host "::notice::WINDOWS_CERTIFICATE not set — skipping Authenticode signing."
+            exit 0
+          }
+
+          [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE) | Set-Content -Path cert.pfx -AsByteStream
+
+          $exePath = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter "*.exe" -Recurse | Select-Object -First 1
+
+          if ($exePath) {
+            Write-Host "Signing $($exePath.FullName)..."
+            signtool sign /f cert.pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" `
+              /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+              "$($exePath.FullName)"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Code signing failed for $($exePath.FullName)"
+              Remove-Item -Path cert.pfx -Force -ErrorAction SilentlyContinue
+              exit 1
+            }
+            Write-Host "Code signing successful."
+          } else {
+            Write-Host "::warning::No EXE installer found to sign"
+          }
+
+          Remove-Item -Path cert.pfx -Force -ErrorAction SilentlyContinue
+
+      - name: Generate latest.json updater manifest
+        shell: pwsh
+        run: |
+          $version = "${{ needs.analyze.outputs.new_version }}"
+          $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+          $nsis = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter "*.exe" -Recurse | Select-Object -First 1
+
+          $installerName = if ($nsis) { $nsis.Name } else { "micontrol_${version}_x64-setup.exe" }
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/latest/download/$installerName"
+
+          $signature = ""
+          if ($nsis) {
+            $sigFile = "$($nsis.FullName).sig"
+            if (Test-Path $sigFile) { $signature = Get-Content $sigFile -Raw }
+          }
+
+          $manifest = @{
+            version = $version
+            notes = "See full changelog at https://github.com/${{ github.repository }}/releases"
+            pub_date = $pubDate
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $signature
+                url = $downloadUrl
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+
+          $manifest | Out-File -FilePath latest.json -Encoding utf8
+          Write-Host "Generated latest.json:"
+          Get-Content latest.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-release-artifacts
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+            latest.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.analyze.outputs.tag_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(needs.analyze.outputs.tag_name, '-') }}
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+            latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
