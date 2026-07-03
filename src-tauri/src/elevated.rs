@@ -872,10 +872,12 @@ fn dispatch(cmd: ElevCmd) -> Value {
                         }}
                     }}
 
-                    # 5. Restart Explorer to apply changes immediately
-                    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-                    Start-Process explorer.exe
-                    $results += "Explorer restarted"
+                    # NOTE: We intentionally do NOT restart Explorer here.
+                    # Restarting Explorer on every MiControl startup breaks the
+                    # system tray (including the "show more" overflow button).
+                    # The registry changes will take effect on next reboot/login,
+                    # which is fine because the Scancode Map also requires a reboot.
+                    $results += "Explorer restart skipped (requires reboot)"
 
                     $results -join "`n"
                 "#
