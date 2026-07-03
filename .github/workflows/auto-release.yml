@@ -38,7 +38,7 @@ jobs:
 
       - name: Analyze commits and determine version bump
         id: analyze
-        shell: node
+        shell: node {0}
         run: |
           const { execSync } = require('child_process');
           const fs = require('fs');
