@@ -9,9 +9,90 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  health-check:
+    name: Pre-Release Health Checks
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync versions
+        run: npm run version:sync
+
+      - name: Verify git tag matches package.json version
+        shell: pwsh
+        run: |
+          $pkgVersion = node -p "require('./package.json').version"
+          $tagName = "${{ github.ref_name }}"
+          $tagVersion = $tagName -replace '^v', ''
+          if ($pkgVersion -ne $tagVersion) {
+            Write-Host "::error::Version mismatch: package.json=$pkgVersion, git tag=$tagVersion"
+            exit 1
+          }
+          Write-Host "Version verified: $pkgVersion"
+
+      - name: Version consistency check
+        run: npm run version:check
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Rust formatting check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Rust type check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+        env:
+          RUST_TEST_THREADS: "1"
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier check
+        run: npm run format:check
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: i18n completeness check
+        run: node scripts/check-i18n.mjs
+
   release:
     name: Build & Publish Release (Windows)
     runs-on: windows-latest
+    needs: health-check
     permissions:
       contents: write
 

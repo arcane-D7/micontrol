@@ -13,22 +13,11 @@ name = "micontrol"
 path = "src/main.rs"
 
 [[bin]]
-name = "wmaa_scan"
-path = "src/bin/wmaa_scan.rs"
-required-features = ["test-bin"]
-
-[[bin]]
-name = "wmaa_scan_focused"
-path = "src/bin/wmaa_scan_focused.rs"
-required-features = ["test-bin"]
-
-[[bin]]
 name = "ecram_service"
 path = "src/bin/ecram_service.rs"
 
 [features]
 default = []
-test-bin = []
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }

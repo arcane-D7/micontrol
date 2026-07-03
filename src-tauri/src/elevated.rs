@@ -964,15 +964,12 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 // Try calling MiInterface with GetFwVersion command (cmd_id=0x0A)
                 // From Ghidra decompilation: InData = [0x55, cmd_id, 0x01, 0x01, 0x55, cmd_id, 0x01, 0x02]
                 // For GetFwVersion: cmd_id = 0x0A
-                let cmd_id: u8 = match cmd
+                let cmd_id: u8 = cmd
                     .args
                     .get("cmd_id")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as u8)
-                {
-                    Some(id) => id,
-                    None => 0x0A, // Default: GetFwVersion
-                };
+                    .unwrap_or(0x0A); // Default: GetFwVersion
 
                 let in_data: Vec<u8> = vec![0x55, cmd_id, 0x01, 0x01, 0x55, cmd_id, 0x01, 0x02];
                 result["cmd_id"] = serde_json::json!(format!("0x{:02x}", cmd_id));
@@ -1003,6 +1000,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
                             return make_ok(result);
                         }
                     };
+                    let _ = instance_obj; // validated GetObject succeeded
                     result["got_instance"] = serde_json::json!(true);
 
                     // Get the class definition for method parameters

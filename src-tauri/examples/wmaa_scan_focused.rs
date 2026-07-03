@@ -6,7 +6,7 @@
 //! - All groups with high nibble patterns (0x0n00, 0x1n00)
 //!
 //! Usage (must run as admin):
-//!   cargo run --bin wmaa_scan_focused --features test-bin
+//!   cargo run --example wmaa_scan_focused
 
 #![cfg(windows)]
 

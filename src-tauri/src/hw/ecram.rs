@@ -33,7 +33,8 @@
 //!   - Most features work via WMI (MICommonInterface) — no IoTDriver needed
 //!   - ECRAM sensor data available via custom IoTService.exe pipe
 //!   - ERAM data (ADPW, battery details) NOT available through existing driver
-//! ═══════════════════════════════════════════════════════════════════════════
+//!
+//! ---------------------------------------------------------------------------
 
 /// ECRAM (Embedded Controller RAM) reader via IoTDriver.sys
 ///

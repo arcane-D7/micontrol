@@ -1,6 +1,96 @@
 # Release Process
 
-This document describes how to cut a release of MiControl, including build, signing, and publication.
+MiControl uses a fully automated semantic release pipeline. No manual version bumping, changelog editing, or tag creation is needed.
+
+## How It Works
+
+```
+  Conventional Commits          release-please              release.yml
+  ────────────────────          ──────────────              ──────────
+  feat: add X
+  fix: resolve Y
+  push to main ──────────────►  Maintains a "release PR"
+                                with version bump +
+                                CHANGELOG.md
+
+  Merge release PR ──────────►  Creates git tag vX.Y.Z
+
+                                tag push ──────────────►  Health checks
+                                                          (fmt, clippy, test,
+                                                           lint, tsc, build)
+
+                                                          Build + sign Tauri
+
+                                                          Generate latest.json
+
+                                                          Create GitHub Release
+                                                          with installer artifacts
+```
+
+## Conventional Commits
+
+All commits to `main` must follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+type(scope): subject
+
+body (optional)
+
+footer(s) (optional)
+```
+
+### Commit Types
+
+| Type       | Release Trigger       | Example                            |
+| ---------- | --------------------- | ---------------------------------- |
+| `feat`     | Minor (0.1.0 → 0.2.0) | `feat: add fan curve editor`       |
+| `fix`      | Patch (0.1.0 → 0.1.1) | `fix: resolve tray icon crash`     |
+| `perf`     | Patch (0.1.0 → 0.1.1) | `perf: optimize WMI cache refresh` |
+| `feat!`    | Major (0.1.0 → 1.0.0) | `feat!: redesign settings UI`      |
+| `fix!`     | Major (0.1.0 → 1.0.0) | `fix!: change ECRAM protocol`      |
+| `chore`    | No release            | `chore: update dependencies`       |
+| `docs`     | No release            | `docs: update README`              |
+| `refactor` | No release            | `refactor: simplify IPC layer`     |
+| `test`     | No release            | `test: add battery unit tests`     |
+| `ci`       | No release            | `ci: add release-please workflow`  |
+| `style`    | No release            | `style: format imports`            |
+| `build`    | No release            | `build: update Cargo.toml deps`    |
+
+### Breaking Changes
+
+Add `!` after the type (and optional scope):
+
+```
+feat(api)!: change IPC protocol format
+```
+
+Or use the `BREAKING CHANGE:` footer:
+
+```
+feat: redesign settings UI
+
+BREAKING CHANGE: Settings schema changed, old configs need migration.
+```
+
+## Workflows
+
+### `release-please.yml`
+
+- **Trigger**: Push to `main`
+- **Action**: Analyzes commits since last release, maintains a "release PR"
+- **When release PR is merged**: Creates git tag `vX.Y.Z`, updates `package.json`, `Cargo.toml`, `tauri.conf.json`, `CHANGELOG.md`
+
+### `release.yml`
+
+- **Trigger**: Tag push `v*.*.*`
+- **Job 1 — Health Checks**: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`, `tsc --noEmit`, `eslint`, `prettier --check`, `npm run build`, i18n check
+- **Job 2 — Build & Publish**: Builds Tauri app with signing, generates `latest.json`, creates GitHub Release with installer artifacts
+- **Job 2 depends on Job 1**: Release only proceeds if all health checks pass
+
+### `ci.yml`
+
+- **Trigger**: PR to `main`, push to `main`
+- **Purpose**: Continuous integration checks on every PR/push
 
 ## Prerequisites
 
@@ -40,37 +130,14 @@ If these secrets are not set, the release will succeed but the installer will be
 
 ## Cutting a Release
 
-The release process is fully automated. Run a single command locally:
+The release process is **fully automated** via [release-please](https://github.com/googleapis/release-please):
 
-```bash
-# Bump patch version: 1.0.0 → 1.0.1
-pnpm release patch
+1. **Commit changes** using Conventional Commits format (e.g., `feat: add X`, `fix: resolve Y`)
+2. **Push to `main`** — release-please automatically maintains a "release PR" with version bump + changelog
+3. **Merge the release PR** — release-please creates the git tag `vX.Y.Z`
+4. **Tag push triggers `release.yml`** which runs health checks, builds, signs, and publishes
 
-# Bump minor version: 1.0.0 → 1.1.0
-pnpm release minor
-
-# Bump major version: 1.0.0 → 2.0.0
-pnpm release major
-
-# Or specify an explicit version
-pnpm release 1.2.3
-```
-
-The script will:
-
-1. Verify the working tree is clean and you're on `main` (in sync with remote)
-2. Bump the version in `package.json`, `Cargo.toml`, and `tauri.conf.json`
-3. Commit the version bump as `chore(release): vX.Y.Z`
-4. Create an annotated git tag `vX.Y.Z`
-5. Push the commit and tag to `origin`
-
-The tag push triggers the GitHub Actions release workflow which:
-
-- Builds the Tauri app for Windows (NSIS installer)
-- Signs the update bundle with the Tauri signing key
-- Signs the installer with Authenticode (if cert configured)
-- Generates `latest.json` for the auto-updater
-- Creates a GitHub Release with the installer `.exe` and `latest.json` attached
+No manual version bumping, changelog editing, or tag creation is needed.
 
 ### Verify the release
 
@@ -78,6 +145,26 @@ The tag push triggers the GitHub Actions release workflow which:
 - Check the release: https://github.com/arcane-D7/micontrol/releases
 - Download the installer and verify the signature
 - Test the updater by installing the previous version and updating
+
+### Emergency Manual Release
+
+If the automated pipeline is broken, you can manually trigger a release:
+
+```bash
+# Bump patch version: 1.0.0 → 1.0.1
+npm run release patch
+
+# Bump minor version: 1.0.0 → 1.1.0
+npm run release minor
+
+# Bump major version: 1.0.0 → 2.0.0
+npm run release major
+
+# Or specify an explicit version
+npm run release 1.2.3
+```
+
+This bumps version, syncs configs, commits, tags, and pushes — triggering `release.yml`.
 
 ## Key Rotation
 

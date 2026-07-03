@@ -28,7 +28,6 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
     {
         use crate::hw::wmi_cache;
         use crate::util::wmi_extract;
-        use anyhow::Context;
         use std::collections::HashMap;
 
         let results: Vec<HashMap<String, wmi::Variant>> = wmi_cache::with_wmi(|wmi| {

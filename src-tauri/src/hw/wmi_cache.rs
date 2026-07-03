@@ -194,7 +194,7 @@ fn is_connection_error(e: &anyhow::Error) -> bool {
     false
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 /// Invalidate the cached connections on the current thread.
 ///
 /// The next call to [`with_cimv2`] or [`with_wmi`] will recreate them.

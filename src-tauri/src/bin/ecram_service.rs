@@ -365,7 +365,7 @@ mod pipe_server {
                     break;
                 }
                 unsafe {
-                    CancelIoEx(handle, Some(&mut overlapped)).ok();
+                    CancelIoEx(handle, Some(&overlapped)).ok();
                 }
                 unsafe {
                     CloseHandle(handle).ok();
@@ -500,7 +500,7 @@ mod pipe_server {
 
     fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
         let s = s.trim();
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err("hex data must have even number of digits".into());
         }
         (0..s.len())
@@ -771,7 +771,7 @@ fn cli_mode(args: &[String]) -> i32 {
             }
             let addr = u64::from_str_radix(args[1].trim_start_matches("0x"), 16).unwrap_or(0);
             let hex_data = &args[2];
-            if hex_data.len() % 2 != 0 {
+            if !hex_data.len().is_multiple_of(2) {
                 eprintln!("hex_data must have even number of digits");
                 return 1;
             }

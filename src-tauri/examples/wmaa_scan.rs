@@ -7,7 +7,7 @@
 //! current/voltage, and Smart Mode.
 //!
 //! Usage (must run as admin):
-//!   cargo run --bin wmaa_scan --features test-bin
+//!   cargo run --example wmaa_scan
 
 #![cfg(windows)]
 

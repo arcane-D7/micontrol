@@ -1,12 +1,32 @@
 #!/usr/bin/env node
 /**
- * Release Script
+ * Release Script (legacy manual release)
  *
- * Bumps version, syncs all config files, commits, tags, and pushes.
- * The GitHub Actions release.yml workflow triggers on the tag push
- * and builds + signs + publishes the installer automatically.
+ * ⚠️  This script is kept for emergency manual releases only.
  *
- * Usage:
+ * The normal release flow is now fully automated:
+ *
+ *   1. You commit changes using Conventional Commits:
+ *        feat: ...     → triggers a minor release
+ *        fix: ...      → triggers a patch release
+ *        feat!: ...    → triggers a major release (breaking)
+ *        chore: ...    → no release
+ *
+ *   2. Push to main.
+ *
+ *   3. release-please.yml automatically maintains a "release PR" with:
+ *        - Version bump in package.json, Cargo.toml, tauri.conf.json
+ *        - Updated CHANGELOG.md
+ *
+ *   4. Merge the release PR → release-please creates the git tag (vX.Y.Z).
+ *
+ *   5. The tag push triggers release.yml which:
+ *        - Runs health checks (fmt, clippy, test, lint, tsc, build)
+ *        - Builds the Tauri app with signing
+ *        - Generates latest.json
+ *        - Creates the GitHub Release with artifacts
+ *
+ * To trigger an emergency manual release, use:
  *   node scripts/release.cjs patch    # 1.0.0 → 1.0.1
  *   node scripts/release.cjs minor    # 1.0.0 → 1.1.0
  *   node scripts/release.cjs major    # 1.0.0 → 2.0.0
