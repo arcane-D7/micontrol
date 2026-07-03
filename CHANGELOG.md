@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-03
+
+### Fixed
+
+- **Raw Input buffer bug** — `handle_keyboard_raw_input()` was comparing the buffer size against `sizeof(RAWINPUT)` (48 bytes) instead of `sizeof(RAWINPUTHEADER)` (24 bytes), causing ALL keyboard raw input events (40 bytes) to be silently dropped. Fixed with proper header-first bounds checking.
+- **Copilot key interception** — Added `disable_copilot_key` elevated command that sets registry policies (`TaskbarMn=0`, `TurnOffWindowsCopilot=1`, `CopilotKey=0`) to prevent Windows Shell from consuming the Copilot key (VK 0xC3).
+- **Scancode Map for Copilot key** — Added `set_scancode_map` elevated command that writes a Scancode Map registry entry to remap the Copilot key's scan code (0xE06E) to Right Ctrl (0xE01D) at the keyboard class driver level. Requires reboot to take effect.
+- **F7 performance mode hotkey** — Switched to elevated bridge for setting performance mode when direct HKLM access fails (UAC-protected `HKLM\SOFTWARE\MI\PerformanceMode` key).
+- **F8 display mode hotkey** — Changed from direct hardware call to Win+P shortcut simulation for reliability.
+- **Explorer restart breaking tray** — Removed the `Stop-Process -Name explorer` from `disable_copilot_key` that was restarting Explorer.exe on every MiControl startup, which destroyed system tray icons and broke the "show more" overflow button.
+- **UI ERR_CONNECTION_REFUSED** — Ensured release binary is built with `npm run tauri build` (which embeds frontend assets) instead of `cargo build --release` (which does not embed frontend assets and falls back to dev server URL `localhost:1420`).
+
 ### Added
 
 - **Custom IoTService.exe replacement binary** (`src-tauri/src/bin/ecram_service.rs`) — Rust binary that proxies ECRAM read/write IOCTLs to IoTDriver.sys via named pipe IPC (`\\.\pipe\ecram_service`, JSON protocol). Passes driver security check by being named `IoTService.exe` and placed in the DriverStore directory.
@@ -86,6 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Driver management
 - Multi-language support (en, pt, es, fr)
 
-[Unreleased]: https://github.com/arcane-D7/micontrol/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/arcane-D7/micontrol/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.3
 [1.0.0]: https://github.com/arcane-D7/micontrol/releases/tag/v1.0.0
 [0.1.0]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.0
