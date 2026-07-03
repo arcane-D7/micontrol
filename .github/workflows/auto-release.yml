@@ -177,6 +177,17 @@ jobs:
             changelogSection += `### Performance\n\n${changelogEntries.perf.join('\n')}\n\n`;
           }
 
+          // Check if the tag already exists (e.g. from a previous partial run)
+          try {
+            execSync(`git rev-parse "${tagName}"`, { encoding: 'utf8' });
+            console.log(`Tag ${tagName} already exists — skipping release.`);
+            console.log('The version bump was already applied by a previous run.');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_release=false\n');
+            process.exit(0);
+          } catch {
+            // Tag doesn't exist — proceed with release
+          }
+
           // Write outputs to GITHUB_OUTPUT (replaces deprecated ::set-output)
           const outputs = {
             should_release: 'true',
