@@ -9,17 +9,15 @@ name: Auto Release
 # If a release is needed:
 #   1. Bumps version in package.json, Cargo.toml, tauri.conf.json
 #   2. Updates CHANGELOG.md
-#   3. Commits + tags + pushes to main
-#   4. Runs health checks (fmt, clippy, test, lint, tsc, build)
-#   5. Builds the Tauri app with signing
-#   6. Creates a GitHub Release with artifacts + latest.json
+#   3. Creates a version-bump commit on a detached HEAD
+#   4. Tags that commit (tag push only — no main push, avoids branch protection)
+#   5. Runs health checks (fmt, clippy, test, lint, tsc, build)
+#   6. Builds the Tauri app with signing
+#   7. Creates a GitHub Release with artifacts + latest.json
 #
-# This workflow does NOT create a pull request (which would require
-# org-level "Allow GitHub Actions to create pull requests" permission).
-# Instead, it commits directly to main and creates the tag.
-#
-# NOTE: We cannot use a separate release.yml triggered by tag push because
-# GitHub Actions does not trigger workflows on pushes made with GITHUB_TOKEN.
+# NOTE: We cannot push to main (branch protection) and we cannot trigger
+# a separate release.yml workflow (GITHUB_TOKEN doesn't trigger workflows).
+# So everything is done in this single workflow.
 
 on:
   push:
@@ -139,9 +137,15 @@ jobs:
             bumpType = 'patch';
           }
 
-          // Read current version
-          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          const currentVersion = pkg.version;
+          // Read current version from the latest tag (not package.json,
+          // because we don't push the version bump to main)
+          let currentVersion;
+          if (latestTag) {
+            currentVersion = latestTag.replace(/^v/, '');
+          } else {
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            currentVersion = pkg.version;
+          }
           const [major, minor, patch] = currentVersion.split('.').map(Number);
 
           let newVersion;
@@ -163,6 +167,16 @@ jobs:
           console.log(`New version: ${newVersion}`);
           console.log(`Tag: ${tagName}`);
 
+          // Check if the tag already exists
+          try {
+            execSync(`git rev-parse "${tagName}"`, { encoding: 'utf8' });
+            console.log(`Tag ${tagName} already exists — skipping release.`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_release=false\n');
+            process.exit(0);
+          } catch {
+            // Tag doesn't exist — proceed
+          }
+
           // Build changelog section
           const today = new Date().toISOString().split('T')[0];
           let changelogSection = `## [${newVersion}] - ${today}\n\n`;
@@ -177,18 +191,7 @@ jobs:
             changelogSection += `### Performance\n\n${changelogEntries.perf.join('\n')}\n\n`;
           }
 
-          // Check if the tag already exists (e.g. from a previous partial run)
-          try {
-            execSync(`git rev-parse "${tagName}"`, { encoding: 'utf8' });
-            console.log(`Tag ${tagName} already exists — skipping release.`);
-            console.log('The version bump was already applied by a previous run.');
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'should_release=false\n');
-            process.exit(0);
-          } catch {
-            // Tag doesn't exist — proceed with release
-          }
-
-          // Write outputs to GITHUB_OUTPUT (replaces deprecated ::set-output)
+          // Write outputs to GITHUB_OUTPUT
           const outputs = {
             should_release: 'true',
             bump_type: bumpType,
@@ -201,7 +204,7 @@ jobs:
             fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
           }
 
-          // Write changelog section to a temp file for the next step
+          // Write changelog section to a temp file
           fs.writeFileSync('/tmp/changelog_section.md', changelogSection);
 
       - name: Skip release (no releasable commits)
@@ -232,7 +235,6 @@ jobs:
             if (pattern.test(content)) {
               content = content.replace(pattern, `$1\n\n${newSection}`);
             } else {
-              // No [Unreleased] section — prepend after header
               content = `# Changelog\n\n${newSection}\n${content}`;
             }
           } else {
@@ -242,26 +244,30 @@ jobs:
           console.log('Updated CHANGELOG.md');
           console.log(content.split('\n').slice(0, 20).join('\n'));
 
-      - name: Commit version bump and create tag
+      - name: Create version-bump commit and tag (no main push)
         if: steps.analyze.outputs.should_release == 'true'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          new_version="${{ steps.analyze.outputs.new_version }}"
           tag_name="${{ steps.analyze.outputs.tag_name }}"
           bump_type="${{ steps.analyze.outputs.bump_type }}"
 
+          # Create the version-bump commit on the current HEAD (detached)
           git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
           git commit -m "chore(release): ${tag_name}
 
           Release ${tag_name} — ${bump_type} bump"
+
+          # Tag the commit
           git tag -a "$tag_name" -m "Release $tag_name"
-          git push origin main
+
+          # Push ONLY the tag (not main — branch protection blocks it)
           git push origin "$tag_name"
 
           echo "Created and pushed tag $tag_name"
+          echo "Health-check and release jobs will checkout this tag."
 
   # ─── Job 2: Health checks ──────────────────────────────────────────
   health-check:
