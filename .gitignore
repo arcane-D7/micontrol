@@ -4,6 +4,10 @@ node_modules/
 # Build outputs
 dist/
 dist-ssr/
+dist-landing/
+
+# Reference assets (downloaded images for 3D model generation)
+assets-reference/
 
 # Rust / Tauri build
 src-tauri/target/

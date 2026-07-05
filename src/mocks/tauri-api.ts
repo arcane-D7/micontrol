@@ -329,8 +329,276 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       await new Promise((r) => setTimeout(r, 800));
       return 'Driver installed successfully (mock)' as T;
 
+    // ── Credential store (secrets) ────────────────────────────────────────
+    case 'get_secret': {
+      const key = args?.key as string;
+      // Return 'granted' for telemetry consent so the consent dialog doesn't appear
+      if (key === 'telemetry_consent') return 'granted' as T;
+      return null as T;
+    }
+
+    case 'set_secret':
+      return undefined as T;
+
+    case 'delete_secret':
+      return undefined as T;
+
     // ── Tray ───────────────────────────────────────────────────────────────
     case 'open_main_window':
+      return undefined as T;
+
+    // ── AI analysis (mock) ─────────────────────────────────────────────────
+    case 'analyze_system':
+      return 'Mock analysis: System running optimally.' as T;
+
+    case 'test_connection':
+      return 'ok' as T;
+
+    // ── Audio ─────────────────────────────────────────────────────────────
+    case 'get_audio_volume':
+      return { volume: 65, muted: false } as T;
+
+    case 'set_audio_volume':
+      return undefined as T;
+
+    case 'set_audio_mute':
+      return undefined as T;
+
+    // ── Thermal ────────────────────────────────────────────────────────────
+    case 'get_thermal_zones':
+      return [{ name: 'THRM0', temperature_celsius: 45.2, critical_temp_celsius: 105 }] as T;
+
+    case 'get_primary_thermal_zone':
+      return { name: 'THRM0', temperature_celsius: 45.2, critical_temp_celsius: 105 } as T;
+
+    // ── EC / WMI (mock) ────────────────────────────────────────────────────
+    case 'is_elevated':
+      return false as T;
+
+    case 'get_ecram_map':
+      return {} as T;
+
+    case 'get_iot_device_info':
+      return { device_name: 'Mock IoT Device', is_connected: true } as T;
+
+    case 'get_iot_wifi_list':
+      return { networks: [], connected_ssid: 'MockWiFi' } as T;
+
+    // ── AI usage stats ──────────────────────────────────────────────────────
+    case 'get_ai_usage':
+      return {
+        total_requests: 42,
+        total_input_tokens: 128_500,
+        total_output_tokens: 15_200,
+        estimated_cost_usd: 0.23,
+      } as T;
+
+    case 'reset_ai_usage':
+      return undefined as T;
+
+    case 'read_ai_perf_logs':
+      return [] as T;
+
+    case 'write_ai_perf_log':
+      return undefined as T;
+
+    case 'open_ai_logs_dir':
+      return undefined as T;
+
+    // ── Audio devices ───────────────────────────────────────────────────────
+    case 'get_audio_devices':
+      return {
+        playback: [
+          {
+            name: 'Speakers (Realtek Audio)',
+            id: 'dev0',
+            direction: 'playback',
+            is_default: true,
+            volume: 65,
+            muted: false,
+          },
+          {
+            name: 'Headphones (Bluetooth)',
+            id: 'dev1',
+            direction: 'playback',
+            is_default: false,
+            volume: 50,
+            muted: false,
+          },
+        ],
+        capture: [
+          {
+            name: 'Microphone (Realtek Audio)',
+            id: 'dev2',
+            direction: 'capture',
+            is_default: true,
+            volume: 80,
+            muted: false,
+          },
+        ],
+      } as T;
+
+    // ── Screen cast ──────────────────────────────────────────────────────────
+    case 'get_cast_devices':
+      return [
+        { name: 'Living Room TV', id: 'cast-0', device_type: 'display' },
+        { name: 'Office Monitor', id: 'cast-1', device_type: 'display' },
+      ] as T;
+
+    case 'start_casting':
+      return { success: true, message: 'Casting started (mock)' } as T;
+
+    case 'stop_casting':
+      return { success: true, message: 'Casting stopped (mock)' } as T;
+
+    // ── Data management ──────────────────────────────────────────────────────
+    case 'export_user_data':
+      return 'C:\\Users\\mock\\miControl_export.zip' as T;
+
+    case 'delete_all_user_data':
+      return undefined as T;
+
+    // ── File / system helpers ───────────────────────────────────────────────
+    case 'reveal_in_explorer':
+      return undefined as T;
+
+    case 'relaunch_as_admin':
+      return undefined as T;
+
+    case 'resize_tray_popup':
+      return undefined as T;
+
+    // ── EC / WMI read commands ──────────────────────────────────────────────
+    case 'wmi_ec_read':
+      return {
+        sger: 0,
+        futr: 0,
+        frd0: 0,
+        frd1: 0,
+        frd2: 0,
+        frd3: 0,
+        raw: [
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+      } as T;
+
+    case 'wmi_ec_write':
+      return {
+        sger: 0,
+        futr: 0,
+        frd0: 0,
+        frd1: 0,
+        frd2: 0,
+        frd3: 0,
+        raw: [
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+      } as T;
+
+    case 'wmi_ec_get_performance_mode':
+      return 'Balanced' as T;
+
+    case 'wmi_ec_read_battery_health':
+      return 94 as T;
+
+    case 'wmi_ec_read_adapter_power':
+      return 65 as T;
+
+    case 'wmi_ec_read_sensor_data':
+      return {
+        battery_health: 94,
+        adapter_power: 65,
+        mi_usage_type: 1,
+        wmid_type: 0,
+        lid_open_type: 1,
+        removable_type: 0,
+        current_mode: 6,
+      } as T;
+
+    // ── EC / WMI set commands (all no-ops in mock) ─────────────────────────
+    case 'wmi_ec_set_performance_mode':
+    case 'wmi_ec_set_auto_illumination':
+    case 'wmi_ec_set_brightness_data':
+    case 'wmi_ec_set_epof_flag':
+    case 'wmi_ec_set_label_mode':
+    case 'wmi_ec_set_lid_open_type':
+    case 'wmi_ec_set_mi_usage_type':
+    case 'wmi_ec_set_pl1_flag':
+    case 'wmi_ec_set_removable_type':
+    case 'wmi_ec_set_sagv_mode':
+    case 'wmi_ec_set_wmid_type':
+      return undefined as T;
+
+    // ── HQWmi commands ──────────────────────────────────────────────────────
+    case 'hq_set_performance_mode':
+    case 'hq_change_boot_option':
+    case 'hq_load_default':
+    case 'hq_s5_rtc_wake_enable':
+    case 'hq_enable_pxe_boot':
+    case 'hq_set_wifi_country_code':
+    case 'hq_set_shipping_country_code':
+      return { method: command, req: String(args?.req ?? ''), ret: 'OK', success: true } as T;
+
+    // ── IoT hex / region ─────────────────────────────────────────────────────
+    case 'get_iot_region_hex':
+      return '00000000' as T;
+
+    case 'write_iot_hex':
+      return undefined as T;
+
+    case 'iot_notify_event':
+      return undefined as T;
+
+    // ── EC RAM raw read ──────────────────────────────────────────────────────
+    case 'read_ecram_raw':
+      return '00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00' as T;
+
+    // ── Performance debug ────────────────────────────────────────────────────
+    case 'get_perf_debug':
+      return {
+        hq_wmi_instance: 'ACPI\\PNP0C14\\0',
+        hq_wmi_works: true,
+        hq_wmi_test_ret: 'OK',
+        vhf_device_path: HARDWARE_PROFILE.vhf_device_path,
+        registry_mode: 'balance',
+        overlay_mode: 'none',
+      } as T;
+
+    // ── Keyboard / hotkeys ──────────────────────────────────────────────────
+    case 'get_hotkey_config':
+      return {
+        ai_key: { enabled: true, action: { type: 'toggle_ai_brightness' } },
+        xiaomi_key: { enabled: true, action: { type: 'open_main_window' } },
+        copilot_key: { enabled: false, action: { type: 'none' } },
+      } as T;
+
+    case 'set_hotkey_config':
+      return undefined as T;
+
+    case 'start_key_detect':
+      return undefined as T;
+
+    case 'get_detected_key':
+      return 162 as T; // VK_LCONTROL
+
+    case 'is_hook_active':
+      return true as T;
+
+    // ── WiFi ─────────────────────────────────────────────────────────────────
+    case 'wifi_scan':
+      return [
+        { ssid: 'MiHome-2.4G', signal: 85, security: 'WPA2', connected: true },
+        { ssid: 'TP-Link_5G', signal: 62, security: 'WPA2', connected: false },
+        { ssid: 'eduroam', signal: 40, security: 'WPA2-Enterprise', connected: false },
+      ] as T;
+
+    case 'wifi_status':
+      return { wifi_status: 1, ssid: 'MiHome-2.4G' } as T;
+
+    case 'wifi_connect':
+      return undefined as T;
+
+    case 'wifi_disconnect':
       return undefined as T;
 
     default:

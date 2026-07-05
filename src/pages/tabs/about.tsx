@@ -23,10 +23,35 @@ export default function AboutTab() {
               <span className="stat-value">Xiaomi Laptop Pro</span>
             </div>
           </div>
+          <div>
+            <div className="stat-row">
+              <span className="stat-label">{t('about.author')}</span>
+              <span className="stat-value">MiControl Contributors</span>
+            </div>
+            <div className="stat-row">
+              <span className="stat-label">{t('about.license')}</span>
+              <span className="stat-value">MIT License</span>
+            </div>
+            <div className="stat-row">
+              <span className="stat-label">{t('about.github')}</span>
+              <span className="stat-value">GitHub Repository</span>
+            </div>
+          </div>
         </div>
         <p style={{ marginTop: 16, fontSize: 12, color: 'var(--color-text-muted)' }}>
           {t('about.description')}
         </p>
+      </div>
+      <div className="card">
+        <div className="card-title">{t('about.drivers')}</div>
+        <div className="grid-2">
+          <div className="stat-row">
+            <span className="stat-label">{t('about.driversList.virtualControlHID')}</span>
+          </div>
+          <div className="stat-row">
+            <span className="stat-label">{t('about.driversList.iotDriver')}</span>
+          </div>
+        </div>
       </div>
     </>
   );
