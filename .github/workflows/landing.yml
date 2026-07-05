@@ -38,6 +38,9 @@ jobs:
       - name: Build landing page
         run: npm run build:landing
 
+      - name: Rename landing.html to index.html
+        run: mv dist-landing/landing.html dist-landing/index.html
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
