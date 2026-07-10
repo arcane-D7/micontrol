@@ -43,36 +43,36 @@ let _autostart = false;
 // ── Mock data ────────────────────────────────────────────────────────────────
 
 const SYSTEM_INFO: SystemInfo = {
-  cpu_name: '12th Gen Intel Core i7-12700H',
-  cpu_cores: 14,
-  cpu_threads: 20,
-  cpu_usage: 23.4,
-  gpu_name: 'NVIDIA GeForce RTX 3060 Laptop GPU',
-  gpu_usage: 12.5,
+  cpu_name: 'Intel Core Ultra X7 358H',
+  cpu_cores: 16,
+  cpu_threads: 16,
+  cpu_usage: 18.5,
+  gpu_name: 'Intel Arc B390 Graphics',
+  gpu_usage: 9.2,
   vram_used_mb: 1024,
-  ram_total_gb: 16,
-  ram_used_gb: 8.3,
-  os_version: 'Windows 11 Home 23H2 (26100.3915)',
+  ram_total_gb: 32,
+  ram_used_gb: 14.6,
+  os_version: 'Windows 11 Home 24H2 (26100.3323)',
 };
 
 const BATTERY_INFO: BatteryInfo = {
   level: 78,
   is_charging: false,
   is_plugged: true,
-  health_percent: 94,
-  cycle_count: 412,
-  designed_capacity_mwh: 70000,
-  full_capacity_mwh: 65800,
+  health_percent: 98,
+  cycle_count: 42,
+  designed_capacity_mwh: 80000,
+  full_capacity_mwh: 78400,
   manufacturer: 'Xiaomi',
-  device_name: 'LP-L9N80V',
-  serial_number: 'BATT-001234',
+  device_name: 'X14Pro2024',
+  serial_number: 'BATT-X14P-001234',
   chemistry: 'Li-ion',
   temperature_celsius: 32.5,
   time_remaining_minutes: 187,
   time_to_full_minutes: null,
   charge_rate_mw: 0,
   ac_input_power_mw: null,
-  voltage_mv: 11400,
+  voltage_mv: 15600,
 };
 
 const HARDWARE_CAPABILITIES: HardwareCapabilities = {
@@ -87,7 +87,7 @@ const HARDWARE_CAPABILITIES: HardwareCapabilities = {
 
 const HARDWARE_PROFILE: HardwareProfile = {
   discovered_at: Math.floor(Date.now() / 1000) - 60 * 60 * 2, // Unix seconds (2 h ago)
-  device_model: 'Xiaomi Mi Notebook Pro X 15',
+  device_model: 'Xiaomi Notebook Pro 14 2026',
   vhf_device_path:
     '\\\\?\\HID#{0CC99493-EB87-54F5-BB10-C0D5EA4A4F4C}#5&3e2b1f9c&0&0000#{0CC99493-EB87-54F5-BB10-C0D5EA4A4F4C}',
   touchpad_hid_path:

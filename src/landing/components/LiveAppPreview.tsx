@@ -6,15 +6,15 @@ import { ErrorBoundary } from '../../components/ErrorBoundary';
 
 // ── Pre-set localStorage so onboarding/consent dialogs don't appear ──────────
 // This runs at module load time, BEFORE any component renders, so useSettings
-// will read the correct values on its first render.
+// will read the correct values on its first render. We also rely on the
+// mocked Tauri credential store (src/mocks/tauri-api.ts) which returns
+// 'granted' for telemetry_consent, so the consent panel shows as accepted.
 try {
   const key = 'micontrol_settings_v2';
   const raw = localStorage.getItem(key);
   const settings = raw ? JSON.parse(raw) : {};
-  if (!settings.onboardingCompleted) {
-    settings.onboardingCompleted = true;
-    localStorage.setItem(key, JSON.stringify(settings));
-  }
+  settings.onboardingCompleted = true;
+  localStorage.setItem(key, JSON.stringify(settings));
 } catch {
   /* ignore */
 }
