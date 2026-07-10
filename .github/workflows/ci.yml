@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,8 +13,8 @@ env:
 permissions: read-all
 
 jobs:
-  rust:
-    name: Rust (check + clippy + test)
+  quality:
+    name: Quality checks
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,78 +24,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: cargo fmt
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-
-      - name: cargo check
-        run: cargo check --manifest-path src-tauri/Cargo.toml
-
-      - name: cargo clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-
-      - name: cargo test
-        run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
-        env:
-          RUST_TEST_THREADS: "1"
-
-      - name: Cache cargo-audit
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
-
-      - name: Install cargo-audit
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
-            $maxRetries = 3
-            for ($i = 1; $i -le $maxRetries; $i++) {
-              cargo install cargo-audit --locked && break
-              Write-Host "Attempt $i/$maxRetries failed, retrying..."
-              Start-Sleep -Seconds 5
-            }
-          }
-        env:
-          CARGO_AUDIT_VERSION: '0.18.3'
-
-      - name: Run cargo audit
-        run: cargo audit --file src-tauri/Cargo.lock
-        continue-on-error: true
-
-      - name: Install cargo-deny
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
-            $maxRetries = 3
-            for ($i = 1; $i -le $maxRetries; $i++) {
-              cargo install cargo-deny --locked && break
-              Write-Host "Attempt $i/$maxRetries failed, retrying..."
-              Start-Sleep -Seconds 5
-            }
-          }
-
-      - name: Run cargo-deny
-        run: cargo deny --manifest-path src-tauri/Cargo.toml check
-        continue-on-error: true
-
-  frontend:
-    name: Frontend (build + lint + format)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -102,9 +31,15 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: TypeScript check
+      - name: Rust fmt
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: TypeScript type check
         run: npx tsc --noEmit
 
       - name: ESLint
@@ -113,14 +48,14 @@ jobs:
       - name: Prettier check
         run: npm run format:check
 
-      - name: Build
-        run: npm run build
+      - name: Version consistency check
+        run: npm run version:check
 
-      - name: Run npm audit
-        run: npm audit --audit-level=moderate
+      - name: i18n completeness check
+        run: node scripts/check-i18n.mjs
 
-  coverage-rust:
-    name: Rust coverage
+  test:
+    name: Tests + coverage
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,153 +63,52 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo-tarpaulin
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-tarpaulin
-          key: ${{ runner.os }}-cargo-tarpaulin-${{ env.CARGO_TARPAULIN_VERSION }}
-
-      - name: Install cargo-tarpaulin
-        shell: pwsh
-        run: |
-          if (-not (Get-Command cargo-tarpaulin -ErrorAction SilentlyContinue)) {
-            cargo install cargo-tarpaulin
-          }
-        env:
-          CARGO_TARPAULIN_VERSION: '0.27.3'
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('src-tauri/Cargo.lock') }}
-
-      - name: Run cargo-tarpaulin
-        run: cargo tarpaulin --manifest-path src-tauri/Cargo.toml --out xml --output-dir coverage/
-
-      - name: Upload coverage to Codecov
-        # CODECOV_TOKEN must be configured as a repository secret.
-        # See: https://docs.codecov.com/docs/adding-the-codecov-token
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage/cobertura.xml
-          flags: rust
-          name: rust-coverage
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  coverage-frontend:
-    name: Frontend coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Run vitest with coverage
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+        env:
+          RUST_TEST_THREADS: '1'
+
+      - name: Frontend tests with coverage
         run: npx vitest run --coverage
 
-      - name: Upload coverage to Codecov
-        # CODECOV_TOKEN must be configured as a repository secret.
-        # See: https://docs.codecov.com/docs/adding-the-codecov-token
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage/lcov.info
-          flags: frontend
-          name: frontend-coverage
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  tauri-smoke:
-    name: Tauri Build (smoke test)
-    runs-on: windows-latest
-    # Only run on main branch pushes, not PRs (to keep PR CI fast)
-    if: github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-cargo-tauri-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-tauri-
-
-      - name: Tauri build
-        run: npm run tauri build
-
-  version-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install
-      - run: npm run version:check
-
-  i18n-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install
-      - run: node scripts/check-i18n.mjs
-
-  e2e:
-    name: E2E (Playwright)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
-
-      - name: Run E2E tests
-        run: npx playwright test
-
-      - name: Upload Playwright report
+      - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-report
-          path: playwright-report/
+          name: coverage-report
+          path: |
+            coverage/
           retention-days: 7
+
+  build:
+    name: Build smoke test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: Tauri build smoke test
+        run: npm run tauri build

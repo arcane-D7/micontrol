@@ -5,8 +5,10 @@ on:
     branches: [main]
     paths:
       - 'src/landing/**'
+      - 'src/mocks/**'
       - 'landing.html'
       - 'public/landing/**'
+      - 'vite.config.landing.ts'
       - '.github/workflows/landing.yml'
   workflow_dispatch:
 
@@ -20,8 +22,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,7 +38,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Build landing page
         run: npm run build:landing
@@ -49,13 +54,6 @@ jobs:
         with:
           path: ./dist-landing
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

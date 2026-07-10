@@ -184,8 +184,7 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
                   ai.updateKey(
                     'perf_mode_ac',
                     (e.target.value || null) as
-                      | import('../../hooks/useHardware').PerformanceMode
-                      | null,
+                      import('../../hooks/useHardware').PerformanceMode | null,
                   )
                 }
               >
@@ -224,8 +223,7 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
                   ai.updateKey(
                     'perf_mode_dc',
                     (e.target.value || null) as
-                      | import('../../hooks/useHardware').PerformanceMode
-                      | null,
+                      import('../../hooks/useHardware').PerformanceMode | null,
                   )
                 }
               >
