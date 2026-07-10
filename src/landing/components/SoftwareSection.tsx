@@ -61,8 +61,8 @@ export function SoftwareSection() {
   }, []);
 
   // ── Scroll internal content to top when tab changes ─────────────────────
-  // When the active tab changes (via scroll or click), reset the content-area
-  // scroll position so the user sees the top of the new tab content.
+  // When the active tab changes (via click inside the mockup), reset the
+  // content-area scroll position so the user sees the top of the new tab.
   useEffect(() => {
     const mockup = mockupRef.current;
     if (!mockup) return;
@@ -214,64 +214,6 @@ export function SoftwareSection() {
     return () => mockup.removeEventListener('wheel', handleWheel, { capture: true });
   }, []);
 
-  // ── Scroll-driven tab switching ──────────────────────────────────────────
-  // The section has 3 phases:
-  //   Phase 1 (0 → 1 viewport): UI enters and settles into view
-  //   Phase 2 (1 → N viewports): Tab switching — each tab gets equal scroll
-  //   Phase 3 (last viewport): UI exits / next section enters
-  //
-  // We only switch tabs during Phase 2, so the first tabs are visible
-  // while the UI is fully on screen.
-  useEffect(() => {
-    const section = sectionRef.current;
-    const sticky = stickyRef.current;
-    if (!section || !sticky) return;
-
-    const tabCount = PREVIEW_TABS.length;
-
-    const calcTab = () => {
-      const rect = section.getBoundingClientRect();
-      const viewportHeight = window.innerHeight;
-
-      // Distance scrolled past the top of the section
-      const scrolled = -rect.top;
-
-      // Phase 1: the first viewport of scroll is used to bring the UI into view.
-      // Phase 2: after that, we distribute tab switching across the remaining scroll.
-      const phase1End = viewportHeight; // 1 viewport to settle
-      const sectionHeight = section.offsetHeight;
-      const phase2End = sectionHeight - viewportHeight; // last viewport is exit
-
-      if (scrolled < phase1End) {
-        // Still entering — show first tab
-        setActiveTabId(PREVIEW_TABS[0].id);
-        return;
-      }
-
-      if (scrolled >= phase2End) {
-        // Exiting — show last tab
-        setActiveTabId(PREVIEW_TABS[tabCount - 1].id);
-        return;
-      }
-
-      // Phase 2: distribute tabs across [phase1End, phase2End]
-      const phase2Scroll = phase2End - phase1End;
-      const phase2Progress = (scrolled - phase1End) / phase2Scroll;
-      const tabIndex = Math.min(tabCount - 1, Math.floor(phase2Progress * tabCount));
-      setActiveTabId(PREVIEW_TABS[tabIndex].id);
-    };
-
-    // Listen to the custom 'lenis-scroll' event dispatched by LandingApp
-    window.addEventListener('lenis-scroll', calcTab, { passive: true });
-    window.addEventListener('scroll', calcTab, { passive: true });
-    calcTab(); // Initial call
-
-    return () => {
-      window.removeEventListener('lenis-scroll', calcTab);
-      window.removeEventListener('scroll', calcTab);
-    };
-  }, []);
-
   // ── Entrance animations ───────────────────────────────────────────────────
   useGSAP(
     () => {
@@ -314,18 +256,6 @@ export function SoftwareSection() {
           <span className="lp-section-tag">The Software</span>
           <h2>{activeTab.title}</h2>
           <p>{activeTab.description}</p>
-          <div className="software-tabs">
-            {PREVIEW_TABS.map((tab) => (
-              <button
-                key={tab.id}
-                className={`software-tab ${activeTabId === tab.id ? 'active' : ''}`}
-                onClick={() => handleTabChange(tab.id)}
-              >
-                <span className="software-tab-icon">{tab.icon}</span>
-                {tab.label}
-              </button>
-            ))}
-          </div>
         </div>
       </div>
     </section>

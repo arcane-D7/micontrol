@@ -732,8 +732,11 @@ body {
    Height = (tabs + 2) viewports: 1 to enter, 1 per tab, 1 to exit. */
 .software-section {
   position: relative;
-  /* 17 tabs + 1 enter + 1 exit = 19 viewports */
-  min-height: 1900vh;
+  min-height: 100vh;
+  padding: 6rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   z-index: 1;
 }
 
