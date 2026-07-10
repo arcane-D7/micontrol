@@ -329,12 +329,7 @@ export interface WmaaResponse {
 
 /** EC performance mode IDs (FUN3 for FUN2=0x0800 write commands). */
 export type EcPerformanceMode =
-  | 'Performance'
-  | 'Balanced'
-  | 'Quiet'
-  | 'SuperQuiet'
-  | 'UltraPerformance'
-  | 'Extreme';
+  'Performance' | 'Balanced' | 'Quiet' | 'SuperQuiet' | 'UltraPerformance' | 'Extreme';
 
 /** Numeric performance mode values for `wmi_ec_set_performance_mode`. */
 export const EC_PERF_MODE = {
