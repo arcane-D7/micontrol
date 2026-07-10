@@ -15,6 +15,8 @@
     "test:ui": "vitest --ui",
     "test:e2e": "playwright test",
     "tauri": "tauri",
+    "clean": "node scripts/clean-build-artifacts.mjs",
+    "clean:rust": "cd src-tauri && cargo clean",
     "lint": "eslint src",
     "format": "prettier --write src",
     "format:check": "prettier --check src",

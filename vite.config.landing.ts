@@ -3,16 +3,17 @@ import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 
 /**
- * Vite config for the miControl landing page (GitHub Pages).
+ * Vite config for the miControl landing page (GitHub Pages + custom domain).
  * Entry: landing.html
  * Output: dist-landing/
- * Base: /micontrol/
+ * Base: ./ (relative paths so the same build works both on
+ * arcane-d7.github.io/micontrol/ and micontrol.mfreitas.dev/)
  *
  * Usage: npx vite build --config vite.config.landing.ts
  */
 export default defineConfig({
   plugins: [react()],
-  base: '/micontrol/',
+  base: './',
   resolve: {
     alias: {
       // Use mock Tauri API so the live app preview works in the landing page
