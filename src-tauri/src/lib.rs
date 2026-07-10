@@ -156,7 +156,7 @@ pub fn run() {
                         event.server_name = None;
 
                         // Strip IP addresses from extra (IPv4 and IPv6)
-                        for (_key, val) in event.extra.iter_mut() {
+                        for val in event.extra.values_mut() {
                             if let Some(s) = val.as_str() {
                                 // IPv4 redaction
                                 let parts: Vec<&str> = s.split('.').collect();
@@ -177,7 +177,7 @@ pub fn run() {
                         }
 
                         // Strip IP addresses from contexts
-                        for (_key, _ctx) in event.contexts.iter_mut() {
+                        for _ctx in event.contexts.values_mut() {
                             // Contexts don't carry IP in this Sentry version;
                             // IP is in event.request.env["REMOTE_ADDR"].
                         }
