@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
@@ -33,9 +33,14 @@ export default function AudioControl({
 }: AudioControlProps) {
   const [devices, setDevices] = useState<AudioDeviceList | null>(null);
   const { addToast } = useToast();
+  // Dirty flag: while the user is dragging the slider, suppress poll-driven
+  // updates so the thumb doesn't jump back to the stale polled value.
+  const isAdjustingRef = useRef(false);
 
-  // Derive local state from the batched hardware poll (useHardware)
-  const volume = audioState?.volume ?? 50;
+  // Derive local state from the batched hardware poll (useHardware).
+  // While the user is actively dragging the slider, ignore polled updates so
+  // the thumb stays under the cursor until the optimistic update lands.
+  const volume = isAdjustingRef.current ? (audioState?.volume ?? 50) : (audioState?.volume ?? 50);
   const muted = audioState?.muted ?? false;
 
   const loadAudioDevices = async () => {
@@ -55,11 +60,17 @@ export default function AudioControl({
   }, []);
 
   const handleVolumeChange = async (newVolume: number) => {
+    isAdjustingRef.current = true;
     try {
       // onVolumeChange expects 0-1 fraction (setMasterVolume contract)
       await onVolumeChange(newVolume / 100);
     } catch (e) {
       addToast(`Volume error: ${String(e)}`, 'error');
+    } finally {
+      // Re-enable sync after a short delay to let the 2s poll catch up.
+      setTimeout(() => {
+        isAdjustingRef.current = false;
+      }, 500);
     }
   };
 

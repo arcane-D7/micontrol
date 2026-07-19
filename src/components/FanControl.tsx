@@ -103,7 +103,7 @@ export default function FanControl({ fan, onModeChange }: Props) {
             {t('fan.temperature')}
           </div>
           <div className="card-value" style={{ fontSize: 22 }}>
-            {fan.gpu_temp_celsius}°
+            {fan.gpu_temp_celsius != null ? `${fan.gpu_temp_celsius}°` : '—'}
           </div>
         </div>
       </div>

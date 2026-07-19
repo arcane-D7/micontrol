@@ -97,8 +97,10 @@ export interface FanInfo {
   mode: 'auto' | 'fixed' | 'off';
   speed_rpm: number;
   speed_percent: number;
-  gpu_temp_celsius: number;
-  cpu_temp_celsius: number;
+  /** GPU temperature in Celsius. Null when no sensor is available. */
+  gpu_temp_celsius: number | null;
+  /** CPU temperature in Celsius. Null when no sensor is available. */
+  cpu_temp_celsius: number | null;
   /** System package power from RAPL (\\Power Meter(_Total)\\Power). Null for ~1.5 s after launch. */
   tdp_watts: number | null;
 }

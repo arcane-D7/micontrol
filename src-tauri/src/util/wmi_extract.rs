@@ -23,6 +23,10 @@ pub fn extract_u32(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<u32
 }
 
 /// Extract an i32 from a WMI variant map.
+///
+/// Note: `UI4` values are cast via `as i32`, which preserves the bit pattern.
+/// Values > `i32::MAX` will wrap to negative. For unsigned access, use
+/// [`extract_u32`] instead.
 pub fn extract_i32(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<i32> {
     match map.get(key) {
         Some(wmi::Variant::I1(v)) => Some(*v as i32),
@@ -31,6 +35,7 @@ pub fn extract_i32(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<i32
         Some(wmi::Variant::I8(v)) => Some(*v as i32),
         Some(wmi::Variant::UI1(v)) => Some(*v as i32),
         Some(wmi::Variant::UI2(v)) => Some(*v as i32),
+        // UI4 → i32: bit-pattern-preserving cast. Use extract_u32 for unsigned access.
         Some(wmi::Variant::UI4(v)) => Some(*v as i32),
         _ => None,
     }

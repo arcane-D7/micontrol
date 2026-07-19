@@ -14,8 +14,12 @@ pub struct FanInfo {
     /// RPM via WMI (common on Xiaomi Book Pro 14 and similar Intel platforms).
     pub speed_rpm: u32,
     pub speed_percent: u8,
-    pub gpu_temp_celsius: f32,
-    pub cpu_temp_celsius: f32,
+    /// GPU temperature in Celsius. None when no sensor is available
+    /// (ESIF/DPTF driver absent and ACPI thermal zone unavailable).
+    pub gpu_temp_celsius: Option<f32>,
+    /// CPU temperature in Celsius. None when no sensor is available
+    /// (ESIF/DPTF driver absent and ACPI thermal zone unavailable).
+    pub cpu_temp_celsius: Option<f32>,
     /// CPU package power from Intel ESIF/DPTF (EsifDeviceInformation._0 Power
     /// field), in watts. The raw WMI value is in deciwatts (×0.1 W). None when
     /// the DPTF driver is absent or reports zero.
@@ -42,8 +46,8 @@ const FAN_REG_SPEED: &str = "FixedSpeed";
 // One WMI query returns all participants, so we read temps and TDP together.
 
 struct EsifReadings {
-    cpu_temp: f32,
-    gpu_temp: f32,
+    cpu_temp: Option<f32>,
+    gpu_temp: Option<f32>,
     tdp_watts: Option<f32>,
 }
 
@@ -60,53 +64,51 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
                 .unwrap_or_default())
         })?;
 
-        let extract_int = |row: &HashMap<String, wmi::Variant>, key: &str| -> Option<i64> {
-            wmi_extract::extract_i32(row, key)
-                .filter(|&v| v > 0)
-                .map(|v| v as i64)
+        let extract_u32_temp = |row: &HashMap<String, wmi::Variant>, key: &str| -> Option<f32> {
+            wmi_extract::extract_u32(row, key).map(|v| v as f32)
         };
 
         let instance_suffix = |row: &HashMap<String, wmi::Variant>, suffix: &str| -> bool {
             wmi_extract::extract_string(row, "InstanceName").is_some_and(|s| s.ends_with(suffix))
         };
 
-        // CPU temp: max non-zero Temperature (participants _0/_1/_2 are hotspot)
+        // CPU temp: max Temperature across participants (hotspot).
+        // Zero is a valid reading (0°C idle), so we do NOT filter it out.
         let cpu_temp = results
             .iter()
-            .filter_map(|r| extract_int(r, "Temperature"))
-            .fold(f32::NEG_INFINITY, |acc, v| acc.max(v as f32));
-        let cpu_temp = if cpu_temp > 0.0 && cpu_temp.is_finite() {
-            cpu_temp.clamp(0.0, 120.0)
+            .filter_map(|r| extract_u32_temp(r, "Temperature"))
+            .fold(f32::NEG_INFINITY, |acc, v| acc.max(v));
+        let cpu_temp = if cpu_temp.is_finite() {
+            Some(cpu_temp.clamp(0.0, 120.0))
         } else {
-            50.0
+            None // No ESIF data — do NOT fabricate a value
         };
 
         // GPU temp: prefer participant _10 (GPU/secondary SoC domain on Panther Lake)
         let gpu_temp = results
             .iter()
             .find(|r| instance_suffix(r, "_10"))
-            .and_then(|r| extract_int(r, "Temperature"))
-            .map(|v| (v as f32).clamp(0.0, 120.0))
-            .unwrap_or_else(|| {
+            .and_then(|r| extract_u32_temp(r, "Temperature"))
+            .map(|v| v.clamp(0.0, 120.0))
+            .or_else(|| {
                 // Fallback: package maximum (same die, valid under GPU load)
                 let m = results
                     .iter()
-                    .filter_map(|r| extract_int(r, "Temperature"))
-                    .fold(f32::NEG_INFINITY, |acc, v| acc.max(v as f32));
-                if m > 0.0 && m.is_finite() {
-                    m.clamp(0.0, 120.0)
+                    .filter_map(|r| extract_u32_temp(r, "Temperature"))
+                    .fold(f32::NEG_INFINITY, |acc, v| acc.max(v));
+                if m.is_finite() {
+                    Some(m.clamp(0.0, 120.0))
                 } else {
-                    45.0
+                    None
                 }
             });
 
-        // TDP: participant _0 is the highest-level DPTF power domain (CPU package/
-        // platform RAPL). Power is in deciwatts — divide by 10 to get watts.
+        // TDP: participant _0 is the highest-level DPTF power domain
         let tdp_watts = results
             .iter()
             .find(|r| instance_suffix(r, "_0"))
-            .and_then(|r| extract_int(r, "Power"))
-            .map(|v| (v as f32 / 10.0).clamp(0.0, 150.0));
+            .and_then(|r| extract_u32_temp(r, "Power"))
+            .map(|v| (v / 10.0).clamp(0.0, 150.0));
 
         Ok(EsifReadings {
             cpu_temp,
@@ -117,8 +119,8 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
     #[cfg(not(windows))]
     {
         Ok(EsifReadings {
-            cpu_temp: 50.0,
-            gpu_temp: 45.0,
+            cpu_temp: None,
+            gpu_temp: None,
             tdp_watts: None,
         })
     }
@@ -127,10 +129,22 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
 pub fn get_fan_info() -> HardwareResult<FanInfo> {
     let speed_rpm = get_fan_rpm_wmi().unwrap_or(0);
     let esif = get_esif_readings().unwrap_or(EsifReadings {
-        cpu_temp: 50.0,
-        gpu_temp: 45.0,
+        cpu_temp: None,
+        gpu_temp: None,
         tdp_watts: None,
     });
+    // If ESIF failed, try ACPI thermal zone as fallback (not a hardcoded value)
+    let cpu_temp = esif
+        .cpu_temp
+        .or_else(|| match crate::hw::thermal::get_primary_thermal_zone() {
+            Ok(zone) => Some(zone.current_temp_celsius as f32),
+            Err(e) => {
+                log::warn!(target: "hw::fan", "ESIF and ACPI thermal zone both unavailable: {e}");
+                None
+            }
+        });
+    let gpu_temp = esif.gpu_temp;
+    let tdp_watts = esif.tdp_watts;
     let (mode, speed_percent) = get_fan_mode_registry().unwrap_or((FanMode::Auto, 50));
 
     // WORKING FORM — DO NOT MODIFY: EC performance mode is read via WMI
@@ -154,9 +168,9 @@ pub fn get_fan_info() -> HardwareResult<FanInfo> {
         mode,
         speed_rpm,
         speed_percent: speed_percent_actual,
-        gpu_temp_celsius: esif.gpu_temp,
-        cpu_temp_celsius: esif.cpu_temp,
-        tdp_watts: esif.tdp_watts,
+        gpu_temp_celsius: gpu_temp,
+        cpu_temp_celsius: cpu_temp,
+        tdp_watts,
     })
 }
 

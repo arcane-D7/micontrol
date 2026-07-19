@@ -43,8 +43,10 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
         scan_cmd.args(["wlan", "scan"]);
         scan_cmd.creation_flags(CREATE_NO_WINDOW);
         let _ = scan_cmd.output(); // Best-effort, ignore errors
-                                   // Give the WiFi adapter time to complete the scan
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+                                   // WiFi scan is async — most adapters need 3-6 seconds to complete.
+                                   // 4s is a pragmatic delay; the proper fix (WlanAPI with
+                                   // WlanRegisterNotification) is tracked in Sprint 37.
+        std::thread::sleep(std::time::Duration::from_millis(4000));
     }
 
     let mut cmd = Command::new("netsh");

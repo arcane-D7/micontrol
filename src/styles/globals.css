@@ -1015,8 +1015,8 @@ input[type='range']:active::-webkit-slider-thumb {
 .tray-popup {
   width: 300px;
   background: var(--surface);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur, none);
+  -webkit-backdrop-filter: var(--blur, none);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-md);

@@ -72,8 +72,8 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
     'registry+overlay': t('performance.monitor.methodLabels.overlay'),
   };
 
-  const cpuTemp = fan?.cpu_temp_celsius ?? 0;
-  const gpuTemp = fan?.gpu_temp_celsius ?? 0;
+  const cpuTemp = fan?.cpu_temp_celsius ?? null;
+  const gpuTemp = fan?.gpu_temp_celsius ?? null;
   const fanRpm = fan?.speed_rpm ?? 0;
   const tdp = fan?.tdp_watts ?? null;
   const cpuLoad = systemInfo?.cpu_usage ?? null;
@@ -115,7 +115,13 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
         {/* CPU Temp + CPU Load */}
         <Metric
           label={t('performance.monitor.cpuTemp')}
-          value={<span style={{ color: tempColor(cpuTemp) }}>{cpuTemp.toFixed(0)}°C</span>}
+          value={
+            cpuTemp != null ? (
+              <span style={{ color: tempColor(cpuTemp) }}>{cpuTemp.toFixed(0)}°C</span>
+            ) : (
+              <span style={{ color: 'var(--text-dim)', fontSize: 16 }}>—</span>
+            )
+          }
           sub={
             cpuLoad !== null ? (
               <span style={{ color: 'var(--info)' }}>
@@ -123,13 +129,19 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
               </span>
             ) : undefined
           }
-          bar={{ pct: tempPct(cpuTemp), cls: 'temp' }}
+          bar={cpuTemp != null ? { pct: tempPct(cpuTemp), cls: 'temp' } : undefined}
         />
 
         {/* GPU Temp + GPU Load */}
         <Metric
           label={t('performance.monitor.gpuTemp')}
-          value={<span style={{ color: tempColor(gpuTemp) }}>{gpuTemp.toFixed(0)}°C</span>}
+          value={
+            gpuTemp != null ? (
+              <span style={{ color: tempColor(gpuTemp) }}>{gpuTemp.toFixed(0)}°C</span>
+            ) : (
+              <span style={{ color: 'var(--text-dim)', fontSize: 16 }}>—</span>
+            )
+          }
           sub={
             gpuLoad !== null ? (
               <span style={{ color: 'var(--info)' }}>
@@ -137,7 +149,7 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
               </span>
             ) : undefined
           }
-          bar={{ pct: tempPct(gpuTemp), cls: 'gpu' }}
+          bar={gpuTemp != null ? { pct: tempPct(gpuTemp), cls: 'gpu' } : undefined}
         />
 
         {/* TDP */}

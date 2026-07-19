@@ -139,7 +139,7 @@ export default function TrayPopup({ hardware }: Props) {
   };
 
   return (
-    <div className="tray-popup" ref={rootRef}>
+    <div className="tray-popup tray-window" ref={rootRef}>
       <div className="tray-header">
         <span className="tray-title">MiControl</span>
         <button
@@ -418,7 +418,9 @@ export default function TrayPopup({ hardware }: Props) {
                     }}
                   >
                     <span>{fan.speed_rpm} RPM</span>
-                    <span>{fan.gpu_temp_celsius}°C GPU</span>
+                    <span>
+                      {fan.gpu_temp_celsius != null ? `${fan.gpu_temp_celsius}°C GPU` : '— GPU'}
+                    </span>
                   </div>
                 )}
               </div>
