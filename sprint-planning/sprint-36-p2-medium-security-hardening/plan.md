@@ -5,7 +5,8 @@
 > **Theme:** Fix 4 security issues — atomic writes, directory ACL, diag_ps gate, USERNAME spoofing
 > **Duration:** ~2–3 days
 > **Dependencies:** Sprint 34 (Auth Bridge fixes must be completed first, as they modify the same files)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete
+> **Commit:** `0a67897` — `fix(s36): harden elevated bridge with atomic writes, ACL, diag_ps gate, and GetUserNameW`
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Report_miControl.md` (Bug A, B, C, D)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT

@@ -77,14 +77,14 @@
 - **S32:** Adaptive brightness logging, auto-discovery, IoT bridge, battery powercfg fallback, credential allowlist
 - **S33:** Dead code removal, dependency cleanup, dev-gating, documentation
 
-### miControl Audit Sprints (from `Audit_Report_miControl.md`) — 📌 PLANNED
+### miControl Audit Sprints (from `Audit_Report_miControl.md`) — ✅ COMPLETE
 
-| Sprint | Priority    | Focus                           | Tickets | Effort     | Status    | File                                             |
-| ------ | ----------- | ------------------------------- | ------- | ---------- | --------- | ------------------------------------------------ |
-| 34     | P0 CRITICAL | Auth Bridge UAC + Quick Wins    | 7       | ~2–3 days  | 📌 Active | `sprint-34-p0-critical-auth-bridge/plan.md`      |
-| 35     | P1 HIGH     | Temperature, Volume, Tray, WiFi | 7       | ~3–4 days  | 📌 Active | `sprint-35-p1-high-temperature-volume/plan.md`   |
-| 36     | P2 MEDIUM   | Security Hardening              | 4       | ~2–3 days  | 📌 Active | `sprint-36-p2-medium-security-hardening/plan.md` |
-| 37     | P1 HIGH     | Audio Switching + WiFi WlanAPI  | 5       | ~5–10 days | 📌 Active | `sprint-37-p1-high-audio-wifi-features/plan.md`  |
+| Sprint | Priority    | Focus                           | Tickets | Effort     | Status       | File                                             |
+| ------ | ----------- | ------------------------------- | ------- | ---------- | ------------ | ------------------------------------------------ |
+| 34     | P0 CRITICAL | Auth Bridge UAC + Quick Wins    | 7       | ~2–3 days  | ✅ `309bfa3` | `sprint-34-p0-critical-auth-bridge/plan.md`      |
+| 35     | P1 HIGH     | Temperature, Volume, Tray, WiFi | 7       | ~3–4 days  | ✅ `45b0d5a` | `sprint-35-p1-high-temperature-volume/plan.md`   |
+| 36     | P2 MEDIUM   | Security Hardening              | 4       | ~2–3 days  | ✅ `0a67897` | `sprint-36-p2-medium-security-hardening/plan.md` |
+| 37     | P1 HIGH     | Audio Switching + WiFi WlanAPI  | 5       | ~5–10 days | ✅ `b47dea0` | `sprint-37-p1-high-audio-wifi-features/plan.md`  |
 
 **miControl Audit totals:** 7 (S34) + 7 (S35) + 4 (S36) + 5 (S37) = 23 tickets, ~12–19 days effort
 

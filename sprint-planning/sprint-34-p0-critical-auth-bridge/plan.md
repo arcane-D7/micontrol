@@ -5,7 +5,8 @@
 > **Theme:** Fix Auth Bridge UAC regression (4 root causes) + 3 quick-win UX fixes
 > **Duration:** ~2–3 days
 > **Dependencies:** Sprint 30–33 (should be completed or merged into this sprint)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete
+> **Commit:** `309bfa3` — `fix(s34): fix Auth Bridge UAC regression and quick wins`
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Report_miControl.md` (Bug 1: 1A, 1B, 1C, 1D; Bug 3: 3A, 3C; Bug 4: 4A)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT

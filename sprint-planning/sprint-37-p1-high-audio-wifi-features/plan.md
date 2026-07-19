@@ -5,7 +5,8 @@
 > **Theme:** Implement audio device switching via IPolicyConfig COM + replace netsh WiFi with native WlanAPI
 > **Duration:** ~5–10 days
 > **Dependencies:** Sprint 34 (Auth Bridge fixes), Sprint 35 (temperature/volume fixes)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete
+> **Commit:** `b47dea0` — `feat(s37): implement audio device switching and WiFi WlanAPI`
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Report_miControl.md` (Bug 5: 5A–5E; Bug 6: 6A)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT

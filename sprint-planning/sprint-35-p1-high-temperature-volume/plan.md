@@ -5,7 +5,8 @@
 > **Theme:** Fix temperature sensor fallback, complete volume slider sync, verify tray popup CSS, add WiFi delay fix
 > **Duration:** ~3–4 days
 > **Dependencies:** Sprint 34 (all P0 critical fixes must be completed first)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete
+> **Commit:** `45b0d5a` — `fix(s35): remove fabricated temperature fallbacks and complete volume/tray/wifi polish`
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Report_miControl.md` (Bug 2: 2A, 2B, 2C; Bug 3: 3B; Bug 4: 4C; Bug 6: 6B)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
