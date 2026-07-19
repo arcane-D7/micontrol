@@ -145,9 +145,21 @@ pub fn run() -> ! {
         "Elevated writing result to: {}",
         pending.result_path.display()
     );
-    let _ = std::fs::write(&pending.result_path, json);
-    if let Err(e) = auth::restrict_file_acl(&pending.result_path) {
-        log::warn!("Failed to restrict ACL on result file: {e}");
+    // S36-001: Write result file atomically (temp + rename) so a killed
+    // helper never leaves a partial JSON file for the main process to read.
+    let tmp_path = pending.result_path.with_extension("json.tmp");
+    match std::fs::write(&tmp_path, &json) {
+        Ok(()) => {
+            if let Err(e) = std::fs::rename(&tmp_path, &pending.result_path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                log::warn!("Failed to atomically rename result file: {e}");
+            } else if let Err(e) = auth::restrict_file_acl(&pending.result_path) {
+                log::warn!("Failed to restrict ACL on result file: {e}");
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to write result file: {e}");
+        }
     }
     // S24-001: Flush nonces before exit to prevent nonce loss.
     flush_nonces();
@@ -610,8 +622,9 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        #[cfg(feature = "diag")]
         "diag_ps" => {
-            // Run elevated PowerShell command
+            // Run elevated PowerShell command (diag builds only)
             let script = cmd.args["script"].as_str().unwrap_or("");
             if script.is_empty() {
                 return make_err("Missing 'script' argument".to_string());
@@ -632,6 +645,9 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 Err(e) => make_err(format!("Failed to run PowerShell: {e}")),
             }
         }
+
+        #[cfg(not(feature = "diag"))]
+        "diag_ps" => make_err("diag_ps is disabled in production builds".to_string()),
 
         // ── Copilot key interception fixes ───────────────────────────────
         // Windows 11 24H2+ intercepts the Copilot key (VK 0xC3) at the Shell
@@ -1319,6 +1335,9 @@ pub fn elev_dir() -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     let dir = PathBuf::from(base).join("MiControl");
     let _ = std::fs::create_dir_all(&dir);
+    // S36-002: Lock down the directory itself so other users can't list files
+    // or pre-create symlink attacks against elev_key.bin.
+    let _ = crate::util::auth::restrict_file_acl(&dir);
     dir
 }
 

@@ -268,8 +268,20 @@ pub fn restrict_file_acl(path: &std::path::Path) -> Result<(), String> {
         .chain(std::iter::once(0))
         .collect();
 
-    // Get the current username
-    let username = std::env::var("USERNAME").map_err(|e| format!("Cannot get USERNAME: {e}"))?;
+    // S36-004: Get the current username from the process token (not the
+    // spoofable USERNAME env var) via GetUserNameW Win32 API.
+    use windows::core::PWSTR;
+    use windows::Win32::System::WindowsProgramming::GetUserNameW;
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    unsafe {
+        GetUserNameW(PWSTR(buf.as_mut_ptr()), &mut len as *mut u32)
+            .map_err(|e| format!("GetUserNameW failed: {e}"))?;
+    }
+    // len includes the null terminator
+    let username = String::from_utf16_lossy(&buf[..len as usize - 1])
+        .trim_end_matches('\0')
+        .to_string();
 
     // Build wide strings that live long enough
     let username_w: Vec<u16> = username.encode_utf16().chain(std::iter::once(0)).collect();

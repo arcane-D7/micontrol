@@ -18,6 +18,7 @@ path = "src/bin/ecram_service.rs"
 
 [features]
 default = []
+diag = []
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
@@ -56,6 +57,7 @@ windows = { version = "0.58", features = [
   "Win32_System_IO",
   "Win32_System_Com",
   "Win32_System_Wmi",
+  "Win32_System_WindowsProgramming",
   "Win32_System_Ole",
   "Win32_System_Variant",
   "Win32_System_Services",
