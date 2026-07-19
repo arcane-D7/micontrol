@@ -1089,11 +1089,7 @@ input[type='range']:active::-webkit-slider-thumb {
   padding: 10px;
   border-radius: var(--r-sm);
   border: 1px solid var(--border);
-  background: linear-gradient(
-    130deg,
-    var(--surface-2),
-    color-mix(in oklch, var(--surface-2) 72%, var(--accent-soft))
-  );
+  background: var(--surface-2);
 }
 
 .tray-quick-head {

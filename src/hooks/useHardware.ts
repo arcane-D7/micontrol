@@ -110,14 +110,16 @@ export function useHardware() {
 
   const fastPoll = useCallback(async () => {
     try {
-      const [fanResult, systemResult] = await Promise.all([
+      const [fanResult, systemResult, audioResult] = await Promise.all([
         invoke<FanInfo>('get_fan_info'),
         invoke<SystemInfo>('get_system_info'),
+        invoke<AudioVolumeResult>('get_audio_volume'),
       ]);
       setFan(fanResult);
       if (systemResult) {
         setSystemInfo(systemResult);
       }
+      setAudioState(audioResult);
       setError(null);
     } catch (e) {
       console.error('Fast poll failed:', e);

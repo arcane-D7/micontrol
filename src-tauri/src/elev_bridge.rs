@@ -29,6 +29,39 @@ const STALE_FILE_MAX_AGE_SECS: u64 = 120;
 static ELEV_REQUEST_LOCK: Mutex<()> = Mutex::const_new(());
 static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
+/// Outcome of a task-path self-healing attempt.
+enum TaskHealResult {
+    /// Task already exists and points to the current exe — no action needed.
+    AlreadyCorrect,
+    /// Task was missing or mis-pointed and has been re-registered successfully.
+    Healed,
+    /// Healing was attempted but failed (not admin, UAC declined, etc.).
+    Failed,
+}
+
+/// Timeout for slow commands that do WMI/IOCTL probes or driver installs.
+const ELEV_TIMEOUT_SLOW_SECS: u64 = 90;
+/// Timeout for medium commands (WMI queries on cold start).
+const ELEV_TIMEOUT_MEDIUM_SECS: u64 = 45;
+
+/// Returns the timeout for a given elevated command.
+///
+/// Slow commands (hardware discovery, driver install) do WMI + IOCTL probes
+/// or run `pnputil`, which can take 30–60 s on a cold system. The task
+/// scheduler's `ExecutionTimeLimit` is PT120S, so the bridge timeout must be
+/// shorter than that to avoid waiting for a killed helper.
+fn timeout_for_cmd(cmd: &str) -> Duration {
+    match cmd {
+        "run_hardware_discovery" | "install_driver" => Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS),
+        "wmi_ec_read_sensor_data"
+        | "wmi_ec_read_battery_health"
+        | "wmi_ec_read_adapter_power"
+        | "wmi_ec_get_performance_mode"
+        | "diag_wmi_query" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
+        _ => Duration::from_secs(ELEV_TIMEOUT_SECS),
+    }
+}
+
 /// Dispatch a privileged command through the scheduled elevated task.
 ///
 /// `cmd` must match one of the branches in `elevated::dispatch()`.
@@ -120,24 +153,35 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
             .await
             .map_err(|e| format!("task heal task panicked: {e}"))?;
 
-        if healed {
-            // Retry the task after healing.
-            let retry_ok = run_schtasks_run().await;
-            if retry_ok {
-                // Task ran successfully after healing — skip UAC fallback,
-                // fall through to the polling loop below.
-            } else {
-                log::warn!("Scheduled task still failed after self-healing, falling back to UAC");
+        match healed {
+            TaskHealResult::AlreadyCorrect => {
+                // Task was fine — the original /run failure was transient.
+                // Retry once before falling back to UAC.
+                let retry_ok = run_schtasks_run().await;
+                if !retry_ok {
+                    log::warn!(
+                        "Scheduled task still failing after AlreadyCorrect, falling back to UAC"
+                    );
+                    launch_uac_fallback(&request_id, &cmd_path).await?;
+                }
+            }
+            TaskHealResult::Healed => {
+                let retry_ok = run_schtasks_run().await;
+                if !retry_ok {
+                    log::warn!(
+                        "Scheduled task still failed after self-healing, falling back to UAC"
+                    );
+                    launch_uac_fallback(&request_id, &cmd_path).await?;
+                }
+            }
+            TaskHealResult::Failed => {
                 launch_uac_fallback(&request_id, &cmd_path).await?;
             }
-        } else {
-            // Healing failed (not admin or other error) — fall back to UAC.
-            launch_uac_fallback(&request_id, &cmd_path).await?;
         }
     }
 
-    // Poll for the result file (check every 150 ms, timeout after 15 s)
-    let timeout = Duration::from_secs(ELEV_TIMEOUT_SECS);
+    // Poll for the result file (check every 150 ms, timeout per-command)
+    let timeout = timeout_for_cmd(cmd);
     let start = Instant::now();
     loop {
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
@@ -196,8 +240,9 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
                 if let Err(e) = uac_result {
                     let _ = tokio::fs::remove_file(&cmd_path).await;
                     return Err(format!(
-                        "Elevated process timed out after 15 s and UAC fallback \
-                         failed: {e}. Reinstall MiControl to fix the scheduled task."
+                        "Elevated process timed out after {} s and UAC fallback \
+                         failed: {e}. Reinstall MiControl to fix the scheduled task.",
+                        timeout.as_secs()
                     ));
                 }
                 // UAC helper ran synchronously; result should be present now.
@@ -232,16 +277,19 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
                             .to_string())
                     };
                 }
-                return Err("Elevated process timed out after 15 s. UAC fallback ran \
-                     but produced no result."
-                    .to_string());
+                return Err(format!(
+                    "Elevated process timed out after {} s. UAC fallback ran \
+                     but produced no result.",
+                    timeout.as_secs()
+                ));
             }
             #[cfg(not(windows))]
             {
                 let _ = tokio::fs::remove_file(&cmd_path).await;
                 return Err(format!(
-                    "Elevated process timed out after 15 s. \
+                    "Elevated process timed out after {} s. \
                      Ensure the '{}' scheduled task is registered.",
+                    timeout.as_secs(),
                     TASK_NAME
                 ));
             }
@@ -458,9 +506,9 @@ fn cleanup_stale_elev_files(dir: &std::path::Path) {
 /// Tries non-elevated `schtasks` first. If that fails (Access Denied), falls
 /// back to `ShellExecuteExW "runas"` to elevate just the schtasks command.
 ///
-/// Returns `true` if the task was (re-)registered successfully.
+/// Returns the outcome of the self-healing attempt.
 #[cfg(windows)]
-fn ensure_task_correct_path() -> bool {
+fn ensure_task_correct_path() -> TaskHealResult {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -469,7 +517,7 @@ fn ensure_task_correct_path() -> bool {
         Ok(p) => p,
         Err(e) => {
             log::warn!("Cannot get current exe path for task healing: {e}");
-            return false;
+            return TaskHealResult::Failed;
         }
     };
     let current_path = current_exe.to_string_lossy().to_string();
@@ -504,19 +552,19 @@ fn ensure_task_correct_path() -> bool {
     };
 
     if !need_reregister {
-        return false;
+        return TaskHealResult::AlreadyCorrect;
     }
 
     // Build the task XML with the correct path.
     let xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT30S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>"{current_path}"</Command><Arguments>--elevated</Arguments></Exec></Actions></Task>"#
+        r#"<?xml version="1.0" encoding="UTF-8"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT120S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>"{current_path}"</Command><Arguments>--elevated</Arguments></Exec></Actions></Task>"#
     );
 
     let temp_dir = std::env::temp_dir();
     let xml_path = temp_dir.join("MCElev_heal.xml");
     if let Err(e) = std::fs::write(&xml_path, &xml) {
         log::warn!("Cannot write task XML for healing: {e}");
-        return false;
+        return TaskHealResult::Failed;
     }
     let xml_str = xml_path.to_string_lossy().to_string();
 
@@ -551,10 +599,11 @@ fn ensure_task_correct_path() -> bool {
 
     if success {
         log::info!("Scheduled task re-registered successfully with correct path");
+        TaskHealResult::Healed
     } else {
         log::warn!("Failed to re-register scheduled task (UAC may have been declined)");
+        TaskHealResult::Failed
     }
-    success
 }
 
 /// Run `schtasks /delete` + `schtasks /create` elevated via ShellExecuteExW "runas".

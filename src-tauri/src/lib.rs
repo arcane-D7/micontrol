@@ -583,10 +583,6 @@ async fn resize_tray_popup(app: tauri::AppHandle, height: f64) -> Result<(), Str
     const MAX_H: f64 = 780.0;
     let height = height.clamp(MIN_H, MAX_H);
     if let Some(window) = app.get_webview_window("tray") {
-        // Only resize when visible — avoid corrupting the hidden position
-        if !window.is_visible().unwrap_or(false) {
-            return Ok(());
-        }
         let scale = window.scale_factor().map_err(|e| e.to_string())?;
         let pos = window.outer_position().map_err(|e| e.to_string())?;
         let cur = window.inner_size().map_err(|e| e.to_string())?;
