@@ -781,7 +781,8 @@
     "unmute": "Unmute",
     "muted": "Muted",
     "playbackDevices": "Playback Devices",
-    "defaultDevice": "Default"
+    "defaultDevice": "Default",
+    "setAsDefault": "Set as Default"
   },
   "error": {
     "boundary": {

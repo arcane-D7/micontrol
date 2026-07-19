@@ -79,11 +79,13 @@ windows = { version = "0.58", features = [
   "Devices_Sensors",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
+  "Win32_NetworkManagement_WiFi",
   "Media_Casting",
   "Devices_Enumeration",
   "Foundation",
   "Foundation_Collections",
 ] }
+windows-core = "0.58"
 wmi = "0.13"
 winreg = "0.52"
 

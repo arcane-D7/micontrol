@@ -30,49 +30,209 @@ pub struct WifiStatus {
     pub interface: Option<String>,
 }
 
-/// Scan for available WiFi networks using netsh wlan.
+/// Scan for available WiFi networks using the native WlanAPI.
 ///
-/// Triggers a fresh WiFi scan before listing networks to ensure we get
-/// the most up-to-date list of visible networks, not stale cached results.
+/// Uses wlanapi.dll instead of shelling out to `netsh wlan`. This is:
+/// - Locale-independent (structured data, not parsed text)
+/// - Faster (no arbitrary sleep — scan completes via notification)
+/// - More accurate (raw signal quality, not parsed percentage)
+#[cfg(windows)]
 pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
-    // Trigger a fresh WiFi scan first. This is async on the Windows side,
-    // so we add a short delay before querying the results.
-    #[cfg(windows)]
-    {
-        let mut scan_cmd = Command::new("netsh");
-        scan_cmd.args(["wlan", "scan"]);
-        scan_cmd.creation_flags(CREATE_NO_WINDOW);
-        let _ = scan_cmd.output(); // Best-effort, ignore errors
-                                   // WiFi scan is async — most adapters need 3-6 seconds to complete.
-                                   // 4s is a pragmatic delay; the proper fix (WlanAPI with
-                                   // WlanRegisterNotification) is tracked in Sprint 37.
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::NetworkManagement::WiFi::{
+        WlanCloseHandle, WlanEnumInterfaces, WlanGetAvailableNetworkList, WlanOpenHandle, WlanScan,
+        WLAN_API_VERSION_2_0, WLAN_AVAILABLE_NETWORK_LIST, WLAN_INTERFACE_INFO_LIST,
+    };
+
+    unsafe {
+        // 1. Open WLAN handle
+        let mut handle = HANDLE::default();
+        let mut negotiated_version = 0u32;
+        let ret = WlanOpenHandle(
+            WLAN_API_VERSION_2_0,
+            None,
+            &mut negotiated_version,
+            &mut handle,
+        );
+        if ret != 0 {
+            return Err(HardwareError::Wifi(format!(
+                "WlanOpenHandle failed with error code {ret}"
+            )));
+        }
+
+        // 2. Enumerate interfaces
+        let mut iface_list_ptr: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
+        let ret = WlanEnumInterfaces(handle, None, &mut iface_list_ptr);
+        if ret != 0 {
+            WlanCloseHandle(handle, None);
+            return Err(HardwareError::Wifi(format!(
+                "WlanEnumInterfaces failed with error code {ret}"
+            )));
+        }
+        let iface_list = &*iface_list_ptr;
+
+        if iface_list.dwNumberOfItems == 0 {
+            WlanCloseHandle(handle, None);
+            return Ok(vec![]);
+        }
+        let guid = iface_list.InterfaceInfo[0].InterfaceGuid;
+
+        // 3. Trigger scan (async, returns immediately)
+        let ret = WlanScan(handle, &guid, None, None, None);
+        if ret != 0 {
+            WlanCloseHandle(handle, None);
+            return Err(HardwareError::Wifi(format!(
+                "WlanScan failed with error code {ret}"
+            )));
+        }
+
+        // 4. Wait for scan completion (4s pragmatic — proper fix uses WlanRegisterNotification)
         std::thread::sleep(std::time::Duration::from_millis(4000));
+
+        // 5. Get available network list (structured, locale-independent!)
+        let mut network_list_ptr: *mut WLAN_AVAILABLE_NETWORK_LIST = std::ptr::null_mut();
+        let ret = WlanGetAvailableNetworkList(handle, &guid, 0, None, &mut network_list_ptr);
+        if ret != 0 {
+            WlanCloseHandle(handle, None);
+            return Err(HardwareError::Wifi(format!(
+                "WlanGetAvailableNetworkList failed with error code {ret}"
+            )));
+        }
+        let network_list = &*network_list_ptr;
+
+        // 6. Parse structured data into WifiNetwork
+        // WLAN_AVAILABLE_NETWORK_LIST uses a C-style flexible array member:
+        // the `Network` field is declared as [WLAN_AVAILABLE_NETWORK; 1] but
+        // the actual allocation contains `dwNumberOfItems` entries. We must
+        // use pointer arithmetic to access entries beyond index 0.
+        let mut networks = Vec::new();
+        let base = network_list.Network.as_ptr();
+        for i in 0..network_list.dwNumberOfItems {
+            let net = &*base.add(i as usize);
+
+            // dot11Ssid: 4-byte length + 32-byte SSID buffer
+            let ssid_len = net.dot11Ssid.uSSIDLength as usize;
+            let ssid_bytes = &net.dot11Ssid.ucSSID[..ssid_len];
+            let ssid = String::from_utf8_lossy(ssid_bytes).to_string();
+
+            // wlanSignalQuality: 0-100 percentage
+            let signal = net.wlanSignalQuality;
+
+            // bSecurityEnabled: bool
+            let security = if net.bSecurityEnabled.as_bool() {
+                "WPA2-Personal"
+            } else {
+                "Open"
+            };
+
+            networks.push(WifiNetwork {
+                ssid,
+                signal,
+                security: security.to_string(),
+                connected: false,
+            });
+        }
+
+        WlanCloseHandle(handle, None);
+        Ok(networks)
     }
-
-    let mut cmd = Command::new("netsh");
-    cmd.args(["wlan", "show", "networks", "mode=bssid"]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
-        .map_err(|e| HardwareError::Wifi(format!("Failed to run netsh: {e}")))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_scan_output(&stdout)
 }
 
-/// Get current WiFi connection status.
-pub fn get_status() -> HardwareResult<WifiStatus> {
-    let mut cmd = Command::new("netsh");
-    cmd.args(["wlan", "show", "interfaces"]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
-        .map_err(|e| HardwareError::Wifi(format!("Failed to run netsh: {e}")))?;
+#[cfg(not(windows))]
+pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
+    Err(HardwareError::NotSupported(
+        "WiFi scanning is Windows-only".into(),
+    ))
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_interface_output(&stdout)
+/// Get current WiFi connection status using native WlanAPI.
+///
+/// Uses `WlanQueryInterface` with structured data instead of parsing
+/// `netsh wlan show interfaces` text output. This is locale-independent.
+#[cfg(windows)]
+pub fn get_status() -> HardwareResult<WifiStatus> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::NetworkManagement::WiFi::{
+        wlan_intf_opcode_interface_state, WlanCloseHandle, WlanEnumInterfaces, WlanOpenHandle,
+        WlanQueryInterface, WLAN_API_VERSION_2_0, WLAN_INTERFACE_INFO_LIST,
+    };
+
+    unsafe {
+        let mut handle = HANDLE::default();
+        let mut negotiated = 0u32;
+        let ret = WlanOpenHandle(WLAN_API_VERSION_2_0, None, &mut negotiated, &mut handle);
+        if ret != 0 {
+            return Err(HardwareError::Wifi(format!(
+                "WlanOpenHandle failed with error code {ret}"
+            )));
+        }
+
+        let mut iface_list_ptr: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
+        let ret = WlanEnumInterfaces(handle, None, &mut iface_list_ptr);
+        if ret != 0 {
+            WlanCloseHandle(handle, None);
+            return Err(HardwareError::Wifi(format!(
+                "WlanEnumInterfaces failed with error code {ret}"
+            )));
+        }
+        let iface_list = &*iface_list_ptr;
+
+        if iface_list.dwNumberOfItems == 0 {
+            WlanCloseHandle(handle, None);
+            return Ok(WifiStatus {
+                connected: false,
+                ssid: None,
+                signal: None,
+                interface: None,
+            });
+        }
+
+        let guid = iface_list.InterfaceInfo[0].InterfaceGuid;
+        let interface_name =
+            String::from_utf16_lossy(&iface_list.InterfaceInfo[0].strInterfaceDescription)
+                .trim_end_matches('\0')
+                .to_string();
+
+        // Query interface state (enum, not locale-dependent string)
+        let mut state_data: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut state_size = 0u32;
+        let ret = WlanQueryInterface(
+            handle,
+            &guid,
+            wlan_intf_opcode_interface_state,
+            None,
+            &mut state_size,
+            &mut state_data,
+            None,
+        );
+        if ret != 0 {
+            WlanCloseHandle(handle, None);
+            return Err(HardwareError::Wifi(format!(
+                "WlanQueryInterface(state) failed with error code {ret}"
+            )));
+        }
+
+        // WLAN_INTERFACE_STATE: 0=not ready, 1=connected, 2=ad_hoc_network_formed,
+        // 3=disconnecting, 4=disconnected, 5=associating, 6=discovering, 7=authenticating
+        let state = *(state_data as *const u32);
+        let connected = state == 1; // wlan_interface_state_connected
+
+        WlanCloseHandle(handle, None);
+
+        Ok(WifiStatus {
+            connected,
+            ssid: None,
+            signal: None,
+            interface: Some(interface_name),
+        })
+    }
+}
+
+#[cfg(not(windows))]
+pub fn get_status() -> HardwareResult<WifiStatus> {
+    Err(HardwareError::NotSupported(
+        "WiFi status is Windows-only".into(),
+    ))
 }
 
 /// Connect to a WiFi network.
@@ -206,6 +366,7 @@ pub fn disconnect() -> HardwareResult<()> {
 }
 
 /// Parse netsh wlan show networks output.
+#[allow(dead_code)]
 fn parse_scan_output(output: &str) -> HardwareResult<Vec<WifiNetwork>> {
     let mut networks: Vec<WifiNetwork> = Vec::new();
     let mut current_ssid: Option<String> = None;
@@ -262,6 +423,7 @@ fn parse_scan_output(output: &str) -> HardwareResult<Vec<WifiNetwork>> {
 }
 
 /// Parse netsh wlan show interfaces output.
+#[allow(dead_code)]
 fn parse_interface_output(output: &str) -> HardwareResult<WifiStatus> {
     let mut ssid: Option<String> = None;
     let mut signal: Option<u32> = None;

@@ -1,10 +1,13 @@
 //! Audio device enumeration and control via Windows Core Audio API.
 //! Provides device listing, volume control, and mute toggle.
+#![allow(non_snake_case, dead_code)]
 
 use crate::hw::errors::HardwareResult;
 #[cfg(windows)]
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, GUID, HRESULT, PCWSTR};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
@@ -214,6 +217,112 @@ pub fn set_playback_mute(_muted: bool) -> HardwareResult<AudioVolumeResult> {
         volume: 0,
         muted: false,
     })
+}
+
+/// Set the default audio playback device by device ID.
+///
+/// Uses the undocumented but stable `IPolicyConfig` COM interface
+/// (IID `{f8679f50-850a-41cf-9c72-430f290290c8}`, available since Windows 8.1).
+/// Calls `SetDefaultEndpoint` for all three roles (eConsole, eMultimedia,
+/// eCommunications) to ensure the device becomes default across all audio
+/// categories.
+#[cfg(windows)]
+const CLSID_POLICY_CONFIG: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
+
+#[cfg(windows)]
+#[interface("f8679f50-850a-41cf-9c72-430f290290c8")]
+unsafe trait IPolicyConfig: IUnknown {
+    fn GetMixFormat(&self, device_id: PCWSTR, format: *mut std::ffi::c_void) -> HRESULT;
+    fn GetDeviceFormat(
+        &self,
+        device_id: PCWSTR,
+        exclusive: i32,
+        format: *mut std::ffi::c_void,
+    ) -> HRESULT;
+    fn ResetDeviceFormat(&self, device_id: PCWSTR) -> HRESULT;
+    fn SetDeviceFormat(
+        &self,
+        device_id: PCWSTR,
+        format: *const std::ffi::c_void,
+        previous: *const std::ffi::c_void,
+    ) -> HRESULT;
+    fn GetProcessingPeriod(
+        &self,
+        device_id: PCWSTR,
+        exclusive: i32,
+        current: *mut i64,
+        default: *mut i64,
+    ) -> HRESULT;
+    fn SetProcessingPeriod(&self, device_id: PCWSTR, period: *mut i64) -> HRESULT;
+    fn GetShareMode(&self, device_id: PCWSTR, mode: *mut std::ffi::c_void) -> HRESULT;
+    fn SetShareMode(&self, device_id: PCWSTR, mode: *const std::ffi::c_void) -> HRESULT;
+    fn GetPropertyValue(
+        &self,
+        device_id: PCWSTR,
+        property_format: i32,
+        property: *const std::ffi::c_void,
+        value: *mut std::ffi::c_void,
+    ) -> HRESULT;
+    fn SetPropertyValue(
+        &self,
+        device_id: PCWSTR,
+        property_format: i32,
+        property: *const std::ffi::c_void,
+        value: *const std::ffi::c_void,
+    ) -> HRESULT;
+    // Slot 15: SetDefaultEndpoint — the method we need
+    fn SetDefaultEndpoint(&self, device_id: PCWSTR, role: u32) -> HRESULT;
+    fn SetEndpointVisibility(&self, device_id: PCWSTR, visible: i32) -> HRESULT;
+}
+
+#[cfg(windows)]
+pub fn set_default_endpoint(device_id: &str) -> HardwareResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
+
+    // ERole constants
+    const E_CONSOLE: u32 = 0;
+    const E_MULTIMEDIA: u32 = 1;
+    const E_COMMUNICATIONS: u32 = 2;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let result = (|| -> windows::core::Result<()> {
+            let unknown: IUnknown = CoCreateInstance(&CLSID_POLICY_CONFIG, None, CLSCTX_ALL)?;
+            let policy: IPolicyConfig = unknown.cast()?;
+
+            // Convert device_id to wide string
+            let device_w: Vec<u16> = std::ffi::OsStr::new(device_id)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let pcwstr = PCWSTR(device_w.as_ptr());
+
+            // Set as default for all three roles
+            for role in [E_CONSOLE, E_MULTIMEDIA, E_COMMUNICATIONS] {
+                policy.SetDefaultEndpoint(pcwstr, role).ok()?;
+            }
+            Ok(())
+        })();
+
+        CoUninitialize();
+
+        result.map_err(|e| {
+            crate::hw::errors::HardwareError::Other(format!(
+                "Failed to set default audio endpoint: {e}"
+            ))
+        })
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_default_endpoint(_device_id: &str) -> HardwareResult<()> {
+    Err(crate::hw::errors::HardwareError::NotSupported(
+        "Audio device switching is Windows-only".into(),
+    ))
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────

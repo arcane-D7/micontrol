@@ -23,6 +23,7 @@ interface AudioControlProps {
   loading: boolean;
   onVolumeChange: (volumeFraction: number) => Promise<void>;
   onMuteToggle: (muted: boolean) => Promise<void>;
+  onSetDefaultDevice?: (deviceId: string) => Promise<void>;
 }
 
 export default function AudioControl({
@@ -30,6 +31,7 @@ export default function AudioControl({
   loading,
   onVolumeChange,
   onMuteToggle,
+  onSetDefaultDevice,
 }: AudioControlProps) {
   const [devices, setDevices] = useState<AudioDeviceList | null>(null);
   const { addToast } = useToast();
@@ -137,21 +139,33 @@ export default function AudioControl({
             {t('audio.playbackDevices')}
           </div>
           {devices.playback.slice(0, 5).map((d) => (
-            <div
+            <button
               key={d.id}
               className="stat-row"
+              disabled={d.is_default || !onSetDefaultDevice}
+              onClick={() => onSetDefaultDevice?.(d.id)}
               style={{
                 padding: '6px 8px',
                 borderRadius: 'var(--r-xs)',
                 background: d.is_default ? 'var(--bg-hover)' : 'transparent',
                 marginBottom: 4,
+                width: '100%',
+                textAlign: 'left',
+                border: 'none',
+                cursor: d.is_default || !onSetDefaultDevice ? 'default' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
               }}
             >
               <span style={{ flex: 1, fontSize: 13 }}>{d.name}</span>
               <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-                {d.is_default ? `✓ ${t('audio.defaultDevice')}` : ''}
+                {d.is_default
+                  ? `\u2713 ${t('audio.defaultDevice')}`
+                  : onSetDefaultDevice
+                    ? t('audio.setAsDefault')
+                    : ''}
               </span>
-            </div>
+            </button>
           ))}
         </div>
       )}

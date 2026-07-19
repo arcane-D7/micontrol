@@ -750,6 +750,17 @@ export function useHardware() {
     }
   }, []);
 
+  const setDefaultAudioDevice = useCallback(async (deviceId: string) => {
+    try {
+      await invoke('set_audio_default_endpoint', { deviceId });
+      setError(null);
+    } catch (e) {
+      console.error('[audio] set_default_endpoint failed:', e);
+      setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+      throw e;
+    }
+  }, []);
+
   // ── WMAA / WMI MiInterface (elevated bridge) ──────────────────────────────
   // Direct EC access via WMI MiInterface — bypasses IoTDriver process check.
   // All commands require admin privileges (auto-elevated through the bridge).
@@ -986,6 +997,7 @@ export function useHardware() {
       getAudioState,
       setMasterVolume,
       setMasterMute,
+      setDefaultAudioDevice,
       // WMAA / WMI MiInterface (elevated)
       wmiEcRead,
       wmiEcWrite,

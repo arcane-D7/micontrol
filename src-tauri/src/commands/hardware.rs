@@ -587,6 +587,14 @@ pub async fn set_audio_mute(muted: bool) -> Result<AudioVolumeResult, ErrorRespo
         .map_err(ErrorResponse::from)
 }
 
+/// Set the default audio playback device by device ID.
+#[tauri::command]
+pub async fn set_audio_default_endpoint(device_id: String) -> Result<(), ErrorResponse> {
+    run_blocking(move || crate::hw::audio::set_default_endpoint(&device_id))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
 // ── Screen Cast commands ──────────────────────────────────────────────────
 
 /// List available Miracast/WiDi receivers.

@@ -2521,6 +2521,7 @@ dependencies = [
  "tokio",
  "url",
  "windows 0.58.0",
+ "windows-core 0.58.0",
  "winreg 0.52.0",
  "wmi",
  "zip 2.4.2",

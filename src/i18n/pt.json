@@ -781,7 +781,8 @@
     "unmute": "Ativar som",
     "muted": "Silenciado",
     "playbackDevices": "Dispositivos de Reprodução",
-    "defaultDevice": "Padrão"
+    "defaultDevice": "Padrão",
+    "setAsDefault": "Definir como Padrão"
   },
   "error": {
     "boundary": {
