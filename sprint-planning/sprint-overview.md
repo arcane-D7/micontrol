@@ -11,10 +11,11 @@
 - v4: `docs/STABILITY_REPORT_v4.md` (Sprint 29)
 - Sprints 20–21: Post-v1 audit CRITICAL/HIGH fixes (committed d514bdf)
 - **Audit_Final**: `C:\Users\mafsc\Documents\Audit_Final.md` (Sprints 30–33) — 26 issues, 2 regressions + 24 pre-existing
+- **Audit_miControl_2026**: C:\Users\mafsc\Documents\Audit_Report_miControl.md (Sprints 34–37) — 10 issues (6 user-reported bugs + 4 security)
 
-**Total findings addressed:** 63 (v1) + 44 (v2) + 27 (v3) + 20 (deferred) + 27 (v4) + 26 (Audit_Final) = 207
-**Total estimated tickets:** 63 (v1) + 44 (v2) + 19 (v3) + 14 (S28) + 3 (S29) + 26 (S30–33) = 169
-**Total estimated effort:** 9–13 days (v1) + 9–12 days (v2) + ~10 days (v3+S28) + ~1–2 days (S29) = 29–37 days
+**Total findings addressed:** 63 (v1) + 44 (v2) + 27 (v3) + 20 (deferred) + 27 (v4) + 26 (Audit_Final) + 10 (Audit_miControl_2026) = 217
+**Total estimated tickets:** 63 (v1) + 44 (v2) + 19 (v3) + 14 (S28) + 3 (S29) + 26 (S30–33) + 23 (S34–37) = 192
+**Total estimated effort:** 9–13 days (v1) + 9–12 days (v2) + ~10 days (v3+S28) + ~1–2 days (S29) + ~12–19 days = 41–56 days
 
 ---
 
@@ -75,6 +76,24 @@
 - **S31:** FULL implementation of ALL stubs — Miracast via WinRT (Option B, not wrapper), ECRAM WMI discovery, audio device names, WiFi CREATE_NO_WINDOW, touchpad HID logging, startup autostart, EC Debug dev-gate
 - **S32:** Adaptive brightness logging, auto-discovery, IoT bridge, battery powercfg fallback, credential allowlist
 - **S33:** Dead code removal, dependency cleanup, dev-gating, documentation
+
+### miControl Audit Sprints (from `Audit_Report_miControl.md`) — 📌 PLANNED
+
+| Sprint | Priority    | Focus                           | Tickets | Effort     | Status    | File                                             |
+| ------ | ----------- | ------------------------------- | ------- | ---------- | --------- | ------------------------------------------------ |
+| 34     | P0 CRITICAL | Auth Bridge UAC + Quick Wins    | 7       | ~2–3 days  | 📌 Active | `sprint-34-p0-critical-auth-bridge/plan.md`      |
+| 35     | P1 HIGH     | Temperature, Volume, Tray, WiFi | 7       | ~3–4 days  | 📌 Active | `sprint-35-p1-high-temperature-volume/plan.md`   |
+| 36     | P2 MEDIUM   | Security Hardening              | 4       | ~2–3 days  | 📌 Active | `sprint-36-p2-medium-security-hardening/plan.md` |
+| 37     | P1 HIGH     | Audio Switching + WiFi WlanAPI  | 5       | ~5–10 days | 📌 Active | `sprint-37-p1-high-audio-wifi-features/plan.md`  |
+
+**miControl Audit totals:** 7 (S34) + 7 (S35) + 4 (S36) + 5 (S37) = 23 tickets, ~12–19 days effort
+
+**Key highlights:**
+
+- **S34:** Fixes Auth Bridge UAC regression (4 root causes: tri-state return, XML encoding, StopExisting, timeout) + 3 quick wins (color-mix CSS, resize guard, audio poll)
+- **S35:** Fixes temperature sensors (remove 50°C fallback, use Option<f32>), volume slider dirty flag, tray CSS verification, WiFi delay increase
+- **S36:** Security hardening (atomic result write, directory ACL, diag_ps gate, USERNAME→GetUserNameW)
+- **S37:** New features (IPolicyConfig audio device switching, WlanAPI replacing netsh for WiFi)
 
 ---
 
@@ -219,6 +238,20 @@ Sprint 30 (P0) ──► Sprint 31 (P1) ──► Sprint 32 (P2) ──► Sprin
 **Sprint 32** fixes 7 MEDIUM issues (adaptive brightness, auto-discovery, IoT bridge, battery powercfg, diagnostics note, IoT retry, credential allowlist).
 **Sprint 33** fixes 7 LOW issues (logging upgrades, dead code removal, dependency cleanup, dev-gating, documentation).
 **After S33:** Zero stubs remaining in codebase. Zero CRITICAL / HIGH / MEDIUM / LOW from Audit_Final.
+
+### miControl Audit Sprints (PLANNED)
+
+```
+Sprint 34 (P0) ──► Sprint 35 (P1) ──► Sprint 36 (P2) ──► Sprint 37 (P1)
+   7 tickets         7 tickets          4 tickets          5 tickets
+   ~2–3 days         ~3–4 days          ~2–3 days           ~5–10 days
+```
+
+**Sprint 34** fixes the Auth Bridge UAC regression (4 root causes) + 3 quick-win UX fixes (tray CSS, resize guard, audio poll).
+**Sprint 35** fixes temperature sensors (remove fabricated fallback), volume slider dirty flag, tray CSS verification, WiFi scan delay.
+**Sprint 36** fixes 4 security issues (atomic writes, directory ACL, diag_ps gate, USERNAME spoofing).
+**Sprint 37** implements audio device switching (IPolicyConfig COM) and replaces netsh with WlanAPI for locale-independent WiFi.
+**After S37:** All 6 user-reported bugs fixed. All 4 security issues resolved. Zero UAC prompts in production.
 
 ---
 
