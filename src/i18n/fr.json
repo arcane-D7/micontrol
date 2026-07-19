@@ -781,7 +781,8 @@
     "unmute": "Réactiver le son",
     "muted": "Muet",
     "playbackDevices": "Périphériques de Lecture",
-    "defaultDevice": "Par défaut"
+    "defaultDevice": "Par défaut",
+    "setAsDefault": "Définir par Défaut"
   },
   "error": {
     "boundary": {
