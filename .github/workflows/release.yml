@@ -92,12 +92,7 @@ jobs:
       - name: Build Tauri app
         run: npm run tauri build
 
-      - name: Create tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a ${{ inputs.tag || github.ref_name }} -m "Release ${{ inputs.tag || github.ref_name }}"
-          git push origin ${{ inputs.tag || github.ref_name }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
