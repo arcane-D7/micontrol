@@ -1,0 +1,75 @@
+;
+; IoTDriver.inf
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System ; TODO: specify appropriate Class
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318} ; TODO: specify appropriate ClassGuid
+Provider    = %ManufacturerName%
+CatalogFile = IoTDriver.cat
+DriverVer = 03/10/2026,25.0.0.9
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+IoTDriver.sys  = 1,,
+IoTService.exe  = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64.10.0...16299 ; %13% support introduced in build 16299
+
+[Standard.NTamd64.10.0...16299]
+%IoTDriver.DeviceDesc% = IoTDriver_Device, ACPI\IOTD0000 ; TODO: edit hw-id
+
+[IoTDriver_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+IoTDriver.sys
+IoTService.exe
+
+;-------------- Service installation
+[IoTDriver_Device.NT.Services]
+AddService = IoTDriver,%SPSVCINST_ASSOCSERVICE%, IoTDriver_Service_Inst
+AddService = IoTSvc,%SPSVCSINST_STARTSERVICE%, IoTSvc_Service_Inst
+
+; -------------- IoTDriver driver install sections
+[IoTDriver_Service_Inst]
+DisplayName    = %IoTDriver.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\IoTDriver.sys
+
+; -------------- IoTService install sections
+[IoTSvc_Service_Inst]
+DisplayName    = %IoTSvc.SVCDESC%
+ServiceType    = 0x10            ; SERVICE_WIN32_OWN_PROCESS
+StartType      = 2               ; SERVICE_AUTO_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\IoTService.exe
+
+[IoTDriver_Device.NT.Wdf]
+KmdfService = IoTDriver, IoTDriver_wdfsect
+
+[IoTDriver_wdfsect]
+KmdfLibraryVersion = 1.15
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+SPSVCSINST_STARTSERVICE = 0x00000800 
+ManufacturerName = "XIAOMI" ;TODO: Replace with your manufacturer name
+DiskName = "IoT Deivce Driver Installation Disk"
+IoTDriver.DeviceDesc = "Xiaomi IoT Module"
+IoTDriver.SVCDESC = "IoT Driver Service"
+IoTSvc.SVCDESC = "IoT App Service"

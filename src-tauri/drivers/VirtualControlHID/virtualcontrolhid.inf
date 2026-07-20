@@ -1,0 +1,68 @@
+;
+; VirtualControlHID.inf
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System ; TODO: specify appropriate Class
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318} ; TODO: specify appropriate ClassGuid
+Provider    = %ManufacturerName%
+CatalogFile = VirtualControlHID.cat
+DriverVer = 03/02/2026,19.27.15.36
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+VirtualControlHID.sys = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64.10.0...16299 ; %13% support introduced in build 16299
+
+[Standard.NTamd64.10.0...16299]
+%VirtualControlHID.DeviceDesc% = VirtualControlHID_Device, Xiaomi\VirtualControlHID ; TODO: edit hw-id
+
+[VirtualControlHID_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+VirtualControlHID.sys
+
+[VirtualControlHID_Device.NT.hw]
+AddReg=VirtualControlHID_Device_AddReg
+
+[VirtualControlHID_Device_AddReg]
+HKR,,"LowerFilters",0x00010000,"vhf"
+
+;-------------- Service installation
+[VirtualControlHID_Device.NT.Services]
+AddService = VirtualControlHID,%SPSVCINST_ASSOCSERVICE%, VirtualControlHID_Service_Inst
+
+; -------------- VirtualControlHID driver install sections
+[VirtualControlHID_Service_Inst]
+DisplayName    = %VirtualControlHID.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\VirtualControlHID.sys
+
+[VirtualControlHID_Device.NT.Wdf]
+KmdfService = VirtualControlHID, VirtualControlHID_wdfsect
+
+[VirtualControlHID_wdfsect]
+KmdfLibraryVersion = 1.15
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "Xiaomi" ;TODO: Replace with your manufacturer name
+DiskName = "VirtualControlHID Installation Disk"
+VirtualControlHID.DeviceDesc = "VirtualControlHID Device"
+VirtualControlHID.SVCDESC = "VirtualControlHID Service"
