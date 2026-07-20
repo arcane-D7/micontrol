@@ -1,6 +1,6 @@
 [package]
 name = "micontrol"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 default-run = "micontrol"
 
@@ -112,3 +112,5 @@ codegen-units = 1
 lto = true
 opt-level = 3
 strip = true
+
+
