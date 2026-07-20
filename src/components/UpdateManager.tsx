@@ -1,13 +1,33 @@
-﻿import { t } from '../hooks/useI18n';
+import { t } from '../hooks/useI18n';
 import type { UpdateStatus } from '../types/hardware';
+import AppUpdateBanner from './AppUpdateBanner';
+import type { AppUpdateState, AppUpdateInfo } from '../hooks/useAutoUpdate';
 
 interface Props {
   updateStatus: UpdateStatus | null;
   loadingUpdate: boolean;
   onRefreshUpdate: () => void;
+  appUpdateState: AppUpdateState;
+  appUpdateInfo: AppUpdateInfo | null;
+  appUpdateProgress: number;
+  appUpdateError: string;
+  onCheckAppUpdate: () => void;
+  onInstallAppUpdate: () => void;
+  onDismissAppUpdate: () => void;
 }
 
-export default function UpdateManager({ updateStatus, loadingUpdate, onRefreshUpdate }: Props) {
+export default function UpdateManager({
+  updateStatus,
+  loadingUpdate,
+  onRefreshUpdate,
+  appUpdateState,
+  appUpdateInfo,
+  appUpdateProgress,
+  appUpdateError,
+  onCheckAppUpdate,
+  onInstallAppUpdate,
+  onDismissAppUpdate,
+}: Props) {
   if (loadingUpdate && !updateStatus) {
     return (
       <div className="card">
@@ -24,6 +44,17 @@ export default function UpdateManager({ updateStatus, loadingUpdate, onRefreshUp
 
   return (
     <>
+      {/* App self-update banner */}
+      <AppUpdateBanner
+        state={appUpdateState}
+        updateInfo={appUpdateInfo}
+        progress={appUpdateProgress}
+        errorMsg={appUpdateError}
+        onCheck={onCheckAppUpdate}
+        onInstall={onInstallAppUpdate}
+        onDismiss={onDismissAppUpdate}
+      />
+
       {/* BIOS Information */}
       <div className="card">
         <div className="card-title">{t('updates.biosSection')}</div>

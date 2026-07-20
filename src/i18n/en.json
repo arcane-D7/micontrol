@@ -255,17 +255,17 @@
       "levelLabel": "Battery Level (%)",
       "levelDesc": "Percentage of energy remaining relative to the current full-charge capacity.",
       "healthLabel": "Battery Health (%)",
-      "healthDesc": "Ratio of the current full-charge capacity to the original designed capacity. Values \u226580% are normal for daily use.",
+      "healthDesc": "Ratio of the current full-charge capacity to the original designed capacity. Values ≥80% are normal for daily use.",
       "capacitySection": "Capacity & Cycles",
       "capacityLabel": "Designed / Full Capacity",
-      "capacityDesc": "Capacity is reported by ACPI in mWh (milliwatt-hours). Wh = mWh \u00f7 1,000. mAh is estimated from the current voltage and may vary slightly with temperature.",
+      "capacityDesc": "Capacity is reported by ACPI in mWh (milliwatt-hours). Wh = mWh ÷ 1,000. mAh is estimated from the current voltage and may vary slightly with temperature.",
       "cyclesLabel": "Charge Cycles",
-      "cyclesDesc": "One full discharge (0\u2192100%) counts as one cycle. Partial charges accumulate proportionally. Most lithium cells last 500\u20131,000 cycles before significant capacity loss.",
+      "cyclesDesc": "One full discharge (0→100%) counts as one cycle. Partial charges accumulate proportionally. Most lithium cells last 500–1,000 cycles before significant capacity loss.",
       "powerSection": "Power Flow",
       "chargeRateLabel": "Charge / Discharge Rate",
-      "chargeRateDesc": "Power flowing to or from the battery, measured by the battery driver in mW. This is the battery\u2019s own charge or discharge rate \u2014 not the total AC adapter output. Adapter wattage = battery charge rate + system power draw, but system consumption is not available through standard Windows APIs.",
+      "chargeRateDesc": "Power flowing to or from the battery, measured by the battery driver in mW. This is the battery’s own charge or discharge rate — not the total AC adapter output. Adapter wattage = battery charge rate + system power draw, but system consumption is not available through standard Windows APIs.",
       "timeLabel": "Time Remaining / Time to Full",
-      "timeDesc": "Instantaneous estimate based on current energy and power rate. When discharging on battery: remaining energy \u00f7 discharge rate. When charging: energy needed to fill \u00f7 charge rate. Fluctuates with varying workload."
+      "timeDesc": "Instantaneous estimate based on current energy and power rate. When discharging on battery: remaining energy ÷ discharge rate. When charging: energy needed to fill ÷ charge rate. Fluctuates with varying workload."
     }
   },
   "charging": {
@@ -283,11 +283,11 @@
     "applied": "Setting applied",
     "error": "Failed to set charging threshold",
     "levels": {
-      "40": "40% \u2014 Maximum protection",
+      "40": "40% — Maximum protection",
       "50": "50%",
       "60": "60%",
       "70": "70%",
-      "80": "80% \u2014 Recommended"
+      "80": "80% — Recommended"
     },
     "infoModal": {
       "title": "How Charging Control Works",
@@ -296,9 +296,9 @@
       "requiresLabel": "Requirements",
       "requiresDesc": "Requires IoTDriver.sys (Xiaomi) to be installed and IoTService to be running. If the pipe connection fails, the value is stored in the registry and only takes effect when the service restarts.",
       "behaviorLabel": "Behaviour",
-      "behaviorDesc": "This is a charge ceiling \u2014 it does not discharge the battery. If you are already above the configured limit, the limit applies on the next charge cycle (discharge below the limit, then plug in).",
-      "warningLabel": "\u26a0\ufe0f Note:",
-      "warningDesc": "This feature was reverse-engineered from the Xiaomi IoTService binary (message type 0x1003). Values 40\u201380 are interpreted as charge limit percentages, but on some firmware variants the same command may control the charging current rate instead. If you observe the battery consistently charging past your configured limit, the IoTDriver may not be active on your device."
+      "behaviorDesc": "This is a charge ceiling — it does not discharge the battery. If you are already above the configured limit, the limit applies on the next charge cycle (discharge below the limit, then plug in).",
+      "warningLabel": "⚠️ Note:",
+      "warningDesc": "This feature was reverse-engineered from the Xiaomi IoTService binary (message type 0x1003). Values 40–80 are interpreted as charge limit percentages, but on some firmware variants the same command may control the charging current rate instead. If you observe the battery consistently charging past your configured limit, the IoTDriver may not be active on your device."
     }
   },
   "display": {
@@ -311,7 +311,7 @@
     "refreshRate": "Refresh Rate",
     "hz": "Hz",
     "aiAdaptiveBrightness": "Adaptive Brightness",
-    "sensitivityConfigure": "Configure sensitivity\u2026",
+    "sensitivityConfigure": "Configure sensitivity…",
     "sensitivityMin": "Min brightness",
     "sensitivityMax": "Max brightness",
     "sensitivityLevel": "Sensitivity",
@@ -511,7 +511,18 @@
     "scanning": "Scanning…",
     "scanSuccess": "Scan triggered via XPM nucleus",
     "scanError": "Failed to trigger scan: {error}",
-    "nucleusNote": "Invokes XiaomiPCManager's scan engine to find official driver and BIOS updates, preventing generic Windows Update drivers from overriding Xiaomi hardware-specific versions."
+    "nucleusNote": "Invokes XiaomiPCManager's scan engine to find official driver and BIOS updates, preventing generic Windows Update drivers from overriding Xiaomi hardware-specific versions.",
+    "appVersion": "App Version",
+    "checkingForUpdates": "Checking for updates…",
+    "upToDate": "Your app is up to date",
+    "checkNow": "Check Now",
+    "newVersionAvailable": "New version available",
+    "downloadAndInstall": "Download & Install",
+    "downloading": "Downloading update",
+    "installing": "Installing update…",
+    "downloadComplete": "Download complete",
+    "restarting": "Restarting app…",
+    "updateError": "Update error"
   },
   "discovery": {
     "title": "Device Setup",
@@ -681,7 +692,7 @@
       "what": "Hardware telemetry: battery level, CPU/GPU temperature, performance mode, touchpad state, display settings, and system information",
       "where": "OpenAI API — processed on their servers in accordance with their privacy policy",
       "why": "To provide AI-powered insights and hardware optimisation recommendations",
-      "control": "You can revoke this consent at any time in Settings \u2192 Privacy. AI features will stop immediately.",
+      "control": "You can revoke this consent at any time in Settings → Privacy. AI features will stop immediately.",
       "sentryDisclosure": "Crash reports will be sent to Sentry to help improve the app. No personal data is included.",
       "allow": "Allow",
       "deny": "Deny",
@@ -692,15 +703,15 @@
     "title": "Privacy Policy",
     "lastUpdated": "Last updated: June 2026",
     "section1Title": "1. What Data We Collect",
-    "section1Body": "When you enable AI-powered features, MiControl collects hardware telemetry data from your device. This includes:\n\n\u2022 Battery information: charge level, health percentage, cycle count, temperature, charging status, capacity\n\u2022 CPU / GPU data: usage percentage, temperature, package power draw (TDP)\n\u2022 Performance mode: current power profile and switching events\n\u2022 Display information: brightness level, refresh rate, HDR status\n\u2022 Fan state: speed (RPM), temperature readings\n\u2022 Touchpad state: sensitivity, haptics configuration\n\u2022 System information: RAM usage, OS version, device model\n\nNo personal identifying information (name, email, location, files) is collected unless explicitly provided by you.",
+    "section1Body": "When you enable AI-powered features, MiControl collects hardware telemetry data from your device. This includes:\n\n• Battery information: charge level, health percentage, cycle count, temperature, charging status, capacity\n• CPU / GPU data: usage percentage, temperature, package power draw (TDP)\n• Performance mode: current power profile and switching events\n• Display information: brightness level, refresh rate, HDR status\n• Fan state: speed (RPM), temperature readings\n• Touchpad state: sensitivity, haptics configuration\n• System information: RAM usage, OS version, device model\n\nNo personal identifying information (name, email, location, files) is collected unless explicitly provided by you.",
     "section2Title": "2. Where Data Is Sent",
     "section2Body": "Hardware telemetry data is sent to OpenAI via their API (api.openai.com). If you have configured a custom endpoint (such as Ollama, Azure OpenAI, or LM Studio), data is sent to that endpoint instead. Data is transmitted over HTTPS and is not stored by MiControl on any external server.",
     "section3Title": "3. Purpose of Data Collection",
-    "section3Body": "The collected hardware data is used exclusively to:\n\n\u2022 Analyse your system\u2019s performance and battery health\n\u2022 Provide personalised hardware optimisation recommendations\n\u2022 Detect potential hardware issues or thermal anomalies\n\u2022 Suggest optimal performance modes for your current workload\n\nData is not used for advertising, profiling, or sold to third parties.",
+    "section3Body": "The collected hardware data is used exclusively to:\n\n• Analyse your system’s performance and battery health\n• Provide personalised hardware optimisation recommendations\n• Detect potential hardware issues or thermal anomalies\n• Suggest optimal performance modes for your current workload\n\nData is not used for advertising, profiling, or sold to third parties.",
     "section4Title": "4. Data Retention",
     "section4Body": "Telemetry data is sent to the AI provider in real time during an analysis request. MiControl does not persistently store the data you send. Performance logs written to disk (if AI Analysis logging is enabled) are stored locally on your device and are never automatically uploaded. You can clear these logs at any time from the AI Analysis tab.",
     "section5Title": "5. Your Rights",
-    "section5Body": "You have full control over your data:\n\n\u2022 Grant or deny consent at any time via Settings \u2192 Privacy\n\u2022 Revoke previously granted consent \u2014 this immediately stops all telemetry transmission\n\u2022 Delete locally stored performance logs from the AI Analysis tab\n\u2022 Uninstall MiControl to remove all locally stored configuration and logs\n\nIf you have separately provided personal data to OpenAI, you must contact them directly to exercise your data rights under applicable law.",
+    "section5Body": "You have full control over your data:\n\n• Grant or deny consent at any time via Settings → Privacy\n• Revoke previously granted consent — this immediately stops all telemetry transmission\n• Delete locally stored performance logs from the AI Analysis tab\n• Uninstall MiControl to remove all locally stored configuration and logs\n\nIf you have separately provided personal data to OpenAI, you must contact them directly to exercise your data rights under applicable law.",
     "section6Title": "6. Contact",
     "section6Body": "For privacy-related inquiries about MiControl, please open an issue on the GitHub repository: github.com/arcane-D7/micontrol",
     "consentStatus": "Consent Status",

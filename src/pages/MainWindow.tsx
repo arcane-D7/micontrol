@@ -5,6 +5,7 @@ import type { useHardware } from '../hooks/useHardware';
 import TrayPopup from './TrayPopup';
 import { useSettings } from '../hooks/useSettings';
 import { useAnalysisLogger } from '../hooks/useAnalysisLogger';
+import { useAutoUpdate } from '../hooks/useAutoUpdate';
 import { ConsentDialog } from '../components/ConsentDialog';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { MiControlIcon } from '../components/MiControlIcon';
@@ -218,6 +219,7 @@ export default function MainWindow({
   toggleTheme,
 }: Props) {
   const aiSettings = useSettings();
+  const appUpdate = useAutoUpdate();
   const { onboardingCompleted } = aiSettings.settings;
   const [showTrayPreview, setShowTrayPreview] = useState(false);
   const [showConsentDialog, setShowConsentDialog] = useState(false);
@@ -311,7 +313,18 @@ export default function MainWindow({
       case 'startup':
         return <StartupTab />;
       case 'updates':
-        return <UpdatesTab hw={hardware} />;
+        return (
+          <UpdatesTab
+            hw={hardware}
+            appUpdateState={appUpdate.state}
+            appUpdateInfo={appUpdate.updateInfo}
+            appUpdateProgress={appUpdate.progress}
+            appUpdateError={appUpdate.errorMsg}
+            onCheckAppUpdate={appUpdate.checkForUpdate}
+            onInstallAppUpdate={appUpdate.downloadAndInstall}
+            onDismissAppUpdate={appUpdate.dismiss}
+          />
+        );
       case 'keyboard':
         return <KeyboardTab />;
       case 'setup':

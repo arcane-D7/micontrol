@@ -511,7 +511,18 @@
     "scanning": "Analizando…",
     "scanSuccess": "Análisis iniciado a través del núcleo XPM",
     "scanError": "Error al iniciar análisis: {error}",
-    "nucleusNote": "Invoca el motor de análisis de XiaomiPCManager para encontrar actualizaciones oficiales de controladores y BIOS, evitando que controladores genéricos de Windows Update reemplacen versiones específicas del hardware Xiaomi."
+    "nucleusNote": "Invoca el motor de análisis de XiaomiPCManager para encontrar actualizaciones oficiales de controladores y BIOS, evitando que controladores genéricos de Windows Update reemplacen versiones específicas del hardware Xiaomi.",
+    "appVersion": "Versión de la App",
+    "checkingForUpdates": "Buscando actualizaciones…",
+    "upToDate": "Tu app está actualizada",
+    "checkNow": "Buscar Ahora",
+    "newVersionAvailable": "Nueva versión disponible",
+    "downloadAndInstall": "Descargar e Instalar",
+    "downloading": "Descargando actualización",
+    "installing": "Instalando actualización…",
+    "downloadComplete": "Descarga completa",
+    "restarting": "Reiniciando app…",
+    "updateError": "Error de actualización"
   },
   "discovery": {
     "title": "Configuración del Dispositivo",
