@@ -101,8 +101,8 @@ jobs:
         run: |
           $tagName = "${{ github.ref_name }}"
           $version = $tagName -replace '^v', ''
-          $sigPath = "src-tauri/target/release/bundle/nsis/MiControl_${{$version}}_x64-setup.exe.sig"
-          $installerName = "MiControl_${{$version}}_x64-setup.exe"
+          $sigPath = "src-tauri/target/release/bundle/nsis/MiControl_$($version)_x64-setup.exe.sig"
+          $installerName = "MiControl_$($version)_x64-setup.exe"
           $installerUrl = "https://github.com/arcane-D7/micontrol/releases/latest/download/$installerName"
           node scripts/generate-latest-json.mjs "$version" "$sigPath" "$installerUrl" "src-tauri/target/release/bundle/nsis/latest.json"
 
