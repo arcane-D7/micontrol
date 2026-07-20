@@ -96,6 +96,16 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
 
+      - name: Generate latest.json for updater
+        shell: pwsh
+        run: |
+          $tagName = "${{ github.ref_name }}"
+          $version = $tagName -replace '^v', ''
+          $sigPath = "src-tauri/target/release/bundle/nsis/MiControl_${{$version}}_x64-setup.exe.sig"
+          $installerName = "MiControl_${{$version}}_x64-setup.exe"
+          $installerUrl = "https://github.com/arcane-D7/micontrol/releases/latest/download/$installerName"
+          node scripts/generate-latest-json.mjs "$version" "$sigPath" "$installerUrl" "src-tauri/target/release/bundle/nsis/latest.json"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -105,7 +115,7 @@ jobs:
             src-tauri/target/release/bundle/**/*.exe
             src-tauri/target/release/bundle/**/*.zip
             src-tauri/target/release/bundle/**/*.sig
-            src-tauri/target/release/bundle/**/*.json
+            src-tauri/target/release/bundle/nsis/latest.json
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
