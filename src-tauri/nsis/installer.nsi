@@ -276,6 +276,15 @@ Function PageReinstall
     Abort
   ${EndIf}
 
+  ; Auto-skip the reinstall dialog for upgrades.
+  ; When a newer version is detected, proceed directly to installation
+  ; (overwrite mode) without showing the "Uninstall before install" dialog.
+  ; User config in AppData is never touched by the installer.
+  ${If} $R0 = 1
+    StrCpy $UpdateMode 1
+    Abort
+  ${EndIf}
+
   ; Skip showing the page if passive
   ;
   ; Note that we don't call this earlier at the beginning
