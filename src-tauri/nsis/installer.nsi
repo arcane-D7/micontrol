@@ -669,7 +669,11 @@ Section Install
     !insertmacro NSIS_HOOK_PREINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; Force-kill any running instance of the app before writing files.
+  ; This is critical: the process may have been restarted by Windows startup
+  ; or the scheduled task between PageReinstall (early kill) and here.
+  ; CheckIfAppIsRunning only shows a dialog — it does NOT kill.
+  Call KillAppProcess
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -806,7 +810,8 @@ Section Uninstall
     !insertmacro NSIS_HOOK_PREUNINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  ; Force-kill any running instance before deleting files.
+  Call un.KillAppProcess
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
@@ -936,6 +941,62 @@ Function SkipIfPassive
 FunctionEnd
 Function un.SkipIfPassive
   ${IfThen} $PassiveMode = 1  ${|} Abort ${|}
+FunctionEnd
+
+; ── Force-kill helper ─────────────────────────────────────────────────────────
+; Kills ${MAINBINARYNAME}.exe with a retry loop (up to 5 attempts, 500ms apart).
+; This ensures the exe file is not locked when the installer tries to overwrite it.
+; Used in both Section Install (installer) and Section Uninstall (uninstaller).
+Function KillAppProcess
+  StrCpy $0 0  ; retry counter
+  kill_loop:
+    !if "${INSTALLMODE}" == "currentUser"
+      nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+    !else
+      nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"
+    !endif
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — safe to proceed
+    ${EndIf}
+    ; Process found — kill it
+    !if "${INSTALLMODE}" == "currentUser"
+      nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+    !else
+      nsis_tauri_utils::KillProcess "${MAINBINARYNAME}.exe"
+    !endif
+    Pop $1
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto kill_loop
+    ${EndIf}
+FunctionEnd
+
+Function un.KillAppProcess
+  StrCpy $0 0  ; retry counter
+  un_kill_loop:
+    !if "${INSTALLMODE}" == "currentUser"
+      nsis_tauri_utils::FindProcessCurrentUser "${MAINBINARYNAME}.exe"
+    !else
+      nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"
+    !endif
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — safe to proceed
+    ${EndIf}
+    ; Process found — kill it
+    !if "${INSTALLMODE}" == "currentUser"
+      nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
+    !else
+      nsis_tauri_utils::KillProcess "${MAINBINARYNAME}.exe"
+    !endif
+    Pop $1
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto un_kill_loop
+    ${EndIf}
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
