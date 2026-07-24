@@ -75,7 +75,7 @@ FunctionEnd
 
   ; ── Windows startup (user choice) ─────────────────────────────────────────
   ${If} $DoStartup == ${BST_CHECKED}
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" \
+    WriteRegStr SHCTX "Software\Microsoft\Windows\CurrentVersion\Run" \
       "MiControl" '"$INSTDIR\micontrol.exe"'
     DetailPrint "MiControl configurado para iniciar com o Windows."
   ${EndIf}
@@ -133,6 +133,8 @@ FunctionEnd
 !macro customUnInstall
   ; Remove desktop shortcut and startup entry (if they were created)
   Delete "$DESKTOP\MiControl.lnk"
+  DeleteRegValue SHCTX "Software\Microsoft\Windows\CurrentVersion\Run" "MiControl"
+  ; Also clean up old HKCU entry from previous currentUser installations
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "MiControl"
 
   ; Remove the elevated scheduled task

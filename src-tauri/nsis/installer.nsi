@@ -682,6 +682,12 @@ Section Install
   ; IoTService.exe runs as a service and holds locks on the IoTDriver files.
   Call StopIoTService
 
+  ; Migrate from old currentUser installation (v0.1.12 and earlier installed
+  ; to $LOCALAPPDATA\MiControl).  perMachine installs to $PROGRAMFILES64\MiControl.
+  ; If the old location exists and differs from $INSTDIR, run its uninstaller
+  ; silently to clean up registry entries, shortcuts, and scheduled tasks.
+  Call MigrateOldCurrentUserInstall
+
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
 
@@ -988,19 +994,54 @@ FunctionEnd
 ; IoTService.exe runs as a service and holds locks on the IoTDriver files
 ; (IoTDriver.sys, IoTDriver.cat, IoTService.exe itself). Without stopping it,
 ; the installer cannot overwrite these files.
+; Uses a retry loop (up to 5 attempts) because the service may take a moment
+; to stop after sc.exe returns.
 Function StopIoTService
-  ; Try to stop the service gracefully
-  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
-  Pop $0
-  Sleep 1000
-  ; Force-kill the process in case the service didn't stop in time
-  nsis_tauri_utils::FindProcess "IoTService.exe"
-  Pop $0
-  ${If} $0 = 0
+  StrCpy $0 0  ; retry counter
+  iot_stop_loop:
+    ; Try to stop the service gracefully
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+    Pop $1
+    Sleep 1000
+    ; Check if the process is still running
+    nsis_tauri_utils::FindProcess "IoTService.exe"
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — service stopped successfully
+    ${EndIf}
+    ; Process still running — force-kill it
     nsis_tauri_utils::KillProcess "IoTService.exe"
-    Pop $0
+    Pop $1
     Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto iot_stop_loop
+    ${EndIf}
+    DetailPrint "Warning: IoTService.exe could not be stopped after 5 attempts."
+FunctionEnd
+
+; ── Old installation migrator ─────────────────────────────────────────────────
+; If a previous currentUser installation exists in $LOCALAPPDATA\${PRODUCTNAME}
+; (from v0.1.12 or earlier), run its uninstaller silently to clean up the old
+; registry entries, shortcuts, and scheduled tasks.  This is necessary because
+; switching from currentUser to perMachine changes the install location and
+; registry scope (HKCU → HKLM).
+Function MigrateOldCurrentUserInstall
+  ; Only migrate if the old location differs from the current install dir
+  StrCpy $R0 "$LOCALAPPDATA\${PRODUCTNAME}"
+  ${If} $R0 == $INSTDIR
+    Return  ; already installing to LOCALAPPDATA — no migration needed
   ${EndIf}
+  ; Check if the old uninstaller exists
+  IfFileExists "$R0\uninstall.exe" 0 migration_done
+    DetailPrint "Found old currentUser installation at $R0 — running uninstaller..."
+    ; Run the old uninstaller silently (no UI, no reboot)
+    nsExec::ExecToLog '"$R0\uninstall.exe" /S /UPDATE'
+    Pop $1
+    DetailPrint "Old installation cleanup returned: $1"
+    ; Remove leftover files/directories
+    RMDir /r /REBOOTOK "$R0"
+  migration_done:
 FunctionEnd
 
 Function un.KillAppProcess
@@ -1030,16 +1071,24 @@ Function un.KillAppProcess
 FunctionEnd
 
 Function un.StopIoTService
-  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
-  Pop $0
-  Sleep 1000
-  nsis_tauri_utils::FindProcess "IoTService.exe"
-  Pop $0
-  ${If} $0 = 0
+  StrCpy $0 0  ; retry counter
+  un_iot_stop_loop:
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+    Pop $1
+    Sleep 1000
+    nsis_tauri_utils::FindProcess "IoTService.exe"
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — service stopped successfully
+    ${EndIf}
     nsis_tauri_utils::KillProcess "IoTService.exe"
-    Pop $0
+    Pop $1
     Sleep 500
-  ${EndIf}
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto un_iot_stop_loop
+    ${EndIf}
+    DetailPrint "Warning: IoTService.exe could not be stopped after 5 attempts."
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
