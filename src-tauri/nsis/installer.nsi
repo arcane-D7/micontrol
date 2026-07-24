@@ -204,6 +204,9 @@ Function PageReinstall
     Sleep 1000
   ${EndIf}
 
+  ; Stop the IoTService Windows service so it releases locks on driver files
+  Call StopIoTService
+
   ; Uninstall previous WiX installation if exists.
   ;
   ; A WiX installer stores the installation info in registry
@@ -675,6 +678,10 @@ Section Install
   ; CheckIfAppIsRunning only shows a dialog — it does NOT kill.
   Call KillAppProcess
 
+  ; Stop the IoTService Windows service so it releases locks on driver files.
+  ; IoTService.exe runs as a service and holds locks on the IoTDriver files.
+  Call StopIoTService
+
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
 
@@ -812,6 +819,9 @@ Section Uninstall
 
   ; Force-kill any running instance before deleting files.
   Call un.KillAppProcess
+
+  ; Stop the IoTService Windows service so it releases locks on driver files.
+  Call un.StopIoTService
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
@@ -973,6 +983,26 @@ Function KillAppProcess
     ${EndIf}
 FunctionEnd
 
+; ── IoTService stopper ────────────────────────────────────────────────────────
+; Stops the IoTSvc Windows service and kills the IoTService.exe process.
+; IoTService.exe runs as a service and holds locks on the IoTDriver files
+; (IoTDriver.sys, IoTDriver.cat, IoTService.exe itself). Without stopping it,
+; the installer cannot overwrite these files.
+Function StopIoTService
+  ; Try to stop the service gracefully
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+  Pop $0
+  Sleep 1000
+  ; Force-kill the process in case the service didn't stop in time
+  nsis_tauri_utils::FindProcess "IoTService.exe"
+  Pop $0
+  ${If} $0 = 0
+    nsis_tauri_utils::KillProcess "IoTService.exe"
+    Pop $0
+    Sleep 500
+  ${EndIf}
+FunctionEnd
+
 Function un.KillAppProcess
   StrCpy $0 0  ; retry counter
   un_kill_loop:
@@ -997,6 +1027,19 @@ Function un.KillAppProcess
     ${If} $0 < 5
       Goto un_kill_loop
     ${EndIf}
+FunctionEnd
+
+Function un.StopIoTService
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+  Pop $0
+  Sleep 1000
+  nsis_tauri_utils::FindProcess "IoTService.exe"
+  Pop $0
+  ${If} $0 = 0
+    nsis_tauri_utils::KillProcess "IoTService.exe"
+    Pop $0
+    Sleep 500
+  ${EndIf}
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut

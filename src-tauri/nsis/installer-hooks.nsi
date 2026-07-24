@@ -140,8 +140,11 @@ FunctionEnd
   Pop $0
   DetailPrint "MiControlElevated task removed: $0"
 
-  ; Hardware drivers are intentionally NOT removed on uninstall.
-  ; VirtualControlHID and IoTDriver are required by the system hardware and
-  ; may be shared with other Xiaomi software. They remain in the driver store.
-  DetailPrint "Nota: VirtualControlHID e IoTDriver permanecem instalados (drivers de hardware)."
+  ; Stop and remove the IoTService Windows service
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+  Pop $0
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" delete IoTSvc'
+  Pop $0
+  DetailPrint "IoTSvc service removed: $0"
+
 !macroend
