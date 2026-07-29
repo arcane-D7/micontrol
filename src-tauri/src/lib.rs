@@ -15,25 +15,26 @@ use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
 #[allow(deprecated)]
 use commands::hardware::{
-    ensure_iot_service, get_audio_devices, get_audio_volume, get_cast_devices,
-    get_charging_threshold, get_ecram_map, get_iot_bind_status, get_iot_device_id,
-    get_iot_device_info, get_iot_device_status, get_iot_fw_version, get_iot_model,
-    get_iot_region_hex, get_iot_wifi_by_index, get_iot_wifi_count, get_iot_wifi_list,
-    get_iot_wifi_status, get_perf_debug, get_performance_mode, get_primary_thermal_zone,
-    get_thermal_zones, hq_change_boot_option, hq_enable_pxe_boot, hq_load_default,
-    hq_s5_rtc_wake_enable, hq_set_performance_mode, hq_set_shipping_country_code,
+    ensure_iot_service, get_audio_devices, get_audio_volume, get_battery_care, get_cast_devices,
+    get_charging_threshold, get_ecram_map, get_function_key, get_iot_bind_status,
+    get_iot_device_id, get_iot_device_info, get_iot_device_status, get_iot_fw_version,
+    get_iot_model, get_iot_region_hex, get_iot_wifi_by_index, get_iot_wifi_count,
+    get_iot_wifi_list, get_iot_wifi_status, get_perf_debug, get_performance_mode,
+    get_primary_thermal_zone, get_thermal_zones, hq_change_boot_option, hq_enable_pxe_boot,
+    hq_load_default, hq_s5_rtc_wake_enable, hq_set_performance_mode, hq_set_shipping_country_code,
     hq_set_wifi_country_code, iot_connect_wifi, iot_delete_wifi_item, iot_empty_wifi_items,
     iot_notify_ec_event, iot_notify_event, iot_notify_power_event, iot_pipe_available,
     iot_report_shutting_down, iot_report_suspending, iot_report_windows_ready, iot_reset_device,
     iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw, relaunch_as_admin,
     send_iot_laptop_status, set_audio_default_endpoint, set_audio_mute, set_audio_volume,
-    set_charging_threshold, set_performance_mode, start_casting, stop_casting, wifi_connect,
-    wifi_disconnect, wifi_scan, wifi_status, wmi_ec_get_performance_mode, wmi_ec_read,
-    wmi_ec_read_adapter_power, wmi_ec_read_battery_health, wmi_ec_read_sensor_data,
-    wmi_ec_set_auto_illumination, wmi_ec_set_brightness_data, wmi_ec_set_epof_flag,
-    wmi_ec_set_label_mode, wmi_ec_set_lid_open_type, wmi_ec_set_mi_usage_type,
-    wmi_ec_set_performance_mode, wmi_ec_set_pl1_flag, wmi_ec_set_removable_type,
-    wmi_ec_set_sagv_mode, wmi_ec_set_wmid_type, wmi_ec_write, write_iot_hex,
+    set_battery_care, set_charging_threshold, set_function_key, set_performance_mode,
+    start_casting, stop_casting, wifi_connect, wifi_disconnect, wifi_scan, wifi_status,
+    wmi_ec_get_performance_mode, wmi_ec_read, wmi_ec_read_adapter_power,
+    wmi_ec_read_battery_health, wmi_ec_read_sensor_data, wmi_ec_set_auto_illumination,
+    wmi_ec_set_brightness_data, wmi_ec_set_epof_flag, wmi_ec_set_label_mode,
+    wmi_ec_set_lid_open_type, wmi_ec_set_mi_usage_type, wmi_ec_set_performance_mode,
+    wmi_ec_set_pl1_flag, wmi_ec_set_removable_type, wmi_ec_set_sagv_mode, wmi_ec_set_wmid_type,
+    wmi_ec_write, write_iot_hex,
 };
 use commands::hotkeys::{
     get_detected_key, get_hotkey_config, grant_script_consent, is_hook_active, set_hotkey_config,
@@ -41,14 +42,16 @@ use commands::hotkeys::{
 };
 use commands::privacy::{export_user_data, reveal_in_explorer};
 use commands::system::{
-    debug_ecram_dump, get_ai_brightness_config, get_autostart, get_available_refresh_rates,
-    get_battery_info, get_display_info, get_fan_info, get_hardware_profile,
-    get_hardware_state_batch, get_process_list, get_system_info, get_touchpad_info,
-    get_update_status, install_driver, run_hardware_discovery, set_adaptive_refresh_rate,
-    set_ai_brightness, set_ai_brightness_config, set_autostart, set_brightness, set_fan_mode,
-    set_hdr, set_refresh_rate, set_touchpad_edge_slide, set_touchpad_gesture_screenshot,
-    set_touchpad_haptics, set_touchpad_haptics_intensity, set_touchpad_repress,
-    set_touchpad_sensitivity, trigger_driver_scan,
+    clean_junk_files, debug_ecram_dump, get_ai_brightness_config, get_audio_effects, get_autostart,
+    get_available_refresh_rates, get_battery_info, get_crash_recovery_status, get_display_info,
+    get_drivers_detail, get_eye_protection, get_fan_info, get_hardware_profile,
+    get_hardware_state_batch, get_os_turbo, get_process_list, get_system_info, get_touchpad_info,
+    get_update_status, install_driver, mark_clean_exit, run_hardware_discovery, scan_junk_files,
+    set_adaptive_refresh_rate, set_ai_brightness, set_ai_brightness_config, set_autostart,
+    set_brightness, set_eye_protection, set_fan_mode, set_hdr, set_mic_noise_canceling,
+    set_os_turbo, set_refresh_rate, set_speaker_noise_canceling, set_touchpad_edge_slide,
+    set_touchpad_gesture_screenshot, set_touchpad_haptics, set_touchpad_haptics_intensity,
+    set_touchpad_repress, set_touchpad_sensitivity, set_voice_focus, trigger_driver_scan,
 };
 use state::AppState;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -231,6 +234,9 @@ pub fn run() {
             set_performance_mode,
             get_charging_threshold,
             set_charging_threshold,
+            // Battery Care toggle (EC 0xA4)
+            get_battery_care,
+            set_battery_care,
             get_perf_debug,
             get_ecram_map,
             get_iot_region_hex,
@@ -378,6 +384,28 @@ pub fn run() {
             // Thermal zone (ACPI temperature)
             get_thermal_zones,
             get_primary_thermal_zone,
+            // Fn-Key Customization (EC 0x4A)
+            get_function_key,
+            set_function_key,
+            // Eye Protection (blue light filter)
+            get_eye_protection,
+            set_eye_protection,
+            // OS Turbo (system optimization)
+            get_os_turbo,
+            set_os_turbo,
+            // Crash Recovery
+            get_crash_recovery_status,
+            mark_clean_exit,
+            // Driver Details
+            get_drivers_detail,
+            // AI Noise Cancellation
+            get_audio_effects,
+            set_mic_noise_canceling,
+            set_speaker_noise_canceling,
+            set_voice_focus,
+            // System Cleanup
+            scan_junk_files,
+            clean_junk_files,
         ])
         .setup(|app| {
             // Hardware discovery — load cached profile or scan on first run

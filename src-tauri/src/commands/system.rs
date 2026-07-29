@@ -386,3 +386,134 @@ pub async fn get_hardware_state_batch() -> Result<HardwareState, ErrorResponse> 
     .await
     .map_err(ErrorResponse::from)
 }
+
+// ── Eye Protection ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_eye_protection(
+) -> Result<crate::hw::eye_protection::EyeProtectionStatus, ErrorResponse> {
+    run_blocking(crate::hw::eye_protection::get_eye_protection)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_eye_protection(enabled: bool, intensity: Option<u8>) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_eye_protection",
+        serde_json::json!({ "enabled": enabled, "intensity": intensity }),
+    )
+    .await?;
+    Ok(())
+}
+
+// ── OS Turbo ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_os_turbo() -> Result<crate::hw::os_turbo::OsTurboStatus, ErrorResponse> {
+    run_blocking(crate::hw::os_turbo::get_os_turbo)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_os_turbo(
+    enabled: bool,
+) -> Result<crate::hw::os_turbo::OsTurboStatus, ErrorResponse> {
+    let raw = elev_bridge::run_elevated("set_os_turbo", serde_json::json!({ "enabled": enabled }))
+        .await?;
+    let result: crate::hw::os_turbo::OsTurboStatus =
+        serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
+    Ok(result)
+}
+
+// ── Crash Recovery ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_crash_recovery_status(
+) -> Result<crate::hw::crash_recovery::CrashRecoveryStatus, ErrorResponse> {
+    run_blocking(crate::hw::crash_recovery::init_crash_recovery)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn mark_clean_exit() -> Result<(), ErrorResponse> {
+    run_blocking(|| {
+        crate::hw::crash_recovery::mark_clean_exit();
+        Ok::<(), crate::hw::errors::HardwareError>(())
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
+// ── Driver Details ───────────────────────────────────────────────────────────
+
+/// Get detailed driver information via Win32_PnPSignedDriver WMI class.
+#[tauri::command]
+pub async fn get_drivers_detail() -> Result<Vec<crate::hw::update::DriverDetail>, ErrorResponse> {
+    run_blocking(crate::hw::update::get_drivers_detail)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+// ── AI Noise Cancellation ────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_audio_effects(
+) -> Result<crate::hw::audio_effects::AudioEffectsStatus, ErrorResponse> {
+    run_blocking(crate::hw::audio_effects::get_audio_effects)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_mic_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_mic_noise_canceling",
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_speaker_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_speaker_noise_canceling",
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_voice_focus(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated("set_voice_focus", serde_json::json!({ "enabled": enabled })).await?;
+    Ok(())
+}
+
+// ── System Cleanup ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn scan_junk_files() -> Result<Vec<crate::hw::cleanup::CleanupItem>, ErrorResponse> {
+    run_blocking(crate::hw::cleanup::scan_junk_files)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn clean_junk_files(
+    categories: Vec<crate::hw::cleanup::CleanupCategory>,
+) -> Result<Vec<crate::hw::cleanup::CleanupResult>, ErrorResponse> {
+    let result = elev_bridge::run_elevated(
+        "clean_junk_files",
+        serde_json::json!({ "categories": categories }),
+    )
+    .await?;
+    // The elevated dispatch returns the CleanupResult array as a JSON value
+    match serde_json::from_value::<Vec<crate::hw::cleanup::CleanupResult>>(result) {
+        Ok(results) => Ok(results),
+        Err(_) => Ok(Vec::new()),
+    }
+}

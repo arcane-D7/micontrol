@@ -7,7 +7,10 @@ use crate::hw::audio::{
     list_audio_devices as hw_list_audio, set_playback_mute as hw_set_mute,
     set_playback_volume as hw_set_volume, AudioDeviceList, AudioVolumeResult,
 };
-use crate::hw::charging::{get_charging_threshold as hw_get_charge, ChargingResult};
+use crate::hw::charging::{
+    get_battery_care as hw_get_battery_care, get_charging_threshold as hw_get_charge,
+    ChargingResult,
+};
 use crate::hw::errors::{ErrorResponse, HardwareError};
 use crate::hw::iotservice;
 use crate::hw::iotservice::{
@@ -75,6 +78,25 @@ pub async fn set_charging_threshold(
         serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
     *lock_or_recover(&state.charging_threshold) = result.threshold;
     Ok(result)
+}
+
+// ── Battery Care Toggle (EC register 0xA4) ─────────────────────────────────
+
+#[tauri::command]
+pub async fn get_battery_care() -> Result<bool, ErrorResponse> {
+    run_blocking(hw_get_battery_care)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_battery_care(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_battery_care",
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Returns diagnostic information about the performance mode control channel:
@@ -905,6 +927,23 @@ pub async fn get_primary_thermal_zone() -> Result<crate::hw::thermal::ThermalZon
     run_blocking(crate::hw::thermal::get_primary_thermal_zone)
         .await
         .map_err(ErrorResponse::from)
+}
+
+// ── Fn-Key Customization (EC 0x4A) ──────────────────────────────────────────
+
+/// Get the current Fn-key mode (Fn-lock state).
+#[tauri::command]
+pub async fn get_function_key() -> Result<crate::hw::fn_key::FnKeyStatus, ErrorResponse> {
+    run_blocking(crate::hw::fn_key::get_function_key)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Set the Fn-key mode (Fn-lock toggle). Requires elevation.
+#[tauri::command]
+pub async fn set_function_key(mode: crate::hw::fn_key::FnKeyMode) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated("set_function_key", serde_json::json!({ "mode": mode })).await?;
+    Ok(())
 }
 
 #[cfg(test)]

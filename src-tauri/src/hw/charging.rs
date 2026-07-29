@@ -252,3 +252,132 @@ fn read_threshold_registry() -> Option<HardwareResult<u8>> {
         )))),
     }
 }
+
+// ── Battery Care Toggle (EC register 0xA4) ───────────────────────────────────
+//
+// EC register 0xA4 is the master enable/disable for the charging-threshold
+// logic. When 0xA4 = 0x00, the EC ignores the threshold register (0xA7) and
+// charges to 100%. When 0xA4 = 0x01, the threshold at 0xA7 is respected.
+//
+// XPM calls this "Battery Care" / "Charging Protect" and exposes it via
+// SvrCModule methods: get_charging_protect, resume_charging_protect.
+//
+// On the TM2424, register 0xA4 is in the ACPI ERAM region (0xFE0B0300 + 0xA4)
+// and is accessible via the IoTDriver IOCTL write path (write_ecram).
+// It has been added to the safe-write allowlist (ecram-safe-writes.json).
+
+/// ERAM offset of the Battery Care enable register.
+const BATTERY_CARE_ERAM_OFFSET: usize = 0xA4;
+
+/// Registry value for persisting Battery Care state across reboots.
+#[cfg(windows)]
+const BATTERY_CARE_REG_VALUE: &str = "BatteryCareEnabled";
+
+/// Read the Battery Care toggle state from EC register 0xA4.
+///
+/// Returns `true` if battery care (charging protection) is enabled,
+/// `false` if disabled. Falls back to registry if EC read fails.
+pub fn get_battery_care() -> HardwareResult<bool> {
+    // Try EC read first (via ERAM pipe)
+    let eram_base = crate::hw::ecram::get_eram_base();
+    match crate::hw::ecram::read_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, 1) {
+        Ok(data) if !data.is_empty() => {
+            let enabled = data[0] != 0;
+            log::debug!(target: "hw::charging", "Battery Care (EC 0xA4) = {:#04X} → enabled={}", data[0], enabled);
+            Ok(enabled)
+        }
+        Ok(_) => {
+            log::warn!(target: "hw::charging", "EC read of 0xA4 returned empty data, falling back to registry");
+            get_battery_care_registry().unwrap_or(Ok(false))
+        }
+        Err(e) => {
+            log::warn!(target: "hw::charging", "EC read of 0xA4 failed: {e}, falling back to registry");
+            get_battery_care_registry().unwrap_or(Ok(false))
+        }
+    }
+}
+
+/// Set the Battery Care toggle state by writing to EC register 0xA4.
+///
+/// When enabled (true), the EC respects the charging threshold (0xA7).
+/// When disabled (false), the EC charges to 100% regardless of threshold.
+///
+/// This also persists the state to registry for re-assertion after S3/S4 resume.
+pub fn set_battery_care(enabled: bool) -> HardwareResult<()> {
+    let value: u8 = if enabled { 0x01 } else { 0x00 };
+    let eram_base = crate::hw::ecram::get_eram_base();
+
+    // Write to EC register 0xA4 via IoTDriver IOCTL
+    crate::hw::ecram::write_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, &[value])?;
+
+    // Read back to confirm
+    match crate::hw::ecram::read_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, 1) {
+        Ok(data) if !data.is_empty() => {
+            if data[0] != value {
+                log::warn!(
+                    target: "hw::charging",
+                    "Battery Care write verification failed: wrote {:#04X}, read back {:#04X}",
+                    value, data[0]
+                );
+            } else {
+                log::info!(
+                    target: "hw::charging",
+                    "Battery Care set to {} (EC 0xA4 = {:#04X})",
+                    if enabled { "enabled" } else { "disabled" },
+                    value
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!(target: "hw::charging", "Battery Care read-back failed: {e}");
+        }
+        _ => {}
+    }
+
+    // Persist to registry for re-assertion after sleep/resume
+    persist_battery_care_registry(enabled).ok();
+
+    Ok(())
+}
+
+/// Persist Battery Care state to registry.
+fn persist_battery_care_registry(enabled: bool) -> HardwareResult<()> {
+    #[cfg(windows)]
+    {
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        match RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY) {
+            Ok(key) => {
+                key.write_u32(BATTERY_CARE_REG_VALUE, if enabled { 1 } else { 0 })
+                    .map_err(|e| {
+                        HardwareError::Registry(format!("Write Battery Care to registry: {e}"))
+                    })?;
+            }
+            Err(e) => {
+                log::debug!("Cannot open charging registry key for Battery Care write: {e}");
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read Battery Care state from registry fallback.
+#[cfg(windows)]
+fn get_battery_care_registry() -> Option<HardwareResult<bool>> {
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    let key = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY).ok()??;
+    match key.read_u32(BATTERY_CARE_REG_VALUE) {
+        Ok(Some(data)) => Some(Ok(data != 0)),
+        Ok(None) => Some(Ok(false)),
+        Err(e) => Some(Err(HardwareError::Registry(format!(
+            "Read Battery Care: {e}"
+        )))),
+    }
+}
+
+#[cfg(not(windows))]
+fn get_battery_care_registry() -> Option<HardwareResult<bool>> {
+    Some(Ok(false))
+}

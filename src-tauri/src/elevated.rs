@@ -288,6 +288,98 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        "set_battery_care" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::charging::set_battery_care(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_eye_protection" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            let intensity: Option<u8> =
+                serde_json::from_value(cmd.args["intensity"].clone()).unwrap_or(None);
+            match crate::hw::eye_protection::set_eye_protection(enabled, intensity) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_os_turbo" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::os_turbo::set_os_turbo(enabled) {
+                Ok(r) => make_ok(serde_json::to_value(r).unwrap_or(Value::Null)),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_function_key" => {
+            let mode: crate::hw::fn_key::FnKeyMode =
+                match serde_json::from_value(cmd.args["mode"].clone()) {
+                    Ok(v) => v,
+                    Err(e) => return make_err(format!("Bad mode arg: {e}")),
+                };
+            match crate::hw::fn_key::set_function_key(mode) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_mic_noise_canceling" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::audio_effects::set_mic_noise_canceling(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_speaker_noise_canceling" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::audio_effects::set_speaker_noise_canceling(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "set_voice_focus" => {
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::audio_effects::set_voice_focus(enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+        "clean_junk_files" => {
+            let categories: Vec<crate::hw::cleanup::CleanupCategory> =
+                match serde_json::from_value(cmd.args["categories"].clone()) {
+                    Ok(v) => v,
+                    Err(e) => return make_err(format!("Bad categories arg: {e}")),
+                };
+            match crate::hw::cleanup::clean_junk_files(categories) {
+                Ok(results) => make_ok(serde_json::to_value(results).unwrap_or(Value::Null)),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
         "set_brightness" => {
             let level: u8 = match serde_json::from_value(cmd.args["level"].clone()) {
                 Ok(v) => v,

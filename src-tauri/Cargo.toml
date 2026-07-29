@@ -85,8 +85,12 @@ windows = { version = "0.58", features = [
   "Devices_Enumeration",
   "Foundation",
   "Foundation_Collections",
+  "Win32_System_Diagnostics",
+  "Win32_System_Recovery",
+  "Win32_System_ErrorReporting",
 ] }
 windows-core = "0.58"
+windows-targets = "0.52"
 wmi = "0.13"
 winreg = "0.52"
 

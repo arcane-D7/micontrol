@@ -649,7 +649,9 @@ fn write_ecram_inner(device_path: &str, phys_addr: u64, data: &[u8]) -> anyhow::
 //   0x4A, 0x4B — Smart Mode Type/Data
 //   0x68 — QFAN mode
 //   0x96, 0xAE, 0xB2 — other config bytes
-const DEFAULT_SAFE_WRITE_OFFSETS: [u8; 9] = [0x1B, 0x40, 0x42, 0x4A, 0x4B, 0x68, 0x96, 0xAE, 0xB2];
+const DEFAULT_SAFE_WRITE_OFFSETS: [u8; 11] = [
+    0x1B, 0x40, 0x42, 0x4A, 0x4B, 0x68, 0x96, 0xA4, 0xA7, 0xAE, 0xB2,
+];
 
 /// Cached safe-write offsets loaded from `scripts/ecram-safe-writes.json`.
 /// Falls back to `DEFAULT_SAFE_WRITE_OFFSETS` if the file is missing or invalid.

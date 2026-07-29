@@ -57,7 +57,16 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "wmi_ec_read_battery_health"
         | "wmi_ec_read_adapter_power"
         | "wmi_ec_get_performance_mode"
-        | "diag_wmi_query" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
+        | "diag_wmi_query"
+        | "set_battery_care"
+        | "set_eye_protection"
+        | "set_os_turbo"
+        | "set_function_key"
+        | "set_mic_noise_canceling"
+        | "set_speaker_noise_canceling"
+        | "set_voice_focus" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
+
+        "clean_junk_files" => Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS),
         _ => Duration::from_secs(ELEV_TIMEOUT_SECS),
     }
 }
