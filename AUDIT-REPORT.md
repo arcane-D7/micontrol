@@ -1,7 +1,7 @@
 # miControl — Bug Audit Report
 
-**Date:** 2026-07-26  
-**Scope:** Systematic audit of all tabs and backend subsystems  
+**Date:** 2026-07-26
+**Scope:** Systematic audit of all tabs and backend subsystems
 **Method:** Code analysis + trace log verification (`MICONTROL_DEV_TRACE=1`)
 
 ---
@@ -18,118 +18,118 @@
 
 ## Bug #1: WiFi status not loading SSID or signal strength
 
-**Tab:** WiFi  
-**Severity:** High — user-visible data missing  
-**Symptom:** WiFi status showed no SSID or signal strength  
-**Root Cause:** `get_status()` in `wifi.rs` didn't query the active connection. It relied on `WlanEnumInterfaces` which returns interface state but not connection details (SSID, signal).  
-**Fix:** Added `WlanQueryInterface` call with `wlan_intf_opcode_current_connection` to extract `WLAN_CONNECTION_ATTRIBUTES` containing the connected SSID and signal quality.  
-**File:** `src-tauri/src/hw/wifi.rs` — `get_status()` (~line 155)  
+**Tab:** WiFi
+**Severity:** High — user-visible data missing
+**Symptom:** WiFi status showed no SSID or signal strength
+**Root Cause:** `get_status()` in `wifi.rs` didn't query the active connection. It relied on `WlanEnumInterfaces` which returns interface state but not connection details (SSID, signal).
+**Fix:** Added `WlanQueryInterface` call with `wlan_intf_opcode_current_connection` to extract `WLAN_CONNECTION_ATTRIBUTES` containing the connected SSID and signal quality.
+**File:** `src-tauri/src/hw/wifi.rs` — `get_status()` (~line 155)
 **Verified:** Code compiles, tests pass
 
 ---
 
 ## Bug #2: WiFi scan not showing connected network
 
-**Tab:** WiFi  
-**Severity:** Medium — UX confusion  
-**Symptom:** Scanned networks list didn't indicate which network was currently connected  
-**Root Cause:** `scan_networks()` in `wifi.rs` didn't compare scanned SSIDs against the currently connected SSID  
-**Fix:** Added a `get_connected_ssid()` call before iterating scanned networks, then set `connected: true` on the matching SSID  
-**File:** `src-tauri/src/hw/wifi.rs` — `scan_networks()` (~line 100)  
+**Tab:** WiFi
+**Severity:** Medium — UX confusion
+**Symptom:** Scanned networks list didn't indicate which network was currently connected
+**Root Cause:** `scan_networks()` in `wifi.rs` didn't compare scanned SSIDs against the currently connected SSID
+**Fix:** Added a `get_connected_ssid()` call before iterating scanned networks, then set `connected: true` on the matching SSID
+**File:** `src-tauri/src/hw/wifi.rs` — `scan_networks()` (~line 100)
 **Verified:** Code compiles, tests pass
 
 ---
 
 ## Bug #3: Permanent WMI errors being retried (0x80041017)
 
-**Tab:** All tabs using WMI (Fan, Thermal, Display, System Info)  
-**Severity:** Medium — wasted CPU, log spam every 2s poll cycle  
-**Symptom:** WMI queries returning `WBEM_E_INVALID_QUERY` (0x80041017) were retried 4 times with exponential backoff, despite being permanent errors that will never succeed  
-**Root Cause:** The retry logic in `retry.rs` had no mechanism to classify errors as permanent vs. transient. All errors were retried unconditionally.  
-**Fix:** Added `ShouldRetry` trait with `should_retry()` method. Implemented for `anyhow::Error` — checks for `wmi::WMIError::HResultError` with permanent HRESULT codes (0x80041003, 0x8004100E, 0x80041010, 0x80041017, 0x80041002). `with_retry_backoff` and `with_retry` now check `if !e.should_retry()` and return immediately.  
+**Tab:** All tabs using WMI (Fan, Thermal, Display, System Info)
+**Severity:** Medium — wasted CPU, log spam every 2s poll cycle
+**Symptom:** WMI queries returning `WBEM_E_INVALID_QUERY` (0x80041017) were retried 4 times with exponential backoff, despite being permanent errors that will never succeed
+**Root Cause:** The retry logic in `retry.rs` had no mechanism to classify errors as permanent vs. transient. All errors were retried unconditionally.
+**Fix:** Added `ShouldRetry` trait with `should_retry()` method. Implemented for `anyhow::Error` — checks for `wmi::WMIError::HResultError` with permanent HRESULT codes (0x80041003, 0x8004100E, 0x80041010, 0x80041017, 0x80041002). `with_retry_backoff` and `with_retry` now check `if !e.should_retry()` and return immediately.
 **Files:**
 
 - `src-tauri/src/util/retry.rs` — `ShouldRetry` trait + impl for `anyhow::Error`
-- `src-tauri/src/hw/wmi_cache.rs` — `is_connection_error()` updated to classify permanent HRESULTs  
+- `src-tauri/src/hw/wmi_cache.rs` — `is_connection_error()` updated to classify permanent HRESULTs
   **Verified:** Trace logs show `Operation failed with permanent error (attempt 1/4): HRESULT Call failed with: 0x80041017 — not retrying`
 
 ---
 
 ## Bug #4: Permanent WMI errors from direct COM calls being retried (0x80041002)
 
-**Tab:** Performance (EC sensors via WMI)  
-**Severity:** Medium — wasted CPU, log spam every 2s poll cycle  
-**Symptom:** WMI `WBEM_E_NOT_FOUND` (0x80041002) errors from `GetObject`/`ExecQuery`/`ExecMethod` COM calls in `wmi_ec.rs` and `hq_wmi.rs` were still being retried despite the `ShouldRetry` trait fix  
-**Root Cause:** The `ShouldRetry` implementation only checked for `wmi::WMIError` (from `raw_query()`), but `wmi_ec.rs` and `hq_wmi.rs` use direct COM calls that return `windows::core::Error`. When the `?` operator converts `windows::core::Error` to `anyhow::Error`, the `downcast_ref::<wmi::WMIError>()` check returns `None` because the error is a `windows::core::Error`, not a `wmi::WMIError`. The error message format difference ("0x80041002" vs "HRESULT Call failed with: 0x80041017") confirmed they come from different error types.  
-**Fix:** Added `extract_hresult_from_error()` function in `retry.rs` that checks both `wmi::WMIError` and `windows::core::Error` for HRESULT codes. Updated `ShouldRetry for anyhow::Error` to use this function. Also updated `is_connection_error()` in `wmi_cache.rs` to check for `windows::core::Error` with permanent HRESULTs.  
+**Tab:** Performance (EC sensors via WMI)
+**Severity:** Medium — wasted CPU, log spam every 2s poll cycle
+**Symptom:** WMI `WBEM_E_NOT_FOUND` (0x80041002) errors from `GetObject`/`ExecQuery`/`ExecMethod` COM calls in `wmi_ec.rs` and `hq_wmi.rs` were still being retried despite the `ShouldRetry` trait fix
+**Root Cause:** The `ShouldRetry` implementation only checked for `wmi::WMIError` (from `raw_query()`), but `wmi_ec.rs` and `hq_wmi.rs` use direct COM calls that return `windows::core::Error`. When the `?` operator converts `windows::core::Error` to `anyhow::Error`, the `downcast_ref::<wmi::WMIError>()` check returns `None` because the error is a `windows::core::Error`, not a `wmi::WMIError`. The error message format difference ("0x80041002" vs "HRESULT Call failed with: 0x80041017") confirmed they come from different error types.
+**Fix:** Added `extract_hresult_from_error()` function in `retry.rs` that checks both `wmi::WMIError` and `windows::core::Error` for HRESULT codes. Updated `ShouldRetry for anyhow::Error` to use this function. Also updated `is_connection_error()` in `wmi_cache.rs` to check for `windows::core::Error` with permanent HRESULTs.
 **Files:**
 
 - `src-tauri/src/util/retry.rs` — `extract_hresult_from_error()` + updated `ShouldRetry` impl
-- `src-tauri/src/hw/wmi_cache.rs` — `is_connection_error()` now checks `windows::core::Error`  
+- `src-tauri/src/hw/wmi_cache.rs` — `is_connection_error()` now checks `windows::core::Error`
   **Verified:** Trace logs show `Operation failed with permanent error (attempt 1/4): 0x80041002 — not retrying` + `COM HRESULT 0x80041002 classified as permanent (NOT a connection error)`
 
 ---
 
 ## Bug #5: WMI errors silently swallowed in fan.rs
 
-**Tab:** Fan / Thermal  
-**Severity:** Medium — errors hidden, debugging difficult  
-**Symptom:** ESIF and Win32_Fan WMI query errors were silently swallowed by `.unwrap_or_default()`, returning empty data without any log message  
-**Root Cause:** `fan.rs` used `.unwrap_or_default()` on `raw_query()` results, which converts `Err(WMIError)` into an empty `Vec`, losing all error information  
-**Fix:** Replaced `.unwrap_or_default()` with explicit `match` blocks that log the error at `debug`/`warn` level and use `anyhow::Error::from(e)` to preserve the `WMIError` type for `ShouldRetry` classification  
-**File:** `src-tauri/src/hw/fan.rs` — ESIF query (~line 62) and Win32_Fan query (~line 253)  
+**Tab:** Fan / Thermal
+**Severity:** Medium — errors hidden, debugging difficult
+**Symptom:** ESIF and Win32_Fan WMI query errors were silently swallowed by `.unwrap_or_default()`, returning empty data without any log message
+**Root Cause:** `fan.rs` used `.unwrap_or_default()` on `raw_query()` results, which converts `Err(WMIError)` into an empty `Vec`, losing all error information
+**Fix:** Replaced `.unwrap_or_default()` with explicit `match` blocks that log the error at `debug`/`warn` level and use `anyhow::Error::from(e)` to preserve the `WMIError` type for `ShouldRetry` classification
+**File:** `src-tauri/src/hw/fan.rs` — ESIF query (~line 62) and Win32_Fan query (~line 253)
 **Verified:** Trace logs show ESIF query returning 15 participants consistently; errors properly logged
 
 ---
 
 ## Bug #6: WMI errors silently swallowed in thermal.rs
 
-**Tab:** Thermal  
-**Severity:** Medium — errors hidden, debugging difficult  
-**Symptom:** MSAcpi_ThermalZoneTemperature WMI query errors were silently swallowed  
-**Root Cause:** Same as Bug #5 — `.unwrap_or_default()` on `raw_query()`  
-**Fix:** Replaced with explicit `match` block with `warn`-level logging and `anyhow::Error::from(e)` for type preservation  
-**File:** `src-tauri/src/hw/thermal.rs` — MSAcpi_ThermalZoneTemperature query  
+**Tab:** Thermal
+**Severity:** Medium — errors hidden, debugging difficult
+**Symptom:** MSAcpi_ThermalZoneTemperature WMI query errors were silently swallowed
+**Root Cause:** Same as Bug #5 — `.unwrap_or_default()` on `raw_query()`
+**Fix:** Replaced with explicit `match` block with `warn`-level logging and `anyhow::Error::from(e)` for type preservation
+**File:** `src-tauri/src/hw/thermal.rs` — MSAcpi_ThermalZoneTemperature query
 **Verified:** Trace logs show no "ESIF and ACPI thermal zone both unavailable" warnings
 
 ---
 
 ## Bug #7: WMI errors silently swallowed in ecram.rs and display.rs
 
-**Tab:** EC RAM / Display  
-**Severity:** Medium — errors hidden, debugging difficult  
-**Symptom:** Win32_PnPEntity and Win32_VideoController WMI query errors were silently swallowed  
-**Root Cause:** Same as Bug #5 — `.unwrap_or_default()` on `raw_query()`  
-**Fix:** Replaced with explicit `match` blocks with `debug`-level logging and `anyhow::Error::from(e)` for type preservation  
+**Tab:** EC RAM / Display
+**Severity:** Medium — errors hidden, debugging difficult
+**Symptom:** Win32_PnPEntity and Win32_VideoController WMI query errors were silently swallowed
+**Root Cause:** Same as Bug #5 — `.unwrap_or_default()` on `raw_query()`
+**Fix:** Replaced with explicit `match` blocks with `debug`-level logging and `anyhow::Error::from(e)` for type preservation
 **Files:**
 
 - `src-tauri/src/hw/ecram.rs` — Win32_PnPEntity query
-- `src-tauri/src/hw/display.rs` — Win32_VideoController query  
+- `src-tauri/src/hw/display.rs` — Win32_VideoController query
   **Verified:** Code compiles, tests pass
 
 ---
 
 ## Bug #8: WMI errors silently swallowed in system_info.rs
 
-**Tab:** System Info  
-**Severity:** Medium — errors hidden, debugging difficult  
-**Symptom:** Five WMI queries (Win32_Processor, Win32_VideoController, Win32_PerfFormattedData_GPUAdapterMemory, Win32_PhysicalMemory, Win32_OperatingSystem) silently swallowed errors via `.unwrap_or_default()`  
-**Root Cause:** Same as Bug #5 — `.unwrap_or_default()` on `raw_query()`  
-**Fix:** Replaced all 5 `.unwrap_or_default()` calls with explicit `match` blocks that log errors at `debug` level and use `anyhow::Error::from(e)` to preserve the `WMIError` type for `ShouldRetry` classification  
-**File:** `src-tauri/src/hw/system_info.rs` — 5 WMI queries in `get_system_info()`  
+**Tab:** System Info
+**Severity:** Medium — errors hidden, debugging difficult
+**Symptom:** Five WMI queries (Win32_Processor, Win32_VideoController, Win32_PerfFormattedData_GPUAdapterMemory, Win32_PhysicalMemory, Win32_OperatingSystem) silently swallowed errors via `.unwrap_or_default()`
+**Root Cause:** Same as Bug #5 — `.unwrap_or_default()` on `raw_query()`
+**Fix:** Replaced all 5 `.unwrap_or_default()` calls with explicit `match` blocks that log errors at `debug` level and use `anyhow::Error::from(e)` to preserve the `WMIError` type for `ShouldRetry` classification
+**File:** `src-tauri/src/hw/system_info.rs` — 5 WMI queries in `get_system_info()`
 **Verified:** Trace logs show `GPUAdapterMemory raw_query error: HRESULT Call failed with: 0x80041010` (class doesn't exist on this machine) — properly logged and not retried
 
 ---
 
 ## Bug #9: Copilot key RegisterHotKey stale registration
 
-**Tab:** Hotkeys  
-**Severity:** Low — supplementary mechanism, main interception via low-level hook  
-**Symptom:** `RegisterHotKey` for id=104 (Win+Shift+F23, Copilot key) could fail if a previous registration wasn't cleaned up  
-**Root Cause:** No `UnregisterHotKey` call before `RegisterHotKey`, so stale registrations from previous app instances could persist  
-**Fix:** Added `UnregisterHotKey` calls before each `RegisterHotKey` for IDs 101-104  
-**File:** `src-tauri/src/hw/hotkeys/mod.rs`  
-**Note:** `RegisterHotKey` id=104 still fails with 0x80070581 — this is expected because Windows itself holds this system-level hotkey. The low-level keyboard hook (`WH_KEYBOARD_LL`) is the actual interception mechanism. `RegisterHotKey` is supplementary.  
+**Tab:** Hotkeys
+**Severity:** Low — supplementary mechanism, main interception via low-level hook
+**Symptom:** `RegisterHotKey` for id=104 (Win+Shift+F23, Copilot key) could fail if a previous registration wasn't cleaned up
+**Root Cause:** No `UnregisterHotKey` call before `RegisterHotKey`, so stale registrations from previous app instances could persist
+**Fix:** Added `UnregisterHotKey` calls before each `RegisterHotKey` for IDs 101-104
+**File:** `src-tauri/src/hw/hotkeys/mod.rs`
+**Note:** `RegisterHotKey` id=104 still fails with 0x80070581 — this is expected because Windows itself holds this system-level hotkey. The low-level keyboard hook (`WH_KEYBOARD_LL`) is the actual interception mechanism. `RegisterHotKey` is supplementary.
 **Verified:** Code compiles, tests pass
 
 ---
@@ -201,20 +201,20 @@ Confirmed via `MICONTROL_DEV_TRACE=1` (session 2026-07-26T17:01-17:11):
 
 ## Bug #10: WMI MICommonInterface 0x80041002 log spam at DEBUG level
 
-**Tab:** Performance / Fan (EC sensors via WMI)  
-**Severity:** Low — cosmetic, log spam  
-**Symptom:** `0x80041002` (WBEM_E_NOT_FOUND) errors appeared every ~2s at DEBUG level in trace logs, causing excessive log noise  
-**Root Cause:** `params.Put("InData")` on `in_sig.SpawnInstance()` in `wmi_ec.rs` fails intermittently with WBEM_E_NOT_FOUND when the WMI provider is in a degraded state. This is correlated with `__Path` being unavailable on the MICommonInterface instance. The error is a WMI provider bug — the standard WMI approach (GetObject → GetMethod → SpawnInstance → Put) is correct; .NET's `GetMethodParameters` uses the same approach.  
+**Tab:** Performance / Fan (EC sensors via WMI)
+**Severity:** Low — cosmetic, log spam
+**Symptom:** `0x80041002` (WBEM_E_NOT_FOUND) errors appeared every ~2s at DEBUG level in trace logs, causing excessive log noise
+**Root Cause:** `params.Put("InData")` on `in_sig.SpawnInstance()` in `wmi_ec.rs` fails intermittently with WBEM_E_NOT_FOUND when the WMI provider is in a degraded state. This is correlated with `__Path` being unavailable on the MICommonInterface instance. The error is a WMI provider bug — the standard WMI approach (GetObject → GetMethod → SpawnInstance → Put) is correct; .NET's `GetMethodParameters` uses the same approach.
 **Fix:**
 
 1. Changed ExecQuery flags from `WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY` to `WBEM_FLAG_RETURN_IMMEDIATELY` only — this reduces `__Path` unavailability frequency
 2. Added `__RELPATH` and `InstanceName` fallbacks when `__Path` is not available
-3. Downgraded all 0x80041002 logging from DEBUG to TRACE in `wmi_ec.rs`, `wmi_cache.rs`, and `retry.rs`  
+3. Downgraded all 0x80041002 logging from DEBUG to TRACE in `wmi_ec.rs`, `wmi_cache.rs`, and `retry.rs`
    **Files:**
 
 - `src-tauri/src/hw/wmi_ec.rs` — `__Path` → `__RELPATH` → `InstanceName` fallback, ExecQuery flags, TRACE logging
 - `src-tauri/src/hw/wmi_cache.rs` — 0x80041002 logging downgraded to TRACE
-- `src-tauri/src/util/retry.rs` — permanent error log for 0x80041002 downgraded to TRACE  
+- `src-tauri/src/util/retry.rs` — permanent error log for 0x80041002 downgraded to TRACE
   **Verified:** `Select-String "DEBUG" | Select-String "0x80041002"` returns 0 results; all 0x80041002 entries at TRACE level only
 
 ---

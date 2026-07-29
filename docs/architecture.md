@@ -114,7 +114,7 @@ A custom replacement binary (`src-tauri/src/bin/ecram_service.rs`) was built to 
 
 MiControl's `ecram.rs` module includes a pipe client (`read_ecram_via_pipe()`) that communicates with this service.
 
-**Limitation**: ERAM (`0xFE0B0300`) and SMA2 (`0xFE0B0A00`) regions are NOT accessible — the driver's hardcoded address ranges do not include them. See [RE_ANALYSIS_REPORT.md](./RE_ANALYSIS_REPORT.md) for details.
+**Limitation**: ERAM (`0xFE0B0300`) and SMA2 (`0xFE0B0A00`) regions are NOT accessible via IoTDriver.sys — the driver's hardcoded address ranges do not include them. However, AC adapter wattage (ADPW) IS available via WMI (ACPI WMAA method), not through the driver. See [RE_ANALYSIS_REPORT.md](./RE_ANALYSIS_REPORT.md) for details.
 
 ## Adding a New Hardware Feature
 

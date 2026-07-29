@@ -28,7 +28,7 @@ This is a **Tauri v2 + React/TypeScript desktop application** with Rust backend 
 | WMI (`MICommonInterface`, root\WMI)          | Performance mode, battery health, fan RPM, adapter power | ✅ Working                             |
 | IoTDriver.sys IOCTLs (`0x22E000`/`0x22E004`) | EC RAM read/write                                        | ✅ Working (via custom IoTService.exe) |
 | Named pipe (`\\.\pipe\ecram_service`)        | IPC between MiControl and custom IoTService.exe          | ✅ Working                             |
-| ERAM/SMA2 regions                            | AC adapter wattage, additional EC data                   | ❌ Not accessible (driver blocks)      |
+| ERAM/SMA2 regions (via IoTDriver)            | AC adapter wattage, additional EC data                   | ⚠️ Not via driver — WMI fallback works |
 
 ### Reverse Engineering Documentation
 

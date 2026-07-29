@@ -55,8 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Limitations
 
-- **ERAM region (0xFE0B0300) not accessible** — IoTDriver.sys hardcoded address ranges do not include ERAM. AC adapter wattage (ADPW at ERAM+0x81) cannot be read via driver. Use WMI as alternative.
-- **SMA2 region (0xFE0B0A00) not accessible** — Same limitation as ERAM.
+- **ERAM region (0xFE0B0300) not accessible via IoTDriver** — IoTDriver.sys hardcoded address ranges do not include ERAM. AC adapter wattage (ADPW at ERAM+0x81) cannot be read via the driver, but IS available via WMI (ACPI WMAA method `read_adapter_power()`).
+- **SMA2 region (0xFE0B0A00) not accessible via IoTDriver** — Same limitation as ERAM.
 - **Secure Boot prevents driver modification** — IoTDriver.sys cannot be patched to add ERAM/SMA2 ranges without disabling Secure Boot.
 
 ## [1.0.0] - 2025-01-XX

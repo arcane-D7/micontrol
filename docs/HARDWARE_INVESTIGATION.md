@@ -24,7 +24,7 @@
 > - Complete hotkey event mapping (Fn+F4, F7, F8, F9, F10, Xiaomi logo key)
 > - **Session 6 (30/06/2026): Custom IoTService.exe built and tested — ECRAM IOCTL proxy via named pipe IPC**
 > - **Session 6: IoTDriver.sys allowed address ranges confirmed (0xFE0B0F00/0x80, 0xFE0B0AB8/0x08, 0xFE0B0E00/0x100)**
-> - **Session 6: ERAM (0xFE0B0300) and SMA2 (0xFE0B0A00) confirmed NOT accessible — not in allowed ranges**
+> - **Session 6: ERAM (0xFE0B0300) and SMA2 (0xFE0B0A00) confirmed NOT accessible via IoTDriver — not in allowed ranges (AC adapter wattage available via WMI instead)**
 > - **Session 6: Security check bypassed by naming binary IoTService.exe + placing in DriverStore dir**
 > - **Session 6: Pipe client added to ecram.rs (read_ecram_via_pipe, is_pipe_broker_available)**
 
@@ -167,15 +167,16 @@ FRD1=0 means backlight is off. This is NOT the same as KBLL (keyboard backlight)
 but rather the **display brightness level** set via hotkeys.
 
 FRD1 values for backlight:
-| FRD1 | HBDA | Level |
-|------|------|-------|
-| 0 | — | Off (LONL=0) |
-| 1 | 0x50 | Level 1 |
-| 4 | 0x5A | Level 2 |
-| 5 | 0x46 | Level 3 |
-| 6 | 0x3C | Level 4 |
-| 7 | 0x32 | Level 5 |
-| 8 | 0x28 | Level 6 |
+
+| FRD1 | HBDA | Level        |
+| ---- | ---- | ------------ |
+| 0    | —    | Off (LONL=0) |
+| 1    | 0x50 | Level 1      |
+| 4    | 0x5A | Level 2      |
+| 5    | 0x46 | Level 3      |
+| 6    | 0x3C | Level 4      |
+| 7    | 0x32 | Level 5      |
+| 8    | 0x28 | Level 6      |
 
 ---
 
@@ -277,12 +278,13 @@ The WMI MiInterface method only supports Arg1=1 (query), so KBLL **cannot be
 read via WMI WMAA query**.
 
 **KBLL values** (from ssdt24.dsl Case 0x05):
+
 | KBLL raw | Backlight level | EVBU[2] value |
 | -------- | --------------- | ------------- |
-| 1 | Off | 0x00 |
-| 2 | Low | 0x05 |
-| 4 | Medium | 0x0A |
-| 8 | High | 0x80 |
+| 1        | Off             | 0x00          |
+| 2        | Low             | 0x05          |
+| 4        | Medium          | 0x0A          |
+| 8        | High            | 0x80          |
 
 **Write path**: No WMAA write command exists for KBLL. The ECWT (EC Write)
 method can write directly to ERAM offset 0xB2, but ECWT is only callable from
@@ -306,17 +308,18 @@ However, H_EC (the alternative EC device) may not be present on this system
 (uses `CondRefOf`), in which case RPMD returns an empty buffer.
 
 **Fan mode values** (QFAN / FUN3 for FUN2=0x0800 write):
-| QFAN | Mode | Smart Mode (SMMT/SMMD) |
+
+| QFAN | Mode             | Smart Mode (SMMT/SMMD) |
 | ---- | ---------------- | ---------------------- |
-| 2 | Balanced | — |
-| 3 | Performance | — |
-| 4 | Quiet | — |
-| 5 | Smart Mode 1 | SMMT=0x05, SMMD=0x05 |
-| 6 | Smart Mode 2 | SMMT=0x06, SMMD=0x06 |
-| 7 | Smart Mode 3 | SMMD=0x07, SMMT=0x07 |
-| 8 | Smart Mode 4 | SMMD=0x08, SMMT=0x08 |
-| 9 | UltraPerformance | — |
-| 0x0A | Extreme | — |
+| 2    | Balanced         | —                      |
+| 3    | Performance      | —                      |
+| 4    | Quiet            | —                      |
+| 5    | Smart Mode 1     | SMMT=0x05, SMMD=0x05   |
+| 6    | Smart Mode 2     | SMMT=0x06, SMMD=0x06   |
+| 7    | Smart Mode 3     | SMMD=0x07, SMMT=0x07   |
+| 8    | Smart Mode 4     | SMMD=0x08, SMMT=0x08   |
+| 9    | UltraPerformance | —                      |
+| 0x0A | Extreme          | —                      |
 
 ### Smart Mode — Detailed Analysis
 
@@ -1000,10 +1003,10 @@ src-tauri/src/hw/
 
 ### Special Keys
 
-| Key                | Event Code | Action       | Status     |
+| Key | Event Code | Action | Status |
 | ------------------ | ---------- | ------------ | ---------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Xiaomi logo key    | 0x25/0x26  | Configurable | ✅ Working |
-| Copilot key (0xC3) | —          | Configurable | ⚠️ Partial | `RegisterHotKey` with `MOD_NOREPEAT` + alt `Win+Shift+F23` path; may still be intercepted by Shell on some Win11 builds |
+| Xiaomi logo key | 0x25/0x26 | Configurable | ✅ Working |
+| Copilot key (0xC3) | — | Configurable | ⚠️ Partial | `RegisterHotKey` with `MOD_NOREPEAT` + alt `Win+Shift+F23` path; may still be intercepted by Shell on some Win11 builds |
 
 ### HID_EVENT20 Event Codes (All Observed)
 

@@ -19,9 +19,11 @@
 //!   Range 2: 0xFE0B0AB8, size 0x08  (8 bytes)   — small status region
 //!   Range 3: 0xFE0B0E00, size 0x100 (256 bytes) — ECRAM sensor block
 //!
-//! NOT ACCESSIBLE (returns STATUS_ACCESS_DENIED 0xC0000022):
+//! NOT ACCESSIBLE VIA IoTDriver (returns STATUS_ACCESS_DENIED 0xC0000022):
 //!   ❌ ERAM (0xFE0B0300, 256 bytes) — contains ADPW, battery data
 //!   ❌ SMA2 (0xFE0B0A00, 256 bytes)
+//!   Note: AC adapter wattage (ADPW) IS available via WMI (ACPI WMAA method),
+//!   not through the driver. See wmi_ec::read_adapter_power().
 //!
 //! Custom IoTService.exe (ecram_service.rs):
 //!   - Named "IoTService.exe" and placed in DriverStore dir → passes security check
@@ -32,7 +34,8 @@
 //! MiControl Strategy:
 //!   - Most features work via WMI (MICommonInterface) — no IoTDriver needed
 //!   - ECRAM sensor data available via custom IoTService.exe pipe
-//!   - ERAM data (ADPW, battery details) NOT available through existing driver
+//!   - ERAM data (ADPW, battery details) NOT available through IoTDriver,
+//!     but AC adapter wattage IS available via WMI (wmi_ec::read_adapter_power)
 //!
 //! ---------------------------------------------------------------------------
 
@@ -55,7 +58,7 @@
 ///       +0x8C:      BTCT  — Battery current (u16 LE, mA)
 ///       +0x8E:      BTPR  — Battery remaining capacity (u16 LE, mAh)
 ///       +0x90:      BTVT  — Battery voltage (u16 LE, mV)
-///   0xFE0B0A00 [0x100 bytes] — ACPI SMA2 region — ❌ NOT ACCESSIBLE
+///   0xFE0B0A00 [0x100 bytes] — ACPI SMA2 region — ❌ NOT ACCESSIBLE VIA IoTDriver
 ///   0xFE0B0F00 [8 bytes]     — IoTDriver status block — ✅ ACCESSIBLE (allowed range 1)
 ///   0xFE0B0F08 [0x78 bytes]  — IoTDevice state block — ✅ ACCESSIBLE (allowed range 1)
 ///   0xFE0B0E00 [0x100 bytes] — ECRAM sensor block — ✅ ACCESSIBLE (allowed range 3)
@@ -63,7 +66,9 @@
 /// AC adapter wattage (ADPW) is at physical address 0xFE0B0381 (ERAM + 0x81).
 /// Reading requires satisfying the IoTDriver security check (process name = IoTService.exe).
 /// Even with the security check passed, ERAM (0xFE0B0300) is NOT in the driver's
-/// allowed address ranges, so ADPW CANNOT be read through the existing driver.
+/// allowed address ranges, so ADPW CANNOT be read through IoTDriver.
+/// However, AC adapter wattage IS available via WMI (ACPI WMAA method) —
+/// see `wmi_ec::read_adapter_power()`. This is the primary path used by MiControl.
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use std::path::PathBuf;
