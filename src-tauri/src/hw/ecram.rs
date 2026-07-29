@@ -1031,6 +1031,94 @@ struct PipeResponse {
     error: Option<String>,
 }
 
+/// Send a JSON request to the custom IoTService.exe pipe server and return
+/// the raw JSON response string.
+///
+/// This is the generic pipe client used by EC command protocol queries.
+/// Returns `Err` if the pipe is not available or the request fails.
+#[cfg(windows)]
+pub fn send_pipe_request(request: &str) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let path_w: Vec<u16> = std::ffi::OsStr::new(ECRAM_PIPE_NAME)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+
+    let handle = unsafe {
+        windows::Win32::Storage::FileSystem::CreateFileW(
+            windows::core::PCWSTR(path_w.as_ptr()),
+            (windows::Win32::Foundation::GENERIC_READ | windows::Win32::Foundation::GENERIC_WRITE)
+                .0,
+            windows::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+            None,
+            windows::Win32::Storage::FileSystem::OPEN_EXISTING,
+            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+            windows::Win32::Foundation::HANDLE::default(),
+        )
+        .map_err(|e| format!("Open pipe: {e}"))?
+    };
+
+    if handle == windows::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return Err("INVALID_HANDLE_VALUE opening pipe".to_string());
+    }
+
+    // Write request
+    let req_bytes = request.as_bytes();
+    let mut written = 0u32;
+    unsafe {
+        windows::Win32::Storage::FileSystem::WriteFile(
+            handle,
+            Some(req_bytes),
+            Some(&mut written),
+            None,
+        )
+        .map_err(|e| format!("WriteFile: {e}"))?;
+    }
+
+    // Read response
+    let mut response_buf = [0u8; 4096];
+    let mut total_read = 0usize;
+    loop {
+        if total_read >= response_buf.len() {
+            break;
+        }
+        let mut bytes_read = 0u32;
+        let result = unsafe {
+            windows::Win32::Storage::FileSystem::ReadFile(
+                handle,
+                Some(&mut response_buf[total_read..]),
+                Some(&mut bytes_read),
+                None,
+            )
+        };
+        if result.is_err() || bytes_read == 0 {
+            break;
+        }
+        total_read += bytes_read as usize;
+        let s = String::from_utf8_lossy(&response_buf[..total_read]);
+        if s.trim_end().ends_with('}') {
+            break;
+        }
+    }
+
+    unsafe {
+        windows::Win32::Foundation::CloseHandle(handle).ok();
+    }
+
+    if total_read == 0 {
+        return Err("No response from pipe".to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&response_buf[..total_read]).to_string())
+}
+
+#[cfg(not(windows))]
+pub fn send_pipe_request(_request: &str) -> Result<String, String> {
+    Err("Pipe client only supported on Windows".to_string())
+}
+
 /// Read ECRAM via the custom IoTService.exe named pipe broker.
 ///
 /// This is the preferred path when the custom IoTService.exe is installed,

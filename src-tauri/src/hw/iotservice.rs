@@ -1242,33 +1242,63 @@ pub fn get_device_info() -> IotDeviceInfo {
     }
 
     // Our custom ecram_service pipe is available but not the MCPI pipe.
-    // The custom service provides ECRAM read/write but does NOT implement
-    // the MCPI device-info protocol (GetModel, GetFwVersion, etc.).
-    // We gather device info from alternative sources:
-    //   - Model: from WMI/cached hardware profile
-    //   - Firmware: from registry (SOFTWARE\MI\IoTDriver\FwVersion)
-    //   - Device status: from ECRAM IOT_STATUS region (0xFE0B0F00)
-    //   - Bind status, WiFi: not available without original IoTService
-    log::info!("[iot] ecram_service pipe available — gathering info from WMI/registry/ECRAM");
+    // The custom service now implements the EC command protocol, which allows
+    // us to query the IoT chip directly for device info.
+    // We use the ecram_service pipe's "iot_get" operations to query:
+    //   - Model: from IoT chip via EC command (cmd_id 0x0B)
+    //   - Firmware: from IoT chip via EC command (cmd_id 0x0A)
+    //   - Device ID: from IoT chip via EC command (cmd_id 0x0D)
+    //   - Bind status: from IoT chip via EC command (cmd_id 0x01)
+    //   - WiFi status: from IoT chip via EC command (cmd_id 0x07)
+    //   - WiFi count: from IoT chip via EC command (cmd_id 0x08)
+    // If EC commands fail, we fall back to registry/WMI/cached values.
+    log::info!("[iot] ecram_service pipe available — querying IoT chip via EC commands");
 
-    // Try to read firmware version from registry
-    let fw_version = read_fw_version_from_registry();
+    // Try to query model from EC command, fall back to cached model
+    let model = query_ec_string("model")
+        .map_err(|e| log::warn!("[iot] EC command get_model failed: {e}"))
+        .ok()
+        .or(cached_model);
+
+    // Try to query firmware version from EC command, fall back to registry
+    let fw_version = query_ec_string("fw_version")
+        .map_err(|e| log::warn!("[iot] EC command get_fw_version failed: {e}"))
+        .ok()
+        .or_else(read_fw_version_from_registry);
+
+    // Try to query device ID from EC command
+    let device_id = query_ec_device_id()
+        .map_err(|e| log::warn!("[iot] EC command get_device_id failed: {e}"))
+        .ok();
+
+    // Try to query bind status from EC command, fall back to registry
+    let bind_status = query_ec_bind_status()
+        .map_err(|e| log::warn!("[iot] EC command get_bind_status failed: {e}"))
+        .ok()
+        .or_else(read_bind_status_from_registry);
 
     // Try to read device status from ECRAM IOT_STATUS region
     let device_status = read_device_status_from_ecram();
 
-    // Try to read bind status from registry
-    let bind_status = read_bind_status_from_registry();
+    // Try to query WiFi status from EC command
+    let wifi_status = query_ec_wifi_status()
+        .map_err(|e| log::warn!("[iot] EC command read_wifi_status failed: {e}"))
+        .ok();
+
+    // Try to query WiFi count from EC command
+    let wifi_network_count = query_ec_wifi_count()
+        .map_err(|e| log::warn!("[iot] EC command read_wifi_count failed: {e}"))
+        .ok();
 
     IotDeviceInfo {
         pipe_available: true,
-        model: cached_model,
+        model,
         fw_version,
         bind_status,
-        device_id: None,
+        device_id,
         device_status,
-        wifi_status: None,
-        wifi_network_count: None,
+        wifi_status,
+        wifi_network_count,
     }
 }
 
@@ -1458,6 +1488,78 @@ pub struct IotWifiList {
     /// All provisioned WiFi items (may be shorter than `count` if individual
     /// lookups fail).
     pub networks: Vec<WiFiItemInfo>,
+}
+
+// ── EC command pipe query helpers ────────────────────────────────────────────
+//
+// These functions query the IoT chip via EC commands through the ecram_service
+// pipe. They send JSON requests like {"op":"iot_get","cmd":"model"} and parse
+// the responses. If the pipe is not available or the EC command fails, they
+// return an error so the caller can fall back to registry/WMI/cached values.
+
+/// Send an iot_get command to the ecram_service pipe and return the JSON response.
+fn send_ec_pipe_command(cmd: &str) -> Result<serde_json::Value, String> {
+    let request = format!(r#"{{"op":"iot_get","cmd":"{cmd}"}}"#);
+    let response = crate::hw::ecram::send_pipe_request(&request)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("invalid JSON response: {e}"))?;
+    if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let err = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("EC pipe command '{cmd}' failed: {err}"));
+    }
+    Ok(parsed)
+}
+
+/// Query the IoT chip for the device model string via EC command.
+fn query_ec_string(cmd: &str) -> Result<String, String> {
+    let resp = send_ec_pipe_command(cmd)?;
+    let value = resp
+        .get(cmd)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing '{cmd}' field in response"))?;
+    Ok(value.to_string())
+}
+
+/// Query the IoT chip for the device ID via EC command.
+fn query_ec_device_id() -> Result<i64, String> {
+    let resp = send_ec_pipe_command("device_id")?;
+    let id = resp
+        .get("device_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "missing 'device_id' field in response".to_string())?;
+    Ok(id)
+}
+
+/// Query the IoT chip for the bind status via EC command.
+fn query_ec_bind_status() -> Result<BindStatusInfo, String> {
+    let resp = send_ec_pipe_command("bind_status")?;
+    let bound = resp.get("bound").and_then(|v| v.as_bool()).unwrap_or(false);
+    let uid = resp.get("uid").and_then(|v| v.as_u64());
+    Ok(BindStatusInfo { bound, uid })
+}
+
+/// Query the IoT chip for the WiFi status via EC command.
+fn query_ec_wifi_status() -> Result<WiFiStatusInfo, String> {
+    let resp = send_ec_pipe_command("wifi_status")?;
+    let wifi_status = resp
+        .get("wifi_status")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let ssid = resp
+        .get("ssid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Ok(WiFiStatusInfo { wifi_status, ssid })
+}
+
+/// Query the IoT chip for the WiFi network count via EC command.
+fn query_ec_wifi_count() -> Result<u32, String> {
+    let resp = send_ec_pipe_command("wifi_count")?;
+    let count = resp.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    Ok(count)
 }
 
 /// Get the full WiFi provisioning list in one call.

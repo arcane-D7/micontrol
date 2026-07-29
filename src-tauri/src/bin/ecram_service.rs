@@ -288,9 +288,499 @@ mod ecram {
     }
 }
 
+// ── EC Command Protocol (IoT chip communication) ─────────────────────────────
+//
+// Implements the 4-phase EC command state machine reverse-engineered from
+// the original IoTService.exe:
+//   1. RamIsReady — check status byte at 0xFE0B0F00 == 0x00
+//   2. WriteCommand — write 7-byte [cmd_id, 0x01, 0x01, UID×4] to 0xFE0B0F01,
+//      then write 0x55 trigger to 0xFE0B0F00
+//   3. ReadCmdAck — poll 0xFE0B0F00 for [0x55, cmd_id, 0x01, 0x02], 5ms interval,
+//      100 max retries
+//   4. ReadCmdRet — poll 0xFE0B0F00 for [0x55, cmd_id, 0x01, 0x03, <4 bytes data>],
+//      45ms interval, 60 max retries
+//
+// See docs/EC_COMMAND_PROTOCOL_RE.md for full details.
+
+mod ec_command {
+    use super::ecram;
+    use std::sync::Mutex;
+
+    /// ECRAM addresses for EC command protocol
+    const EC_STATUS_ADDR: u64 = 0xFE0B0F00;
+    const EC_COMMAND_ADDR: u64 = 0xFE0B0F01;
+    const EC_SENSOR_ADDR: u64 = 0xFE0B0F08;
+
+    /// EC command IDs (from RE of IoTService.exe)
+    pub mod cmd_id {
+        pub const GET_BIND_STATUS: u8 = 0x01;
+        pub const SET_BIND_STATUS: u8 = 0x02;
+        pub const RESET_DEVICE: u8 = 0x03;
+        pub const WRITE_WIFI_ITEM: u8 = 0x04;
+        pub const EMPTY_WIFI_ITEMS: u8 = 0x05;
+        pub const DELETE_WIFI_ITEM: u8 = 0x06;
+        pub const READ_WIFI_STATUS: u8 = 0x07;
+        pub const READ_WIFI_COUNT: u8 = 0x08;
+        pub const GET_WIFI_BY_INDEX: u8 = 0x09;
+        pub const GET_FW_VERSION: u8 = 0x0A;
+        pub const GET_MODEL: u8 = 0x0B;
+        pub const CONNECT_WIFI: u8 = 0x0C;
+        pub const GET_DEVICE_ID: u8 = 0x0D;
+        pub const LAPTOP_SUSPEND: u8 = 0x0E;
+        pub const LAPTOP_SHUTDOWN: u8 = 0x0F;
+        pub const LAPTOP_WIN_READY: u8 = 0x10;
+    }
+
+    /// Mutex to serialize EC command access — prevents concurrent EC corruption.
+    static EC_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Cached device UID (populated by GetBindStatus or registry)
+    static CACHED_UID: Mutex<Option<u32>> = Mutex::new(None);
+
+    /// Read the device UID from the Windows registry.
+    /// The original IoTService stores it in HKLM\SOFTWARE\MI\IoTDriver\Uid (REG_DWORD).
+    fn read_uid_from_registry() -> Option<u32> {
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
+        };
+
+        let subkey: Vec<u16> = "SOFTWARE\\MI\\IoTDriver\0".encode_utf16().collect();
+
+        let mut hkey = windows::Win32::System::Registry::HKEY::default();
+        let result = unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                windows::core::PCWSTR(subkey.as_ptr()),
+                0,
+                KEY_READ,
+                &mut hkey,
+            )
+        };
+        if result.is_err() {
+            return None;
+        }
+
+        let value_name: Vec<u16> = "Uid\0".encode_utf16().collect();
+        let mut uid_val: u32 = 0;
+        let mut uid_len: u32 = std::mem::size_of::<u32>() as u32;
+        let uid_type = windows::Win32::System::Registry::REG_NONE;
+        let uid_result = unsafe {
+            RegQueryValueExW(
+                hkey,
+                windows::core::PCWSTR(value_name.as_ptr()),
+                None,
+                Some(&mut uid_type.clone() as *mut _),
+                Some(&mut uid_val as *mut u32 as *mut u8),
+                Some(&mut uid_len),
+            )
+        };
+
+        unsafe {
+            let _ = RegCloseKey(hkey);
+        }
+
+        if uid_result.is_err() || uid_val == 0 {
+            None
+        } else {
+            Some(uid_val)
+        }
+    }
+
+    /// Get the device UID, either from cache, registry, or by querying the EC.
+    /// If no UID is available, returns 0 (some commands work with UID=0).
+    fn get_uid() -> u32 {
+        // Check cache first
+        if let Ok(cache) = CACHED_UID.lock() {
+            if let Some(uid) = *cache {
+                return uid;
+            }
+        }
+
+        // Try registry
+        if let Some(uid) = read_uid_from_registry() {
+            if let Ok(mut cache) = CACHED_UID.lock() {
+                *cache = Some(uid);
+            }
+            return uid;
+        }
+
+        // No UID available — use 0 (commands may still work if EC doesn't require UID)
+        0
+    }
+
+    /// Check if EC is ready (status byte == 0x00).
+    /// Does NOT poll — caller must retry if busy.
+    fn ram_is_ready() -> Result<(), String> {
+        let _ = ecram::send_handshake();
+        let data = ecram::read_ecram(EC_STATUS_ADDR, 1)?;
+        if data[0] == 0x00 {
+            Ok(())
+        } else {
+            Err(format!("EC busy (status=0x{:02X})", data[0]))
+        }
+    }
+
+    /// Write a 7-byte command to EC, then trigger with 0x55.
+    fn write_command(cmd: u8, uid: u32) -> Result<(), String> {
+        let cmd_buf = [
+            cmd,
+            0x01,
+            0x01,
+            (uid & 0xFF) as u8,
+            ((uid >> 8) & 0xFF) as u8,
+            ((uid >> 16) & 0xFF) as u8,
+            ((uid >> 24) & 0xFF) as u8,
+        ];
+        ecram::write_ecram(EC_COMMAND_ADDR, &cmd_buf)?;
+        // Write trigger byte
+        ecram::write_ecram(EC_STATUS_ADDR, &[0x55])?;
+        Ok(())
+    }
+
+    /// Poll for ACK: expected [0x55, cmd_id, 0x01, 0x02].
+    /// 5ms poll interval, 100 max retries.
+    fn read_cmd_ack(cmd: u8) -> Result<(), String> {
+        let expected_ack = [0x55u8, cmd, 0x01, 0x02];
+        let last_cmd_pattern = [0x55u8, cmd, 0x01, 0x01];
+        let next_cmd_pattern = [0x55u8, cmd, 0x01, 0x03];
+
+        for i in 0..100 {
+            // Don't sleep on first iteration — command may already be processed
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let data = ecram::read_ecram(EC_STATUS_ADDR, 4)?;
+            if data == expected_ack {
+                return Ok(());
+            }
+            if data == last_cmd_pattern {
+                continue;
+            }
+            if data == next_cmd_pattern {
+                // EC already moved to RET phase — retry
+                continue;
+            }
+            // Mismatch — decode EC error code and reset
+            let _ = reset_ec();
+            let err_msg = match data[0] {
+                0x11 => format!("EC error 0x11 (cmd 0x{cmd:02X})"),
+                0x22 => format!("EC timeout (cmd 0x{cmd:02X})"),
+                0x33 => format!("EC error 0x33 (cmd 0x{cmd:02X})"),
+                0x44 => format!("EC error 0x44 (cmd 0x{cmd:02X})"),
+                _ => format!(
+                    "ACK mismatch for cmd 0x{cmd:02X}: expected {:02X?}, got {:02X?}",
+                    expected_ack, data
+                ),
+            };
+            return Err(err_msg);
+        }
+        let _ = reset_ec();
+        Err(format!("ACK timeout for cmd 0x{cmd:02X}"))
+    }
+
+    /// Poll for RET: expected [0x55, cmd_id, 0x01, 0x03, <4 bytes data>].
+    /// 45ms poll interval, 60 max retries.
+    fn read_cmd_ret(cmd: u8) -> Result<[u8; 4], String> {
+        let expected_ret = [0x55u8, cmd, 0x01, 0x03];
+        let last_ack_pattern = [0x55u8, cmd, 0x01, 0x02];
+
+        for i in 0..60 {
+            // Don't sleep on first iteration — ACK may already be done
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(45));
+            }
+            let data = ecram::read_ecram(EC_STATUS_ADDR, 8)?;
+            if data.len() < 8 {
+                return Err("RET read too short".to_string());
+            }
+            let first4: [u8; 4] = [data[0], data[1], data[2], data[3]];
+            if first4 == expected_ret {
+                // RET data is in bytes 4-7
+                return Ok([data[4], data[5], data[6], data[7]]);
+            }
+            if first4 == last_ack_pattern {
+                // Still processing ACK — retry
+                continue;
+            }
+            // Mismatch — decode EC error code and reset
+            let _ = reset_ec();
+            let err_msg = match first4[0] {
+                0x11 => format!("EC error 0x11 (cmd 0x{cmd:02X})"),
+                0x22 => format!("EC timeout (cmd 0x{cmd:02X})"),
+                0x33 => format!("EC error 0x33 (cmd 0x{cmd:02X})"),
+                0x44 => format!("EC error 0x44 (cmd 0x{cmd:02X})"),
+                _ => format!(
+                    "RET mismatch for cmd 0x{cmd:02X}: expected {:02X?}, got {:02X?}",
+                    expected_ret, first4
+                ),
+            };
+            return Err(err_msg);
+        }
+        let _ = reset_ec();
+        Err(format!("RET timeout for cmd 0x{cmd:02X}"))
+    }
+
+    /// Reset EC by writing zero to status address.
+    fn reset_ec() -> Result<(), String> {
+        ecram::write_ecram(EC_STATUS_ADDR, &[0x00])?;
+        Ok(())
+    }
+
+    /// Read 120 bytes of sensor data from 0xFE0B0F08.
+    fn read_sensor_data() -> Result<Vec<u8>, String> {
+        ecram::read_ecram(EC_SENSOR_ADDR, 120)
+    }
+
+    /// Write sensor data to 0xFE0B0F08 (max 120 bytes).
+    fn write_sensor_data(data: &[u8]) -> Result<(), String> {
+        if data.len() > 120 {
+            return Err(format!("sensor data too large: {} > 120", data.len()));
+        }
+        ecram::write_ecram(EC_SENSOR_ADDR, data)?;
+        Ok(())
+    }
+
+    /// Execute a full EC command (Reset → RamIsReady → Write → Ack → Ret → Reset).
+    /// Returns the 4-byte RET data.
+    /// The EC must be reset (write 0x00 to status) before AND after each command
+    /// to clear any leftover state from previous commands.
+    fn execute_command(cmd: u8) -> Result<[u8; 4], String> {
+        let _guard = EC_MUTEX.lock().map_err(|e| format!("EC mutex: {e}"))?;
+        let uid = get_uid();
+
+        // Reset EC first to clear any leftover state from previous commands
+        let _ = reset_ec();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Retry RamIsReady up to 10 times with 5ms delay
+        let mut ready = false;
+        for _ in 0..10 {
+            if ram_is_ready().is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if !ready {
+            return Err("EC not ready after 10 retries".to_string());
+        }
+
+        write_command(cmd, uid)?;
+        read_cmd_ack(cmd)?;
+        let ret_data = read_cmd_ret(cmd)?;
+
+        // Reset EC after successful command to clear state for next command
+        let _ = reset_ec();
+
+        Ok(ret_data)
+    }
+
+    // ── Public feature implementations ────────────────────────────────────────
+
+    /// GetBindStatus — cmd_id 0x01
+    /// Returns (bound, uid) where uid is the device UID as u64.
+    pub fn get_bind_status() -> Result<(bool, u64), String> {
+        let ret = execute_command(cmd_id::GET_BIND_STATUS)?;
+        match ret[0] {
+            0x01 => {
+                // Bound — read UID from sensor data
+                let sensors = read_sensor_data()?;
+                if sensors.is_empty() {
+                    return Err("sensor data empty for bind status".to_string());
+                }
+                let uid_size = sensors[0] as usize;
+                if uid_size == 0 {
+                    return Ok((true, 0));
+                }
+                // Bytes 1-7 are UID, byte-swapped to big-endian u64
+                let mut uid_bytes = [0u8; 8];
+                let copy_len = uid_size.min(7);
+                uid_bytes[..copy_len].copy_from_slice(&sensors[1..1 + copy_len]);
+                let device_uid = u64::from_be_bytes(uid_bytes);
+                Ok((true, device_uid))
+            }
+            0x02 => Ok((false, 0)),
+            status => Err(format!("unexpected bind status: 0x{status:02X}")),
+        }
+    }
+
+    /// GetFwVersion — cmd_id 0x0A
+    /// Returns the firmware version as a string.
+    pub fn get_fw_version() -> Result<String, String> {
+        let ret = execute_command(cmd_id::GET_FW_VERSION)?;
+        if ret[0] != 0x01 {
+            return Err(format!("fw version failed: status 0x{:02X}", ret[0]));
+        }
+        let sensors = read_sensor_data()?;
+        if sensors.is_empty() {
+            return Err("sensor data empty for fw version".to_string());
+        }
+        let len = (sensors[0] as usize).min(119);
+        if len == 0 {
+            return Ok(String::new());
+        }
+        let version = String::from_utf8_lossy(&sensors[1..1 + len])
+            .trim_end_matches('\0')
+            .to_string();
+        Ok(version)
+    }
+
+    /// GetModel — cmd_id 0x0B
+    /// Returns the device model as a string.
+    pub fn get_model() -> Result<String, String> {
+        let ret = execute_command(cmd_id::GET_MODEL)?;
+        if ret[0] != 0x01 {
+            return Err(format!("get model failed: status 0x{:02X}", ret[0]));
+        }
+        let sensors = read_sensor_data()?;
+        if sensors.is_empty() {
+            return Err("sensor data empty for model".to_string());
+        }
+        let len = (sensors[0] as usize).min(119);
+        if len == 0 {
+            return Ok(String::new());
+        }
+        let model = String::from_utf8_lossy(&sensors[1..1 + len])
+            .trim_end_matches('\0')
+            .to_string();
+        Ok(model)
+    }
+
+    /// GetDeviceID — cmd_id 0x0D
+    /// Returns the device ID as u64.
+    pub fn get_device_id() -> Result<u64, String> {
+        let ret = execute_command(cmd_id::GET_DEVICE_ID)?;
+        if ret[0] != 0x01 {
+            return Err(format!("get device id failed: status 0x{:02X}", ret[0]));
+        }
+        let sensors = read_sensor_data()?;
+        if sensors.is_empty() {
+            return Err("sensor data empty for device id".to_string());
+        }
+        let did_size = sensors[0] as usize;
+        if did_size == 0 {
+            return Ok(0);
+        }
+        let mut did_bytes = [0u8; 8];
+        let copy_len = did_size.min(7);
+        did_bytes[..copy_len].copy_from_slice(&sensors[1..1 + copy_len]);
+        let device_id = u64::from_be_bytes(did_bytes);
+        Ok(device_id)
+    }
+
+    /// ReadWiFiCount — cmd_id 0x08
+    /// Returns the number of provisioned WiFi networks.
+    pub fn read_wifi_count() -> Result<u8, String> {
+        let ret = execute_command(cmd_id::READ_WIFI_COUNT)?;
+        if ret[0] != 0x01 {
+            return Err(format!("read wifi count failed: status 0x{:02X}", ret[0]));
+        }
+        let sensors = read_sensor_data()?;
+        if sensors.is_empty() {
+            return Err("sensor data empty for wifi count".to_string());
+        }
+        Ok(sensors[0])
+    }
+
+    /// ReadWiFiStatus — cmd_id 0x07
+    /// Returns (status_code, ssid) where status_code is the WiFi connection state.
+    pub fn read_wifi_status() -> Result<(u8, Option<String>), String> {
+        let ret = execute_command(cmd_id::READ_WIFI_STATUS)?;
+        let status_code = ret[0];
+
+        // Valid status codes: 0x01-0x07, 0x0F
+        let is_valid = matches!(status_code, 0x01..=0x07 | 0x0F);
+        if !is_valid {
+            return Ok((status_code, None));
+        }
+
+        let sensors = read_sensor_data()?;
+        if sensors.len() < 5 {
+            return Ok((status_code, None));
+        }
+        let ssid_len = sensors[4] as usize;
+        if ssid_len == 0 || ssid_len > 31 {
+            return Ok((status_code, None));
+        }
+        if sensors.len() < 5 + ssid_len {
+            return Ok((status_code, None));
+        }
+        let ssid = String::from_utf8_lossy(&sensors[5..5 + ssid_len])
+            .trim_end_matches('\0')
+            .to_string();
+        Ok((status_code, Some(ssid)))
+    }
+
+    /// GetWiFiByIndex — cmd_id 0x09
+    /// Returns the WiFi item at the given index as raw bytes (101 bytes).
+    pub fn get_wifi_by_index(index: u8) -> Result<Vec<u8>, String> {
+        if index >= 20 {
+            return Err(format!("wifi index out of range: {index} >= 20"));
+        }
+        // Write index payload to sensor data
+        write_sensor_data(&[0x01, index])?;
+        let ret = execute_command(cmd_id::GET_WIFI_BY_INDEX)?;
+        if ret[0] != 0x01 {
+            return Err(format!("get wifi by index failed: status 0x{:02X}", ret[0]));
+        }
+        let sensors = read_sensor_data()?;
+        Ok(sensors)
+    }
+
+    /// EmptyWiFiItems — cmd_id 0x05
+    /// Removes all provisioned WiFi networks.
+    pub fn empty_wifi_items() -> Result<(), String> {
+        let ret = execute_command(cmd_id::EMPTY_WIFI_ITEMS)?;
+        if ret[0] != 0x01 {
+            return Err(format!("empty wifi items failed: status 0x{:02X}", ret[0]));
+        }
+        Ok(())
+    }
+
+    /// ConnectWiFi — cmd_id 0x0C
+    /// Forces the IoT device to connect to provisioned WiFi.
+    pub fn connect_wifi() -> Result<(), String> {
+        let ret = execute_command(cmd_id::CONNECT_WIFI)?;
+        if ret[0] != 0x01 && ret[0] != 0x02 {
+            return Err(format!("connect wifi failed: status 0x{:02X}", ret[0]));
+        }
+        Ok(())
+    }
+
+    /// ResetDevice — cmd_id 0x03
+    /// Resets the IoT device.
+    pub fn reset_device() -> Result<(), String> {
+        let ret = execute_command(cmd_id::RESET_DEVICE)?;
+        if ret[0] != 0x01 {
+            return Err(format!("reset device failed: status 0x{:02X}", ret[0]));
+        }
+        Ok(())
+    }
+
+    /// SendLaptopStatus — sends a laptop status command to the IoT device.
+    /// status: 4=WinReady, 6=Suspending, 8=Shutting
+    pub fn send_laptop_status(status: u32) -> Result<(), String> {
+        let cmd = match status {
+            4 => cmd_id::LAPTOP_WIN_READY,
+            6 => cmd_id::LAPTOP_SUSPEND,
+            8 => cmd_id::LAPTOP_SHUTDOWN,
+            _ => return Err(format!("invalid laptop status: {status}")),
+        };
+        let ret = execute_command(cmd)?;
+        if ret[0] != 0x01 {
+            return Err(format!(
+                "send laptop status {status} failed: status 0x{:02X}",
+                ret[0]
+            ));
+        }
+        Ok(())
+    }
+}
+
 // ── Named pipe server ────────────────────────────────────────────────────────
 
 mod pipe_server {
+    use super::ec_command;
     use super::ecram;
     use std::ffi::OsStr;
     use std::io;
@@ -493,8 +983,89 @@ mod pipe_server {
                     Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
                 }
             }
+            "iot_get" => {
+                // EC command protocol: get device info from IoT chip
+                let cmd = parsed.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
+                match cmd {
+                    "model" => match ec_command::get_model() {
+                        Ok(m) => format!(r#"{{"ok":true,"cmd":"model","model":"{m}"}}"#),
+                        Err(e) => format!(r#"{{"ok":false,"cmd":"model","error":"{e}"}}"#),
+                    },
+                    "fw_version" => match ec_command::get_fw_version() {
+                        Ok(v) => format!(r#"{{"ok":true,"cmd":"fw_version","fw_version":"{v}"}}"#),
+                        Err(e) => format!(r#"{{"ok":false,"cmd":"fw_version","error":"{e}"}}"#),
+                    },
+                    "device_id" => match ec_command::get_device_id() {
+                        Ok(id) => format!(r#"{{"ok":true,"cmd":"device_id","device_id":{id}}}"#),
+                        Err(e) => format!(r#"{{"ok":false,"cmd":"device_id","error":"{e}"}}"#),
+                    },
+                    "bind_status" => match ec_command::get_bind_status() {
+                        Ok((bound, uid)) => {
+                            format!(
+                                r#"{{"ok":true,"cmd":"bind_status","bound":{bound},"uid":{uid}}}"#
+                            )
+                        }
+                        Err(e) => format!(r#"{{"ok":false,"cmd":"bind_status","error":"{e}"}}"#),
+                    },
+                    "wifi_count" => match ec_command::read_wifi_count() {
+                        Ok(count) => format!(r#"{{"ok":true,"cmd":"wifi_count","count":{count}}}"#),
+                        Err(e) => format!(r#"{{"ok":false,"cmd":"wifi_count","error":"{e}"}}"#),
+                    },
+                    "wifi_status" => match ec_command::read_wifi_status() {
+                        Ok((status, ssid)) => {
+                            let ssid_json = ssid
+                                .map(|s| format!(r#""{s}""#))
+                                .unwrap_or_else(|| "null".to_string());
+                            format!(
+                                r#"{{"ok":true,"cmd":"wifi_status","wifi_status":{status},"ssid":{ssid_json}}}"#
+                            )
+                        }
+                        Err(e) => format!(r#"{{"ok":false,"cmd":"wifi_status","error":"{e}"}}"#),
+                    },
+                    "wifi_by_index" => {
+                        let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                        match ec_command::get_wifi_by_index(index) {
+                            Ok(data) => {
+                                let hex: String = data.iter().map(|b| format!("{b:02X}")).collect();
+                                format!(
+                                    r#"{{"ok":true,"cmd":"wifi_by_index","index":{index},"data":"{hex}"}}"#
+                                )
+                            }
+                            Err(e) => {
+                                format!(r#"{{"ok":false,"cmd":"wifi_by_index","error":"{e}"}}"#)
+                            }
+                        }
+                    }
+                    _ => format!(
+                        r#"{{"ok":false,"error":"unknown iot_get cmd '{cmd}' — valid: model, fw_version, device_id, bind_status, wifi_count, wifi_status, wifi_by_index"}}"#
+                    ),
+                }
+            }
+            "iot_reset_device" => match ec_command::reset_device() {
+                Ok(()) => r#"{"ok":true,"cmd":"reset_device"}"#.to_string(),
+                Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+            },
+            "iot_empty_wifi" => match ec_command::empty_wifi_items() {
+                Ok(()) => r#"{"ok":true,"cmd":"empty_wifi"}"#.to_string(),
+                Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+            },
+            "iot_connect_wifi" => match ec_command::connect_wifi() {
+                Ok(()) => r#"{"ok":true,"cmd":"connect_wifi"}"#.to_string(),
+                Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+            },
+            "iot_send_laptop_status" => {
+                let status = parsed.get("status").and_then(|v| v.as_u64()).unwrap_or(4) as u32;
+                match ec_command::send_laptop_status(status) {
+                    Ok(()) => {
+                        format!(r#"{{"ok":true,"cmd":"send_laptop_status","status":{status}}}"#)
+                    }
+                    Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+                }
+            }
             "ping" => r#"{"ok":true,"pong":true}"#.to_string(),
-            _ => format!(r#"{{"ok":false,"error":"unknown op '{op}'"}}"#),
+            _ => format!(
+                r#"{{"ok":false,"error":"unknown op '{op}' — valid: read, write, read_region, ping, iot_get, iot_reset_device, iot_empty_wifi, iot_connect_wifi, iot_send_laptop_status"}}"#
+            ),
         }
     }
 
@@ -651,6 +1222,13 @@ fn cli_mode(args: &[String]) -> i32 {
         eprintln!("  read <addr_hex> <count>      Read <count> bytes from address");
         eprintln!("  write <addr_hex> <hex_data>  Write hex data to address");
         eprintln!("  pipe-test                    Run pipe server in console (for testing)");
+        eprintln!("  iot-get <cmd>                EC command: model, fw_version, device_id, bind_status, wifi_count, wifi_status");
+        eprintln!("  iot-reset-device             Reset the IoT device");
+        eprintln!("  iot-empty-wifi               Remove all provisioned WiFi networks");
+        eprintln!("  iot-connect-wifi             Force IoT device to connect to WiFi");
+        eprintln!(
+            "  iot-send-laptop-status <N>   Send laptop status (4=WinReady, 6=Suspend, 8=Shutdown)"
+        );
         return 1;
     }
 
@@ -801,6 +1379,134 @@ fn cli_mode(args: &[String]) -> i32 {
             pipe_server::run_pipe_server(shutdown);
             0
         }
+        "iot-get" => {
+            if args.len() < 2 {
+                eprintln!("Usage: iot-get <model|fw_version|device_id|bind_status|wifi_count|wifi_status>");
+                return 1;
+            }
+            match args[1].as_str() {
+                "model" => match ec_command::get_model() {
+                    Ok(m) => {
+                        println!(r#"{{"ok":true,"cmd":"model","model":"{m}"}}"#);
+                        0
+                    }
+                    Err(e) => {
+                        println!(r#"{{"ok":false,"cmd":"model","error":"{e}"}}"#);
+                        1
+                    }
+                },
+                "fw_version" => match ec_command::get_fw_version() {
+                    Ok(v) => {
+                        println!(r#"{{"ok":true,"cmd":"fw_version","fw_version":"{v}"}}"#);
+                        0
+                    }
+                    Err(e) => {
+                        println!(r#"{{"ok":false,"cmd":"fw_version","error":"{e}"}}"#);
+                        1
+                    }
+                },
+                "device_id" => match ec_command::get_device_id() {
+                    Ok(id) => {
+                        println!(r#"{{"ok":true,"cmd":"device_id","device_id":{id}}}"#);
+                        0
+                    }
+                    Err(e) => {
+                        println!(r#"{{"ok":false,"cmd":"device_id","error":"{e}"}}"#);
+                        1
+                    }
+                },
+                "bind_status" => match ec_command::get_bind_status() {
+                    Ok((bound, uid)) => {
+                        println!(
+                            r#"{{"ok":true,"cmd":"bind_status","bound":{bound},"uid":{uid}}}"#
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        println!(r#"{{"ok":false,"cmd":"bind_status","error":"{e}"}}"#);
+                        1
+                    }
+                },
+                "wifi_count" => match ec_command::read_wifi_count() {
+                    Ok(count) => {
+                        println!(r#"{{"ok":true,"cmd":"wifi_count","count":{count}}}"#);
+                        0
+                    }
+                    Err(e) => {
+                        println!(r#"{{"ok":false,"cmd":"wifi_count","error":"{e}"}}"#);
+                        1
+                    }
+                },
+                "wifi_status" => match ec_command::read_wifi_status() {
+                    Ok((status, ssid)) => {
+                        let ssid_str = ssid.unwrap_or_default();
+                        println!(
+                            r#"{{"ok":true,"cmd":"wifi_status","wifi_status":{status},"ssid":"{ssid_str}"}}"#
+                        );
+                        0
+                    }
+                    Err(e) => {
+                        println!(r#"{{"ok":false,"cmd":"wifi_status","error":"{e}"}}"#);
+                        1
+                    }
+                },
+                _ => {
+                    eprintln!(
+                        "Unknown iot-get command: {} (valid: model, fw_version, device_id, bind_status, wifi_count, wifi_status)",
+                        args[1]
+                    );
+                    1
+                }
+            }
+        }
+        "iot-reset-device" => match ec_command::reset_device() {
+            Ok(()) => {
+                println!(r#"{{"ok":true,"cmd":"reset_device"}}"#);
+                0
+            }
+            Err(e) => {
+                println!(r#"{{"ok":false,"error":"{e}"}}"#);
+                1
+            }
+        },
+        "iot-empty-wifi" => match ec_command::empty_wifi_items() {
+            Ok(()) => {
+                println!(r#"{{"ok":true,"cmd":"empty_wifi"}}"#);
+                0
+            }
+            Err(e) => {
+                println!(r#"{{"ok":false,"error":"{e}"}}"#);
+                1
+            }
+        },
+        "iot-connect-wifi" => match ec_command::connect_wifi() {
+            Ok(()) => {
+                println!(r#"{{"ok":true,"cmd":"connect_wifi"}}"#);
+                0
+            }
+            Err(e) => {
+                println!(r#"{{"ok":false,"error":"{e}"}}"#);
+                1
+            }
+        },
+        "iot-send-laptop-status" => {
+            if args.len() < 2 {
+                eprintln!("Usage: iot-send-laptop-status <4|6|8>");
+                eprintln!("  4 = WinReady, 6 = Suspending, 8 = Shutting");
+                return 1;
+            }
+            let status: u32 = args[1].parse().unwrap_or(4);
+            match ec_command::send_laptop_status(status) {
+                Ok(()) => {
+                    println!(r#"{{"ok":true,"cmd":"send_laptop_status","status":{status}}}"#);
+                    0
+                }
+                Err(e) => {
+                    println!(r#"{{"ok":false,"error":"{e}"}}"#);
+                    1
+                }
+            }
+        }
         _ => {
             eprintln!("Unknown command: {}", args[0]);
             1
@@ -841,6 +1547,11 @@ fn main() {
                 eprintln!(
                     "  pipe-test                    Run pipe server in console (for testing)"
                 );
+                eprintln!("  iot-get <cmd>                EC command: model, fw_version, device_id, bind_status, wifi_count, wifi_status");
+                eprintln!("  iot-reset-device             Reset the IoT device");
+                eprintln!("  iot-empty-wifi               Remove all provisioned WiFi networks");
+                eprintln!("  iot-connect-wifi             Force IoT device to connect to WiFi");
+                eprintln!("  iot-send-laptop-status <N>   Send laptop status (4=WinReady, 6=Suspend, 8=Shutdown)");
                 std::process::exit(1);
             }
             eprintln!("Service error: {e}");
