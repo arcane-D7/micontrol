@@ -221,8 +221,13 @@ fn discover_from_wmi() -> Option<u32> {
     // Query for the ACPI Embedded Controller device (PNP0C09)
     let results = crate::hw::wmi_cache::with_cimv2(|wmi| {
         let query = "SELECT * FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%PNP0C09%'";
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi.raw_query(query).unwrap_or_default();
-        Ok(results)
+        match wmi.raw_query::<HashMap<String, wmi::Variant>>(query) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                log::debug!(target: "hw::ecram", "Win32_PnPEntity raw_query error: {e}");
+                Err(anyhow::Error::from(e))
+            }
+        }
     });
 
     let entities = match results {

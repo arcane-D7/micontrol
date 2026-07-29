@@ -58,11 +58,33 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
         use crate::util::wmi_extract;
         use std::collections::HashMap;
 
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi_cache::with_wmi(|wmi| {
-            Ok(wmi
+        let query_result = wmi_cache::with_wmi(|wmi| {
+            match wmi
                 .raw_query("SELECT InstanceName, Temperature, Power FROM EsifDeviceInformation")
-                .unwrap_or_default())
-        })?;
+            {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    log::warn!(target: "hw::fan", "ESIF raw_query error: {e}");
+                    // Use anyhow::Error::from to preserve the WMIError type
+                    // so ShouldRetry can classify permanent HRESULTs.
+                    Err(anyhow::Error::from(e))
+                }
+            }
+        });
+
+        let results: Vec<HashMap<String, wmi::Variant>> = match query_result {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!(target: "hw::fan", "ESIF WMI query failed: {e}");
+                return Err(e);
+            }
+        };
+
+        log::debug!(
+            target: "hw::fan",
+            "ESIF query returned {} participants",
+            results.len()
+        );
 
         let extract_u32_temp = |row: &HashMap<String, wmi::Variant>, key: &str| -> Option<f32> {
             wmi_extract::extract_u32(row, key).map(|v| v as f32)
@@ -230,14 +252,33 @@ fn get_fan_rpm_wmi() -> HardwareResult<u32> {
         use crate::util::wmi_extract;
         use std::collections::HashMap;
 
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi_cache::with_cimv2(|wmi| {
-            Ok(wmi
-                .raw_query("SELECT CurrentReading FROM Win32_Fan")
-                .unwrap_or_default())
-        })?;
+        // Win32_Fan does not have a CurrentReading property on most Xiaomi Book platforms.
+        // It does have DesiredSpeed (UInt64) and VariableSpeed (Boolean), but these are
+        // typically empty. We query all available properties and try DesiredSpeed first,
+        // then fall back to 0 (fan RPM is not exposed via WMI on this platform).
+        // The ESIF/DPTF driver provides temperature data separately via get_esif_readings().
+        let query_result = wmi_cache::with_cimv2(|wmi| {
+            match wmi.raw_query("SELECT DesiredSpeed, VariableSpeed FROM Win32_Fan") {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    log::debug!(target: "hw::fan", "Win32_Fan raw_query error: {e}");
+                    Err(anyhow::Error::from(e))
+                }
+            }
+        });
+        let results: Vec<HashMap<String, wmi::Variant>> = match query_result {
+            Ok(r) => r,
+            Err(e) => {
+                log::debug!(target: "hw::fan", "Win32_Fan query failed: {e}");
+                return Ok(0); // No fan data — don't fail the whole call
+            }
+        };
         if let Some(row) = results.first() {
-            if let Some(rpm) = wmi_extract::extract_u32(row, "CurrentReading") {
-                return Ok(rpm);
+            // Try DesiredSpeed first (UInt64, may be null on some platforms)
+            if let Some(rpm) = wmi_extract::extract_u64(row, "DesiredSpeed") {
+                if rpm > 0 {
+                    return Ok(rpm as u32);
+                }
             }
         }
         Ok(0)

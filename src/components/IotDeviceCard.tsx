@@ -6,10 +6,24 @@ export default function IotDeviceCard() {
   const [info, setInfo] = useState<IotDeviceInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [retryCount, setRetryCount] = useState(0);
+  const [ensuringService, setEnsuringService] = useState(false);
 
   const loadInfo = useCallback(async () => {
     try {
       const data = await invoke<IotDeviceInfo>('get_iot_device_info');
+      // Defensive: ensure all string fields are actually strings, not objects
+      // (prevents [object Object] if backend returns unexpected shapes)
+      if (data) {
+        if (typeof data.device_status !== 'string' && data.device_status !== null) {
+          data.device_status = String(data.device_status);
+        }
+        if (typeof data.model !== 'string' && data.model !== null) {
+          data.model = String(data.model);
+        }
+        if (typeof data.fw_version !== 'string' && data.fw_version !== null) {
+          data.fw_version = String(data.fw_version);
+        }
+      }
       setInfo(data);
     } catch (e) {
       console.error('Failed to load IoT device info:', e);
@@ -21,6 +35,26 @@ export default function IotDeviceCard() {
   useEffect(() => {
     void loadInfo();
   }, [loadInfo]);
+
+  // When pipe is not available, try to start the ecram_service bridge
+  // automatically, then retry.
+  useEffect(() => {
+    if (info?.pipe_available === false && !ensuringService) {
+      setEnsuringService(true);
+      invoke('ensure_iot_service')
+        .then(() => {
+          // Wait a moment for the pipe to become available, then reload
+          setTimeout(() => {
+            void loadInfo();
+            setEnsuringService(false);
+          }, 3000);
+        })
+        .catch((e) => {
+          console.warn('Failed to ensure IoT service:', e);
+          setEnsuringService(false);
+        });
+    }
+  }, [info?.pipe_available, ensuringService, loadInfo]);
 
   // Auto-retry every 5 seconds when pipe is not available
   useEffect(() => {
@@ -58,8 +92,9 @@ export default function IotDeviceCard() {
             {retryCount > 0 && ` (retry ${retryCount}...)`}
           </div>
           <div style={{ marginTop: 8, lineHeight: 1.5 }}>
-            Ensure Xiaomi PC Manager is installed and IoTService is running. The system will
-            automatically retry every 5 seconds.
+            {ensuringService
+              ? 'Starting IoT bridge service...'
+              : 'The IoT bridge service is not running. It will be started automatically and the system will retry every 5 seconds.'}
           </div>
         </div>
         <button

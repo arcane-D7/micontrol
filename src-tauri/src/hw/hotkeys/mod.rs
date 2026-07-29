@@ -864,7 +864,7 @@ fn hook_thread_main() {
     // revisions emit that raw sequence instead of synthesising VK 0xC3.
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            RegisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+            RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
         };
         // Standard VK registrations (AI key, Xiaomi key, Copilot key).
         for (id, vk) in [
@@ -876,6 +876,9 @@ fn hook_thread_main() {
             // CreateWindowExW), a unique ID, and a VK code. The HWND is alive
             // for the duration of the hook thread.
             let mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
+            // Best-effort: unregister first in case a previous instance left
+            // a stale registration (common after app restart without reboot).
+            let _ = unsafe { UnregisterHotKey(hwnd, id) };
             match unsafe { RegisterHotKey(hwnd, id, mods, vk) } {
                 Ok(()) => log::info!("[hotkeys] RegisterHotKey VK={:#04X} id={id} OK", vk),
                 Err(e) => log::warn!(
@@ -886,6 +889,9 @@ fn hook_thread_main() {
         }
         // Also register Win+Shift+F23 (alternate Copilot key path on some boards).
         // VK_F23 = 0x86.  MOD_WIN | MOD_SHIFT | MOD_NOREPEAT.
+        // Best-effort: unregister first to clear stale registrations from
+        // previous app instances (0x80070581 = ERROR_HOTKEY_ALREADY_REGISTERED).
+        let _ = unsafe { UnregisterHotKey(hwnd, 104i32) };
         let copilot_alt_mods = HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0);
         match unsafe { RegisterHotKey(hwnd, 104i32, copilot_alt_mods, 0x86) } {
             Ok(()) => log::info!("[hotkeys] RegisterHotKey Win+Shift+F23 id=104 OK"),

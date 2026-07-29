@@ -153,7 +153,17 @@ where
             });
         }
         Err(e) => {
-            log::debug!("WMI cache: wmi transient query error (cache preserved): {e}");
+            // 0x80041002 from wmi_ec.rs is expected intermittently.
+            // Log at trace level to avoid log spam.
+            let is_expected = e
+                .downcast_ref::<windows::core::Error>()
+                .map(|win_err| win_err.code().0 as u32 == 0x80041002)
+                .unwrap_or(false);
+            if is_expected {
+                log::trace!("WMI cache: wmi transient query error (cache preserved): {e}");
+            } else {
+                log::debug!("WMI cache: wmi transient query error (cache preserved): {e}");
+            }
         }
         Ok(_) => {}
     }
@@ -161,19 +171,97 @@ where
 }
 
 /// Returns `true` if the error indicates a connection-level failure
-/// (COM init, namespace binding, or WMI infrastructure) vs. a transient
-/// query error (class not found, invalid query syntax).
+/// (COM init, namespace binding, or WMI infrastructure) vs. a permanent
+/// or transient query error (class not found, access denied, invalid query).
 ///
-/// Uses structured error type checking via downcasting instead of fragile
-/// substring matching on error messages.
+/// Classifies by HRESULT code, NOT by error message strings (which are
+/// localized on non-English Windows and would break silently).
+///
+/// ## Transient / connection-level HRESULTs (invalidate cache + retry)
+/// These indicate the WMI infrastructure itself is unavailable, and a
+/// COM re-init + reconnect may help:
+/// - `0x80041015` WBEM_E_TRANSPORT_FAILURE
+/// - `0x8004101D` WBEM_E_UNEXPECTED
+/// - `0x80041033` WBEM_E_SHUTTING_DOWN
+/// - `0x80041045` WBEM_E_SERVER_TOO_BUSY
+/// - `0x80041069` WBEM_E_TIMED_OUT
+/// - `0x800706xx` RPC/DCOM family (server unavailable, etc.)
+///
+/// ## Permanent HRESULTs (do NOT invalidate, do NOT retry)
+/// These are deterministic — retrying the identical query will always fail:
+/// - `0x80041003` WBEM_E_ACCESS_DENIED
+/// - `0x8004100E` WBEM_E_INVALID_NAMESPACE
+/// - `0x80041010` WBEM_E_INVALID_CLASS
+/// - `0x80041017` WBEM_E_INVALID_QUERY
+/// - `0x80041002` WBEM_E_NOT_FOUND
+///
+/// Unknown HRESULTs default to **transient** (conservative) so genuine
+/// transient failures still recover.
 fn is_connection_error(e: &anyhow::Error) -> bool {
     // First, try downcasting to our structured HardwareError
     if let Some(hw_err) = e.downcast_ref::<HardwareError>() {
         return matches!(hw_err, HardwareError::WmiConnection(_));
     }
 
-    // Then, try downcasting to common WMI/COM error types
-    if e.downcast_ref::<wmi::WMIError>().is_some() {
+    // Check for WMIError with HRESULT — classify by specific code
+    if let Some(wmi_err) = e.downcast_ref::<wmi::WMIError>() {
+        return match wmi_err {
+            wmi::WMIError::HResultError { hres } => {
+                let hres_u32 = *hres as u32;
+
+                // Check if it's in the PERMANENT set — these should NOT
+                // invalidate the cache or trigger retries.
+                let is_permanent = matches!(
+                    hres_u32,
+                    0x80041003 | 0x8004100E | 0x80041010 | 0x80041017 | 0x80041002
+                );
+
+                if is_permanent {
+                    log::debug!(
+                        "WMI HRESULT 0x{:08X} classified as permanent (NOT a connection error)",
+                        hres_u32
+                    );
+                    false
+                } else {
+                    // Unknown HRESULTs default to transient (conservative)
+                    log::debug!(
+                        "WMI HRESULT 0x{:08X} classified as transient (connection error)",
+                        hres_u32
+                    );
+                    true
+                }
+            }
+            // Other WMIError variants (connection issues, COM init, etc.)
+            // are treated as connection errors
+            _ => true,
+        };
+    }
+
+    // Check for windows::core::Error (from direct COM calls in wmi_ec.rs, hq_wmi.rs)
+    // These come from GetObject/ExecQuery/ExecMethod calls that use the `?`
+    // operator to convert windows::core::Error into anyhow::Error.
+    #[cfg(windows)]
+    if let Some(win_err) = e.downcast_ref::<windows::core::Error>() {
+        let hres_u32 = win_err.code().0 as u32;
+        let is_permanent = matches!(
+            hres_u32,
+            0x80041003 | 0x8004100E | 0x80041010 | 0x80041017 | 0x80041002
+        );
+        if is_permanent {
+            // 0x80041002 (WBEM_E_NOT_FOUND) is expected intermittently from
+            // the MICommonInterface WMI provider when it's in a degraded state.
+            // Log at trace level to avoid log spam.
+            log::trace!(
+                "COM HRESULT 0x{:08X} classified as permanent (NOT a connection error)",
+                hres_u32
+            );
+            return false;
+        }
+        // Unknown COM HRESULTs default to transient (conservative)
+        log::debug!(
+            "COM HRESULT 0x{:08X} classified as transient (connection error)",
+            hres_u32
+        );
         return true;
     }
 
@@ -231,10 +319,42 @@ mod tests {
     }
 
     #[test]
-    fn test_is_connection_error_wmi_error_type() {
-        // A wmi::WMIError should be detected as a connection error
+    fn test_is_connection_error_wmi_error_transient_hresult() {
+        // A wmi::WMIError with a transient HRESULT (transport failure)
+        // should be detected as a connection error
         let wmi_err = wmi::WMIError::HResultError {
-            hres: 0x80040154u32 as i32, // REGDB_E_CLASSNOTREG
+            hres: 0x80041015u32 as i32, // WBEM_E_TRANSPORT_FAILURE
+        };
+        let err: anyhow::Error = anyhow::Error::from(wmi_err);
+        assert!(is_connection_error(&err));
+    }
+
+    #[test]
+    fn test_is_connection_error_wmi_error_access_denied_is_not_connection() {
+        // WBEM_E_ACCESS_DENIED (0x80041003) is a PERMANENT error, NOT a
+        // connection error — retrying the same query will always fail.
+        let wmi_err = wmi::WMIError::HResultError {
+            hres: 0x80041003u32 as i32, // WBEM_E_ACCESS_DENIED
+        };
+        let err: anyhow::Error = anyhow::Error::from(wmi_err);
+        assert!(!is_connection_error(&err));
+    }
+
+    #[test]
+    fn test_is_connection_error_wmi_error_invalid_class_is_not_connection() {
+        // WBEM_E_INVALID_CLASS (0x80041010) is a permanent query error
+        let wmi_err = wmi::WMIError::HResultError {
+            hres: 0x80041010u32 as i32, // WBEM_E_INVALID_CLASS
+        };
+        let err: anyhow::Error = anyhow::Error::from(wmi_err);
+        assert!(!is_connection_error(&err));
+    }
+
+    #[test]
+    fn test_is_connection_error_wmi_error_unknown_hresult_defaults_transient() {
+        // Unknown HRESULTs should default to transient (conservative)
+        let wmi_err = wmi::WMIError::HResultError {
+            hres: 0x80040154u32 as i32, // REGDB_E_CLASSNOTREG — not in permanent list
         };
         let err: anyhow::Error = anyhow::Error::from(wmi_err);
         assert!(is_connection_error(&err));

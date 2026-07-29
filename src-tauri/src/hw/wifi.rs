@@ -100,6 +100,40 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
         }
         let network_list = &*network_list_ptr;
 
+        // 5b. Query current connection to determine which network is connected.
+        // WLAN_AVAILABLE_NETWORK has a `bNetworkConnectable` flag but NOT a
+        // "currently connected" flag, so we must compare SSIDs.
+        let connected_ssid: Option<String> = {
+            use windows::Win32::NetworkManagement::WiFi::{
+                wlan_intf_opcode_current_connection, WlanQueryInterface, WLAN_CONNECTION_ATTRIBUTES,
+            };
+            let mut conn_data: *mut std::ffi::c_void = std::ptr::null_mut();
+            let mut conn_size = 0u32;
+            let conn_ret = WlanQueryInterface(
+                handle,
+                &guid,
+                wlan_intf_opcode_current_connection,
+                None,
+                &mut conn_size,
+                &mut conn_data,
+                None,
+            );
+            if conn_ret == 0 && !conn_data.is_null() {
+                let conn_attrs = &*(conn_data as *const WLAN_CONNECTION_ATTRIBUTES);
+                let assoc = &conn_attrs.wlanAssociationAttributes;
+                let ssid_len = assoc.dot11Ssid.uSSIDLength as usize;
+                let ssid_bytes = &assoc.dot11Ssid.ucSSID[..ssid_len];
+                let ssid_str = String::from_utf8_lossy(ssid_bytes).to_string();
+                if ssid_str.is_empty() {
+                    None
+                } else {
+                    Some(ssid_str)
+                }
+            } else {
+                None
+            }
+        };
+
         // 6. Parse structured data into WifiNetwork
         // WLAN_AVAILABLE_NETWORK_LIST uses a C-style flexible array member:
         // the `Network` field is declared as [WLAN_AVAILABLE_NETWORK; 1] but
@@ -125,11 +159,14 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
                 "Open"
             };
 
+            // Check if this is the currently connected network
+            let is_connected = connected_ssid.as_ref().is_some_and(|s| s == &ssid);
+
             networks.push(WifiNetwork {
                 ssid,
                 signal,
                 security: security.to_string(),
-                connected: false,
+                connected: is_connected,
             });
         }
 
@@ -149,12 +186,17 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
 ///
 /// Uses `WlanQueryInterface` with structured data instead of parsing
 /// `netsh wlan show interfaces` text output. This is locale-independent.
+///
+/// Queries two opcodes:
+/// 1. `wlan_intf_opcode_interface_state` — connected/disconnected enum
+/// 2. `wlan_intf_opcode_current_connection` — SSID + signal quality (when connected)
 #[cfg(windows)]
 pub fn get_status() -> HardwareResult<WifiStatus> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::NetworkManagement::WiFi::{
-        wlan_intf_opcode_interface_state, WlanCloseHandle, WlanEnumInterfaces, WlanOpenHandle,
-        WlanQueryInterface, WLAN_API_VERSION_2_0, WLAN_INTERFACE_INFO_LIST,
+        wlan_intf_opcode_current_connection, wlan_intf_opcode_interface_state, WlanCloseHandle,
+        WlanEnumInterfaces, WlanOpenHandle, WlanQueryInterface, WLAN_API_VERSION_2_0,
+        WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST,
     };
 
     unsafe {
@@ -217,12 +259,54 @@ pub fn get_status() -> HardwareResult<WifiStatus> {
         let state = *(state_data as *const u32);
         let connected = state == 1; // wlan_interface_state_connected
 
+        // When connected, query the current connection to get SSID and signal
+        let (ssid, signal) = if connected {
+            let mut conn_data: *mut std::ffi::c_void = std::ptr::null_mut();
+            let mut conn_size = 0u32;
+            let conn_ret = WlanQueryInterface(
+                handle,
+                &guid,
+                wlan_intf_opcode_current_connection,
+                None,
+                &mut conn_size,
+                &mut conn_data,
+                None,
+            );
+
+            if conn_ret == 0 && !conn_data.is_null() {
+                let conn_attrs = &*(conn_data as *const WLAN_CONNECTION_ATTRIBUTES);
+                let assoc = &conn_attrs.wlanAssociationAttributes;
+
+                // Extract SSID from DOT11_SSID (4-byte length + 32-byte buffer)
+                let ssid_len = assoc.dot11Ssid.uSSIDLength as usize;
+                let ssid_bytes = &assoc.dot11Ssid.ucSSID[..ssid_len];
+                let ssid_str = String::from_utf8_lossy(ssid_bytes).to_string();
+                let ssid = if ssid_str.is_empty() {
+                    None
+                } else {
+                    Some(ssid_str)
+                };
+
+                // wlanSignalQuality: 0-100 percentage
+                let signal = assoc.wlanSignalQuality;
+
+                (ssid, Some(signal))
+            } else {
+                log::warn!(
+                    "[wifi] WlanQueryInterface(current_connection) failed with error code {conn_ret} — SSID unavailable"
+                );
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
         WlanCloseHandle(handle, None);
 
         Ok(WifiStatus {
             connected,
-            ssid: None,
-            signal: None,
+            ssid,
+            signal,
             interface: Some(interface_name),
         })
     }

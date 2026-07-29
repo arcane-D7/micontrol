@@ -206,6 +206,16 @@ pub async fn iot_pipe_available() -> Result<bool, ErrorResponse> {
     Ok(iotservice::is_available())
 }
 
+/// Ensure the ecram_service (IoT bridge) is installed and running.
+/// Called from the frontend when the IoT pipe is not available.
+#[tauri::command]
+pub async fn ensure_iot_service() -> Result<serde_json::Value, ErrorResponse> {
+    let result = elev_bridge::run_elevated("ensure_ecram_service", serde_json::Value::Null)
+        .await
+        .map_err(ErrorResponse::from)?;
+    Ok(result)
+}
+
 /// Get all available IoT device info via IoTService IPC.
 #[tauri::command]
 pub async fn get_iot_device_info() -> Result<IotDeviceInfo, ErrorResponse> {

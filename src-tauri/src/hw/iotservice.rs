@@ -1166,20 +1166,41 @@ pub struct IotDeviceInfo {
 
 /// Get all available device information in one call.
 ///
-/// Each field is independently queried; if the pipe is unavailable or a
-/// specific query fails, the corresponding field is `None`.
+/// This function adapts to whichever IoT service is available:
+///
+/// 1. **Custom ecram_service** (our replacement IoTService.exe in DriverStore):
+///    The pipe `\\.\pipe\ecram_service` is available and responds to JSON
+///    commands for ECRAM read/write.  Device info (model, firmware, etc.) is
+///    gathered from WMI and the registry instead of MCPI IPC, since our
+///    custom service does not implement the MCPI device-info protocol.
+///
+/// 2. **Original Xiaomi IoTService** (if ecram_service is not installed):
+///    The pipe `\\.\pipe\LOCAL\IoTService_IPC_Broker` would be available and
+///    we could send MCPI binary protocol queries for model, firmware, bind
+///    status, etc.  This path is kept for forward compatibility.
+///
+/// 3. **No pipe available**: Fall back to cached hardware profile (WMI).
 pub fn get_device_info() -> IotDeviceInfo {
-    let pipe_available = is_available();
-    log::info!("[iot] get_device_info: pipe_available={pipe_available}");
+    // Check which pipe is available
+    let ecram_pipe_available = crate::hw::ecram::is_pipe_broker_available();
+    let mcpi_pipe_available = is_available(); // checks MCPI pipe path
 
-    // Short-circuit: if the pipe is not available, return immediately with all
-    // fields as None. This prevents ~2 minutes of retry timeouts when the
-    // IoTService is not running.
-    if !pipe_available {
-        log::info!("[iot] Pipe not available — returning empty device info");
+    log::info!(
+        "[iot] get_device_info: ecram_pipe={ecram_pipe_available}, mcpi_pipe={mcpi_pipe_available}"
+    );
+
+    // Get cached model from hardware profile (discovered via WMI)
+    let cached_model = crate::hw::discovery::global_profile().and_then(|p| p.device_model);
+
+    if let Some(ref model) = cached_model {
+        log::info!("[iot] Using cached device model: {model}");
+    }
+
+    // If neither pipe is available, return minimal info
+    if !ecram_pipe_available && !mcpi_pipe_available {
         return IotDeviceInfo {
             pipe_available: false,
-            model: None,
+            model: cached_model,
             fw_version: None,
             bind_status: None,
             device_id: None,
@@ -1189,30 +1210,238 @@ pub fn get_device_info() -> IotDeviceInfo {
         };
     }
 
-    IotDeviceInfo {
-        pipe_available,
-        model: get_model()
-            .map_err(|e| log::warn!("[iot] Failed to query model: {e}"))
-            .ok(),
-        fw_version: get_fw_version()
-            .map_err(|e| log::warn!("[iot] Failed to query firmware version: {e}"))
-            .ok(),
-        bind_status: get_bind_status()
-            .map_err(|e| log::warn!("[iot] Failed to query bind status: {e}"))
-            .ok(),
-        device_id: get_device_id()
-            .map_err(|e| log::warn!("[iot] Failed to query device ID: {e}"))
-            .ok(),
-        device_status: get_device_status()
-            .map_err(|e| log::warn!("[iot] Failed to query device status: {e}"))
-            .ok(),
-        wifi_status: read_wifi_status()
-            .map_err(|e| log::warn!("[iot] Failed to read WiFi status: {e}"))
-            .ok(),
-        wifi_network_count: read_wifi_count()
-            .map_err(|e| log::warn!("[iot] Failed to read WiFi network count: {e}"))
-            .ok(),
+    // If the original MCPI pipe is available, use the full MCPI protocol
+    // to query device info (model, firmware, bind status, WiFi, etc.)
+    if mcpi_pipe_available {
+        log::info!("[iot] MCPI pipe available — querying device info via MCPI protocol");
+        return IotDeviceInfo {
+            pipe_available: true,
+            model: get_model()
+                .map_err(|e| log::warn!("[iot] Failed to query model: {e}"))
+                .ok()
+                .or(cached_model),
+            fw_version: get_fw_version()
+                .map_err(|e| log::warn!("[iot] Failed to query firmware version: {e}"))
+                .ok(),
+            bind_status: get_bind_status()
+                .map_err(|e| log::warn!("[iot] Failed to query bind status: {e}"))
+                .ok(),
+            device_id: get_device_id()
+                .map_err(|e| log::warn!("[iot] Failed to query device ID: {e}"))
+                .ok(),
+            device_status: get_device_status()
+                .map_err(|e| log::warn!("[iot] Failed to query device status: {e}"))
+                .ok(),
+            wifi_status: read_wifi_status()
+                .map_err(|e| log::warn!("[iot] Failed to read WiFi status: {e}"))
+                .ok(),
+            wifi_network_count: read_wifi_count()
+                .map_err(|e| log::warn!("[iot] Failed to read WiFi network count: {e}"))
+                .ok(),
+        };
     }
+
+    // Our custom ecram_service pipe is available but not the MCPI pipe.
+    // The custom service provides ECRAM read/write but does NOT implement
+    // the MCPI device-info protocol (GetModel, GetFwVersion, etc.).
+    // We gather device info from alternative sources:
+    //   - Model: from WMI/cached hardware profile
+    //   - Firmware: from registry (SOFTWARE\MI\IoTDriver\FwVersion)
+    //   - Device status: from ECRAM IOT_STATUS region (0xFE0B0F00)
+    //   - Bind status, WiFi: not available without original IoTService
+    log::info!("[iot] ecram_service pipe available — gathering info from WMI/registry/ECRAM");
+
+    // Try to read firmware version from registry
+    let fw_version = read_fw_version_from_registry();
+
+    // Try to read device status from ECRAM IOT_STATUS region
+    let device_status = read_device_status_from_ecram();
+
+    // Try to read bind status from registry
+    let bind_status = read_bind_status_from_registry();
+
+    IotDeviceInfo {
+        pipe_available: true,
+        model: cached_model,
+        fw_version,
+        bind_status,
+        device_id: None,
+        device_status,
+        wifi_status: None,
+        wifi_network_count: None,
+    }
+}
+
+/// Read firmware version from the Windows registry.
+///
+/// The original IoTService.exe stores the firmware version in
+/// `HKLM\SOFTWARE\MI\IoTDriver\FwVersion`.
+#[cfg(windows)]
+fn read_fw_version_from_registry() -> Option<String> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
+    };
+
+    let subkey: Vec<u16> = "SOFTWARE\\MI\\IoTDriver\0".encode_utf16().collect();
+
+    let mut hkey = windows::Win32::System::Registry::HKEY::default();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if result.is_err() {
+        return None;
+    }
+
+    let value_name: Vec<u16> = "FwVersion\0".encode_utf16().collect();
+    let mut buf_len: u32 = 256;
+    let mut buf = [0u8; 256];
+    let value_type = windows::Win32::System::Registry::REG_NONE;
+    let result = unsafe {
+        RegQueryValueExW(
+            hkey,
+            windows::core::PCWSTR(value_name.as_ptr()),
+            None,
+            Some(&mut value_type.clone() as *mut _),
+            Some(buf.as_mut_ptr() as *mut u8),
+            Some(&mut buf_len),
+        )
+    };
+
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
+
+    if result.is_err() || buf_len == 0 {
+        return None;
+    }
+
+    // Interpret as REG_SZ (UTF-16LE string)
+    let utf16_len = (buf_len as usize) / 2;
+    let utf16: Vec<u16> = buf[..buf_len as usize]
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .take(utf16_len)
+        .collect();
+
+    let s = String::from_utf16_lossy(&utf16);
+    let trimmed = s.trim_end_matches('\0').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[cfg(not(windows))]
+fn read_fw_version_from_registry() -> Option<String> {
+    None
+}
+
+/// Read device status from the ECRAM IOT_STATUS region.
+///
+/// Reads 8 bytes from 0xFE0B0F00 via the ecram_service pipe and interprets
+/// the first byte as a status code.
+fn read_device_status_from_ecram() -> Option<String> {
+    let data = crate::hw::ecram::read_ecram_via_pipe(0xFE0B0F00, 8)?;
+    if data.is_empty() {
+        return None;
+    }
+
+    // Interpret the first byte as a status code.
+    // The IOT_STATUS region format was reverse-engineered from IoTService.exe.
+    // Byte 0: driver status flags
+    // Byte 1: device state
+    let status_byte = data[0];
+    let state_byte = data.get(1).copied().unwrap_or(0);
+
+    let status = match state_byte {
+        0 => "offline",
+        1 => "online",
+        2 => "connected",
+        3 => "bound",
+        _ => "unknown",
+    };
+
+    Some(format!("{status} (0x{status_byte:02X})"))
+}
+
+/// Read bind status from the Windows registry.
+///
+/// The original IoTService.exe stores bind info in
+/// `HKLM\SOFTWARE\MI\IoTDriver\Uid` (REG_DWORD) and
+/// `HKLM\SOFTWARE\MI\IoTDriver\SSID` (REG_SZ).
+#[cfg(windows)]
+fn read_bind_status_from_registry() -> Option<BindStatusInfo> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
+    };
+
+    let subkey: Vec<u16> = "SOFTWARE\\MI\\IoTDriver\0".encode_utf16().collect();
+
+    let mut hkey = windows::Win32::System::Registry::HKEY::default();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if result.is_err() {
+        return None;
+    }
+
+    // Try to read Uid
+    let uid_name: Vec<u16> = "Uid\0".encode_utf16().collect();
+    let mut uid_val: u32 = 0;
+    let mut uid_len: u32 = std::mem::size_of::<u32>() as u32;
+    let uid_type = windows::Win32::System::Registry::REG_NONE;
+    let uid_result = unsafe {
+        RegQueryValueExW(
+            hkey,
+            windows::core::PCWSTR(uid_name.as_ptr()),
+            None,
+            Some(&mut uid_type.clone() as *mut _),
+            Some(&mut uid_val as *mut u32 as *mut u8),
+            Some(&mut uid_len),
+        )
+    };
+
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
+
+    if uid_result.is_err() {
+        // No Uid in registry — device is not bound
+        return Some(BindStatusInfo {
+            bound: false,
+            uid: None,
+        });
+    }
+
+    if uid_val == 0 {
+        Some(BindStatusInfo {
+            bound: false,
+            uid: None,
+        })
+    } else {
+        Some(BindStatusInfo {
+            bound: true,
+            uid: Some(uid_val as u64),
+        })
+    }
+}
+
+#[cfg(not(windows))]
+fn read_bind_status_from_registry() -> Option<BindStatusInfo> {
+    None
 }
 
 /// Consolidated WiFi list response.

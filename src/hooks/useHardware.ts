@@ -108,49 +108,48 @@ export function useHardware() {
   const FAST_POLL_INTERVAL = 2000;
   const SLOW_POLL_INTERVAL = 15000;
 
+  // Safe wrapper: catches per-invoke failures so one failing query doesn't
+  // abort the entire batch. Returns the fallback value on failure.
+  const safe = useCallback(
+    <T>(p: Promise<T>, fallback: T, label: string): Promise<T> =>
+      p.catch((e) => {
+        console.warn(`[hardware] ${label} failed:`, e);
+        return fallback;
+      }),
+    [],
+  );
+
   const fastPoll = useCallback(async () => {
-    try {
-      const [fanResult, systemResult, audioResult] = await Promise.all([
-        invoke<FanInfo>('get_fan_info'),
-        invoke<SystemInfo>('get_system_info'),
-        invoke<AudioVolumeResult>('get_audio_volume'),
-      ]);
-      setFan(fanResult);
-      if (systemResult) {
-        setSystemInfo(systemResult);
-      }
-      setAudioState(audioResult);
-      setError(null);
-    } catch (e) {
-      console.error('Fast poll failed:', e);
-      setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
-    }
-  }, []);
+    const [fanResult, systemResult, audioResult] = await Promise.all([
+      safe(invoke<FanInfo>('get_fan_info'), null, 'get_fan_info'),
+      safe(invoke<SystemInfo>('get_system_info'), null, 'get_system_info'),
+      safe(invoke<AudioVolumeResult>('get_audio_volume'), null, 'get_audio_volume'),
+    ]);
+    if (fanResult) setFan(fanResult);
+    if (systemResult) setSystemInfo(systemResult);
+    if (audioResult) setAudioState(audioResult);
+    setError(null);
+  }, [safe]);
 
   const slowPoll = useCallback(async () => {
-    try {
-      const [batteryResult, displayResult, touchpadResult, perfMode, chargeThreshold] =
-        await Promise.all([
-          invoke<BatteryInfo>('get_battery_info'),
-          invoke<DisplayInfo>('get_display_info'),
-          invoke<TouchpadInfo>('get_touchpad_info'),
-          invoke<PerformanceMode>('get_performance_mode'),
-          invoke<number>('get_charging_threshold'),
-        ]);
-      if (batteryResult !== null) setBattery(batteryResult);
-      if (displayResult !== null) setDisplay(displayResult);
-      // Only update touchpad from poll when no user write is in flight.
-      if (touchpadResult !== null && Date.now() >= touchpadDirtyUntil.current) {
-        setTouchpad(touchpadResult);
-      }
-      if (perfMode) setPerformanceModeState(perfMode);
-      setChargingThresholdState(chargeThreshold);
-      setError(null);
-    } catch (e) {
-      console.error('Slow poll failed:', e);
-      setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+    const [batteryResult, displayResult, touchpadResult, perfMode, chargeThreshold] =
+      await Promise.all([
+        safe(invoke<BatteryInfo>('get_battery_info'), null, 'get_battery_info'),
+        safe(invoke<DisplayInfo>('get_display_info'), null, 'get_display_info'),
+        safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'get_touchpad_info'),
+        safe(invoke<PerformanceMode>('get_performance_mode'), null, 'get_performance_mode'),
+        safe(invoke<number>('get_charging_threshold'), 80, 'get_charging_threshold'),
+      ]);
+    if (batteryResult !== null) setBattery(batteryResult);
+    if (displayResult !== null) setDisplay(displayResult);
+    // Only update touchpad from poll when no user write is in flight.
+    if (touchpadResult !== null && Date.now() >= touchpadDirtyUntil.current) {
+      setTouchpad(touchpadResult);
     }
-  }, []);
+    if (perfMode) setPerformanceModeState(perfMode);
+    setChargingThresholdState(chargeThreshold);
+    setError(null);
+  }, [safe]);
 
   const initialLoadRef = useRef(false);
 
@@ -179,16 +178,20 @@ export function useHardware() {
             perfMode,
             chargeThreshold,
           ] = await Promise.all([
-            invoke<FanInfo>('get_fan_info'),
-            invoke<SystemInfo>('get_system_info'),
-            invoke<BatteryInfo>('get_battery_info'),
-            invoke<DisplayInfo>('get_display_info'),
-            invoke<TouchpadInfo>('get_touchpad_info'),
-            invoke<PerformanceMode>('get_performance_mode'),
-            invoke<number>('get_charging_threshold'),
+            safe(invoke<FanInfo>('get_fan_info'), null, 'init:get_fan_info'),
+            safe(invoke<SystemInfo>('get_system_info'), null, 'init:get_system_info'),
+            safe(invoke<BatteryInfo>('get_battery_info'), null, 'init:get_battery_info'),
+            safe(invoke<DisplayInfo>('get_display_info'), null, 'init:get_display_info'),
+            safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'init:get_touchpad_info'),
+            safe(
+              invoke<PerformanceMode>('get_performance_mode'),
+              null,
+              'init:get_performance_mode',
+            ),
+            safe(invoke<number>('get_charging_threshold'), 80, 'init:get_charging_threshold'),
           ]);
-          setFan(fanResult);
-          setSystemInfo(systemResult);
+          if (fanResult) setFan(fanResult);
+          if (systemResult) setSystemInfo(systemResult);
           if (batteryResult !== null) setBattery(batteryResult);
           if (displayResult !== null) setDisplay(displayResult);
           if (touchpadResult !== null) setTouchpad(touchpadResult);
@@ -242,7 +245,7 @@ export function useHardware() {
       clearInterval(fastInterval);
       clearInterval(slowInterval);
     };
-  }, [fastPoll, slowPoll]);
+  }, [fastPoll, slowPoll, safe]);
 
   const setPerformanceMode = useCallback(async (mode: PerformanceMode) => {
     const snap = performanceModeRef.current;

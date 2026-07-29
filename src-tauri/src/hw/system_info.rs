@@ -366,11 +366,15 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
 
         let info = wmi_cache::with_cimv2(|wmi| {
             // ── Static CPU identity (name, cores, threads) ────────────────────
-            let cpus: Vec<HashMap<String, wmi::Variant>> = wmi
-                .raw_query(
-                    "SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor",
-                )
-                .unwrap_or_default();
+            let cpus: Vec<HashMap<String, wmi::Variant>> = match wmi.raw_query(
+                "SELECT Name, NumberOfCores, NumberOfLogicalProcessors FROM Win32_Processor",
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(target: "hw::system_info", "Win32_Processor raw_query error: {e}");
+                    return Err(anyhow::Error::from(e));
+                }
+            };
             let cpu = cpus.into_iter().next().unwrap_or_default();
 
             // ── CPU usage — PDH "% Processor Utility" matches Task Manager ──────
@@ -380,9 +384,15 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
             let cpu_usage = read_cpu_usage();
 
             // ── GPU name ──────────────────────────────────────────────────────
-            let gpu_query: Vec<HashMap<String, wmi::Variant>> = wmi
+            let gpu_query: Vec<HashMap<String, wmi::Variant>> = match wmi
                 .raw_query("SELECT Name FROM Win32_VideoController")
-                .unwrap_or_default();
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(target: "hw::system_info", "Win32_VideoController raw_query error: {e}");
+                    return Err(anyhow::Error::from(e));
+                }
+            };
             let gpu_name = gpu_query
                 .into_iter()
                 .next()
@@ -397,11 +407,17 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
             let gpu_usage = read_gpu_usage();
 
             // ── Dedicated VRAM used ───────────────────────────────────────────
-            let vram_q: Vec<HashMap<String, wmi::Variant>> = wmi
-                .raw_query(
-                    "SELECT DedicatedUsage FROM Win32_PerfFormattedData_GPUAdapterMemory_GPUAdapter",
-                )
-                .unwrap_or_default();
+            // The correct class name is Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory
+            // (not Win32_PerfFormattedData_GPUAdapterMemory_GPUAdapter which doesn't exist)
+            let vram_q: Vec<HashMap<String, wmi::Variant>> = match wmi.raw_query(
+                "SELECT DedicatedUsage FROM Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory",
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(target: "hw::system_info", "GPUAdapterMemory raw_query error: {e}");
+                    return Err(anyhow::Error::from(e));
+                }
+            };
             let vram_used_mb = vram_q
                 .first()
                 .and_then(|r| wmi_extract::extract_u64(r, "DedicatedUsage"))
@@ -409,9 +425,15 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
                 .unwrap_or(0.0);
 
             // ── Physical memory total ─────────────────────────────────────────
-            let mem_query: Vec<HashMap<String, wmi::Variant>> = wmi
+            let mem_query: Vec<HashMap<String, wmi::Variant>> = match wmi
                 .raw_query("SELECT Capacity FROM Win32_PhysicalMemory")
-                .unwrap_or_default();
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(target: "hw::system_info", "Win32_PhysicalMemory raw_query error: {e}");
+                    return Err(anyhow::Error::from(e));
+                }
+            };
             let ram_total_bytes: u64 = mem_query
                 .iter()
                 .filter_map(|row| match row.get("Capacity") {
@@ -421,9 +443,15 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
                 .sum();
 
             // ── OS info + available (free) memory ─────────────────────────────
-            let os_info: Vec<HashMap<String, wmi::Variant>> = wmi
+            let os_info: Vec<HashMap<String, wmi::Variant>> = match wmi
                 .raw_query("SELECT Caption, FreePhysicalMemory, TotalVisibleMemorySize FROM Win32_OperatingSystem")
-                .unwrap_or_default();
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(target: "hw::system_info", "Win32_OperatingSystem raw_query error: {e}");
+                    return Err(anyhow::Error::from(e));
+                }
+            };
             let os_row = os_info.into_iter().next().unwrap_or_default();
 
             let cpu_name = wmi_extract::extract_string(&cpu, "Name")

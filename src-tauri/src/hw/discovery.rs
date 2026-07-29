@@ -311,6 +311,11 @@ fn load_or_discover(data_dir: Option<&Path>) -> HardwareProfile {
                             }
                         }
                         log::info!("Hardware profile loaded from {}", path.display());
+
+                        // If device_model is missing from cache, try to probe it
+                        // now and update the persisted profile.  This ensures we
+                        // never show "Unknown" when the information is obtainable.
+                        let p = ensure_device_model(p, data_dir);
                         return p;
                     }
                     log::info!("Hardware profile is stale, re-discovering...");
@@ -348,6 +353,25 @@ fn save_profile(profile: &HardwareProfile, data_dir: Option<&Path>) {
     }
 }
 
+/// Ensure `device_model` is populated.  If it is `None` in the cached profile,
+/// attempt to probe it now and persist the updated profile.  This prevents
+/// the UI from showing "Unknown" when the information is readily obtainable
+/// via WMI.
+fn ensure_device_model(mut profile: HardwareProfile, data_dir: Option<&Path>) -> HardwareProfile {
+    if profile.device_model.is_some() {
+        return profile;
+    }
+    log::info!("device_model missing from cached profile — probing...");
+    if let Some(model) = probe_device_model() {
+        log::info!("device_model probed successfully: {model}");
+        profile.device_model = Some(model);
+        save_profile(&profile, data_dir);
+    } else {
+        log::warn!("device_model probe failed — will retry on next discovery");
+    }
+    profile
+}
+
 fn profile_file_path(data_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(d) = data_dir {
         return Some(d.join("hardware_profile.json"));
@@ -381,6 +405,18 @@ fn run_discovery() -> HardwareProfile {
     p.discovered_at = now_unix();
 
     p.device_model = probe_device_model();
+
+    // If device_model probe failed, try to preserve the previously cached
+    // value so we never regress from "known" to "Unknown".
+    if p.device_model.is_none() {
+        if let Some(prev) = global_profile() {
+            if let Some(prev_model) = prev.device_model {
+                log::info!("device_model probe failed — preserving cached value: {prev_model}");
+                p.device_model = Some(prev_model);
+            }
+        }
+    }
+
     p.vhf_device_path = probe_vhf_device();
     p.touchpad_hid_path = probe_touchpad_hid();
     p.touchscreen_hid_path = probe_touchscreen_hid();
@@ -420,8 +456,9 @@ fn run_discovery() -> HardwareProfile {
 fn probe_device_model() -> Option<String> {
     #[cfg(windows)]
     {
+        // First try WMI (Win32_ComputerSystem.Model)
         use crate::hw::wmi_cache;
-        wmi_cache::with_cimv2(|wmi| {
+        let wmi_result = wmi_cache::with_cimv2(|wmi| {
             let results: Vec<HashMap<String, wmi::Variant>> = wmi
                 .raw_query("SELECT Model FROM Win32_ComputerSystem")
                 .unwrap_or_default();
@@ -432,10 +469,90 @@ fn probe_device_model() -> Option<String> {
             }
             Ok(None::<String>)
         })
-        .ok()?
+        .ok()
+        .flatten();
+
+        if wmi_result.is_some() {
+            return wmi_result;
+        }
+
+        // Fallback: read from BIOS registry (HKLM\HARDWARE\DESCRIPTION\System\BIOS\SystemProductName)
+        // This works even when WMI COM initialization fails (RPC_E_CHANGED_MODE)
+        log::info!("device_model: WMI query failed, falling back to BIOS registry");
+        read_model_from_bios_registry()
     }
     #[cfg(not(windows))]
     None
+}
+
+/// Read the device model from the BIOS registry.
+///
+/// `HKLM\HARDWARE\DESCRIPTION\System\BIOS\SystemProductName` contains the
+/// system model name (e.g. "Xiaomi Book Pro 14").  This is available even
+/// when WMI fails due to COM threading model conflicts.
+#[cfg(windows)]
+fn read_model_from_bios_registry() -> Option<String> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
+    };
+
+    let subkey: Vec<u16> = "HARDWARE\\DESCRIPTION\\System\\BIOS\0"
+        .encode_utf16()
+        .collect();
+
+    let mut hkey = windows::Win32::System::Registry::HKEY::default();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if result.is_err() {
+        log::warn!("device_model: Failed to open BIOS registry key");
+        return None;
+    }
+
+    let value_name: Vec<u16> = "SystemProductName\0".encode_utf16().collect();
+    let mut buf = [0u8; 512];
+    let mut buf_len: u32 = buf.len() as u32;
+    let value_type = windows::Win32::System::Registry::REG_NONE;
+    let result = unsafe {
+        RegQueryValueExW(
+            hkey,
+            windows::core::PCWSTR(value_name.as_ptr()),
+            None,
+            Some(&mut value_type.clone() as *mut _),
+            Some(buf.as_mut_ptr() as *mut u8),
+            Some(&mut buf_len),
+        )
+    };
+
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
+
+    if result.is_err() || buf_len == 0 {
+        log::warn!("device_model: Failed to read SystemProductName from BIOS registry");
+        return None;
+    }
+
+    // Interpret as REG_SZ (UTF-16LE string)
+    let utf16: Vec<u16> = buf[..buf_len as usize]
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+
+    let s = String::from_utf16_lossy(&utf16);
+    let trimmed = s.trim_end_matches('\0').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        log::info!("device_model: Read from BIOS registry: {trimmed}");
+        Some(trimmed.to_string())
+    }
 }
 
 /// Enumerate the VHF custom interface GUID and return the first device path.
@@ -597,6 +714,8 @@ fn probe_iot_pipe() -> Option<String> {
         r"\\.\pipe\LOCAL\IoTService_IPC_Broker",
         r"\\.\pipe\IoTService",
         r"\\.\pipe\LOCAL\IoTDriver",
+        // Our custom ecram_service pipe — provides ECRAM access without XPM
+        r"\\.\pipe\ecram_service",
     ];
     for path in &candidates {
         if std::fs::metadata(path).is_ok() {

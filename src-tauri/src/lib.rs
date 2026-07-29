@@ -15,20 +15,21 @@ use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
 #[allow(deprecated)]
 use commands::hardware::{
-    get_audio_devices, get_audio_volume, get_cast_devices, get_charging_threshold, get_ecram_map,
-    get_iot_bind_status, get_iot_device_id, get_iot_device_info, get_iot_device_status,
-    get_iot_fw_version, get_iot_model, get_iot_region_hex, get_iot_wifi_by_index,
-    get_iot_wifi_count, get_iot_wifi_list, get_iot_wifi_status, get_perf_debug,
-    get_performance_mode, get_primary_thermal_zone, get_thermal_zones, hq_change_boot_option,
-    hq_enable_pxe_boot, hq_load_default, hq_s5_rtc_wake_enable, hq_set_performance_mode,
-    hq_set_shipping_country_code, hq_set_wifi_country_code, iot_connect_wifi, iot_delete_wifi_item,
-    iot_empty_wifi_items, iot_notify_ec_event, iot_notify_event, iot_notify_power_event,
-    iot_pipe_available, iot_report_shutting_down, iot_report_suspending, iot_report_windows_ready,
-    iot_reset_device, iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw,
-    relaunch_as_admin, send_iot_laptop_status, set_audio_default_endpoint, set_audio_mute,
-    set_audio_volume, set_charging_threshold, set_performance_mode, start_casting, stop_casting,
-    wifi_connect, wifi_disconnect, wifi_scan, wifi_status, wmi_ec_get_performance_mode,
-    wmi_ec_read, wmi_ec_read_adapter_power, wmi_ec_read_battery_health, wmi_ec_read_sensor_data,
+    ensure_iot_service, get_audio_devices, get_audio_volume, get_cast_devices,
+    get_charging_threshold, get_ecram_map, get_iot_bind_status, get_iot_device_id,
+    get_iot_device_info, get_iot_device_status, get_iot_fw_version, get_iot_model,
+    get_iot_region_hex, get_iot_wifi_by_index, get_iot_wifi_count, get_iot_wifi_list,
+    get_iot_wifi_status, get_perf_debug, get_performance_mode, get_primary_thermal_zone,
+    get_thermal_zones, hq_change_boot_option, hq_enable_pxe_boot, hq_load_default,
+    hq_s5_rtc_wake_enable, hq_set_performance_mode, hq_set_shipping_country_code,
+    hq_set_wifi_country_code, iot_connect_wifi, iot_delete_wifi_item, iot_empty_wifi_items,
+    iot_notify_ec_event, iot_notify_event, iot_notify_power_event, iot_pipe_available,
+    iot_report_shutting_down, iot_report_suspending, iot_report_windows_ready, iot_reset_device,
+    iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw, relaunch_as_admin,
+    send_iot_laptop_status, set_audio_default_endpoint, set_audio_mute, set_audio_volume,
+    set_charging_threshold, set_performance_mode, start_casting, stop_casting, wifi_connect,
+    wifi_disconnect, wifi_scan, wifi_status, wmi_ec_get_performance_mode, wmi_ec_read,
+    wmi_ec_read_adapter_power, wmi_ec_read_battery_health, wmi_ec_read_sensor_data,
     wmi_ec_set_auto_illumination, wmi_ec_set_brightness_data, wmi_ec_set_epof_flag,
     wmi_ec_set_label_mode, wmi_ec_set_lid_open_type, wmi_ec_set_mi_usage_type,
     wmi_ec_set_performance_mode, wmi_ec_set_pl1_flag, wmi_ec_set_removable_type,
@@ -239,6 +240,7 @@ pub fn run() {
             relaunch_as_admin,
             // IoTService IPC
             iot_pipe_available,
+            ensure_iot_service,
             get_iot_device_info,
             get_iot_wifi_list,
             iot_notify_event,
@@ -474,6 +476,12 @@ pub fn run() {
             // Start the native Win32 brightness OSD (GDI layered window, no WebView2).
             #[cfg(windows)]
             crate::hw::osd::init();
+
+            // Start power event listener for sleep/resume detection.
+            // Resets sensors (ambient light, WMI cache) after the system
+            // wakes from sleep to prevent "Sensor unavailable" errors.
+            #[cfg(windows)]
+            crate::hw::power_listener::start_power_listener();
 
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());

@@ -10,6 +10,7 @@ pub mod charging;
 pub mod discovery;
 pub mod display;
 pub mod ecram;
+pub mod ecram_service_mgmt;
 pub mod errors;
 pub mod fan;
 pub mod hotkeys;
@@ -19,6 +20,8 @@ pub mod mic;
 #[cfg(windows)]
 pub mod osd;
 pub mod performance;
+#[cfg(windows)]
+pub mod power_listener;
 pub mod processes;
 pub mod screen_cast;
 pub mod startup;

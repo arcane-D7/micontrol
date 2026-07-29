@@ -30,14 +30,27 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
         use crate::util::wmi_extract;
         use std::collections::HashMap;
 
-        let results: Vec<HashMap<String, wmi::Variant>> = wmi_cache::with_wmi(|wmi| {
-            Ok(wmi
-                .raw_query(
-                    "SELECT InstanceName, Active, CurrentTemperature, CriticalTripPoint \
-                     FROM MSAcpi_ThermalZoneTemperature",
-                )
-                .unwrap_or_default())
-        })?;
+        let query_result = wmi_cache::with_wmi(|wmi| {
+            match wmi.raw_query(
+                "SELECT InstanceName, Active, CurrentTemperature, CriticalTripPoint \
+                 FROM MSAcpi_ThermalZoneTemperature",
+            ) {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    log::warn!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature raw_query error: {e}");
+                    // Use anyhow::Error::from to preserve the WMIError type
+                    // so ShouldRetry can classify permanent HRESULTs.
+                    Err(anyhow::Error::from(e))
+                }
+            }
+        });
+        let results: Vec<HashMap<String, wmi::Variant>> = match query_result {
+            Ok(r) => r,
+            Err(e) => {
+                log::debug!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed: {e}");
+                return Err(e.into());
+            }
+        };
 
         let zones: Vec<ThermalZoneInfo> = results
             .iter()

@@ -231,11 +231,59 @@ pub fn set_ai_brightness_config(config: AiBrightnessConfig) -> HardwareResult<()
 
 // ── Ambient light sensor ──────────────────────────────────────────────────────
 
+/// Global flag to force sensor re-initialization on next read.
+/// Set to `true` when a power-resume event is detected so the sensor
+/// instance is re-created instead of returning stale `None`.
+static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Request a sensor reset on the next polling cycle.
+/// Called when a WM_POWERBROADCAST resume event is received.
+pub fn request_sensor_reset() {
+    SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
+    log::info!("[display] Sensor reset requested (power resume event)");
+}
+
+/// Cached LightSensor instance — re-created only when a reset is requested.
+/// This avoids calling `LightSensor::GetDefault()` on every 2-second poll,
+/// which can be slow and may return `None` transiently after sleep/wake.
+#[cfg(windows)]
+static CACHED_LIGHT_SENSOR: std::sync::OnceLock<
+    std::sync::Mutex<Option<windows::Devices::Sensors::LightSensor>>,
+> = std::sync::OnceLock::new();
+
 #[cfg(windows)]
 fn get_ambient_lux() -> Option<f32> {
     use windows::Devices::Sensors::LightSensor;
-    let sensor = LightSensor::GetDefault().ok()?;
-    log::debug!("[display] Ambient light sensor found");
+
+    // Check if a reset was requested (e.g., after sleep/wake)
+    let needs_reset = SENSOR_RESET_REQUESTED.swap(false, Ordering::SeqCst);
+
+    let cache = CACHED_LIGHT_SENSOR.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock().ok()?;
+
+    if needs_reset || guard.is_none() {
+        // Re-create the sensor instance
+        match LightSensor::GetDefault() {
+            Ok(sensor) => {
+                log::debug!(
+                    "[display] Ambient light sensor {}",
+                    if needs_reset {
+                        "re-initialized (reset)"
+                    } else {
+                        "found"
+                    }
+                );
+                *guard = Some(sensor);
+            }
+            Err(_) => {
+                log::debug!("[display] Ambient light sensor not available");
+                *guard = None;
+                return None;
+            }
+        }
+    }
+
+    let sensor = guard.as_ref()?;
     let reading = sensor.GetCurrentReading().ok()?;
     let lux = reading.IlluminanceInLux().ok()?;
     log::debug!("[display] Ambient lux: {lux}");
@@ -1087,9 +1135,15 @@ fn get_refresh_rate() -> HardwareResult<u32> {
         use std::collections::HashMap;
 
         if let Ok(Some(hz)) = wmi_cache::with_cimv2(|wmi| {
-            let results: Vec<HashMap<String, wmi::Variant>> = wmi
+            let results: Vec<HashMap<String, wmi::Variant>> = match wmi
                 .raw_query("SELECT CurrentRefreshRate FROM Win32_VideoController")
-                .unwrap_or_default();
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(target: "hw::display", "Win32_VideoController raw_query error: {e}");
+                    return Ok(None);
+                }
+            };
             if let Some(row) = results.first() {
                 match row.get("CurrentRefreshRate") {
                     Some(wmi::Variant::UI4(v)) => Ok(Some(*v)),

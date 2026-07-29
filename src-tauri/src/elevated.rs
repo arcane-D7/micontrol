@@ -20,6 +20,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Called from `main()` when `--elevated` is present in argv.
@@ -629,9 +635,21 @@ fn dispatch(cmd: ElevCmd) -> Value {
             if script.is_empty() {
                 return make_err("Missing 'script' argument".to_string());
             }
-            let output = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                .output();
+            let output = {
+                #[cfg(windows)]
+                {
+                    std::process::Command::new("powershell")
+                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .output()
+                }
+                #[cfg(not(windows))]
+                {
+                    std::process::Command::new("powershell")
+                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                        .output()
+                }
+            };
             match output {
                 Ok(out) => {
                     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -708,9 +726,21 @@ fn dispatch(cmd: ElevCmd) -> Value {
                             }
                         }
                     "#;
-                    let output = std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                        .output();
+                    let output = {
+                        #[cfg(windows)]
+                        {
+                            std::process::Command::new("powershell")
+                                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                                .creation_flags(CREATE_NO_WINDOW)
+                                .output()
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            std::process::Command::new("powershell")
+                                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                                .output()
+                        }
+                    };
                     return match output {
                         Ok(out) => {
                             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -899,9 +929,21 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 "#
                 );
 
-                let output = std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                    .output();
+                let output = {
+                    #[cfg(windows)]
+                    {
+                        std::process::Command::new("powershell")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output()
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        std::process::Command::new("powershell")
+                            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                            .output()
+                    }
+                };
 
                 match output {
                     Ok(out) => {
@@ -1306,6 +1348,11 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 Err(e) => make_err(e.to_string()),
             }
         }
+
+        "ensure_ecram_service" => match crate::hw::ecram_service_mgmt::ensure_service_running() {
+            Ok(status) => make_ok(serde_json::to_value(status).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
 
         unknown => make_err(format!("Unknown elevated command: {unknown}")),
     }
