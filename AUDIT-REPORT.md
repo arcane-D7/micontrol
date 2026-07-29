@@ -11,7 +11,7 @@
 | Category    | Count | Status                              |
 | ----------- | ----- | ----------------------------------- |
 | Bugs found  | 10    | All fixed                           |
-| Tests       | 279   | All passing (0 failures, 3 ignored) |
+| Tests       | 270   | All passing (0 failures, 3 ignored) |
 | Regressions | 0     | None                                |
 
 ---
@@ -154,11 +154,11 @@
 ## Test Results
 
 ```
-running 282 tests
-test result: ok. 279 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out
+running 273 tests
+test result: ok. 270 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out
 ```
 
-All 279 tests pass with 0 failures. The 3 ignored tests require real battery hardware (WMI BatteryStaticData).
+All 270 tests pass with 0 failures. The 3 ignored tests require real battery hardware (WMI BatteryStaticData).
 
 ---
 
@@ -219,27 +219,62 @@ Confirmed via `MICONTROL_DEV_TRACE=1` (session 2026-07-26T17:01-17:11):
 
 ---
 
+## EC Command Protocol Implementation (2026-07-30)
+
+### Overview
+
+Full implementation of the EC command protocol — a 4-phase state machine over ECRAM that enables communication with the Xiaomi IoT chip for cloud binding, WiFi provisioning, firmware/model queries, and laptop power status notifications.
+
+### Implementation Details
+
+| Component                | File                                 | Description                                                                                                                     |
+| ------------------------ | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| EC command state machine | `src-tauri/src/bin/ecram_service.rs` | 4-phase protocol (RamIsReady → WriteCommand → ReadCmdAck → ReadCmdRet) with 16 cmd_ids. EC reset before and after each command. |
+| IoT service helpers      | `src-tauri/src/hw/iotservice.rs`     | `get_device_info()` with EC command queries + fallback to registry/WMI/cached. Helper functions for each EC command type.       |
+| Pipe client              | `src-tauri/src/hw/ecram.rs`          | `send_pipe_request()` generic pipe client for JSON protocol communication.                                                      |
+| RE documentation         | `docs/EC_COMMAND_PROTOCOL_RE.md`     | Complete reverse engineering report: state machine, cmd_id map, response layouts, error codes.                                  |
+
+### Verified EC Commands (Real Hardware)
+
+| cmd_id | Command        | Result              | Status                                            |
+| ------ | -------------- | ------------------- | ------------------------------------------------- |
+| 0x0A   | GetFwVersion   | `1.0.3_0010`        | ✅ Working                                        |
+| 0x0B   | GetModel       | `xiaomi.laptop.p52` | ✅ Working                                        |
+| 0x0D   | GetDeviceID    | `2175217920`        | ✅ Working                                        |
+| 0x01   | GetBindStatus  | `not bound`         | ✅ Working                                        |
+| 0x07   | ReadWiFiStatus | EC timeout          | ⚠️ Expected (chip not bound, no WiFi provisioned) |
+| 0x08   | ReadWiFiCount  | EC timeout          | ⚠️ Expected (chip not bound, no WiFi provisioned) |
+
+### Key Design Decisions
+
+1. **EC reset before AND after each command** — Prevents state machine lockup from residual data in the status register.
+2. **Fallback chain** — `get_device_info()` tries EC commands first, then falls back to registry, WMI, and cached data for resilience.
+3. **Pipe auto-start** — When the pipe is unavailable, the app automatically starts the ecram_service bridge and retries every 5 seconds.
+4. **IoT WiFi vs Windows WiFi** — The IoT chip has its own WiFi module (separate from Windows WiFi). When the chip is not bound to the cloud, IoT WiFi shows "Not connected" — this is expected behavior, not a bug.
+
+---
+
 ## Tab Audit Summary (2026-07-26)
 
 All 18 tabs audited via code analysis and runtime verification:
 
-| Tab         | Commands                                                                                                                                                                          | Status     | Notes                                                                 |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------------------------------------------------------------------- |
-| Overview    | get_system_info, get_battery_info, get_process_list, get_performance_mode, set_performance_mode                                                                                   | ✅ Working | System info, battery, performance mode all polling correctly          |
-| Performance | get_perf_debug, read_ai_perf_logs, write_ai_perf_log, get_performance_mode, set_performance_mode                                                                                  | ✅ Working | ESIF returning 15 participants, auto-switch AC/DC functional          |
-| Battery     | get_battery_info, get_charging_threshold, set_charging_threshold                                                                                                                  | ✅ Working | 60W AC detected, voltage 17.55V, ECRAM probe throttled to 15s         |
-| Display     | get_display_info, set_brightness, set_hdr, set_ai_brightness, set_ai_brightness_config, set_refresh_rate, set_adaptive_refresh_rate                                               | ✅ Working | Ambient light sensor found, adaptive brightness active                |
-| Fan         | get_fan_info, set_fan_mode                                                                                                                                                        | ✅ Working | ESIF 15 participants, Win32_Fan errors gone                           |
-| Audio       | get_audio_devices, set_master_volume, set_master_mute                                                                                                                             | ✅ Working | Commands lazy-loaded on tab visit                                     |
-| Cast        | get_cast_devices, start_casting, stop_casting                                                                                                                                     | ✅ Working | WinRT DeviceEnumeration + explorer.exe Connect panel                  |
-| Touchpad    | get_touchpad_info, set_touchpad_sensitivity, set_touchpad_haptics, set_touchpad_haptics_intensity, set_touchpad_gesture_screenshot, set_touchpad_repress, set_touchpad_edge_slide | ✅ Working | HID path discovered (BLTP7853 COL04), gesture listener active         |
-| IoT         | get_iot_device_info, iot_pipe_available                                                                                                                                           | ✅ Working | Pipe unavailable (IoTSvc stopped) — graceful fallback with auto-retry |
-| WiFi        | wifi_status, wifi_scan, wifi_connect, wifi_disconnect                                                                                                                             | ✅ Working | Native WlanAPI for scan/status, netsh for connect/disconnect          |
-| Startup     | get_autostart, set_autostart                                                                                                                                                      | ✅ Working | Registry HKCU Run key read/write                                      |
-| Updates     | get_update_status, check_app_update, install_app_update                                                                                                                           | ✅ Working | Update check with 2s visual feedback delay                            |
-| Keyboard    | get_hotkey_config, set_hotkey_config, is_hook_active, start_key_detect, get_detected_key                                                                                          | ✅ Working | RegisterHotKey OK for VK 0xB6/0xB7/0xC3, WH_KEYBOARD_LL active        |
-| Setup       | get_hardware_profile, run_hardware_discovery, read_ecram_raw, write_iot_hex, get_ecram_map                                                                                        | ✅ Working | Hardware profile cached, ECRAM debug available in dev mode            |
-| ECR Debug   | read_ecram_raw, write_iot_hex, get_ecram_map                                                                                                                                      | ✅ Working | Dev-only tab, ECRAM read/write via IoTDriver IOCTL                    |
-| AI Analysis | get_ai_usage, reset_ai_usage                                                                                                                                                      | ✅ Working | Usage stats tracking functional                                       |
-| Settings    | save_settings, test_connection, get_telemetry_consent, set_telemetry_consent, revoke_telemetry_consent                                                                            | ✅ Working | Settings persistence, telemetry consent management                    |
-| About       | (none — static info)                                                                                                                                                              | ✅ Working | App version, device info, driver list                                 |
+| Tab         | Commands                                                                                                                                                                          | Status     | Notes                                                                                                                                                              |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Overview    | get_system_info, get_battery_info, get_process_list, get_performance_mode, set_performance_mode                                                                                   | ✅ Working | System info, battery, performance mode all polling correctly                                                                                                       |
+| Performance | get_perf_debug, read_ai_perf_logs, write_ai_perf_log, get_performance_mode, set_performance_mode                                                                                  | ✅ Working | ESIF returning 15 participants, auto-switch AC/DC functional                                                                                                       |
+| Battery     | get_battery_info, get_charging_threshold, set_charging_threshold                                                                                                                  | ✅ Working | 60W AC detected, voltage 17.55V, ECRAM probe throttled to 15s                                                                                                      |
+| Display     | get_display_info, set_brightness, set_hdr, set_ai_brightness, set_ai_brightness_config, set_refresh_rate, set_adaptive_refresh_rate                                               | ✅ Working | Ambient light sensor found, adaptive brightness active                                                                                                             |
+| Fan         | get_fan_info, set_fan_mode                                                                                                                                                        | ✅ Working | ESIF 15 participants, Win32_Fan errors gone                                                                                                                        |
+| Audio       | get_audio_devices, set_master_volume, set_master_mute                                                                                                                             | ✅ Working | Commands lazy-loaded on tab visit                                                                                                                                  |
+| Cast        | get_cast_devices, start_casting, stop_casting                                                                                                                                     | ✅ Working | WinRT DeviceEnumeration + explorer.exe Connect panel                                                                                                               |
+| Touchpad    | get_touchpad_info, set_touchpad_sensitivity, set_touchpad_haptics, set_touchpad_haptics_intensity, set_touchpad_gesture_screenshot, set_touchpad_repress, set_touchpad_edge_slide | ✅ Working | HID path discovered (BLTP7853 COL04), gesture listener active                                                                                                      |
+| IoT         | get_iot_device_info, iot_pipe_available                                                                                                                                           | ✅ Working | EC commands working: model, fw_version, device_id, bind_status queried. WiFi commands return timeout (expected — chip not bound). Pipe auto-start with auto-retry. |
+| WiFi        | wifi_status, wifi_scan, wifi_connect, wifi_disconnect                                                                                                                             | ✅ Working | Native WlanAPI for scan/status, netsh for connect/disconnect                                                                                                       |
+| Startup     | get_autostart, set_autostart                                                                                                                                                      | ✅ Working | Registry HKCU Run key read/write                                                                                                                                   |
+| Updates     | get_update_status, check_app_update, install_app_update                                                                                                                           | ✅ Working | Update check with 2s visual feedback delay                                                                                                                         |
+| Keyboard    | get_hotkey_config, set_hotkey_config, is_hook_active, start_key_detect, get_detected_key                                                                                          | ✅ Working | RegisterHotKey OK for VK 0xB6/0xB7/0xC3, WH_KEYBOARD_LL active                                                                                                     |
+| Setup       | get_hardware_profile, run_hardware_discovery, read_ecram_raw, write_iot_hex, get_ecram_map                                                                                        | ✅ Working | Hardware profile cached, ECRAM debug available in dev mode                                                                                                         |
+| ECR Debug   | read_ecram_raw, write_iot_hex, get_ecram_map                                                                                                                                      | ✅ Working | Dev-only tab, ECRAM read/write via IoTDriver IOCTL                                                                                                                 |
+| AI Analysis | get_ai_usage, reset_ai_usage                                                                                                                                                      | ✅ Working | Usage stats tracking functional                                                                                                                                    |
+| Settings    | save_settings, test_connection, get_telemetry_consent, set_telemetry_consent, revoke_telemetry_consent                                                                            | ✅ Working | Settings persistence, telemetry consent management                                                                                                                 |
+| About       | (none — static info)                                                                                                                                                              | ✅ Working | App version, device info, driver list                                                                                                                              |

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **EC Command Protocol** — Full implementation of the 4-phase EC command state machine (RamIsReady → WriteCommand → ReadCmdAck → ReadCmdRet) in `ecram_service.rs`. Supports all 16 EC cmd_ids: GetBindStatus, SetBindStatus, ResetDevice, WriteWiFiItem, EmptyWiFiItems, DeleteWiFiItem, ReadWiFiStatus, ReadWiFiCount, GetWiFiByIndex, GetFwVersion, GetModel, ConnectWiFi, GetDeviceID, and SendLaptopStatus (SUSPEND/SHUTDOWN/WIN_READY). EC reset is performed before and after each command for reliability.
+- **EC Command Protocol RE Report** (`docs/EC_COMMAND_PROTOCOL_RE.md`) — Complete reverse engineering documentation of the EC command protocol: 4-phase state machine, 7-byte command template, ACK/RET polling patterns, ECRAM address map, per-feature response layouts, and error codes.
+- **IoT Device UI documentation** — Updated `IotDeviceCard.tsx` with explanatory sections clarifying that Cloud Binding is about Xiaomi IoT cloud registration (not Mi Home), IoT WiFi is the chip's own WiFi module (separate from Windows WiFi), and a collapsible table listing all 16 EC commands with descriptions.
+- **Pipe operations in ecram_service** — JSON pipe protocol operations: `iot_get`, `iot_reset_device`, `iot_empty_wifi`, `iot_connect_wifi`, `iot_send_laptop_status` for frontend-to-backend IoT command forwarding.
+- **EC command helpers in iotservice.rs** — `send_ec_pipe_command()`, `query_ec_string()`, `query_ec_device_id()`, `query_ec_bind_status()`, `query_ec_wifi_status()`, `query_ec_wifi_count()` with fallback to registry/WMI/cached data.
+- **Generic pipe client in ecram.rs** — `send_pipe_request()` for communicating with ecram_service.exe.
+
+### Changed
+
+- Updated `README.md` — Added EC Command Protocol to features, architecture, and documentation table.
+- Updated `AGENTS.md` — Added EC command protocol references and ecram_service pipe operations documentation.
+- Updated `.gitignore` — Added `.bench/` and `.bench_trace_*` patterns to prevent benchmark trace files from being committed.
+
+### Removed
+
+- **Log file cleanup** — Deleted 44 temporary log files (build logs, trace logs, patch logs, test logs) and 2 test PowerShell scripts that were leftover from development. Screenshots `screenshot.png` and `screenshot2.png` removed from version control.
+
 ## [0.1.3] - 2026-07-03
 
 ### Fixed

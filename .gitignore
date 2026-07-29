@@ -29,6 +29,10 @@ src-tauri/bin/
 *.txt
 npm-debug.log*
 
+# Benchmark traces
+.bench/
+.bench_trace_*
+
 # Editor directories
 .vscode/settings.json
 .idea/
