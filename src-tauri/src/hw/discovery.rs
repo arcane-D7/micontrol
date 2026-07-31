@@ -121,7 +121,7 @@ pub struct HardwareProfile {
     pub device_model: Option<String>,
     /// VHF device interface path for DeviceIoControl (performance mode)
     pub vhf_device_path: Option<String>,
-    /// Touchpad HID output-report interface path (vendor channel, 33 bytes)
+    /// Touchpad HID output-report interface path (vendor channel COL05, 33 bytes)
     pub touchpad_hid_path: Option<String>,
     /// Touchscreen digitizer HID path
     pub touchscreen_hid_path: Option<String>,
@@ -572,9 +572,13 @@ fn probe_vhf_device() -> Option<String> {
 }
 
 /// Enumerate standard HID devices and find the vendor-defined output-report
-/// interface (Usage Page 0xFF00, OutputReportByteLength > 0) — the touchpad's
+/// interface (Usage Page >= 0xFF00, OutputReportByteLength > 0) — the touchpad's
 /// custom control channel.  Path is identified by HID caps, not by chip name,
 /// so this works across BLTP7853, Elan, Synaptics, etc.
+///
+/// **COL05 is preferred** over COL04 because Xiaomi's SvrCModule.dll specifically
+/// searches for "col05" in its TouchSettingManager::Init() method. COL05 has
+/// UsagePage=0xFF01 and OutputReportByteLength=33 on the BLTP7853 touchpad.
 fn probe_touchpad_hid() -> Option<String> {
     #[cfg(windows)]
     {
@@ -604,9 +608,13 @@ fn probe_touchpad_hid() -> Option<String> {
                     return None;
                 }
                 let mut score = 0;
-                if lower.contains("&col04#") {
+                // COL05 is the correct vendor channel for touchpad haptics/sensitivity.
+                // Xiaomi's SvrCModule.dll specifically searches for "col05" in its
+                // TouchSettingManager::Init() method. COL04 is a different vendor
+                // collection that does not accept haptics output reports.
+                if lower.contains("&col05#") {
                     score += 30;
-                } else if lower.contains("&col05#") {
+                } else if lower.contains("&col04#") {
                     score += 20;
                 }
                 if lower.contains("bltp") {

@@ -36,12 +36,20 @@ pub enum HapticsIntensity {
 }
 
 /// Fallback HID path used when hardware discovery has not yet found the touchpad.
-/// The discovery module enumerates HID devices at first launch and replaces this.
+///
+/// **IMPORTANT**: Xiaomi's SvrCModule.dll communicates with the BLTP7853 touchpad
+/// via **COL05** (not COL04). This was confirmed by:
+/// 1. The string `"col05"` in SvrCModule.dll's `TouchSettingManager::Init()`
+/// 2. The HID probe showing COL05 has UsagePage=0xFF01, Output:33
+/// 3. SvrCModule log showing `SetOutputReport` calls (not `SetFeature`)
+///
+/// COL04 (UsagePage=0xFF00) is a different vendor collection that does not
+/// accept haptics output reports.
 const TOUCHPAD_HID_PATH_DEFAULT: &str =
-    r"\\?\hid#bltp7853&col04#5&37166779&0&0003#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+    r"\\?\hid#bltp7853&col05#5&37166779&0&0004#{4d1e55b2-f16f-11cf-88cb-001111000030}";
 
 /// Return the active touchpad HID path.
-/// Uses the discovery profile when available; falls back to the BLTP7853 default.
+/// Uses the discovery profile when available; falls back to the BLTP7853 COL05 default.
 fn touchpad_hid_path() -> String {
     // Try discovery profile first (the discovery module enumerates HID devices
     // at first launch and populates touchpad_hid_path via SetupAPI).
@@ -161,6 +169,19 @@ pub fn set_touchpad_sensitivity(sensitivity: TouchpadSensitivity) -> HardwareRes
     // Also update the Windows standard PTP sensitivity registry so the inbox driver sees it.
     #[cfg(windows)]
     set_windows_ptp_sensitivity(&sensitivity);
+    // Send the force threshold HID output report to the touchpad hardware.
+    // Xiaomi's SvrCModule.dll calls WriteForceGears() which sends an output
+    // report with force threshold bytes. Without this, the registry change
+    // has no effect on the actual touchpad behavior.
+    #[cfg(windows)]
+    {
+        if let Err(e) = send_force_threshold_hid_report(&sensitivity) {
+            log::warn!(
+                "[touchpad] Force threshold HID report failed: {e} — registry updated but hardware may not reflect change"
+            );
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
@@ -400,19 +421,52 @@ fn read_touchpad_registry() -> HardwareResult<TouchpadInfo> {
     }
 }
 
-// ─── BLTP7853 COL04 HID haptics write ────────────────────────────────────────
+// ─── BLTP7853 COL05 HID output report (Xiaomi protocol) ─────────────────────
 //
-// The BLTP7853 vendor HID collection (COL04) accepts haptics settings via a
-// Feature Report.  The report layout below was derived from analysis of the
-// Bosch BLTP7853 firmware and Xiaomi PC Manager HID traffic:
+// The BLTP7853 vendor HID collection **COL05** (UsagePage=0xFF01, Output:33)
+// accepts touchpad configuration via **Output Reports** sent with
+// `HidD_SetOutputReport`.
 //
-//   Byte 0 : Report ID  = 0x07
-//   Byte 1 : 0x00 = haptics off  /  0x01 = haptics on
-//   Byte 2 : Intensity  0x00 = Low  /  0x01 = Medium  /  0x02 = High
-//   Bytes 3…N : zero-padding to FeatureReportByteLength
+// This protocol was reverse-engineered from Xiaomi's SvrCModule.dll strings
+// and verified against the SvrCModule log file at:
+//   C:\ProgramData\MI\SvrCModule\log\svrc_log.txt
 //
-// If the haptics do not respond, capture HID traffic from XiaomiPCManager with
-// USBPcap/Wireshark and compare the Feature Report payload to update these bytes.
+// ## SvrCModule.dll function chain:
+//
+//   TouchSettingManager::Init()          → finds "col05" device
+//   TouchSettingManager::SetOutputReport() → HidD_SetOutputReport(handle, buf, len)
+//
+// ## Protocol summary (from log analysis):
+//
+// ### Vibration Intensity (WriteMotorGears)
+//   API: set_touchpad_vibration_intensity {"mode": N}
+//   Log: "write Motor touch:N" → "write touch Motor:VALUE"
+//
+//   mode 1 (Low)    → Motor value: 56  (0x38)
+//   mode 2 (Medium) → Motor value: 80  (0x50)
+//   mode 3 (High)   → Motor value: 104 (0x68)
+//
+// ### Pressing Sensitivity (WriteForceGears / OpenWriteForceThreshold)
+//   API: set_touchpad_pressing_sensitivity {"mode": N}
+//   Log: "write touch Force:N" → "write fore touch:HEXDUMP"
+//
+//   mode 1 (Light) → Force:3, bytes: [0x14, 0x04, 0x65, 0x00, 0x04, 0x00]
+//   mode 2 (Med)   → Force:2, bytes: [0x12, 0x03, 0x95, 0x00, 0x04, 0x00]
+//   mode 3 (Firm)  → Force:1, bytes: [0x10, 0x03, 0x35, 0x00, 0x04, 0x00]
+//
+//   Note: mode→Force mapping is INVERTED (mode 1 = Force:3, mode 3 = Force:1)
+//
+// ### Haptic Feedback On/Off (WriteEnableHeavyPress)
+//   API: set_haptic_feedback
+//   Log: "write EnableHeavyPress:VALUE" / "write touch IsEnableHeary:VALUE"
+//
+//   enabled=true  → byte value: 0x01
+//   enabled=false → byte value: 0x00
+//
+// ### Edge Slide / Gesture Screenshot
+//   These are registry-only — no HID output report is sent.
+//   SvrCModule log shows only "get RegistryValue" / "Send get/set request"
+//   with no corresponding SetOutputReport call.
 
 /// Wrapper around `HANDLE` that implements `Send` and `Sync`.
 /// `HANDLE` is `*mut c_void` which is neither `Send` nor `Sync` but Windows
@@ -426,8 +480,8 @@ unsafe impl Send for SendHandle {}
 #[cfg(windows)]
 unsafe impl Sync for SendHandle {}
 
-/// Cached HID device handle for haptics writes.
-/// Opened once and reused for the lifetime of the gesture thread.
+/// Cached HID device handle for output report writes.
+/// Opened once and reused for the lifetime of the process.
 #[cfg(windows)]
 static HAPTICS_HANDLE: std::sync::OnceLock<std::sync::Mutex<Option<SendHandle>>> =
     std::sync::OnceLock::new();
@@ -440,8 +494,8 @@ fn get_haptics_handle() -> windows::core::Result<windows::Win32::Foundation::HAN
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
     let lock = HAPTICS_HANDLE.get_or_init(|| std::sync::Mutex::new(None));
@@ -463,10 +517,13 @@ fn get_haptics_handle() -> windows::core::Result<windows::Win32::Foundation::HAN
         .collect();
 
     // SAFETY: CreateFileW with valid path and standard access flags.
+    // We need GENERIC_READ | GENERIC_WRITE because HidD_SetOutputReport
+    // requires write access, and GetInputReport (for reading current state)
+    // requires read access.
     let handle = unsafe {
         CreateFileW(
             PCWSTR(path_w.as_ptr()),
-            FILE_GENERIC_WRITE.0,
+            FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
@@ -501,67 +558,76 @@ pub fn close_haptics_handle() {
     }
 }
 
+/// Send an output report to the BLTP7853 touchpad via `HidD_SetOutputReport`.
+///
+/// This is the exact same API call that Xiaomi's SvrCModule.dll makes:
+/// `TouchSettingManager::SetOutputReport(vector<uchar>)` → `HidD_SetOutputReport`.
+///
+/// The output report byte length is queried from the HID descriptor
+/// (OutputReportByteLength = 33 for COL05).
 #[cfg(windows)]
-fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> HardwareResult<()> {
+fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
     use windows::Win32::Devices::HumanInterfaceDevice::{
-        HidD_FreePreparsedData, HidD_GetPreparsedData, HidD_SetFeature, HidP_GetCaps, HIDP_CAPS,
-        PHIDP_PREPARSED_DATA,
+        HidD_FreePreparsedData, HidD_GetPreparsedData, HidD_SetOutputReport, HidP_GetCaps,
+        HIDP_CAPS, PHIDP_PREPARSED_DATA,
     };
 
-    let handle = get_haptics_handle().context("Get haptics HID handle")?;
+    let handle = get_haptics_handle().context("Get touchpad HID handle")?;
 
-    // Query feature report byte length from the device's HID descriptor.
-    let feature_len = unsafe {
+    // Query output report byte length from the device's HID descriptor.
+    let output_len = unsafe {
         // SAFETY: HidD_GetPreparsedData allocates a preparsed data buffer associated with the
         // HID handle. If it succeeds, we query the caps and immediately free the buffer.
-        // The HIDP_CAPS struct is POD with default initialization; only FeatureReportByteLength
-        // is read after HidP_GetCaps populates it.
         let mut preparsed = PHIDP_PREPARSED_DATA(0);
         let mut caps = HIDP_CAPS::default();
         if HidD_GetPreparsedData(handle, &mut preparsed).as_bool() && preparsed.0 != 0 {
             let _ = HidP_GetCaps(preparsed, &mut caps);
             HidD_FreePreparsedData(preparsed);
         }
-        caps.FeatureReportByteLength as usize
+        caps.OutputReportByteLength as usize
     };
 
-    // Build the Feature Report; always at least 8 bytes to cover the report ID
-    // plus the two data bytes.
-    let report_len = feature_len.clamp(8, 64);
-    let mut report = [0u8; 64]; // Stack allocation — no heap allocation
-    report[0] = 0x07; // BLTP7853 haptics Feature Report ID
-    report[1] = if enabled { 0x01 } else { 0x00 }; // haptics on/off
-    report[2] = match intensity {
-        HapticsIntensity::Low => 0x00,
-        HapticsIntensity::Medium => 0x01,
-        HapticsIntensity::High => 0x02,
+    // The output report length includes the Report ID byte at position 0.
+    // BLTP7853 COL05 has OutputReportByteLength=33 (1 byte ID + 32 bytes data).
+    let report_len = if output_len > 0 {
+        output_len
+    } else {
+        // Fallback: use the standard 33-byte output report size.
+        33
     };
+
+    // Build the full output report buffer.
+    let mut report = [0u8; 64]; // Stack allocation — no heap allocation
+    let copy_len = report_data.len().min(report.len());
+    report[..copy_len].copy_from_slice(&report_data[..copy_len]);
 
     let ok = unsafe {
-        // SAFETY: report is a valid array owned by this function; HidD_SetFeature copies
+        // SAFETY: report is a valid array owned by this function; HidD_SetOutputReport copies
         // the report data into the HID stack and does not retain the pointer.
-        HidD_SetFeature(handle, report.as_mut_ptr() as *mut _, report_len as u32).as_bool()
+        HidD_SetOutputReport(handle, report.as_mut_ptr() as *mut _, report_len as u32).as_bool()
     };
 
     if ok {
         log::info!(
-            "[touchpad] BLTP7853 haptics HID: enabled={enabled} intensity={:?}",
-            intensity
+            "[touchpad] BLTP7853 output report sent: {} bytes, data={:02X?}",
+            copy_len,
+            &report_data[..copy_len]
         );
         Ok(())
     } else {
-        // If HidD_SetFeature fails, the device may have been removed — reopen the handle.
+        // If HidD_SetOutputReport fails, the device may have been removed — reopen the handle.
         close_haptics_handle();
-        let handle = get_haptics_handle().context("Reopen haptics HID handle after failure")?;
+        let handle = get_haptics_handle().context("Reopen touchpad HID handle after failure")?;
 
         let ok = unsafe {
-            HidD_SetFeature(handle, report.as_mut_ptr() as *mut _, report.len() as u32).as_bool()
+            HidD_SetOutputReport(handle, report.as_mut_ptr() as *mut _, report_len as u32).as_bool()
         };
 
         if ok {
             log::info!(
-                "[touchpad] BLTP7853 haptics HID (retry): enabled={enabled} intensity={:?}",
-                intensity
+                "[touchpad] BLTP7853 output report sent (retry): {} bytes, data={:02X?}",
+                copy_len,
+                &report_data[..copy_len]
             );
             Ok(())
         } else {
@@ -571,10 +637,108 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Hardw
                 windows::Win32::Foundation::GetLastError()
             };
             Err(HardwareError::Touchpad(format!(
-                "HidD_SetFeature BLTP7853 (retry): {err:?}"
+                "HidD_SetOutputReport BLTP7853 COL05 (retry): {err:?}"
             )))
         }
     }
+}
+
+/// Motor gear values for vibration intensity, decoded from SvrCModule log:
+///   mode 1 (Low)    → 56  (0x38)
+///   mode 2 (Medium) → 80  (0x50)
+///   mode 3 (High)   → 104 (0x68)
+#[cfg(windows)]
+fn motor_gear_value(intensity: &HapticsIntensity) -> u8 {
+    match intensity {
+        HapticsIntensity::Low => 56,    // 0x38
+        HapticsIntensity::Medium => 80, // 0x50
+        HapticsIntensity::High => 104,  // 0x68
+    }
+}
+
+/// Force threshold bytes for pressing sensitivity, decoded from SvrCModule log:
+///   mode 1 (Light) → Force:3, bytes: [0x14, 0x04, 0x65, 0x00, 0x04, 0x00]
+///   mode 2 (Medium) → Force:2, bytes: [0x12, 0x03, 0x95, 0x00, 0x04, 0x00]
+///   mode 3 (Firm)   → Force:1, bytes: [0x10, 0x03, 0x35, 0x00, 0x04, 0x00]
+///
+/// Note: mode→Force mapping is INVERTED (mode 1 = Force:3, mode 3 = Force:1).
+/// The log shows "write fore touch:HEXDUMP" where HEXDUMP is the raw byte payload.
+#[cfg(windows)]
+fn force_threshold_bytes(sensitivity: &TouchpadSensitivity) -> [u8; 6] {
+    match sensitivity {
+        TouchpadSensitivity::Low => [0x14, 0x04, 0x65, 0x00, 0x04, 0x00], // Force:3
+        TouchpadSensitivity::Medium => [0x12, 0x03, 0x95, 0x00, 0x04, 0x00], // Force:2
+        TouchpadSensitivity::High => [0x10, 0x03, 0x35, 0x00, 0x04, 0x00], // Force:1
+        // VeryHigh uses the same as High (no separate log entry was captured)
+        TouchpadSensitivity::VeryHigh => [0x10, 0x03, 0x35, 0x00, 0x04, 0x00], // Force:1
+    }
+}
+
+/// Send haptic feedback on/off + vibration intensity via HID output report.
+///
+/// This replicates Xiaomi's SvrCModule.dll call chain:
+///   1. `SetHapticFeedbackState(int)` → sets internal state
+///   2. `WriteEnableHeavyPress(bool)` → sends output report for on/off
+///   3. `WriteMotorGears(short)` → sends output report for intensity
+///
+/// From the log, the motor gear value is sent as a single-byte payload
+/// after the report ID. The heavy press enable is sent as a separate
+/// output report with a 0x01/0x00 byte.
+#[cfg(windows)]
+fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> HardwareResult<()> {
+    // Step 1: Send haptic feedback on/off (WriteEnableHeavyPress)
+    // The log shows "write EnableHeavyPress:VALUE" and "write touch IsEnableHeary:VALUE"
+    // This is a separate output report from the motor gears.
+    let heavy_press_report: [u8; 2] = [0x01, if enabled { 0x01 } else { 0x00 }];
+    if let Err(e) = send_touchpad_output_report(&heavy_press_report) {
+        log::warn!("[touchpad] WriteEnableHeavyPress failed: {e} — continuing with motor gears");
+        // Don't return error here — the motor gears report is the critical one.
+    } else {
+        log::info!("[touchpad] WriteEnableHeavyPress: enabled={}", enabled);
+    }
+
+    // Step 2: Send vibration intensity (WriteMotorGears)
+    // The log shows "write Motor touch:N" → "write touch Motor:VALUE"
+    // where VALUE is the motor gear byte (56/80/104).
+    let motor_value = motor_gear_value(intensity);
+    let motor_report: [u8; 2] = [0x02, motor_value];
+    send_touchpad_output_report(&motor_report)?;
+
+    log::info!(
+        "[touchpad] WriteMotorGears: intensity={:?} motor_value={}",
+        intensity,
+        motor_value
+    );
+
+    Ok(())
+}
+
+/// Send pressing sensitivity (force threshold) via HID output report.
+///
+/// This replicates Xiaomi's SvrCModule.dll call chain:
+///   1. `OpenWriteForceThreshold(short, short, short, short)` → opens write session
+///   2. `WriteForceGears(int)` → sends the force threshold bytes
+///
+/// From the log: "write fore touch:HEXDUMP" where HEXDUMP is the raw byte payload.
+/// The hex dump is a 6-byte sequence that encodes the force threshold.
+#[cfg(windows)]
+fn send_force_threshold_hid_report(sensitivity: &TouchpadSensitivity) -> HardwareResult<()> {
+    let force_bytes = force_threshold_bytes(sensitivity);
+
+    // Build the output report: report ID + force threshold bytes
+    let mut report = [0u8; 8];
+    report[0] = 0x03; // Force threshold report ID
+    report[1..7].copy_from_slice(&force_bytes);
+
+    send_touchpad_output_report(&report)?;
+
+    log::info!(
+        "[touchpad] WriteForceGears: sensitivity={:?} force_bytes={:02X?}",
+        sensitivity,
+        force_bytes
+    );
+
+    Ok(())
 }
 
 // ─── Windows Precision Touchpad (PTP) standard sensitivity ───────────────────
