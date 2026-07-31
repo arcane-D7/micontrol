@@ -220,7 +220,7 @@ pub fn run() {
     // 7. Start hardware polling
     // 8. Run Tauri application
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // When a second instance is launched, focus the existing window instead.
             if let Some(window) = app.get_webview_window("main") {
@@ -230,7 +230,15 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_shell::init());
+
+    // MCP Bridge plugin — enables AI assistants to inspect and interact
+    // with the Tauri app (screenshots, DOM, IPC calls, console logs).
+    // Only loaded in debug builds to avoid shipping it in production.
+    #[cfg(debug_assertions)]
+    let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+
+    builder
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // Window

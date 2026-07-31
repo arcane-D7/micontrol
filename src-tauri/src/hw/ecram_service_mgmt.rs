@@ -44,32 +44,65 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
     let exe_path = find_ecram_service_exe();
     let pipe_path = r"\\.\pipe\ecram_service";
 
-    // Check if pipe is already available (service already running)
+    // Check if pipe is already available (service already running).
+    // BUT: the original Xiaomi IoTService.exe also creates this pipe, yet
+    // rejects our ECRAM_READ ioctl with "Access is denied".  So we must
+    // additionally verify that the running IoTService.exe in the DriverStore
+    // is actually *our* ecram_service.exe (byte-for-byte).  If it's the
+    // original Xiaomi binary, we need to replace it even though the pipe
+    // exists.
     let pipe_available = std::fs::metadata(pipe_path).is_ok();
-    if pipe_available {
-        return Ok(ServiceStatus {
-            installed: true,
-            running: true,
-            pipe_available: true,
-            exe_path,
-            message: "ecram_service already running".to_string(),
-        });
-    }
 
     let our_exe = exe_path
         .as_deref()
         .ok_or_else(|| "ecram_service.exe not found".to_string())?;
 
     // Find the DriverStore path where IoTService.exe lives.
-    // IoTDriver.sys checks that the calling process is IoTService.exe in this path.
     let driverstore_iot_exe = find_driverstore_iot_service_exe();
+
+    // If the pipe is available AND the DriverStore IoTService.exe is already
+    // our ecram_service.exe, we're genuinely done.
+    if pipe_available {
+        let already_ours = driverstore_iot_exe
+            .as_ref()
+            .and_then(|ds_path| {
+                let existing = std::fs::read(ds_path).ok()?;
+                let ours = std::fs::read(our_exe).ok()?;
+                Some(existing == ours)
+            })
+            .unwrap_or(false);
+
+        if already_ours {
+            return Ok(ServiceStatus {
+                installed: true,
+                running: true,
+                pipe_available: true,
+                exe_path,
+                message: "ecram_service already running".to_string(),
+            });
+        }
+
+        // Pipe exists but the DriverStore exe is NOT ours — the original
+        // Xiaomi IoTService.exe is running and will reject our ioctls.
+        // Fall through to the replacement logic below.
+        log::warn!(
+            "[ecram_service_mgmt] Pipe exists but DriverStore IoTService.exe \
+             is not our ecram_service.exe — replacing it now"
+        );
+    }
 
     let target_exe = if let Some(ref ds_path) = driverstore_iot_exe {
         // Copy our ecram_service.exe to the DriverStore as IoTService.exe
         // (replacing the original Xiaomi IoTService.exe)
-        let need_copy = match std::fs::metadata(ds_path) {
-            Ok(meta) => meta.len() != std::fs::metadata(our_exe).map(|m| m.len()).unwrap_or(0),
-            Err(_) => true,
+        //
+        // We compare file hashes (not just sizes) because different builds
+        // can produce binaries with identical sizes but different content.
+        // Using size-only comparison caused the original Xiaomi IoTService.exe
+        // to remain in place when our ecram_service.exe happened to have the
+        // same file size, resulting in no \\.\pipe\ecram_service being created.
+        let need_copy = match (std::fs::read(ds_path), std::fs::read(our_exe)) {
+            (Ok(existing), Ok(ours)) => existing != ours,
+            _ => true,
         };
 
         if need_copy {
