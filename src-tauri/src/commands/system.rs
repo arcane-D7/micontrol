@@ -558,10 +558,23 @@ pub async fn get_threat_history() -> Result<crate::hw::security_scan::ThreatHist
 #[tauri::command]
 pub async fn open_windows_security() -> Result<(), ErrorResponse> {
     run_blocking(|| {
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", "Start-Process 'windowsdefender:'"])
-            .status()
-            .map_err(|e| HardwareError::Other(format!("Failed to open Windows Security: {e}")))?;
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Start-Process 'windowsdefender:'"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status()
+                .map_err(|e| {
+                    HardwareError::Other(format!("Failed to open Windows Security: {e}"))
+                })?;
+        }
+        #[cfg(not(windows))]
+        {
+            return Err(HardwareError::Other(
+                "Windows Security is only available on Windows".to_string(),
+            ));
+        }
         Ok(())
     })
     .await

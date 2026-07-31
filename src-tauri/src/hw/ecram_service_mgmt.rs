@@ -13,6 +13,13 @@ use std::path::PathBuf;
 const SERVICE_NAME: &str = "IoTSvc";
 const SERVICE_EXE: &str = "ecram_service.exe";
 
+/// Prevent console window flash when spawning subprocesses.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 /// Status of the ecram_service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStatus {
@@ -69,6 +76,7 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             // Stop the service before replacing the file
             let _ = std::process::Command::new("sc")
                 .args(["stop", SERVICE_NAME])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
             std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -123,15 +131,18 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             // Stop and reconfigure
             let _ = std::process::Command::new("sc")
                 .args(["stop", SERVICE_NAME])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             // Kill any lingering process
             let _ = std::process::Command::new("taskkill")
                 .args(["/F", "/IM", "IoTService.exe"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
             let _ = std::process::Command::new("taskkill")
                 .args(["/F", "/IM", "ecram_service.exe"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
             std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -140,6 +151,7 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             // deleting and recreating is more robust.
             let _ = std::process::Command::new("sc")
                 .args(["delete", SERVICE_NAME])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output();
             std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -259,7 +271,10 @@ fn service_exists(name: &str) -> bool {
     #[cfg(windows)]
     {
         use std::process::Command;
-        let output = Command::new("sc").args(["query", name]).output();
+        let output = Command::new("sc")
+            .args(["query", name])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
         match output {
             Ok(o) => o.status.success(),
             Err(_) => false,
@@ -276,7 +291,11 @@ fn service_exists(name: &str) -> bool {
 #[cfg(windows)]
 fn get_service_bin_path(name: &str) -> Option<String> {
     use std::process::Command;
-    let output = Command::new("sc").args(["qc", name]).output().ok()?;
+    let output = Command::new("sc")
+        .args(["qc", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
 
     if !output.status.success() {
         return None;
@@ -321,6 +340,7 @@ fn install_service(name: &str, exe_path: &str) -> Result<(), String> {
             "DisplayName=",
             "MiControl IoT Bridge Service",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to create service: {e}"))?;
 
@@ -333,6 +353,7 @@ fn install_service(name: &str, exe_path: &str) -> Result<(), String> {
     // Set the service to run as LocalSystem
     let _ = Command::new("sc")
         .args(["config", name, "obj=", "LocalSystem"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
 
     // Set failure actions to auto-restart
@@ -345,6 +366,7 @@ fn install_service(name: &str, exe_path: &str) -> Result<(), String> {
             "actions=",
             "restart/5000/restart/10000/restart/30000",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
 
     log::info!(
@@ -367,6 +389,7 @@ fn start_service(name: &str) -> Result<(), String> {
 
     let output = Command::new("sc")
         .args(["start", name])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("Failed to start service: {e}"))?;
 
