@@ -854,19 +854,56 @@ pub fn write_ecram(phys_addr: u64, data: &[u8]) -> HardwareResult<()> {
     }
 }
 
-/// Read a named ECRAM region via direct IoTDriver IOCTL access.
+/// Read a named ECRAM region.
+///
+/// Tries direct IoTDriver IOCTL first, then falls back to the custom
+/// IoTService.exe named-pipe broker. The driver blocks direct access to
+/// ERAM/SMA2 from unpackaged processes, so the pipe broker is required for
+/// those regions.
 ///
 /// Supported regions: `ERAM`, `SMA2`, `IOT_STATUS`, `IOT_SENSORS`.
 pub fn read_named_region(region: &str) -> HardwareResult<Vec<u8>> {
-    match region.to_ascii_uppercase().as_str() {
-        "ERAM" => read_ecram(get_eram_base(), ERAM_SIZE),
-        "SMA2" => read_ecram(SMA2_BASE, SMA2_SIZE),
-        "IOT_STATUS" => read_ecram(IOT_STATUS_BASE, IOT_STATUS_SIZE),
-        "IOT_SENSORS" => read_ecram(ECRAM_SENSOR_BLOCK, ECRAM_SENSOR_SIZE),
-        _ => Err(HardwareError::Ecram(format!(
-            "Unknown ECRAM region: {region}. Supported: ERAM, SMA2, IOT_STATUS, IOT_SENSORS"
-        ))),
-    }
+    let (addr, size) = match region.to_ascii_uppercase().as_str() {
+        "ERAM" => (get_eram_base(), ERAM_SIZE),
+        "SMA2" => (SMA2_BASE, SMA2_SIZE),
+        "IOT_STATUS" => (IOT_STATUS_BASE, IOT_STATUS_SIZE),
+        "IOT_SENSORS" => (ECRAM_SENSOR_BLOCK, ECRAM_SENSOR_SIZE),
+        _ => {
+            return Err(HardwareError::Ecram(format!(
+                "Unknown ECRAM region: {region}. Supported: ERAM, SMA2, IOT_STATUS, IOT_SENSORS"
+            )))
+        }
+    };
+
+    // Direct driver access works for IOT_STATUS/IOT_SENSORS and may work for
+    // ERAM/SMA2 on some configurations. If it fails, fall back to the pipe
+    // broker. If both fail, return zeros for blocked regions so that the UI
+    // (System/Setup/EC Debug tabs) can still show the regions that are
+    // readable (IOT_STATUS / IOT_SENSORS).
+    read_ecram(addr, size)
+        .or_else(|e| {
+            log::debug!(target: "hw::ecram", "Direct read of {region} failed ({e}), trying pipe broker");
+            read_ecram_via_pipe(addr, size)
+                .ok_or_else(|| e)
+                .map(|data| {
+                    log::debug!(target: "hw::ecram", "Pipe broker read {region}: {len} bytes", len = data.len());
+                    data
+                })
+        })
+        .or_else(|e| {
+            let region_upper = region.to_ascii_uppercase();
+            if region_upper == "ERAM" || region_upper == "SMA2" {
+                log::warn!(
+                    target: "hw::ecram",
+                    "Region {region} is blocked by the IoTDriver; returning zeros. Error: {e}"
+                );
+                Ok(vec![0u8; size])
+            } else {
+                Err(HardwareError::Ecram(format!(
+                    "Failed to read ECRAM region {region}: {e}"
+                )))
+            }
+        })
 }
 
 /// Returns `true` when the current process token is elevated (administrator).
@@ -953,11 +990,42 @@ pub struct EramMap {
 
 /// Read the ACPI ERAM block and decode all known fields.
 ///
-/// Direct read of the ACPI ERAM register map.
+/// Tries direct IoTDriver access first, then falls back to the custom
+/// IoTService.exe named-pipe broker. On some laptop firmwares the driver
+/// blocks both paths for ERAM/SMA2. In that case we build a partial map from
+/// the data that is still available through the ACPI WMAA WMI interface
+/// (adapter power, battery health, current performance mode) so the System /
+/// Setup / EC Debug tabs do not show a hard error.
 pub fn read_eram_map() -> HardwareResult<EramMap> {
     let eram = read_ecram(get_eram_base(), 0x100)
-        .context("ECRAM read (direct IoTDriver access failed)")?;
+        .or_else(|e| {
+            log::debug!(target: "hw::ecram", "Direct ERAM read failed ({e}), trying pipe broker");
+            read_ecram_via_pipe(get_eram_base(), 0x100)
+                .ok_or_else(|| e)
+                .map(|data| {
+                    log::debug!(target: "hw::ecram", "Pipe broker ERAM read: {len} bytes", len = data.len());
+                    data
+                })
+        });
 
+    match eram {
+        Ok(bytes) if bytes.len() >= 0x100 => decode_eram_map(&bytes),
+        Ok(bytes) => Err(HardwareError::Ecram(format!(
+            "Short ERAM read: {} bytes",
+            bytes.len()
+        ))),
+        Err(e) => {
+            log::warn!(
+                target: "hw::ecram",
+                "ERAM read unavailable (direct + pipe broker failed: {e}); building partial map from WMI"
+            );
+            Ok(partial_eram_map_from_wmi())
+        }
+    }
+}
+
+/// Decode a full 256-byte ERAM buffer into an `EramMap`.
+fn decode_eram_map(eram: &[u8]) -> HardwareResult<EramMap> {
     if eram.len() < 0x100 {
         return Err(HardwareError::Ecram(format!(
             "Short ERAM read: {} bytes",
@@ -1006,6 +1074,51 @@ pub fn read_eram_map() -> HardwareResult<EramMap> {
         keyboard_backlight_level: eram[0xB2] & 0x7F,
         raw_hex,
     })
+}
+
+/// Build a partial `EramMap` from data sources that do not require direct
+/// ERAM access. Used when the IoTDriver blocks both direct and pipe-broker
+/// reads of the ERAM region.
+fn partial_eram_map_from_wmi() -> EramMap {
+    let mut map = EramMap {
+        misc0: 0,
+        misc1: 0,
+        control_flags_1b: 0,
+        ai_limit_enabled: false,
+        long_battery_limit_enabled: false,
+        cpu_temp_c: 0,
+        fan_rpm: 0,
+        fan2_rpm: 0,
+        cpu_power_w: 0,
+        smart_mode_type: 0,
+        smart_mode_data: 0,
+        smart_mode_profile: None,
+        qfan_mode: 0,
+        perf_profile: 0,
+        tdp_w: 0,
+        ac_flags: 0,
+        ac_connected: false,
+        ac_adapter_w: 0,
+        battery_current_ma: 0,
+        battery_capacity_mah: 0,
+        battery_voltage_mv: 0,
+        charge_threshold_pct: 0,
+        battery_temp_c: 0,
+        display_brightness_level: 0,
+        keyboard_backlight_level: 0,
+        raw_hex: "UNAVAILABLE".to_string(),
+    };
+
+    if let Ok(sensor) = crate::hw::wmi_ec::read_sensor_data() {
+        map.ac_connected = sensor.adapter_power > 0;
+        map.ac_adapter_w = sensor.adapter_power.clamp(0, 255) as u8;
+    }
+
+    if let Ok(mode) = crate::hw::wmi_ec::get_performance_mode() {
+        map.perf_profile = mode as u8;
+    }
+
+    map
 }
 
 // ── Pipe client for custom IoTService.exe ────────────────────────────────────
