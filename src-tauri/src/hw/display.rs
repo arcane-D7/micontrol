@@ -255,8 +255,11 @@ static CACHED_LIGHT_SENSOR: std::sync::OnceLock<
     std::sync::Mutex<Option<windows::Devices::Sensors::LightSensor>>,
 > = std::sync::OnceLock::new();
 
+/// Fallback ambient-light reader using the WinRT `Windows.Devices.Sensors.LightSensor` API.
+/// This works well in UWP/WinUI apps, but in an unpackaged desktop app it frequently
+/// returns `None` even when a HID ALS sensor is present in Device Manager.
 #[cfg(windows)]
-fn get_ambient_lux() -> Option<f32> {
+fn get_ambient_lux_winrt() -> Option<f32> {
     use windows::Devices::Sensors::LightSensor;
 
     // Check if a reset was requested (e.g., after sleep/wake)
@@ -270,7 +273,7 @@ fn get_ambient_lux() -> Option<f32> {
         match LightSensor::GetDefault() {
             Ok(sensor) => {
                 log::debug!(
-                    "[display] Ambient light sensor {}",
+                    "[display] WinRT ambient light sensor {}",
                     if needs_reset {
                         "re-initialized (reset)"
                     } else {
@@ -280,7 +283,7 @@ fn get_ambient_lux() -> Option<f32> {
                 *guard = Some(sensor);
             }
             Err(_) => {
-                log::debug!("[display] Ambient light sensor not available");
+                log::debug!("[display] WinRT ambient light sensor not available");
                 *guard = None;
                 return None;
             }
@@ -290,8 +293,82 @@ fn get_ambient_lux() -> Option<f32> {
     let sensor = guard.as_ref()?;
     let reading = sensor.GetCurrentReading().ok()?;
     let lux = reading.IlluminanceInLux().ok()?;
-    log::debug!("[display] Ambient lux: {lux}");
+    log::debug!("[display] WinRT ambient lux: {lux}");
     Some(lux)
+}
+
+/// Primary ambient-light reader using the classic COM Sensor API (`ISensorManager`).
+/// This is the API that Windows itself uses for the "Adaptive brightness" power-plan
+/// setting and it works for unpackaged desktop applications, unlike the WinRT API.
+#[cfg(windows)]
+fn get_ambient_lux_com() -> Option<f32> {
+    use windows::Win32::Devices::Sensors::{
+        ISensorManager, SensorManager as CLSID_SensorManager, SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX,
+        SENSOR_TYPE_AMBIENT_LIGHT,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
+
+    // SAFETY: `CoInitializeEx` is idempotent for the same apartment model and is safe
+    // to call from each thread. If the thread is already in a different apartment model
+    // the call returns RPC_E_CHANGED_MODE, which we ignore because the runtime may have
+    // already initialized COM for us.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+
+    // SAFETY: we keep all COM objects alive in this scope and release them when they drop.
+    unsafe {
+        let manager: ISensorManager = CoCreateInstance(&CLSID_SensorManager, None, CLSCTX_ALL)
+            .map_err(|e| {
+                log::debug!("[display] COM SensorManager not available: {e}");
+                e
+            })
+            .ok()?;
+        let collection = manager.GetSensorsByType(&SENSOR_TYPE_AMBIENT_LIGHT).ok()?;
+        let count = collection.GetCount().ok()?;
+        log::debug!("[display] COM SensorManager: {count} ambient light sensor(s)");
+        if count == 0 {
+            log::debug!("[display] COM SensorManager: no ambient light sensors found");
+            return None;
+        }
+
+        // Some Windows drivers enumerate multiple ambient-light sensors. One of them
+        // (often the first) may be a placeholder that always reports 0.0 lux. We read
+        // all of them and prefer the first positive, finite reading. If every sensor
+        // reports 0.0 we still return 0.0 so the UI shows a real number rather than
+        // "Sensor unavailable".
+        let mut chosen_lux: Option<f32> = None;
+        for i in 0..count {
+            let sensor = collection.GetAt(i).ok()?;
+            if let Some(state) = sensor.GetState().ok() {
+                log::debug!("[display] COM sensor[{i}] state={state:?}");
+            }
+            let report = sensor.GetData().ok()?;
+            let pv = report
+                .GetSensorValue(&SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX)
+                .ok()?;
+            // VT_R4 (float) and VT_R8 (double) both convert safely via windows_core.
+            let lux = f64::try_from(&pv).ok()? as f32;
+            log::debug!("[display] COM sensor[{i}] ambient lux: {lux}");
+            if lux.is_finite() && lux > 0.0 {
+                return Some(lux);
+            }
+            if chosen_lux.is_none() {
+                chosen_lux = Some(lux);
+            }
+        }
+        chosen_lux
+    }
+}
+
+#[cfg(windows)]
+fn get_ambient_lux() -> Option<f32> {
+    // Try the classic COM Sensor API first: it works for unpackaged desktop apps.
+    if let Some(lux) = get_ambient_lux_com() {
+        return Some(lux);
+    }
+    // Fall back to WinRT, which works on some systems depending on the sensor driver.
+    get_ambient_lux_winrt()
 }
 
 #[cfg(not(windows))]
