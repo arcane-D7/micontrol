@@ -141,6 +141,7 @@ fn set_power_plan_best_performance() -> HardwareResult<String> {
         let result = unsafe { PowerSetActiveScheme(None, Some(&guid)) };
         if result.0 != 0 {
             // Fallback: use powercfg
+            use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             let _ = std::process::Command::new("powercfg")
                 .args(["/setactive", "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"])
@@ -167,6 +168,7 @@ fn set_power_plan_balanced() -> HardwareResult<String> {
 
         let result = unsafe { PowerSetActiveScheme(None, Some(&guid)) };
         if result.0 != 0 {
+            use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             let _ = std::process::Command::new("powercfg")
                 .args(["/setactive", "381b4222-f694-41f0-9685-ff5bb260df2e"])

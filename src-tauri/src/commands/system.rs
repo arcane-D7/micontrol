@@ -560,6 +560,7 @@ pub async fn open_windows_security() -> Result<(), ErrorResponse> {
     run_blocking(|| {
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             std::process::Command::new("powershell")
                 .args(["-NoProfile", "-Command", "Start-Process 'windowsdefender:'"])

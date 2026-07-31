@@ -262,6 +262,7 @@ fn is_enabled_via_registry() -> Result<bool, ()> {
 fn persist_enabled_to_registry(enabled: bool) {
     use windows::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, REG_DWORD,
+        REG_OPTION_NON_VOLATILE,
     };
 
     let subkey: Vec<u16> = "SOFTWARE\\MiControl\0".encode_utf16().collect();
@@ -272,7 +273,7 @@ fn persist_enabled_to_registry(enabled: bool) {
             windows::core::PCWSTR(subkey.as_ptr()),
             0,
             None,
-            0,
+            REG_OPTION_NON_VOLATILE,
             windows::Win32::System::Registry::KEY_WRITE,
             None,
             &mut hkey,
@@ -289,7 +290,7 @@ fn persist_enabled_to_registry(enabled: bool) {
         let _ = RegSetValueExW(
             hkey,
             windows::core::PCWSTR(value_name.as_ptr()),
-            None,
+            0,
             REG_DWORD,
             Some(std::slice::from_raw_parts(
                 &val as *const u32 as *const u8,
