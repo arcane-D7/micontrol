@@ -30,6 +30,10 @@ const KeyboardTab = lazy(() => import('./tabs/keyboard'));
 const SetupTab = lazy(() => import('./tabs/setup'));
 const SettingsTab = lazy(() => import('./tabs/settings'));
 const AiAnalysisTab = lazy(() => import('./tabs/ai-analysis'));
+const SecurityTab = lazy(() => import('./tabs/security'));
+const CrossDeviceTab = lazy(() => import('./tabs/crossdevice'));
+const ColorTab = lazy(() => import('./tabs/color'));
+const CleanupTab = lazy(() => import('./tabs/cleanup'));
 const AboutTab = lazy(() => import('./tabs/about'));
 
 type Hardware = ReturnType<typeof useHardware>;
@@ -57,6 +61,10 @@ const NAV_ITEMS = [
   { id: 'updates', icon: '🔄', label: 'nav.updates' },
   { id: 'keyboard', icon: '⌨️', label: 'nav.keyboard' },
   { id: 'setup', icon: '🔍', label: 'nav.setup' },
+  { id: 'security', icon: '🛡️', label: 'nav.security' },
+  { id: 'crossDevice', icon: '📱', label: 'nav.crossDevice' },
+  { id: 'color', icon: '🎨', label: 'nav.color' },
+  { id: 'cleanup', icon: '🧹', label: 'nav.cleanup' },
   ...(import.meta.env.DEV ? [{ id: 'ecrdebug', icon: '🔧', label: 'nav.ecrdebug' }] : []),
   { id: 'ai_analysis', icon: '🤖', label: 'nav.aiAnalysis' },
   { id: 'settings', icon: '⚙️', label: 'nav.settings' },
@@ -329,6 +337,14 @@ export default function MainWindow({
         return <KeyboardTab />;
       case 'setup':
         return <SetupTab hw={hardware} />;
+      case 'security':
+        return <SecurityTab />;
+      case 'crossDevice':
+        return <CrossDeviceTab />;
+      case 'color':
+        return <ColorTab />;
+      case 'cleanup':
+        return <CleanupTab />;
       case 'ai_analysis':
         return (
           <AiAnalysisTab

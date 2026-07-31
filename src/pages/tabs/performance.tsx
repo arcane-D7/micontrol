@@ -135,6 +135,9 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
         />
       </div>
 
+      {/* OS Turbo Card */}
+      <OsTurboCard />
+
       {/* Power Profiles */}
       <div className="card">
         <div
@@ -587,6 +590,101 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
         </div>
       )}
     </>
+  );
+}
+
+// ── OS Turbo Card ────────────────────────────────────────────────────────────
+
+interface OsTurboStatus {
+  enabled: boolean;
+  throttled_processes: number;
+  power_plan: string;
+}
+
+function OsTurboCard() {
+  const [status, setStatus] = useState<OsTurboStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [toggling, setToggling] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const { addToast } = useToast();
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const s = await invoke<OsTurboStatus>('get_os_turbo');
+      setStatus(s);
+    } catch {
+      setStatus(null);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void fetchStatus();
+  }, [fetchStatus]);
+
+  const handleToggle = async () => {
+    if (!status) return;
+    setToggling(true);
+    try {
+      const s = await invoke<OsTurboStatus>('set_os_turbo', { enabled: !status.enabled });
+      setStatus(s);
+      addToast({
+        message: s.enabled ? t('performance.osTurboEnabled') : t('performance.osTurboDisabled'),
+        type: 'success',
+      });
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+    setToggling(false);
+  };
+
+  if (loading) return null;
+
+  return (
+    <div className="card">
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 4,
+        }}
+      >
+        <div>
+          <div className="card-title" style={{ marginBottom: 2 }}>
+            ⚡ {t('performance.osTurboTitle')}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            {t('performance.osTurboDesc')}
+          </div>
+        </div>
+        <label className="toggle-switch">
+          <input
+            type="checkbox"
+            checked={status?.enabled ?? false}
+            onChange={handleToggle}
+            disabled={toggling || !status}
+          />
+          <span className="toggle-track" />
+          <span className="toggle-knob" />
+        </label>
+      </div>
+      {errorMsg && (
+        <div className="alert alert-error" style={{ marginTop: 8 }}>
+          ⚠ {errorMsg}
+        </div>
+      )}
+      {status?.enabled && (
+        <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+          <div>
+            📊 {t('performance.osTurboThrottled')}: {status.throttled_processes}
+          </div>
+          <div>
+            🔌 {t('performance.osTurboPowerPlan')}: {status.power_plan}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
