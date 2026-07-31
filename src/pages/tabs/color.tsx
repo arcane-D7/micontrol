@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { useToast } from '../../contexts/ToastContext';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ export default function ColorTab() {
   const [selectedProfiles, setSelectedProfiles] = useState<Record<string, string>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [eyeToggling, setEyeToggling] = useState(false);
+  const { addToast } = useToast();
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -68,7 +70,11 @@ export default function ColorTab() {
       await invoke('load_icc_profile', { display, profilePath: profile });
       void fetchStatus();
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(`${t('color.loadProfile')}: ${msg}`);
     }
   };
 
@@ -77,15 +83,25 @@ export default function ColorTab() {
       await invoke('unload_icc_profile', { display });
       void fetchStatus();
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(`${t('color.unloadProfile')}: ${msg}`);
     }
   };
 
   const handleLaunchWizard = async () => {
     try {
       await invoke('launch_color_calibration_wizard');
+      addToast({ message: t('color.launchWizard'), type: 'info' });
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(`${t('color.launchWizard')}: ${msg}`);
+      addToast({ message: msg, type: 'error' });
     }
   };
 
@@ -93,13 +109,18 @@ export default function ColorTab() {
     try {
       await invoke('open_color_management_settings');
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(msg);
     }
   };
 
   const handleToggleEyeProtection = async () => {
     if (!eyeProtection) return;
     setEyeToggling(true);
+    setErrorMsg(null);
     try {
       await invoke('set_eye_protection', {
         enabled: !eyeProtection.enabled,
@@ -107,8 +128,17 @@ export default function ColorTab() {
       });
       const ep = await invoke<EyeProtectionStatus>('get_eye_protection');
       setEyeProtection(ep);
+      addToast({
+        message: ep.enabled ? t('color.eyeProtectionActive') : t('color.eyeProtectionInactive'),
+        type: 'success',
+      });
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(`${t('color.eyeProtection')}: ${msg}`);
+      addToast({ message: `${t('color.eyeProtection')}: ${msg}`, type: 'error' });
     }
     setEyeToggling(false);
   };
@@ -122,7 +152,11 @@ export default function ColorTab() {
       });
       setEyeProtection({ ...eyeProtection, intensity });
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(`${t('color.eyeProtection')}: ${msg}`);
     }
   };
 

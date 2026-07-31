@@ -158,23 +158,49 @@ pub fn start_casting(_device_id: &str) -> HardwareResult<CastResult> {
     })
 }
 
-/// Stop casting by disconnecting the active casting connection.
+/// Stop casting by closing the Windows Connect panel.
 ///
-/// Uses `CastingConnection.DisconnectAsync()` to gracefully terminate
-/// the Miracast session. Also closes the Windows Connect panel if open
-/// as a cleanup fallback.
+/// Instead of killing ALL `SystemSettings.exe` processes (which would close
+/// any other Settings windows the user may have open), we use PowerShell
+/// with the Win32 API to find and close only the Connect panel window.
 #[cfg(windows)]
 pub fn stop_casting() -> HardwareResult<CastResult> {
     use std::os::windows::process::CommandExt;
 
     log::info!("[screen_cast] Stopping active cast");
 
-    // Close the Windows Connect panel if it's open (cleanup fallback)
+    // Use PowerShell to close only the Connect panel window by sending WM_CLOSE.
+    // This avoids killing all SystemSettings.exe processes.
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/c", "taskkill", "/f", "/im", "SystemSettings.exe"]);
+    let ps_script = r#"
+        Add-Type @"
+        using System;
+        using System.Runtime.InteropServices;
+        public class Win32 {
+            [DllImport("user32.dll")]
+            public static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+        }
+"@
+        # Find SystemSettings processes whose window title contains "Connect"
+        Get-Process -Name SystemSettings -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.MainWindowTitle -match 'Connect') {
+                [void][Win32]::SendMessage($_.MainWindowHandle, 0x0010, 0, 0)
+            }
+        }
+    "#;
+
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_script]);
     cmd.creation_flags(CREATE_NO_WINDOW);
-    let _ = cmd.output();
+    let output = cmd
+        .output()
+        .map_err(|e| HardwareError::Cast(format!("Failed to stop casting: {e}")))?;
+
+    let success = output.status.success();
+    log::info!(
+        "[screen_cast] stop_casting PowerShell exited: success={success}, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     Ok(CastResult {
         success: true,

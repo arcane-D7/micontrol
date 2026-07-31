@@ -489,7 +489,8 @@
     "availableNetworks": "Available Networks",
     "noNetworks": "No networks found. Click Refresh to scan.",
     "refresh": "Refresh",
-    "connected": "Connected"
+    "connected": "Connected",
+    "hiddenNetwork": "Hidden network — connect via Windows WiFi settings"
   },
   "cast": {
     "title": "Screen Cast",
@@ -551,7 +552,9 @@
     "driverDate": "Date",
     "driverManufacturer": "Manufacturer",
     "driverStatus": "Status",
-    "noDrivers": "No driver details available"
+    "noDrivers": "No driver details available",
+    "scanComplete": "Driver scan complete",
+    "scanError": "Scan error"
   },
   "discovery": {
     "title": "Device Setup",

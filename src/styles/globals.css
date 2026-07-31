@@ -1014,7 +1014,10 @@ input[type='range']:active::-webkit-slider-thumb {
 /* ── Tray popup ──────────────────────────────────────────────────────────── */
 .tray-popup {
   width: 300px;
-  background: var(--surface);
+  /* Use surface-solid directly (not var(--surface)) because .tray-window
+     sets background: transparent !important which would override var(--surface).
+     We need the popup itself to be opaque even though the window is transparent. */
+  background: var(--surface-solid) !important;
   backdrop-filter: var(--blur, none);
   -webkit-backdrop-filter: var(--blur, none);
   border: 1px solid var(--border);
@@ -1023,8 +1026,7 @@ input[type='range']:active::-webkit-slider-thumb {
 }
 .tray-header {
   padding: 14px 16px;
-  background: var(--surface-2);
-  backdrop-filter: var(--blur-sm);
+  background: var(--surface-solid);
   border-bottom: 1px solid var(--border);
   display: flex;
   justify-content: space-between;

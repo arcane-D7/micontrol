@@ -28,6 +28,7 @@ const FN_LOCK_ENABLED_VALUE: &str = "FnLockEnabled";
 
 /// Fn-key mode.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum FnKeyMode {
     /// F1-F12 act as multimedia keys (brightness, volume, etc.)
     Multimedia,

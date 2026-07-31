@@ -521,7 +521,9 @@
     "driverDate": "Data",
     "driverManufacturer": "Fabricante",
     "driverStatus": "Status",
-    "noDrivers": "Nenhum detalhe de driver disponível"
+    "noDrivers": "Nenhum detalhe de driver disponível",
+    "scanComplete": "Verificação de drivers concluída",
+    "scanError": "Erro de verificação"
   },
   "discovery": {
     "title": "Configuração do Dispositivo",
@@ -696,7 +698,8 @@
     "availableNetworks": "Redes Disponíveis",
     "noNetworks": "Nenhuma rede encontrada. Clique em Atualizar para procurar.",
     "refresh": "Atualizar",
-    "connected": "Ligado"
+    "connected": "Ligado",
+    "hiddenNetwork": "Rede oculta — conecte pelas definições de WiFi do Windows"
   },
   "cast": {
     "title": "Screen Cast",

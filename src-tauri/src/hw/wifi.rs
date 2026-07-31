@@ -140,6 +140,7 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
         // the actual allocation contains `dwNumberOfItems` entries. We must
         // use pointer arithmetic to access entries beyond index 0.
         let mut networks = Vec::new();
+        let mut hidden_count = 0u32;
         let base = network_list.Network.as_ptr();
         for i in 0..network_list.dwNumberOfItems {
             let net = &*base.add(i as usize);
@@ -162,6 +163,14 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
             // Check if this is the currently connected network
             let is_connected = connected_ssid.as_ref().is_some_and(|s| s == &ssid);
 
+            // Skip hidden networks (empty SSID) — they show as blank entries
+            // and cause duplicate React key issues. We'll add a placeholder
+            // hidden network entry at the end if any were found.
+            if ssid.is_empty() {
+                hidden_count += 1;
+                continue;
+            }
+
             networks.push(WifiNetwork {
                 ssid,
                 signal,
@@ -170,8 +179,31 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
             });
         }
 
+        // Deduplicate by SSID — WlanAPI returns one entry per BSS, so the
+        // same SSID from multiple APs (e.g., 2.4GHz + 5GHz) appears multiple
+        // times. We keep the entry with the strongest signal and preserve
+        // the connected flag.
+        networks.sort_by(|a, b| b.signal.cmp(&a.signal));
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut deduped: Vec<WifiNetwork> = Vec::with_capacity(networks.len());
+        for net in networks {
+            if seen.insert(net.ssid.clone()) {
+                deduped.push(net);
+            }
+        }
+
+        // Add a single placeholder for hidden networks if any were found
+        if hidden_count > 0 {
+            deduped.push(WifiNetwork {
+                ssid: "<Hidden Network>".to_string(),
+                signal: 0,
+                security: "Unknown".to_string(),
+                connected: connected_ssid.as_ref().is_some_and(|s| s.is_empty()),
+            });
+        }
+
         WlanCloseHandle(handle, None);
-        Ok(networks)
+        Ok(deduped)
     }
 }
 

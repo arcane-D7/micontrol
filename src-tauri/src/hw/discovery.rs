@@ -1067,6 +1067,16 @@ fn is_touchpad_vendor_channel_path(path: &str) -> bool {
         if !(entry.caps.UsagePage >= 0xFF00 && entry.caps.OutputReportByteLength > 0) {
             return false;
         }
+        // Prefer COL05 — if the cached path is COL04, invalidate so
+        // re-discovery can find the correct COL05 vendor channel.
+        // Xiaomi's SvrCModule.dll specifically searches for "col05".
+        if !target.contains("&col05#") {
+            log::warn!(
+                "Cached touchpad path is not COL05 (got {:?}). Invalidating for re-discovery.",
+                target
+            );
+            return false;
+        }
         if let Some(root) = hid_instance_root(&entry.path) {
             return touchpad_roots.contains(&root);
         }

@@ -489,7 +489,8 @@
     "availableNetworks": "Réseaux Disponibles",
     "noNetworks": "Aucun réseau trouvé. Cliquez sur Actualiser pour rechercher.",
     "refresh": "Actualiser",
-    "connected": "Connecté"
+    "connected": "Connecté",
+    "hiddenNetwork": "Réseau caché — connectez-vous via les paramètres WiFi de Windows"
   },
   "cast": {
     "title": "Screen Cast",
@@ -551,7 +552,9 @@
     "driverDate": "Date",
     "driverManufacturer": "Fabricant",
     "driverStatus": "Statut",
-    "noDrivers": "Aucun détail de pilote disponible"
+    "noDrivers": "Aucun détail de pilote disponible",
+    "scanComplete": "Analyse des pilotes terminée",
+    "scanError": "Erreur d'analyse"
   },
   "discovery": {
     "title": "Configuration de l'appareil",

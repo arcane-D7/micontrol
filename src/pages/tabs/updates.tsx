@@ -2,6 +2,7 @@ import { memo, useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { useToast } from '../../contexts/ToastContext';
 import UpdateManager from '../../components/UpdateManager';
 import type { Hardware } from './shared';
 import type { AppUpdateState, AppUpdateInfo } from '../../hooks/useAutoUpdate';
@@ -27,6 +28,19 @@ interface Props {
   onDismissAppUpdate: () => void;
 }
 
+/// Format a WMI CIM datetime (e.g. "20250514000000.000000-000") to a
+/// human-readable date string (YYYY-MM-DD). Returns the original string
+/// if parsing fails.
+function formatDriverDate(raw: string): string {
+  if (!raw || raw.length < 8) return raw || '—';
+  // WMI CIM datetime format: YYYYMMDDHHMMSS.mmmmmm+UUU
+  const match = raw.match(/^(\d{4})(\d{2})(\d{2})/);
+  if (match) {
+    return `${match[1]}-${match[2]}-${match[3]}`;
+  }
+  return raw;
+}
+
 function UpdatesTab({
   hw,
   appUpdateState,
@@ -41,6 +55,7 @@ function UpdatesTab({
   const [loadingDrivers, setLoadingDrivers] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const { addToast } = useToast();
 
   const fetchDrivers = useCallback(async () => {
     setLoadingDrivers(true);
@@ -49,7 +64,11 @@ function UpdatesTab({
       const details = await invoke<DriverDetail[]>('get_drivers_detail');
       setDrivers(details);
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(msg);
     }
     setLoadingDrivers(false);
   }, []);
@@ -60,8 +79,14 @@ function UpdatesTab({
     try {
       await invoke('trigger_driver_scan');
       await fetchDrivers();
+      addToast({ message: t('updates.scanComplete'), type: 'success' });
     } catch (e) {
-      setErrorMsg(String(e));
+      const msg =
+        typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setErrorMsg(msg);
+      addToast({ message: `${t('updates.scanError')}: ${msg}`, type: 'error' });
     }
     setScanning(false);
   };
@@ -130,13 +155,15 @@ function UpdatesTab({
               <tbody>
                 {drivers.map((d, i) => (
                   <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                    <td style={{ padding: '8px 4px' }}>{d.device_name}</td>
-                    <td style={{ padding: '8px 4px' }}>{d.driver_version}</td>
-                    <td style={{ padding: '8px 4px' }}>{d.driver_date}</td>
-                    <td style={{ padding: '8px 4px' }}>{d.manufacturer}</td>
+                    <td style={{ padding: '8px 4px' }}>
+                      {d.device_name || <span className="text-muted">—</span>}
+                    </td>
+                    <td style={{ padding: '8px 4px' }}>{d.driver_version || '—'}</td>
+                    <td style={{ padding: '8px 4px' }}>{formatDriverDate(d.driver_date)}</td>
+                    <td style={{ padding: '8px 4px' }}>{d.manufacturer || '—'}</td>
                     <td style={{ padding: '8px 4px' }}>
                       <span className={d.status === 'OK' ? 'status-ok' : 'status-warn'}>
-                        {d.status}
+                        {d.status || 'Unknown'}
                       </span>
                     </td>
                   </tr>
