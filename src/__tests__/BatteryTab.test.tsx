@@ -15,9 +15,9 @@ vi.mock('../components/BatteryInfo', () => ({
   ),
 }));
 
-vi.mock('../components/ChargingThreshold', () => ({
+vi.mock('../components/ChargingProtection', () => ({
   default: ({ threshold }: { threshold: number }) => (
-    <div data-testid="charging-threshold">Threshold: {threshold}%</div>
+    <div data-testid="charging-protection">Threshold: {threshold}%</div>
   ),
 }));
 
@@ -34,7 +34,7 @@ describe('BatteryTab', () => {
     const hw = makeMockHardware({ level: 50, is_charging: true });
     render(<BatteryTab hw={hw} />);
     expect(screen.getByTestId('battery-info')).toBeInTheDocument();
-    expect(screen.getByTestId('charging-threshold')).toBeInTheDocument();
+    expect(screen.getByTestId('charging-protection')).toBeInTheDocument();
     expect(screen.getByText('Threshold: 80%')).toBeInTheDocument();
   });
 

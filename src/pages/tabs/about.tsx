@@ -1,12 +1,46 @@
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import AppUpdateBanner from '../../components/AppUpdateBanner';
+import type { AppUpdateState, AppUpdateInfo } from '../../hooks/useAutoUpdate';
 
 const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
 
-export default function AboutTab() {
+interface Props {
+  appUpdateState?: AppUpdateState;
+  appUpdateInfo?: AppUpdateInfo | null;
+  appUpdateProgress?: number;
+  appUpdateError?: string;
+  onCheckAppUpdate?: () => void;
+  onInstallAppUpdate?: () => void;
+  onDismissAppUpdate?: () => void;
+}
+
+export default function AboutTab({
+  appUpdateState = 'idle',
+  appUpdateInfo = null,
+  appUpdateProgress = 0,
+  appUpdateError = '',
+  onCheckAppUpdate,
+  onInstallAppUpdate,
+  onDismissAppUpdate,
+}: Props) {
   return (
     <>
       <PageHeader title={t('about.title')} />
+
+      {/* App self-update banner */}
+      {onCheckAppUpdate && onInstallAppUpdate && onDismissAppUpdate && (
+        <AppUpdateBanner
+          state={appUpdateState}
+          updateInfo={appUpdateInfo}
+          progress={appUpdateProgress}
+          errorMsg={appUpdateError}
+          onCheck={onCheckAppUpdate}
+          onInstall={onInstallAppUpdate}
+          onDismiss={onDismissAppUpdate}
+        />
+      )}
+
       <div className="card">
         <div className="grid-2">
           <div>

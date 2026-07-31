@@ -46,8 +46,7 @@
     "iot": "IoT Device",
     "wifi": "Wi-Fi",
     "startup": "Startup",
-    "updates": "Updates",
-    "setup": "Device Setup",
+    "system": "System",
     "keyboard": "Key Remapper",
     "ecrdebug": "EC Debug",
     "security": "Security",
@@ -507,6 +506,10 @@
     "availableDevices": "Available Devices",
     "tip": "Tip",
     "tipText": "You can also press Win + K to open the Windows Connect panel directly."
+  },
+  "system": {
+    "title": "System & Drivers",
+    "subtitle": "Hardware discovery, driver details, and IoT module access"
   },
   "updates": {
     "title": "Drivers & BIOS",

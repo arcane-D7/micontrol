@@ -25,9 +25,8 @@ const WiFiTab = lazy(() => import('./tabs/wifi'));
 const EcrDebugTab = lazy(() => import('./tabs/ecrdebug'));
 const TouchpadTab = lazy(() => import('./tabs/touchpad'));
 const StartupTab = lazy(() => import('./tabs/startup'));
-const UpdatesTab = lazy(() => import('./tabs/updates'));
+const SystemTab = lazy(() => import('./tabs/system'));
 const KeyboardTab = lazy(() => import('./tabs/keyboard'));
-const SetupTab = lazy(() => import('./tabs/setup'));
 const SettingsTab = lazy(() => import('./tabs/settings'));
 const AiAnalysisTab = lazy(() => import('./tabs/ai-analysis'));
 const SecurityTab = lazy(() => import('./tabs/security'));
@@ -58,9 +57,8 @@ const NAV_ITEMS = [
   { id: 'iot', icon: '🔌', label: 'nav.iot' },
   { id: 'wifi', icon: '📶', label: 'nav.wifi' },
   { id: 'startup', icon: '🚀', label: 'nav.startup' },
-  { id: 'updates', icon: '🔄', label: 'nav.updates' },
+  { id: 'system', icon: '🔧', label: 'nav.system' },
   { id: 'keyboard', icon: '⌨️', label: 'nav.keyboard' },
-  { id: 'setup', icon: '🔍', label: 'nav.setup' },
   { id: 'security', icon: '🛡️', label: 'nav.security' },
   { id: 'crossDevice', icon: '📱', label: 'nav.crossDevice' },
   { id: 'color', icon: '🎨', label: 'nav.color' },
@@ -320,23 +318,10 @@ export default function MainWindow({
         return <TouchpadTab hw={hardware} />;
       case 'startup':
         return <StartupTab />;
-      case 'updates':
-        return (
-          <UpdatesTab
-            hw={hardware}
-            appUpdateState={appUpdate.state}
-            appUpdateInfo={appUpdate.updateInfo}
-            appUpdateProgress={appUpdate.progress}
-            appUpdateError={appUpdate.errorMsg}
-            onCheckAppUpdate={appUpdate.checkForUpdate}
-            onInstallAppUpdate={appUpdate.downloadAndInstall}
-            onDismissAppUpdate={appUpdate.dismiss}
-          />
-        );
+      case 'system':
+        return <SystemTab hw={hardware} />;
       case 'keyboard':
         return <KeyboardTab />;
-      case 'setup':
-        return <SetupTab hw={hardware} />;
       case 'security':
         return <SecurityTab />;
       case 'crossDevice':
@@ -358,7 +343,17 @@ export default function MainWindow({
       case 'privacy':
         return <PrivacyPolicy />;
       case 'about':
-        return <AboutTab />;
+        return (
+          <AboutTab
+            appUpdateState={appUpdate.state}
+            appUpdateInfo={appUpdate.updateInfo}
+            appUpdateProgress={appUpdate.progress}
+            appUpdateError={appUpdate.errorMsg}
+            onCheckAppUpdate={appUpdate.checkForUpdate}
+            onInstallAppUpdate={appUpdate.downloadAndInstall}
+            onDismissAppUpdate={appUpdate.dismiss}
+          />
+        );
       default:
         return (
           <OverviewTab

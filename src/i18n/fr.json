@@ -46,8 +46,7 @@
     "iot": "Appareil IoT",
     "wifi": "Wi-Fi",
     "startup": "Démarrage",
-    "updates": "Mises à jour",
-    "setup": "Configuration",
+    "system": "Système",
     "keyboard": "Touches",
     "ecrdebug": "Debug EC",
     "security": "Sécurité",
@@ -507,6 +506,10 @@
     "availableDevices": "Appareils Disponibles",
     "tip": "Astuce",
     "tipText": "Vous pouvez également appuyer sur Win + K pour ouvrir directement le panneau de connexion Windows."
+  },
+  "system": {
+    "title": "Système et Pilotes",
+    "subtitle": "Détection matérielle, détails des pilotes et accès au module IoT"
   },
   "updates": {
     "title": "Pilotes et BIOS",

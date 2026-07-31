@@ -46,8 +46,7 @@
     "iot": "Dispositivo IoT",
     "wifi": "Wi-Fi",
     "startup": "Arranque",
-    "updates": "Atualizações",
-    "setup": "Configuração",
+    "system": "Sistema",
     "keyboard": "Remapeador",
     "ecrdebug": "Debug EC",
     "security": "Segurança",
@@ -476,6 +475,10 @@
     "minutes": "{count} minutos",
     "minutes_one": "{count} minuto",
     "minutes_other": "{count} minutos"
+  },
+  "system": {
+    "title": "Sistema e Drivers",
+    "subtitle": "Detecção de hardware, detalhes de drivers e acesso ao módulo IoT"
   },
   "updates": {
     "title": "Drivers & BIOS",

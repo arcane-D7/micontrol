@@ -119,12 +119,12 @@ export const PREVIEW_TABS: PreviewTab[] = [
       'Control which apps launch at boot. Enable, disable, or delay startup entries to reduce boot time and optimize system resource allocation.',
   },
   {
-    id: 'updates',
-    icon: '🔄',
-    label: 'Updates',
-    title: 'System Updates',
+    id: 'system',
+    icon: '🔧',
+    label: 'System',
+    title: 'System & Drivers',
     description:
-      'Check for driver updates, BIOS releases, and app patches. Automated update detection keeps your Xiaomi Notebook running the latest firmware.',
+      'Hardware discovery, driver details, BIOS info, and IoT module access. Full ECRAM read/write controls for advanced configuration.',
   },
   {
     id: 'keyboard',
@@ -133,14 +133,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
     title: 'Keyboard Customization',
     description:
       'Remap keys, configure backlight brightness, and set up macro profiles. Per-application keyboard layouts switch automatically as you work.',
-  },
-  {
-    id: 'setup',
-    icon: '🔍',
-    label: 'Setup',
-    title: 'Initial Setup Wizard',
-    description:
-      'Guided first-run configuration for new installations. Hardware detection, driver verification, and optimal preset selection in a single streamlined flow.',
   },
   {
     id: 'ai_analysis',
