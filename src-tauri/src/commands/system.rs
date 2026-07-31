@@ -719,3 +719,39 @@ pub async fn clean_junk_files(
         Err(_) => Ok(Vec::new()),
     }
 }
+
+// ── Error Logging ────────────────────────────────────────────────────────────
+
+/// Get the error logging configuration.
+#[tauri::command]
+pub async fn get_error_log_config() -> Result<crate::util::error_log::ErrorLogConfig, ErrorResponse>
+{
+    Ok(crate::util::error_log::get_config())
+}
+
+/// Enable or disable error logging.
+#[tauri::command]
+pub async fn set_error_logging_enabled(enabled: bool) -> Result<(), ErrorResponse> {
+    crate::util::error_log::set_enabled(enabled);
+    Ok(())
+}
+
+/// Read the error log (last N lines).
+#[tauri::command]
+pub async fn read_error_log(max_lines: Option<usize>) -> Result<String, ErrorResponse> {
+    Ok(crate::util::error_log::read_log(max_lines.unwrap_or(500)))
+}
+
+/// Clear the error log file.
+#[tauri::command]
+pub async fn clear_error_log() -> Result<(), ErrorResponse> {
+    crate::util::error_log::clear_log();
+    Ok(())
+}
+
+/// Log a frontend error to the error log file.
+#[tauri::command]
+pub async fn log_frontend_error(target: String, message: String) -> Result<(), ErrorResponse> {
+    crate::util::error_log::log_error(&target, &message);
+    Ok(())
+}

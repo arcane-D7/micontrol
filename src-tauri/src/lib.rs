@@ -42,22 +42,23 @@ use commands::hotkeys::{
 };
 use commands::privacy::{export_user_data, reveal_in_explorer};
 use commands::system::{
-    check_official_driver_updates, clean_junk_files, custom_security_scan, debug_ecram_dump,
-    download_driver_package, fetch_official_drivers, full_security_scan, get_ai_brightness_config,
-    get_audio_effects, get_autostart, get_available_refresh_rates, get_battery_info,
-    get_color_status, get_crash_recovery_status, get_defender_status, get_display_info,
-    get_drivers_detail, get_eye_protection, get_fan_info, get_hardware_profile,
-    get_hardware_state_batch, get_model_code, get_os_turbo, get_phone_link_status,
-    get_process_list, get_system_info, get_threat_history, get_touchpad_info, get_update_status,
-    install_driver, launch_color_calibration_wizard, launch_phone_link, launch_phone_link_feature,
-    load_icc_profile, mark_clean_exit, open_color_management_settings, open_phone_link_settings,
-    open_windows_security, quick_security_scan, run_hardware_discovery, scan_junk_files,
-    set_adaptive_refresh_rate, set_ai_brightness, set_ai_brightness_config, set_autostart,
-    set_brightness, set_eye_protection, set_fan_mode, set_hdr, set_mic_noise_canceling,
-    set_os_turbo, set_refresh_rate, set_speaker_noise_canceling, set_touchpad_edge_slide,
-    set_touchpad_gesture_screenshot, set_touchpad_haptics, set_touchpad_haptics_intensity,
-    set_touchpad_repress, set_touchpad_sensitivity, set_voice_focus, trigger_driver_scan,
-    unload_icc_profile, update_defender_signatures,
+    check_official_driver_updates, clean_junk_files, clear_error_log, custom_security_scan,
+    debug_ecram_dump, download_driver_package, fetch_official_drivers, full_security_scan,
+    get_ai_brightness_config, get_audio_effects, get_autostart, get_available_refresh_rates,
+    get_battery_info, get_color_status, get_crash_recovery_status, get_defender_status,
+    get_display_info, get_drivers_detail, get_error_log_config, get_eye_protection, get_fan_info,
+    get_hardware_profile, get_hardware_state_batch, get_model_code, get_os_turbo,
+    get_phone_link_status, get_process_list, get_system_info, get_threat_history,
+    get_touchpad_info, get_update_status, install_driver, launch_color_calibration_wizard,
+    launch_phone_link, launch_phone_link_feature, load_icc_profile, log_frontend_error,
+    mark_clean_exit, open_color_management_settings, open_phone_link_settings,
+    open_windows_security, quick_security_scan, read_error_log, run_hardware_discovery,
+    scan_junk_files, set_adaptive_refresh_rate, set_ai_brightness, set_ai_brightness_config,
+    set_autostart, set_brightness, set_error_logging_enabled, set_eye_protection, set_fan_mode,
+    set_hdr, set_mic_noise_canceling, set_os_turbo, set_refresh_rate, set_speaker_noise_canceling,
+    set_touchpad_edge_slide, set_touchpad_gesture_screenshot, set_touchpad_haptics,
+    set_touchpad_haptics_intensity, set_touchpad_repress, set_touchpad_sensitivity,
+    set_voice_focus, trigger_driver_scan, unload_icc_profile, update_defender_signatures,
 };
 use state::AppState;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -432,6 +433,11 @@ pub fn run() {
             open_phone_link_settings,
             // Color Calibration
             get_color_status,
+            get_error_log_config,
+            set_error_logging_enabled,
+            read_error_log,
+            clear_error_log,
+            log_frontend_error,
             load_icc_profile,
             unload_icc_profile,
             open_color_management_settings,
@@ -452,6 +458,9 @@ pub fn run() {
             if let Err(e) = crate::hw::crash_recovery::init_crash_recovery() {
                 log::warn!("Crash recovery init failed (non-fatal): {e}");
             }
+
+            // Initialize error logging system (7-day retention, on by default)
+            crate::util::error_log::init();
 
             // S26-004: Auto-rotate HMAC key if needed (replaces misleading --rotate-key message).
             if crate::util::auth::key_needs_rotation() {

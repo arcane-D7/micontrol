@@ -9,6 +9,7 @@ pub mod auth;
 pub mod blocking;
 pub mod consent_audit;
 pub mod data_deletion;
+pub mod error_log;
 pub mod panic;
 pub mod registry;
 pub mod retry;

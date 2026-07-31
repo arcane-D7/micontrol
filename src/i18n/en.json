@@ -653,7 +653,12 @@
     "exporting": "Exporting...",
     "replayOnboarding": "Replay Onboarding",
     "onboarding": "Onboarding Wizard",
-    "onboardingDesc": "Re-display the first-run welcome wizard to review features and preferences."
+    "onboardingDesc": "Re-display the first-run welcome wizard to review features and preferences.",
+    "errorLogging": "Error Logging",
+    "errorLoggingDesc": "Automatically logs errors to a local file for troubleshooting. Logs are retained for 7 days and automatically deleted thereafter.",
+    "errorLoggingEnable": "Enable error logging",
+    "errorLogView": "View error log",
+    "errorLogClear": "Clear log"
   },
   "onboarding": {
     "welcome": {

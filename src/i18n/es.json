@@ -653,7 +653,12 @@
     "dataExport": "Exportación de Datos",
     "dataExportDesc": "Descargue una copia de sus datos en un formato portátil (archivo ZIP).",
     "downloadData": "Descargar Mis Datos",
-    "exporting": "Exportando..."
+    "exporting": "Exportando...",
+    "errorLogging": "Registro de errores",
+    "errorLoggingDesc": "Registra automáticamente los errores en un archivo local para solucionar problemas. Los registros se conservan durante 7 días y se eliminan automáticamente después.",
+    "errorLoggingEnable": "Habilitar registro de errores",
+    "errorLogView": "Ver registro de errores",
+    "errorLogClear": "Borrar registro"
   },
   "onboarding": {
     "welcome": {

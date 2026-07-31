@@ -653,7 +653,12 @@
     "dataExport": "Exportation de Données",
     "dataExportDesc": "Téléchargez une copie de vos données dans un format portable (archive ZIP).",
     "downloadData": "Télécharger Mes Données",
-    "exporting": "Exportation..."
+    "exporting": "Exportation...",
+    "errorLogging": "Journalisation des erreurs",
+    "errorLoggingDesc": "Enregistre automatiquement les erreurs dans un fichier local pour le dépannage. Les journaux sont conservés pendant 7 jours puis supprimés automatiquement.",
+    "errorLoggingEnable": "Activer la journalisation des erreurs",
+    "errorLogView": "Voir le journal d'erreurs",
+    "errorLogClear": "Effacer le journal"
   },
   "onboarding": {
     "welcome": {
