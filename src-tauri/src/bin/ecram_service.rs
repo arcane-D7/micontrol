@@ -312,6 +312,11 @@ mod ec_command {
     const EC_SENSOR_ADDR: u64 = 0xFE0B0F08;
 
     /// EC command IDs (from RE of IoTService.exe)
+    ///
+    /// Not all IDs are currently used — they document the full EC command
+    /// protocol for future implementation. `#[allow(dead_code)]` suppresses
+    /// warnings for the unused variants.
+    #[allow(dead_code)]
     pub mod cmd_id {
         pub const GET_BIND_STATUS: u8 = 0x01;
         pub const SET_BIND_STATUS: u8 = 0x02;
