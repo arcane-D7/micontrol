@@ -114,8 +114,12 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     let brightness = get_brightness_wmi().unwrap_or_else(|_| get_brightness_igcl().unwrap_or(80));
     let hdr_enabled = get_hdr_state();
     let refresh_rate_hz = get_refresh_rate().unwrap_or(120);
-    // S25-009: Propagate error from get_available_refresh_rates.
-    let available_refresh_rates = get_available_refresh_rates()?;
+    // S25-009: Don't let refresh-rate enumeration failure nuke the entire display info.
+    // If we can't enumerate rates, fall back to the current rate as the only option.
+    let available_refresh_rates = get_available_refresh_rates().unwrap_or_else(|e| {
+        log::warn!(target: "hw::display", "get_available_refresh_rates failed: {e}, using current rate as fallback");
+        vec![refresh_rate_hz]
+    });
     // DRR is active when the display is set to its highest supported refresh rate.
     let dynamic_refresh_rate_capable = available_refresh_rates
         .last()

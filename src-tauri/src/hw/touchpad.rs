@@ -565,6 +565,11 @@ pub fn close_haptics_handle() {
 ///
 /// The output report byte length is queried from the HID descriptor
 /// (OutputReportByteLength = 33 for COL05).
+///
+/// **Important**: SvrCModule.dll opens, writes, and closes the HID device for
+/// each operation (see `touch UnInit HandleDeviceDisconnected` in svrc_log.txt).
+/// We replicate this pattern — the handle is closed after each write to avoid
+/// stale handle issues when the device disconnects.
 #[cfg(windows)]
 fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
     use windows::Win32::Devices::HumanInterfaceDevice::{
@@ -582,6 +587,12 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
         let mut caps = HIDP_CAPS::default();
         if HidD_GetPreparsedData(handle, &mut preparsed).as_bool() && preparsed.0 != 0 {
             let _ = HidP_GetCaps(preparsed, &mut caps);
+            log::info!(
+                "[touchpad] HID caps: OutputReportByteLength={}, InputReportByteLength={}, FeatureReportByteLength={}",
+                caps.OutputReportByteLength,
+                caps.InputReportByteLength,
+                caps.FeatureReportByteLength,
+            );
             HidD_FreePreparsedData(preparsed);
         }
         caps.OutputReportByteLength as usize
@@ -607,6 +618,11 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
         HidD_SetOutputReport(handle, report.as_mut_ptr() as *mut _, report_len as u32).as_bool()
     };
 
+    // Always close the handle after each write — SvrCModule.dll disconnects
+    // the device after every operation (see svrc_log.txt "HandleDeviceDisconnected").
+    // Keeping a stale handle causes subsequent writes to fail silently.
+    close_haptics_handle();
+
     if ok {
         log::info!(
             "[touchpad] BLTP7853 output report sent: {} bytes, data={:02X?}",
@@ -615,13 +631,14 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
         );
         Ok(())
     } else {
-        // If HidD_SetOutputReport fails, the device may have been removed — reopen the handle.
-        close_haptics_handle();
+        // Retry once with a fresh handle
         let handle = get_haptics_handle().context("Reopen touchpad HID handle after failure")?;
 
         let ok = unsafe {
             HidD_SetOutputReport(handle, report.as_mut_ptr() as *mut _, report_len as u32).as_bool()
         };
+
+        close_haptics_handle();
 
         if ok {
             log::info!(

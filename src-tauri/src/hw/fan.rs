@@ -155,18 +155,54 @@ pub fn get_fan_info() -> HardwareResult<FanInfo> {
         gpu_temp: None,
         tdp_watts: None,
     });
-    // If ESIF failed, try ACPI thermal zone as fallback (not a hardcoded value)
-    let cpu_temp = esif
-        .cpu_temp
-        .or_else(|| match crate::hw::thermal::get_primary_thermal_zone() {
+
+    // ── Temperature fallback chain ──────────────────────────────────────────
+    // 1. Intel ESIF/DPTF (WMI EsifDeviceInformation) — most accurate
+    // 2. ACPI thermal zone (MSAcpi_ThermalZoneTemperature) — CPU only
+    // 3. EC RAM via ecram_service pipe — CPU temp at offset 0x03, fan RPM at 0x04
+    let acpi_fallback = || -> Option<f32> {
+        match crate::hw::thermal::get_primary_thermal_zone() {
             Ok(zone) => Some(zone.current_temp_celsius as f32),
             Err(e) => {
-                log::warn!(target: "hw::fan", "ESIF and ACPI thermal zone both unavailable: {e}");
+                log::debug!(target: "hw::fan", "ACPI thermal zone unavailable: {e}");
                 None
             }
-        });
-    let gpu_temp = esif.gpu_temp;
+        }
+    };
+
+    // EC RAM via pipe fallback — reads the ACPI ERAM block (0xFE0B0300, 256 bytes)
+    // CPU temp is at offset 0x03, fan RPM at 0x04-0x05, GPU temp not available here.
+    let ecram_fallback = || -> Option<(f32, u32, Option<f32>)> {
+        let eram = crate::hw::ecram::read_ecram_via_pipe(crate::hw::ecram::get_eram_base(), 0x10)?;
+        if eram.len() < 0x08 {
+            return None;
+        }
+        let cpu_t = eram[0x03] as f32;
+        let fan_rpm = u16::from_le_bytes([eram[0x04], eram[0x05]]) as u32;
+        let tdp = if eram.len() > 0x0A {
+            Some(eram[0x0A] as f32)
+        } else {
+            None
+        };
+        log::debug!(target: "hw::fan", "EC RAM via pipe: cpu_temp={cpu_t}°C, fan_rpm={fan_rpm}, tdp={tdp:?}");
+        Some((cpu_t, fan_rpm, tdp))
+    };
+
+    let cpu_temp = esif
+        .cpu_temp
+        .or_else(acpi_fallback)
+        .or_else(|| ecram_fallback().map(|(t, _, _)| t));
+    // GPU temp: use ESIF, then ACPI fallback (same thermal zone — better than None)
+    let gpu_temp = esif.gpu_temp.or_else(acpi_fallback);
     let tdp_watts = esif.tdp_watts;
+
+    // Fan RPM: WMI first, then EC RAM via pipe
+    let speed_rpm = if speed_rpm > 0 {
+        speed_rpm
+    } else {
+        ecram_fallback().map(|(_, rpm, _)| rpm).unwrap_or(0)
+    };
+
     let (mode, speed_percent) = get_fan_mode_registry().unwrap_or((FanMode::Auto, 50));
 
     // WORKING FORM — DO NOT MODIFY: EC performance mode is read via WMI
