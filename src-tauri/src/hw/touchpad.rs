@@ -660,71 +660,103 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
     }
 }
 
-/// Motor gear values for vibration intensity, decoded from SvrCModule log:
-///   mode 1 (Low)    → 56  (0x38)
-///   mode 2 (Medium) → 80  (0x50)
-///   mode 3 (High)   → 104 (0x68)
+/// Motor gear values for vibration intensity, verified against Xiaomi's
+/// SvrCModule.dll disassembly (WriteMotorGears):
+///   mode 1 (Low)    → gears (56, 80)
+///   mode 2 (Medium) → gears (80, 104)
+///   mode 3 (High)   → gears (104, 104)
+/// The two shorts are sent as a 4-byte payload with report ID 0x5D.
 #[cfg(windows)]
-fn motor_gear_value(intensity: &HapticsIntensity) -> u8 {
+fn motor_gears(intensity: &HapticsIntensity) -> (u16, u16) {
     match intensity {
-        HapticsIntensity::Low => 56,    // 0x38
-        HapticsIntensity::Medium => 80, // 0x50
-        HapticsIntensity::High => 104,  // 0x68
+        HapticsIntensity::Low => (56, 80),
+        HapticsIntensity::Medium => (80, 104),
+        HapticsIntensity::High => (104, 104),
     }
 }
 
-/// Force threshold bytes for pressing sensitivity, decoded from SvrCModule log:
-///   mode 1 (Light) → Force:3, bytes: [0x14, 0x04, 0x65, 0x00, 0x04, 0x00]
-///   mode 2 (Medium) → Force:2, bytes: [0x12, 0x03, 0x95, 0x00, 0x04, 0x00]
-///   mode 3 (Firm)   → Force:1, bytes: [0x10, 0x03, 0x35, 0x00, 0x04, 0x00]
-///
-/// Note: mode→Force mapping is INVERTED (mode 1 = Force:3, mode 3 = Force:1).
-/// The log shows "write fore touch:HEXDUMP" where HEXDUMP is the raw byte payload.
+/// Force threshold shorts for pressing sensitivity, verified against Xiaomi's
+/// SvrCModule.dll disassembly (WriteForceGears):
+///   mode 1 (Light)  → threshold 100, scaled = (int)(100 * 0.33) = 33, param 400
+///   mode 2 (Medium) → threshold 120, scaled = (int)(120 * 0.33) = 39, param 400
+///   mode 3 (Firm)   → threshold 140, scaled = (int)(140 * 0.33) = 46, param 400
+/// The 4 shorts are sent as an 8-byte payload with report ID 0x5B.
 #[cfg(windows)]
-fn force_threshold_bytes(sensitivity: &TouchpadSensitivity) -> [u8; 6] {
-    match sensitivity {
-        TouchpadSensitivity::Low => [0x14, 0x04, 0x65, 0x00, 0x04, 0x00], // Force:3
-        TouchpadSensitivity::Medium => [0x12, 0x03, 0x95, 0x00, 0x04, 0x00], // Force:2
-        TouchpadSensitivity::High => [0x10, 0x03, 0x35, 0x00, 0x04, 0x00], // Force:1
-        // VeryHigh uses the same as High (no separate log entry was captured)
-        TouchpadSensitivity::VeryHigh => [0x10, 0x03, 0x35, 0x00, 0x04, 0x00], // Force:1
+fn force_threshold_shorts(sensitivity: &TouchpadSensitivity) -> [u16; 4] {
+    let threshold: u16 = match sensitivity {
+        TouchpadSensitivity::Low => 100,
+        TouchpadSensitivity::Medium => 120,
+        // High and VeryHigh both map to the firm threshold (no separate value).
+        TouchpadSensitivity::High | TouchpadSensitivity::VeryHigh => 140,
+    };
+    let scaled = (threshold as f64 * 0.33) as u16; // 33 / 39 / 46
+    [scaled, 400, 0, 0]
+}
+
+/// Build a 33-byte BLTP7853 output report frame.
+///
+/// Verified against Xiaomi's SvrCModule.dll `TouchSettingManager::report`
+/// constructor: byte 0 is a fixed 0x0D magic, byte 1 = payload_len + 7,
+/// byte 2 = checksum (XOR of all payload bytes + 1), byte 3 = phase flag
+/// (0x01 first frame, 0x00 commit), byte 5 = payload_len + 1, byte 8 = the
+/// report ID, and the payload follows at byte 9. The rest is zero-padded to
+/// 33 bytes. `HidD_SetOutputReport` requires the full 33-byte frame.
+#[cfg(windows)]
+fn build_touchpad_report(report_id: u8, payload: &[u8], commit: bool) -> [u8; 33] {
+    let mut r = [0u8; 33];
+    r[0] = 0x0D;
+    r[1] = payload.len() as u8 + 7;
+    let mut cks = 0u8;
+    for &b in payload {
+        cks ^= b;
     }
+    r[2] = cks + 1;
+    r[3] = if commit { 0x00 } else { 0x01 };
+    r[5] = payload.len() as u8 + 1;
+    r[8] = report_id;
+    let copy_len = payload.len().min(24); // max payload region
+    r[9..9 + copy_len].copy_from_slice(&payload[..copy_len]);
+    r
 }
 
 /// Send haptic feedback on/off + vibration intensity via HID output report.
 ///
-/// This replicates Xiaomi's SvrCModule.dll call chain:
-///   1. `SetHapticFeedbackState(int)` → sets internal state
-///   2. `WriteEnableHeavyPress(bool)` → sends output report for on/off
-///   3. `WriteMotorGears(short)` → sends output report for intensity
+/// This replicates Xiaomi's SvrCModule.dll call chain (verified by reverse
+/// engineering):
+///   1. `WriteEnableHeavyPress(bool)` → report ID 0x59, payload [0x01]/[0x02]
+///   2. `OpenWriteMotorGears(a, b)` + `WriteMotorGears` → report ID 0x5D,
+///      payload = 2 × little-endian shorts (the gear pair)
 ///
-/// From the log, the motor gear value is sent as a single-byte payload
-/// after the report ID. The heavy press enable is sent as a separate
-/// output report with a 0x01/0x00 byte.
+/// Each command is sent as two frames: an initial frame (phase flag 0x01) and
+/// a commit frame (phase flag 0x00) — the DLL sends both for heavy-press.
 #[cfg(windows)]
 fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> HardwareResult<()> {
-    // Step 1: Send haptic feedback on/off (WriteEnableHeavyPress)
-    // The log shows "write EnableHeavyPress:VALUE" and "write touch IsEnableHeary:VALUE"
-    // This is a separate output report from the motor gears.
-    let heavy_press_report: [u8; 2] = [0x01, if enabled { 0x01 } else { 0x00 }];
-    if let Err(e) = send_touchpad_output_report(&heavy_press_report) {
-        log::warn!("[touchpad] WriteEnableHeavyPress failed: {e} — continuing with motor gears");
-        // Don't return error here — the motor gears report is the critical one.
+    // Step 1: WriteEnableHeavyPress — report ID 0x59, payload [0x01]=on [0x02]=off
+    let heavy_payload = [if enabled { 0x01 } else { 0x02 }];
+    let heavy1 = build_touchpad_report(0x59, &heavy_payload, false);
+    if let Err(e) = send_touchpad_output_report(&heavy1) {
+        log::warn!("[touchpad] WriteEnableHeavyPress (phase 1) failed: {e}");
     } else {
+        let heavy2 = build_touchpad_report(0x59, &heavy_payload, true);
+        let _ = send_touchpad_output_report(&heavy2);
         log::info!("[touchpad] WriteEnableHeavyPress: enabled={}", enabled);
     }
 
-    // Step 2: Send vibration intensity (WriteMotorGears)
-    // The log shows "write Motor touch:N" → "write touch Motor:VALUE"
-    // where VALUE is the motor gear byte (56/80/104).
-    let motor_value = motor_gear_value(intensity);
-    let motor_report: [u8; 2] = [0x02, motor_value];
-    send_touchpad_output_report(&motor_report)?;
+    // Step 2: WriteMotorGears — report ID 0x5D, payload = 2 LE shorts (gear pair)
+    let (g1, g2) = motor_gears(intensity);
+    let mut motor_payload = [0u8; 4];
+    motor_payload[..2].copy_from_slice(&g1.to_le_bytes());
+    motor_payload[2..].copy_from_slice(&g2.to_le_bytes());
+    let motor1 = build_touchpad_report(0x5D, &motor_payload, false);
+    send_touchpad_output_report(&motor1)?;
+    let motor2 = build_touchpad_report(0x5D, &motor_payload, true);
+    send_touchpad_output_report(&motor2)?;
 
     log::info!(
-        "[touchpad] WriteMotorGears: intensity={:?} motor_value={}",
+        "[touchpad] WriteMotorGears: intensity={:?} gears=({},{})",
         intensity,
-        motor_value
+        g1,
+        g2
     );
 
     Ok(())
@@ -732,27 +764,26 @@ fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> Hardw
 
 /// Send pressing sensitivity (force threshold) via HID output report.
 ///
-/// This replicates Xiaomi's SvrCModule.dll call chain:
-///   1. `OpenWriteForceThreshold(short, short, short, short)` → opens write session
-///   2. `WriteForceGears(int)` → sends the force threshold bytes
-///
-/// From the log: "write fore touch:HEXDUMP" where HEXDUMP is the raw byte payload.
-/// The hex dump is a 6-byte sequence that encodes the force threshold.
+/// This replicates Xiaomi's SvrCModule.dll call chain (verified by reverse
+/// engineering):
+///   `OpenWriteForceThreshold(a, b, c, d)` + `WriteForceGears` → report ID
+///   0x5B, payload = 4 × little-endian shorts (scaled threshold + params).
 #[cfg(windows)]
 fn send_force_threshold_hid_report(sensitivity: &TouchpadSensitivity) -> HardwareResult<()> {
-    let force_bytes = force_threshold_bytes(sensitivity);
-
-    // Build the output report: report ID + force threshold bytes
-    let mut report = [0u8; 8];
-    report[0] = 0x03; // Force threshold report ID
-    report[1..7].copy_from_slice(&force_bytes);
-
-    send_touchpad_output_report(&report)?;
+    let shorts = force_threshold_shorts(sensitivity);
+    let mut payload = [0u8; 8];
+    for (i, s) in shorts.iter().enumerate() {
+        payload[i * 2..i * 2 + 2].copy_from_slice(&s.to_le_bytes());
+    }
+    let report1 = build_touchpad_report(0x5B, &payload, false);
+    send_touchpad_output_report(&report1)?;
+    let report2 = build_touchpad_report(0x5B, &payload, true);
+    send_touchpad_output_report(&report2)?;
 
     log::info!(
-        "[touchpad] WriteForceGears: sensitivity={:?} force_bytes={:02X?}",
+        "[touchpad] WriteForceGears: sensitivity={:?} shorts={:?}",
         sensitivity,
-        force_bytes
+        shorts
     );
 
     Ok(())
