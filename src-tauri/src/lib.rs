@@ -5,7 +5,7 @@
 
 mod commands;
 mod debug_log;
-mod elev_bridge;
+pub mod elev_bridge;
 pub mod elevated;
 pub mod hw;
 mod state;
