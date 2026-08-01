@@ -11,6 +11,7 @@
 //! `C:\ProgramData\Microsoft\Windows Defender\Platform\<version>\MpCmdRun.exe`
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -183,16 +184,25 @@ pub fn update_signatures() -> HardwareResult<SecurityScanResult> {
 pub fn get_defender_status() -> HardwareResult<DefenderStatus> {
     #[cfg(windows)]
     {
-        // Read status from registry (no WMI SecurityCenter2 namespace needed)
-        let rt = read_defender_registry_bool("RealTimeProtectionEnabled").unwrap_or(false);
+        // Prefer the WMI MSFT_MPComputerStatus class (root\Microsoft\Windows\Defender),
+        // which reports the *actual* protection state. This is the same source that
+        // Windows Security uses and it is reliable regardless of registry key presence.
+        if let Ok(status) = get_defender_status_wmi() {
+            return Ok(status);
+        }
+        // Fallback: registry-based status with corrected semantics.
+        // A missing DisableAntiVirus/DisableAntiSpyware value means the protection
+        // is ENABLED (default) — NOT disabled as the old code assumed.
+        let rt = read_defender_registry_bool("DisableRealtimeMonitoring")
+            .map(|v| !v) // 1 = monitoring disabled, 0 = enabled
+            .unwrap_or(true); // key absent = real-time protection enabled
         let av = read_defender_registry_bool("DisableAntiVirus")
             .map(|v| !v)
-            .unwrap_or(false);
+            .unwrap_or(true); // key absent = antivirus enabled
         let asw = read_defender_registry_bool("DisableAntiSpyware")
             .map(|v| !v)
-            .unwrap_or(false);
+            .unwrap_or(true); // key absent = antispyware enabled
 
-        let definitions_updated = read_defender_registry_string("SignaturesLastUpdated");
         let engine_version = read_defender_registry_string("EngineVersion");
         let product_version = read_defender_registry_string("ProductVersion");
 
@@ -202,7 +212,8 @@ pub fn get_defender_status() -> HardwareResult<DefenderStatus> {
             antivirus_enabled: av,
             antispyware_enabled: asw,
             real_time_protection: rt,
-            definitions_updated,
+            definitions_updated: read_defender_registry_string("SignaturesLastUpdated")
+                .map(format_registry_filetime),
             engine_version: engine_version.clone(),
             product_version,
             signature_version: read_defender_registry_string("AVSignatureVersion"),
@@ -212,6 +223,126 @@ pub fn get_defender_status() -> HardwareResult<DefenderStatus> {
     #[cfg(not(windows))]
     Err(HardwareError::NotSupported(
         "Security scan only available on Windows".into(),
+    ))
+}
+
+/// Read Defender status from the WMI `MSFT_MPComputerStatus` class.
+///
+/// NOTE: This provider rejects `SELECT <columns> FROM` queries with
+/// `WBEM_E_INVALID_QUERY` (0x80041017) — it only accepts `SELECT *`. That is
+/// why we select all columns and extract the fields we need.
+#[cfg(windows)]
+fn get_defender_status_wmi() -> HardwareResult<DefenderStatus> {
+    use std::collections::HashMap;
+
+    let status = crate::hw::wmi_cache::with_defender(|wmi| {
+        let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+            .raw_query("SELECT * FROM MSFT_MPComputerStatus")
+            .context("MSFT_MPComputerStatus query")?;
+        rows.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!("MSFT_MPComputerStatus returned no rows (Defender likely replaced by third-party AV)")
+        })
+    })?;
+
+    let av = crate::util::wmi_extract::extract_bool(&status, "AntivirusEnabled").unwrap_or(false);
+    let asw =
+        crate::util::wmi_extract::extract_bool(&status, "AntispywareEnabled").unwrap_or(false);
+    let rt = crate::util::wmi_extract::extract_bool(&status, "RealTimeProtectionEnabled")
+        .unwrap_or(false);
+
+    let wmi_datetime = |key: &str| -> Option<String> {
+        let s = crate::util::wmi_extract::extract_string(&status, key)?;
+        // WMI DATETIME format: "20260801091242.000000-000" → ISO-ish readable.
+        if s.len() >= 14 {
+            let (y, mo, d, h, mi, se) = (
+                &s[0..4],
+                &s[4..6],
+                &s[6..8],
+                &s[8..10],
+                &s[10..12],
+                &s[12..14],
+            );
+            Some(format!("{y}-{mo}-{d} {h}:{mi}:{se}"))
+        } else {
+            Some(s)
+        }
+    };
+
+    Ok(DefenderStatus {
+        installed: find_mpcmdrun().is_ok(),
+        enabled: av || asw || rt,
+        antivirus_enabled: av,
+        antispyware_enabled: asw,
+        real_time_protection: rt,
+        definitions_updated: wmi_datetime("AntivirusSignatureLastUpdated"),
+        engine_version: crate::util::wmi_extract::extract_string(&status, "EngineVersion"),
+        product_version: crate::util::wmi_extract::extract_string(&status, "ProductVersion"),
+        signature_version: crate::util::wmi_extract::extract_string(
+            &status,
+            "AntivirusSignatureVersion",
+        ),
+        last_scan_time: wmi_datetime("QuickScanEndTime"),
+    })
+}
+
+/// Convert a registry FILETIME-encoded REG_BINARY value to a readable date
+/// string, or return the raw value if it cannot be parsed.
+///
+/// The registry value read as a Rust `String` may contain the raw FILETIME
+/// bytes (8 bytes) as UTF-8 (non-ASCII bytes preserved). We reinterpret them
+/// as a little-endian u64 and convert with civil-from-days arithmetic to avoid
+/// a chrono dependency.
+#[cfg(windows)]
+fn format_registry_filetime(raw: String) -> String {
+    // If it's a plain ASCII date string already, return it as-is.
+    if raw
+        .bytes()
+        .all(|b| b.is_ascii() && (b.is_ascii_digit() || b.is_ascii_punctuation()))
+    {
+        return raw;
+    }
+
+    let bytes = raw.as_bytes();
+    if bytes.len() == 8 {
+        let mut le = [0u8; 8];
+        le.copy_from_slice(bytes);
+        let ft = u64::from_le_bytes(le);
+        // FILETIME: 100ns intervals since 1601-01-01.
+        // Unix epoch (1970-01-01) offset: 11644473600 seconds.
+        const EPOCH_OFFSET_SECS: u64 = 11_644_473_600;
+        if ft >= EPOCH_OFFSET_SECS * 10_000_000 {
+            let unix_secs = (ft / 10_000_000) - EPOCH_OFFSET_SECS;
+            if let Some(s) = format_unix_secs(unix_secs as i64) {
+                return s;
+            }
+        }
+    }
+    raw
+}
+
+/// Format a Unix timestamp (seconds) as `YYYY-MM-DD HH:MM:SS` using
+/// civil-from-days arithmetic (no external date library).
+#[cfg(windows)]
+fn format_unix_secs(secs: i64) -> Option<String> {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    // Howard Hinnant's civil_from_days algorithm.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y, m, d, hh, mm, ss
     ))
 }
 
@@ -340,11 +471,20 @@ fn parse_threat_list(output: &str) -> Vec<ThreatEntry> {
 fn read_defender_registry_bool(value_name: &str) -> Option<bool> {
     use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let key = hklm
-        .open_subkey(r"SOFTWARE\Microsoft\Windows Defender\Real-Time Protection")
-        .or_else(|_| hklm.open_subkey(r"SOFTWARE\Microsoft\Windows Defender"))
-        .ok()?;
-    key.get_value::<u32, _>(value_name).ok().map(|v| v != 0)
+    // Try each subkey in order; a value may live in only one of them.
+    // The old code opened only the first subkey and never fell back to the
+    // second, so it returned None for values that existed in the parent key.
+    for path in [
+        r"SOFTWARE\Microsoft\Windows Defender\Real-Time Protection",
+        r"SOFTWARE\Microsoft\Windows Defender",
+    ] {
+        if let Ok(key) = hklm.open_subkey(path) {
+            if let Ok(v) = key.get_value::<u32, _>(value_name) {
+                return Some(v != 0);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(windows)]

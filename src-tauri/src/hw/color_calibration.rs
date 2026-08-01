@@ -266,6 +266,18 @@ fn enumerate_display_profiles() -> Vec<ColorProfileInfo> {
 
 #[cfg(windows)]
 fn get_display_icc_profile(device_name: &str) -> Option<String> {
+    // Try the legacy GDI path first (works on some systems).
+    if let Some(path) = get_icm_profile_gdi(device_name) {
+        return Some(path);
+    }
+    // Fallback: WCS (Windows Color System) default profile for the display.
+    // This is the API that Windows Settings actually uses for per-display
+    // profile association on modern Windows 10/11.
+    get_wcs_default_profile(device_name)
+}
+
+#[cfg(windows)]
+fn get_icm_profile_gdi(device_name: &str) -> Option<String> {
     let device_w: Vec<u16> = device_name
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -285,7 +297,6 @@ fn get_display_icc_profile(device_name: &str) -> Option<String> {
             windows::core::PCSTR(b"GetICMProfileW\0".as_ptr()),
         )?;
 
-        // Create a DC for the display device
         let hdc = windows::Win32::Graphics::Gdi::CreateDCW(
             windows::core::PCWSTR(device_w.as_ptr()),
             windows::core::PCWSTR::null(),
@@ -298,12 +309,10 @@ fn get_display_icc_profile(device_name: &str) -> Option<String> {
             return None;
         }
 
-        // GetICMProfileW(HDC, LPDWORD, LPWSTR) -> BOOL
         let get_icm_profile: unsafe extern "system" fn(usize, *mut u32, *mut u16) -> i32 =
             std::mem::transmute(proc);
         let r = get_icm_profile(hdc.0 as usize, &mut size, profile_path.as_mut_ptr());
 
-        // Clean up
         let _ = windows::Win32::Graphics::Gdi::DeleteDC(hdc);
         let _ = windows::Win32::Foundation::FreeLibrary(mscms);
         r
@@ -319,6 +328,95 @@ fn get_display_icc_profile(device_name: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(windows)]
+fn get_wcs_default_profile(device_name: &str) -> Option<String> {
+    // WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER = 1
+    const WCS_SCOPE_CURRENT_USER: u32 = 1;
+    // COLORPROFILETYPE values from mscms.h
+    const CPT_ICC: u32 = 1;
+    // COLORPROFILESUBTYPE values from mscms.h; CPST_NONE asks for the device profile.
+    const CPST_NONE: u32 = 0;
+
+    // WCS uses the bare display name (e.g. "DISPLAY1") without the \\.\ prefix.
+    let wcs_device = device_name
+        .strip_prefix(r"\\.\")
+        .unwrap_or(device_name)
+        .to_ascii_uppercase();
+    let device_w: Vec<u16> = wcs_device
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mscms = windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::PCSTR(
+            b"mscms.dll\0".as_ptr(),
+        ))
+        .ok()?;
+
+        let size_proc = windows::Win32::System::LibraryLoader::GetProcAddress(
+            mscms,
+            windows::core::PCSTR(b"WcsGetDefaultColorProfileSize\0".as_ptr()),
+        )?;
+        let get_proc = windows::Win32::System::LibraryLoader::GetProcAddress(
+            mscms,
+            windows::core::PCSTR(b"WcsGetDefaultColorProfile\0".as_ptr()),
+        )?;
+
+        let wcs_get_size: unsafe extern "system" fn(
+            u32,
+            *const u16,
+            u32,
+            u32,
+            u32,
+            *mut u32,
+        ) -> i32 = std::mem::transmute(size_proc);
+        let wcs_get_profile: unsafe extern "system" fn(
+            u32,
+            *const u16,
+            u32,
+            u32,
+            u32,
+            u32,
+            *mut u16,
+        ) -> i32 = std::mem::transmute(get_proc);
+
+        let mut size = 0u32;
+        let r_size = wcs_get_size(
+            WCS_SCOPE_CURRENT_USER,
+            device_w.as_ptr(),
+            CPT_ICC,
+            CPST_NONE,
+            0,
+            &mut size,
+        );
+        if r_size == 0 || size == 0 || size > 4096 {
+            let _ = windows::Win32::Foundation::FreeLibrary(mscms);
+            return None;
+        }
+
+        let mut profile_name: Vec<u16> = vec![0; size as usize];
+        let r = wcs_get_profile(
+            WCS_SCOPE_CURRENT_USER,
+            device_w.as_ptr(),
+            CPT_ICC,
+            CPST_NONE,
+            0,
+            size * std::mem::size_of::<u16>() as u32,
+            profile_name.as_mut_ptr(),
+        );
+        let _ = windows::Win32::Foundation::FreeLibrary(mscms);
+
+        if r != 0 {
+            let name = String::from_utf16_lossy(&profile_name);
+            let name = name.trim_end_matches('\0').to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(windows)]

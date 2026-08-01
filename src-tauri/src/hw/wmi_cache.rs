@@ -15,6 +15,8 @@ use wmi::{COMLibrary, WMIConnection};
 pub const NS_CIMV2: &str = "ROOT\\CIMV2";
 /// Namespace for WMI-level queries (BatteryStatus, WmiMonitorBrightness, etc.).
 pub const NS_WMI: &str = "ROOT\\WMI";
+/// Namespace for Windows Defender status (MSFT_MPComputerStatus).
+pub const NS_DEFENDER: &str = "ROOT\\Microsoft\\Windows\\Defender";
 
 thread_local! {
     /// Per-thread cached WMI connections.
@@ -26,13 +28,14 @@ thread_local! {
 struct WmiThreadCache {
     cimv2: WMIConnection,
     wmi: WMIConnection,
+    defender: Option<WMIConnection>,
 }
 
 impl WmiThreadCache {
     fn init() -> anyhow::Result<Self> {
-        // COM is reference-counted per thread, so creating two COMLibrary
+        // COM is reference-counted per thread, so creating multiple COMLibrary
         // instances on the same thread is safe — CoInitializeEx is called
-        // twice and CoUninitialize is called twice on drop.
+        // per instance and CoUninitialize is called on each drop.
         let com_cimv2 = COMLibrary::new().map_err(|e| HardwareError::WmiQuery {
             query: "COMLibrary::new cimv2".into(),
             source: Box::new(e),
@@ -53,7 +56,15 @@ impl WmiThreadCache {
                 source: Box::new(e),
             }
         })?;
-        Ok(Self { cimv2, wmi })
+        // Defender namespace may not exist on systems without Defender — do not fail.
+        let defender = COMLibrary::new()
+            .ok()
+            .and_then(|com| WMIConnection::with_namespace_path(NS_DEFENDER, com).ok());
+        Ok(Self {
+            cimv2,
+            wmi,
+            defender,
+        })
     }
 }
 
@@ -167,6 +178,40 @@ where
         }
         Ok(_) => {}
     }
+    result.map_err(HardwareError::from)
+}
+
+/// Execute a closure with the cached `ROOT\Microsoft\Windows\Defender`
+/// connection (MSFT_MPComputerStatus).
+///
+/// Returns `HardwareError::WmiConnection` when the Defender WMI namespace is
+/// unavailable (e.g. Defender replaced by a third-party AV). Callers should
+/// fall back to the registry-based status in that case.
+pub fn with_defender<F, T>(f: F) -> HardwareResult<T>
+where
+    F: Fn(&WMIConnection) -> anyhow::Result<T>,
+{
+    let result: anyhow::Result<T> = WMI_CACHE.with(|cell| {
+        let mut cache_ref = cell.borrow_mut();
+        if cache_ref.is_none() {
+            match WmiThreadCache::init() {
+                Ok(cache) => *cache_ref = Some(cache),
+                Err(e) => {
+                    log::warn!("WMI cache: cache initialization failed: {e}");
+                    return Err(e);
+                }
+            }
+        }
+        match cache_ref.as_ref().and_then(|c| c.defender.as_ref()) {
+            Some(conn) => f(conn),
+            None => {
+                log::debug!("WMI cache: Defender namespace unavailable");
+                Err(anyhow::anyhow!(HardwareError::WmiConnection(
+                    "Defender WMI namespace not available".to_string(),
+                )))
+            }
+        }
+    });
     result.map_err(HardwareError::from)
 }
 
