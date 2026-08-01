@@ -12,6 +12,17 @@ use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, Ordering};
 /// retry a DLL that cannot load — avoids a WARN log on every brightness change.
 static IGCL_SET_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
+/// S32-003: Set while the Windows display color calibration wizard (dccw.exe)
+/// is open. While set, the adaptive-brightness loop stops touching the
+/// backlight/LUT so the wizard can save its calibration without
+/// "Access is denied" (the LUT would otherwise be locked by our gamma ramp).
+pub static CALIBRATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` while the display color calibration wizard is running.
+pub fn is_calibration_in_progress() -> bool {
+    CALIBRATION_IN_PROGRESS.load(Ordering::Relaxed)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DisplayInfo {
     pub brightness: u8,
@@ -498,6 +509,14 @@ pub async fn adaptive_brightness_loop() {
     let mut adaptbright_suppressed = false;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // S32-003: While the display color calibration wizard is open, do NOT
+        // touch the backlight. Writing brightness while dccw.exe is saving its
+        // gamma ramp causes "Access is denied" / "Close other programs".
+        if CALIBRATION_IN_PROGRESS.load(Ordering::Relaxed) {
+            log::debug!("[adaptive_brightness] paused — color calibration in progress");
+            continue;
+        }
 
         // Skip the iteration when the display is off (lid closed, sleep, etc.)
         // to avoid wasting CPU and fighting with the OS power manager.

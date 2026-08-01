@@ -207,23 +207,74 @@ pub fn open_color_management_settings() -> HardwareResult<()> {
 }
 
 /// Launch Windows Display Color Calibration (dccw.exe).
+///
+/// S32-003: While the wizard is open we set `CALIBRATION_IN_PROGRESS` so the
+/// adaptive-brightness loop stops touching the backlight, and we temporarily
+/// reset our eye-protection gamma ramp. Both would otherwise lock the display
+/// LUT and make the wizard fail to save with "Access is denied / Close other
+/// programs". When the wizard process exits, the flag is cleared and eye
+/// protection is restored.
 pub fn launch_color_calibration_wizard() -> HardwareResult<()> {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+
         let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
         let dccw = format!("{}\\System32\\dccw.exe", system_root);
-        std::process::Command::new(&dccw)
+
+        // Remember whether eye protection was on so we can restore it.
+        let eye_was_on = crate::hw::eye_protection::get_eye_protection()
+            .map(|s| s.enabled)
+            .unwrap_or(false);
+        let eye_intensity = crate::hw::eye_protection::get_eye_protection()
+            .ok()
+            .map(|s| s.intensity);
+
+        // Pause our display control: stop the adaptive loop + release the LUT.
+        crate::hw::display::CALIBRATION_IN_PROGRESS
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if eye_was_on {
+            // Temporarily disable eye protection so the LUT is free for dccw.
+            let _ = crate::hw::eye_protection::set_eye_protection(false, None);
+        }
+
+        let spawned = std::process::Command::new(&dccw)
             .creation_flags(0x0800_0000)
-            .spawn()
-            .map_err(|e| {
-                HardwareError::Other(format!("Failed to launch color calibration wizard: {e}"))
-            })?;
+            .spawn();
+
+        // Spawn a watcher thread that waits for the wizard to exit, then
+        // restores our display state. Runs detached from the caller.
+        let _ = eye_intensity;
+        std::thread::spawn(move || {
+            let mut child = match spawned {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("Failed to launch color calibration wizard: {e}");
+                    restore_after_calibration(eye_was_on, None);
+                    return;
+                }
+            };
+            // Block this thread until the wizard process exits (up to 10 min).
+            let _ = child.wait();
+            restore_after_calibration(eye_was_on, None);
+        });
+
         Ok(())
     }
     #[cfg(not(windows))]
     Err(HardwareError::NotSupported(
         "Color calibration wizard only available on Windows".into(),
     ))
+}
+
+/// Clear the calibration-in-progress flag and restore eye protection.
+#[cfg(windows)]
+fn restore_after_calibration(eye_was_on: bool, _intensity: Option<u8>) {
+    crate::hw::display::CALIBRATION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    if eye_was_on {
+        let _ = crate::hw::eye_protection::set_eye_protection(true, None);
+    }
+    log::info!("Color calibration wizard closed — display control restored");
 }
 
 /// Get the path to the system sRGB color profile.
