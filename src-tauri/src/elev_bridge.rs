@@ -1,19 +1,18 @@
 //! Bridge from the main (unprivileged) process to the elevated helper task.
 //!
 //! Every privileged hardware operation is dispatched through here:
-//!   1. Write a JSON command to `%LOCALAPPDATA%\MiControl\elev_cmd_<request_id>.json`
-//!   2. Trigger the `MiControlElevated` scheduled task via `schtasks /run`
-//!      (the task was created at install time with RunLevel = Highest,
-//!      so it runs with administrator rights, no UAC prompt)
-//!   3. Poll `%LOCALAPPDATA%\MiControl\elev_result_<request_id>.json` until it appears
-//!      (timeout: 15 s)
-//!   4. Return the `data` field on success, or `Err(error_message)`.
+//!   0. Try the autonomous `MiControlBridge` Windows service via named pipe
+//!      `\\.\pipe\micontrol_bridge` (installed at install time, runs as
+//!      `NT AUTHORITY\SYSTEM` — NO UAC prompt ever, even after reboot).
+//!   1. If the service is not installed/running, fall back to the
+//!      `MiControlElevated` scheduled task: write a JSON command to
+//!      `%LOCALAPPDATA%\MiControl\elev_cmd_<request_id>.json`, trigger the task
+//!      via `schtasks /run`, poll the result file.
+//!   2. As a last resort (dev mode / no installer), fall back to a UAC prompt.
 //!
-//! **Dev-mode fallback**: when the scheduled task is absent (e.g. running
-//! straight from `cargo tauri dev` without an installer), step 2 falls back to
-//! `ShellExecuteExW` with verb "runas", which triggers a UAC prompt and runs
-//! the current binary as `micontrol.exe --elevated --request-id <id>`.
-//! only a dev ergonomics aid; production always uses the scheduled task.
+//! The service pipe is the preferred, fully-autonomous path: after
+//! installation the app NEVER prompts for elevation. The scheduled task and
+//! UAC paths remain only for development and for self-healing a broken install.
 
 use crate::util::auth;
 use serde_json::Value;
@@ -23,6 +22,8 @@ use tokio::sync::Mutex;
 
 /// Name of the scheduled task registered by the NSIS installer.
 const TASK_NAME: &str = "MiControlElevated";
+/// Named pipe of the autonomous elevated service installed at install time.
+const BRIDGE_PIPE_NAME: &str = r"\\.\pipe\micontrol_bridge";
 const POLL_INTERVAL_MS: u64 = 150;
 const ELEV_TIMEOUT_SECS: u64 = 15;
 const STALE_FILE_MAX_AGE_SECS: u64 = 120;
@@ -71,7 +72,8 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
     }
 }
 
-/// Dispatch a privileged command through the scheduled elevated task.
+/// Dispatch a privileged command through the autonomous elevated service,
+/// the scheduled elevated task, or (last resort) a UAC prompt.
 ///
 /// `cmd` must match one of the branches in `elevated::dispatch()`.
 /// `args` is the JSON arguments object (use `serde_json::json!({...})`).
@@ -102,6 +104,13 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
         .await
         .map_err(|e| format!("blocking task panicked: {e}"))?;
     }
+
+    // ── Preferred path: autonomous MiControlBridge service pipe ─────────────
+    // The service runs as SYSTEM since installation — no UAC prompt ever.
+    if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
+        return Ok(response);
+    }
+    // Service pipe unavailable — fall through to the scheduled task.
 
     let dir = crate::elevated::elev_dir();
     // S26-006: Wrap in spawn_blocking — cleanup_stale_elev_files() uses std::fs::read_dir.
@@ -304,6 +313,153 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
             }
         }
     }
+}
+
+/// Send a privileged command to the autonomous `MiControlBridge` service over
+/// the named pipe `\\.\pipe\micontrol_bridge`.
+///
+/// The bridge service runs as `NT AUTHORITY\SYSTEM` since installation, so
+/// this path NEVER triggers a UAC prompt. Authentication uses the same
+/// HMAC-SHA256 shared key as the scheduled-task path, plus a freshness window.
+///
+/// Returns `Err` when the service is not installed/running or the command
+/// fails; the caller falls back to the scheduled task in that case.
+#[cfg(windows)]
+async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
+    let request_id = make_request_id();
+    let nonce = auth::generate_nonce();
+    let mut payload = serde_json::json!({
+        "protocol_version": 3,
+        "request_id": request_id,
+        "created_at_ms": auth::now_ms(),
+        "nonce": nonce,
+        "caller_pid": std::process::id(),
+        "cmd": cmd,
+        "args": args,
+    });
+
+    // Sign the payload (same shared key as the scheduled-task bridge).
+    let key = tokio::task::spawn_blocking(auth::get_or_create_key)
+        .await
+        .map_err(|e| format!("HMAC key task panicked: {e}"))?
+        .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
+    auth::sign_payload(&mut payload, &key);
+
+    // Open the pipe (blocking — do it on a blocking thread).
+    let body = payload.to_string();
+    let result: Result<String, String> = tokio::task::spawn_blocking(move || pipe_request(&body))
+        .await
+        .map_err(|e| format!("pipe request task panicked: {e}"))?;
+
+    let content = result?;
+
+    // Parse + verify response.
+    let mut v: Value =
+        serde_json::from_str(&content).map_err(|e| format!("Invalid bridge response JSON: {e}"))?;
+    if let Err(e) = auth::verify_payload(&mut v, &key) {
+        log::warn!("Bridge response HMAC verification failed: {e}");
+        return Err(format!("Bridge response authentication failed: {e}"));
+    }
+
+    let resp_req = v["request_id"].as_str().unwrap_or_default();
+    if resp_req != request_id {
+        return Err(format!(
+            "Bridge response request_id mismatch (expected {}, got {})",
+            request_id, resp_req
+        ));
+    }
+
+    if v["ok"].as_bool().unwrap_or(false) {
+        Ok(v["data"].clone())
+    } else {
+        Err(v["error"]
+            .as_str()
+            .unwrap_or("bridge service failed")
+            .to_string())
+    }
+}
+
+#[cfg(not(windows))]
+async fn run_via_service_pipe(_cmd: &str, _args: Value) -> Result<Value, String> {
+    Err("Bridge service pipe only available on Windows".to_string())
+}
+
+/// Perform a synchronous request/response round-trip on the bridge named pipe.
+#[cfg(windows)]
+fn pipe_request(body: &str) -> Result<String, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+
+    let path_w: Vec<u16> = std::ffi::OsStr::new(BRIDGE_PIPE_NAME)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(path_w.as_ptr()),
+            (GENERIC_READ | GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            HANDLE::default(),
+        )
+        .map_err(|e| format!("Open bridge pipe: {e}"))?
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return Err("INVALID_HANDLE_VALUE opening bridge pipe".to_string());
+    }
+
+    // Write the request.
+    let req_bytes = body.as_bytes();
+    let mut written = 0u32;
+    unsafe {
+        WriteFile(handle, Some(req_bytes), Some(&mut written), None)
+            .map_err(|e| format!("WriteFile bridge pipe: {e}"))?;
+    }
+
+    // Read the response (loop until full JSON object).
+    let mut response_buf = [0u8; 16384];
+    let mut total_read = 0usize;
+    loop {
+        if total_read >= response_buf.len() {
+            break;
+        }
+        let mut bytes_read = 0u32;
+        let result = unsafe {
+            ReadFile(
+                handle,
+                Some(&mut response_buf[total_read..]),
+                Some(&mut bytes_read),
+                None,
+            )
+        };
+        if result.is_err() || bytes_read == 0 {
+            break;
+        }
+        total_read += bytes_read as usize;
+        if total_read > 0 && response_buf[total_read - 1] == b'}' {
+            break;
+        }
+    }
+
+    unsafe {
+        CloseHandle(handle).ok();
+    }
+
+    if total_read == 0 {
+        return Err("No response from bridge service".to_string());
+    }
+    Ok(String::from_utf8_lossy(&response_buf[..total_read]).to_string())
 }
 
 /// Run `schtasks /run /tn MiControlElevated` with CREATE_NO_WINDOW to avoid

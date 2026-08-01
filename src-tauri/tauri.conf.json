@@ -42,7 +42,8 @@
     "resources": {
       "drivers/VirtualControlHID/*": "drivers/VirtualControlHID/",
       "drivers/IoTDriver/*": "drivers/IoTDriver/",
-      "bin/ecram_service.exe": "ecram_service.exe"
+      "bin/ecram_service.exe": "ecram_service.exe",
+      "bin/micontrol_bridge.exe": "micontrol_bridge.exe"
     },
     "windows": {
       "nsis": {

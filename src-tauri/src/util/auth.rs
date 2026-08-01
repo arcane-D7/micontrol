@@ -1,10 +1,15 @@
 //! HMAC-SHA256 authentication for the elevated bridge protocol.
 //!
-//! Both the main process and the elevated helper share a secret key stored in
-//! `%LOCALAPPDATA%\MiControl\elev_key.bin`.  Every command and response message
+//! Both the main process and the elevated helper (scheduled task AND the
+//! autonomous `MiControlBridge` SYSTEM service) share a secret key stored in
+//! `%ProgramData%\MiControl\elev_key.bin`.  Every command and response message
 //! includes an `hmac` field computed over the JSON body (excluding the `hmac`
 //! field itself).  The elevated helper rejects any command whose HMAC does not
 //! verify, preventing an attacker from injecting commands via file swapping.
+//!
+//! The key is stored under `ProgramData` (not `LOCALAPPDATA`) so that both the
+//! interactive user process and the SYSTEM service can read the same key. The
+//! file is ACL-restricted to the current user + SYSTEM.
 
 use fs2::FileExt;
 use hmac::{Hmac, Mac};
@@ -19,8 +24,15 @@ type HmacSha256 = Hmac<Sha256>;
 pub const MAX_COMMAND_AGE_MS: u64 = 30_000;
 
 /// Returns the path to the shared HMAC key file.
-/// `%LOCALAPPDATA%\MiControl\elev_key.bin`
+/// `%ProgramData%\MiControl\elev_key.bin`
 fn key_path() -> PathBuf {
+    let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".to_string());
+    PathBuf::from(base).join("MiControl").join("elev_key.bin")
+}
+
+/// Legacy key path used before the autonomous bridge service existed.
+/// `%LOCALAPPDATA%\MiControl\elev_key.bin`
+fn legacy_key_path() -> PathBuf {
     crate::elevated::elev_dir().join("elev_key.bin")
 }
 
@@ -29,6 +41,10 @@ fn key_path() -> PathBuf {
 /// The key is 32 random bytes generated on first call and persisted to disk.
 /// Both the main process and the elevated helper call this to obtain the key.
 pub fn get_or_create_key() -> Result<Vec<u8>, String> {
+    // Migrate a legacy LOCALAPPDATA key into ProgramData so an existing
+    // installation keeps working across the bridge-service upgrade.
+    migrate_legacy_key();
+
     let path = key_path();
 
     // Ensure the parent directory exists
@@ -108,12 +124,47 @@ pub fn get_or_create_key() -> Result<Vec<u8>, String> {
 /// Used by the elevated helper: if the key file is missing or unreadable,
 /// all commands are rejected.
 pub fn read_key() -> Result<Vec<u8>, String> {
+    migrate_legacy_key();
     let path = key_path();
     let bytes = std::fs::read(&path).map_err(|e| format!("Cannot read HMAC key file: {e}"))?;
     if bytes.len() != 32 {
         return Err("HMAC key file is corrupt (wrong length)".to_string());
     }
     Ok(bytes)
+}
+
+/// Migrate a legacy `%LOCALAPPDATA%\MiControl\elev_key.bin` key into the
+/// shared `%ProgramData%\MiControl\elev_key.bin` location.
+///
+/// Called by both the main process and the elevated helper so an existing
+/// installation (pre-bridge-service) keeps a working shared key after upgrade.
+/// If a ProgramData key already exists it wins (no overwrite). If the legacy
+/// key exists and no ProgramData key exists, the legacy key is copied (not
+/// moved) so the scheduled-task path keeps working during transition.
+fn migrate_legacy_key() {
+    let new_path = key_path();
+    if new_path.exists() {
+        return;
+    }
+    let legacy = legacy_key_path();
+    if !legacy.exists() {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(&legacy) else {
+        return;
+    };
+    if bytes.len() != 32 {
+        return;
+    }
+    if let Some(parent) = new_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(_) = std::fs::write(&new_path, &bytes) else {
+        return;
+    };
+    // Best-effort ACL restriction on the new key file.
+    let _ = restrict_file_acl(&new_path);
+    log::info!("Migrated HMAC key from LOCALAPPDATA to ProgramData");
 }
 
 /// Compute the HMAC-SHA256 tag for the given data, returned as a hex string.

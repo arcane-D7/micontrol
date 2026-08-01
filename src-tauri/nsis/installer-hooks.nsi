@@ -127,6 +127,16 @@ FunctionEnd
   Delete "$TEMP\MCElev.xml"
   DetailPrint "MiControlElevated task registered: $0"
 
+  ; ── Autonomous elevated bridge service (MiControlBridge) ────────────────────
+  ; Installed as a Windows service running as NT AUTHORITY\SYSTEM. Provides a
+  ; named pipe (\\.\pipe\micontrol_bridge) for privileged commands WITHOUT any
+  ; UAC prompt after installation. The main app prefers this path; the
+  ; scheduled task above remains only as a fallback.
+  DetailPrint "Instalando serviço MiControlBridge (bridge elevada autónoma)..."
+  nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" install'
+  Pop $0
+  DetailPrint "MiControlBridge service install: $0"
+
   DetailPrint "Configuração de hardware concluída."
 !macroend
 
@@ -141,6 +151,11 @@ FunctionEnd
   nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "MiControlElevated" /f'
   Pop $0
   DetailPrint "MiControlElevated task removed: $0"
+
+  ; Remove the autonomous bridge service (if present)
+  nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" uninstall'
+  Pop $0
+  DetailPrint "MiControlBridge service removed: $0"
 
   ; Stop and remove the IoTService Windows service
   nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
