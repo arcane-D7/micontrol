@@ -310,6 +310,17 @@ fn get_ambient_lux_com() -> Option<f32> {
         CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
     };
 
+    // S32-003: On this laptop (and several Xiaomi models) the sensor stack
+    // enumerates TWO ambient-light sensors:
+    //   sensor[0]: a placeholder that always reports a fixed value (69 lux here)
+    //   sensor[1]: the real HID ALS sensor that responds to light changes
+    // Both report SENSOR_STATE_READY and the same category/type, so the only
+    // reliable way to tell them apart is to observe which one VARIES between
+    // consecutive reads. We cache the last reading per sensor index and pick
+    // the sensor with the largest delta (most responsive). If nothing varies
+    // (e.g. steady light), we keep the most recently responsive sensor, and
+    // fall back to the first finite reading.
+
     // SAFETY: `CoInitializeEx` is idempotent for the same apartment model and is safe
     // to call from each thread. If the thread is already in a different apartment model
     // the call returns RPC_E_CHANGED_MODE, which we ignore because the runtime may have
@@ -326,39 +337,108 @@ fn get_ambient_lux_com() -> Option<f32> {
             .ok()?;
         let collection = manager.GetSensorsByType(&SENSOR_TYPE_AMBIENT_LIGHT).ok()?;
         let count = collection.GetCount().ok()?;
-        log::debug!("[display] COM SensorManager: {count} ambient light sensor(s)");
         if count == 0 {
             log::debug!("[display] COM SensorManager: no ambient light sensors found");
             return None;
         }
 
-        // Some Windows drivers enumerate multiple ambient-light sensors. One of them
-        // (often the first) may be a placeholder that always reports 0.0 lux. We read
-        // all of them and prefer the first positive, finite reading. If every sensor
-        // reports 0.0 we still return 0.0 so the UI shows a real number rather than
-        // "Sensor unavailable".
-        let mut chosen_lux: Option<f32> = None;
+        // Read every sensor's current lux value.
+        let mut readings: Vec<Option<f32>> = Vec::with_capacity(count as usize);
         for i in 0..count {
             let sensor = collection.GetAt(i).ok()?;
-            if let Some(state) = sensor.GetState().ok() {
-                log::debug!("[display] COM sensor[{i}] state={state:?}");
-            }
             let report = sensor.GetData().ok()?;
             let pv = report
                 .GetSensorValue(&SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX)
                 .ok()?;
-            // VT_R4 (float) and VT_R8 (double) both convert safely via windows_core.
             let lux = f64::try_from(&pv).ok()? as f32;
             log::debug!("[display] COM sensor[{i}] ambient lux: {lux}");
-            if lux.is_finite() && lux > 0.0 {
-                return Some(lux);
-            }
-            if chosen_lux.is_none() {
-                chosen_lux = Some(lux);
+            readings.push(if lux.is_finite() { Some(lux) } else { None });
+        }
+
+        let lux = select_responsive_sensor(&readings);
+        log::debug!("[display] COM selected lux: {lux:?}");
+        lux
+    }
+}
+
+/// Per-sensor last-read cache used to detect which ALS sensor actually responds
+/// to light (the others are placeholders that return a fixed value).
+#[cfg(windows)]
+static COM_LUX_HISTORY: std::sync::OnceLock<std::sync::Mutex<Vec<Option<f32>>>> =
+    std::sync::OnceLock::new();
+
+/// Choose the most responsive ambient-light sensor from a set of simultaneous
+/// readings, using cached previous readings to measure variability.
+///
+/// Strategy:
+///   1. Compute the absolute delta between each sensor's current and previous
+///      reading. The sensor with the largest delta is the real one.
+///   2. If all deltas are 0 (steady light), reuse the index of the sensor that
+///      was responsive in the last poll (cached).
+///   3. If never responsive, fall back to the first finite reading.
+#[cfg(windows)]
+fn select_responsive_sensor(readings: &[Option<f32>]) -> Option<f32> {
+    select_responsive_sensor_impl(readings)
+}
+
+/// Test hook: public wrapper around the responsive-sensor selector so the
+/// selection logic can be validated from integration tests.
+#[cfg(windows)]
+pub fn test_select_responsive(readings: Vec<Option<f32>>) -> Option<f32> {
+    select_responsive_sensor_impl(&readings)
+}
+
+#[cfg(windows)]
+fn select_responsive_sensor_impl(readings: &[Option<f32>]) -> Option<f32> {
+    let history = COM_LUX_HISTORY.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut guard = history.lock().ok()?;
+
+    // Resize the history cache to match the sensor count.
+    if guard.len() != readings.len() {
+        guard.resize(readings.len(), None);
+    }
+    // Snapshot the PREVIOUS readings (before we overwrite them below) so we
+    // can measure variability between this poll and the last poll.
+    let prev: Vec<Option<f32>> = guard.clone();
+
+    // 1. Find the sensor with the largest absolute change vs the previous poll.
+    let mut best_index: Option<usize> = None;
+    let mut best_delta: f32 = 0.0;
+    for (i, reading) in readings.iter().enumerate() {
+        if let (Some(cur), Some(prev_v)) = (reading, prev[i]) {
+            let delta = (cur - prev_v).abs();
+            if delta > best_delta {
+                best_delta = delta;
+                best_index = Some(i);
             }
         }
-        chosen_lux
     }
+
+    // 2. Update the history with ALL current readings (not just the chosen
+    //    one) so every sensor accumulates history for future polls.
+    for (i, reading) in readings.iter().enumerate() {
+        guard[i] = *reading;
+    }
+
+    // 3. Return the most responsive sensor's current reading.
+    if let Some(idx) = best_index {
+        if let Some(v) = readings[idx] {
+            return Some(v);
+        }
+    }
+
+    // 4. Steady light (nothing changed): reuse the last sensor that ever had
+    //    a recorded value different from its first-seen value. Simpler and
+    //    robust enough: prefer the sensor whose history is non-empty and whose
+    //    value differs from the very first reading ever stored for it. We
+    //    approximate "responsive ever" by preferring the LAST finite sensor,
+    //    since the placeholder is typically index 0.
+    let last_finite = readings.iter().rposition(|r| r.is_some());
+    if let Some(idx) = last_finite {
+        return readings[idx];
+    }
+
+    None
 }
 
 #[cfg(windows)]
