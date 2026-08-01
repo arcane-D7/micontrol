@@ -262,6 +262,16 @@ pub async fn ensure_iot_service() -> Result<serde_json::Value, ErrorResponse> {
     Ok(result)
 }
 
+/// Ensure the autonomous MiControlBridge service is installed and running.
+/// Returns the service status. Called at startup by the backend and exposed
+/// so the UI can surface bridge status in the System tab.
+#[tauri::command]
+pub async fn ensure_bridge_service() -> Result<serde_json::Value, ErrorResponse> {
+    crate::elev_bridge::ensure_bridge_service()
+        .await
+        .map_err(ErrorResponse::from)
+}
+
 /// Get all available IoT device info via IoTService IPC.
 #[tauri::command]
 pub async fn get_iot_device_info() -> Result<IotDeviceInfo, ErrorResponse> {

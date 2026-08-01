@@ -28,6 +28,69 @@ const POLL_INTERVAL_MS: u64 = 150;
 const ELEV_TIMEOUT_SECS: u64 = 15;
 const STALE_FILE_MAX_AGE_SECS: u64 = 120;
 static ELEV_REQUEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// Returns `true` when the autonomous `MiControlBridge` service pipe is
+/// currently available (i.e. the service is installed and running).
+///
+/// Cheap check — a single `CreateFileW` on the pipe. Used at startup to
+/// decide whether to install the service.
+pub fn is_bridge_service_available() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+
+        let path_w: Vec<u16> = std::ffi::OsStr::new(BRIDGE_PIPE_NAME)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: path_w is a valid null-terminated wide string.
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(path_w.as_ptr()),
+                (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                windows::Win32::Foundation::HANDLE::default(),
+            )
+        };
+        match handle {
+            Ok(h) if h != INVALID_HANDLE_VALUE => {
+                unsafe {
+                    CloseHandle(h).ok();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Ensure the autonomous `MiControlBridge` service is installed and running.
+///
+/// If the service pipe is already available, returns immediately. Otherwise
+/// dispatches `ensure_bridge_service` through the elevated path (scheduled
+/// task, which is already elevated — no UAC). Callers typically invoke this
+/// once at app startup and log the result.
+pub async fn ensure_bridge_service() -> Result<Value, String> {
+    if is_bridge_service_available() {
+        return Ok(serde_json::json!({ "status": "already_running" }));
+    }
+    log::info!("MiControlBridge service not available — installing via elevated path");
+    run_elevated("ensure_bridge_service", serde_json::json!({})).await
+}
 static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
 /// Outcome of a task-path self-healing attempt.

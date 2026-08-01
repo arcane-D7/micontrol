@@ -1536,6 +1536,15 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
+        // S32-002: Install + start the autonomous MiControlBridge service.
+        // Called once (usually at app startup) when the service pipe is not
+        // available. Uses the bundled micontrol_bridge.exe `install` command.
+        // Runs via the scheduled task (already elevated) so it never prompts UAC.
+        "ensure_bridge_service" => match install_bridge_service() {
+            Ok(status) => make_ok(serde_json::to_value(status).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
+
         unknown => make_err(format!("Unknown elevated command: {unknown}")),
     }
 }
@@ -1554,6 +1563,81 @@ pub fn dispatch_cmd(cmd: &str, args: Value) -> Value {
         cmd: cmd.to_string(),
         args,
     })
+}
+
+/// S32-002: Install and start the autonomous `MiControlBridge` service.
+///
+/// Locates the bundled `micontrol_bridge.exe` (next to the current exe, in
+/// Program Files, or in the dev target dir) and runs its `install` command.
+/// Returns a status object describing the outcome.
+#[cfg(windows)]
+fn install_bridge_service() -> Result<Value, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    // Find the bridge executable.
+    let bridge_exe = find_bridge_exe().ok_or_else(|| {
+        "micontrol_bridge.exe not found (not bundled with this installation)".to_string()
+    })?;
+
+    let output = Command::new(&bridge_exe)
+        .arg("install")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("Failed to run micontrol_bridge install: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let combined = if stdout.is_empty() { stderr } else { stdout };
+    let exit_ok = output.status.success();
+
+    Ok(json!({
+        "exit_code": output.status.code().unwrap_or(-1),
+        "output": combined,
+        "service_installed": exit_ok,
+    }))
+}
+
+#[cfg(not(windows))]
+fn install_bridge_service() -> Result<Value, String> {
+    Err("Bridge service only supported on Windows".to_string())
+}
+
+/// Locate the bundled `micontrol_bridge.exe`.
+#[cfg(windows)]
+fn find_bridge_exe() -> Option<PathBuf> {
+    // 1. Same directory as current exe (installed mode).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("micontrol_bridge.exe");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    // 2. Program Files\miControl.
+    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+    let candidate = PathBuf::from(&pf)
+        .join("miControl")
+        .join("micontrol_bridge.exe");
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    // 3. Dev target dir.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let candidate = PathBuf::from(manifest)
+        .join("target")
+        .join("debug")
+        .join("micontrol_bridge.exe");
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn find_bridge_exe() -> Option<PathBuf> {
+    None
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
