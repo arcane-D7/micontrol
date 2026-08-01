@@ -4,6 +4,7 @@ import { t } from '../../hooks/useI18n';
 import { PageHeader } from './PageHeader';
 import PerformanceMonitor from '../../components/PerformanceMonitor';
 import PerformanceModeSelector from '../../components/PerformanceModeSelector';
+import FunctionExplain from '../../components/FunctionExplain';
 import { useToast } from '../../contexts/ToastContext';
 import type { Hardware, AiSettings, PerfDebugInfo } from './shared';
 
@@ -684,6 +685,17 @@ function OsTurboCard() {
           </div>
         </div>
       )}
+      <FunctionExplain
+        summary={t('performance.osTurboExplainSummary')}
+        details={t('performance.osTurboExplainDetails')}
+        bullets={[
+          t('performance.osTurboExplainBullet1'),
+          t('performance.osTurboExplainBullet2'),
+          t('performance.osTurboExplainBullet3'),
+          t('performance.osTurboExplainBullet4'),
+        ]}
+        note={t('performance.osTurboExplainNote')}
+      />
     </div>
   );
 }
