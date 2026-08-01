@@ -263,6 +263,47 @@ struct ElevCmd {
 
 // ── Dispatcher ───────────────────────────────────────────────────────────────
 
+/// S32-002: Allowlist of WMAA read combinations used by the app.
+/// (fun2, fun3) → purpose. Anything else is rejected at the dispatcher so a
+/// compromised webview cannot probe arbitrary EC registers.
+fn is_allowed_wmi_read(fun2: u16, fun3: u16) -> bool {
+    // FUN2_EC_FUNC=0x0800, FUN2_MI_INFO=0x0A00, FUN2_MISC=0x0C00, FUN2_SENSOR=0x1000
+    matches!(
+        (fun2, fun3),
+        (0x0800, 0x00) // current performance mode
+            | (0x1000, 0x01) // battery health
+            | (0x1000, 0x06) // adapter power
+            | (0x0A00, 0x05) // mi usage type
+            | (0x0A00, 0x07) // wmid type
+            | (0x0C00, 0x02) // lid open type
+            | (0x0C00, 0x03) // removable type
+    )
+}
+
+/// S32-002: Allowlist of WMAA write combinations used by the app.
+/// (fun2, fun3) → purpose. Rejects arbitrary EC writes.
+fn is_allowed_wmi_write(fun2: u16, fun3: u16) -> bool {
+    matches!(
+        (fun2, fun3),
+        (0x0800, 5) // set performance mode (Performance)
+            | (0x0800, 6) // set performance mode (Balanced)
+            | (0x0800, 7) // set performance mode (Quiet)
+            | (0x0800, 8) // set performance mode (SuperQuiet)
+            | (0x0800, 9) // set performance mode (UltraPerformance)
+            | (0x0800, 10) // set performance mode (Extreme)
+            | (0x1000, 0x02) // set brightness data
+            | (0x0C00, 0x06) // set sagv mode
+            | (0x0C00, 0x04) // set pl1 flag
+            | (0x0C00, 0x05) // set epof flag
+            | (0x0A00, 0x05) // set mi usage type
+            | (0x0A00, 0x07) // set wmid type
+            | (0x0C00, 0x02) // set lid open type
+            | (0x0C00, 0x03) // set removable type
+            | (0x0A00, 0x08) // set auto illumination
+            | (0x0A00, 0x09) // set label mode
+    )
+}
+
 fn dispatch(cmd: ElevCmd) -> Value {
     match cmd.cmd.as_str() {
         "set_performance_mode" => {
@@ -722,10 +763,19 @@ fn dispatch(cmd: ElevCmd) -> Value {
 
         #[cfg(feature = "diag")]
         "diag_ps" => {
-            // Run elevated PowerShell command (diag builds only)
+            // Run elevated PowerShell command (diag builds only).
+            // S32-002: Restricted to a hardcoded allowlist of diagnostic
+            // scripts. Arbitrary script text is rejected so a compromised
+            // webview cannot execute arbitrary PowerShell as SYSTEM.
             let script = cmd.args["script"].as_str().unwrap_or("");
-            if script.is_empty() {
-                return make_err("Missing 'script' argument".to_string());
+            const ALLOWED_DIAG_SCRIPTS: [&str; 4] = [
+                "Get-Service | Select-Object Name,Status",
+                "Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Name,CPU,WorkingSet64",
+                "Get-CimInstance Win32_Fan | Select-Object Name,DesiredSpeed,ActiveCooling",
+                "Get-CimInstance Win32_TemperatureProbe | Select-Object Name,CurrentReading",
+            ];
+            if !ALLOWED_DIAG_SCRIPTS.contains(&script) {
+                return make_err("diag_ps rejected: script is not in the allowlist".to_string());
             }
             let output = {
                 #[cfg(windows)]
@@ -859,7 +909,31 @@ fn dispatch(cmd: ElevCmd) -> Value {
                                         for (i, v) in entry.iter().enumerate() {
                                             e[i] = v.as_u64().unwrap_or(0) as u8;
                                         }
-                                        result.push(e);
+                                        // S32-002: Only accept mappings whose source
+                                        // scan code is the Copilot key (0x6E/E0) and
+                                        // whose target is a known remap key. Reject
+                                        // arbitrary bytes to prevent a compromised
+                                        // webview from writing junk into HKLM.
+                                        let src_lo = e[2];
+                                        let src_hi = e[3];
+                                        let tgt_lo = e[0];
+                                        let tgt_hi = e[1];
+                                        let src_is_copilot =
+                                            src_lo == 0x6E && (src_hi == 0x00 || src_hi == 0xE0);
+                                        let tgt_known = matches!(
+                                            (tgt_lo, tgt_hi),
+                                            (0x1D, 0x00) | (0x1D, 0xE0) // Ctrl
+                                                | (0x38, 0x00) | (0x38, 0xE0) // Alt
+                                                | (0x36, 0xE0) // Right Shift
+                                                | (0x2A, 0x00) // Left Shift
+                                        );
+                                        if src_is_copilot && tgt_known && result.len() < 8 {
+                                            result.push(e);
+                                        } else {
+                                            log::warn!(
+                                                "[elevated] Rejected invalid scancode mapping: {e:02X?}"
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1315,6 +1389,14 @@ fn dispatch(cmd: ElevCmd) -> Value {
         "wmi_ec_read" => {
             let fun2 = cmd.args["fun2"].as_u64().unwrap_or(0) as u16;
             let fun3 = cmd.args["fun3"].as_u64().unwrap_or(0) as u16;
+            // S32-002: Allowlist check — only permit the exact (fun2, fun3)
+            // combinations the app uses. Arbitrary WMAA reads would expose
+            // unvalidated hardware registers to a compromised webview.
+            if !is_allowed_wmi_read(fun2, fun3) {
+                return make_err(format!(
+                    "wmi_ec_read rejected: (fun2=0x{fun2:04X}, fun3=0x{fun3:04X}) is not in the allowlist"
+                ));
+            }
             match crate::hw::wmi_ec::wmi_read(fun2, fun3) {
                 Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
                 Err(e) => make_err(e.to_string()),
@@ -1325,6 +1407,14 @@ fn dispatch(cmd: ElevCmd) -> Value {
             let fun2 = cmd.args["fun2"].as_u64().unwrap_or(0) as u16;
             let fun3 = cmd.args["fun3"].as_u64().unwrap_or(0) as u16;
             let fun4 = cmd.args["fun4"].as_u64().unwrap_or(0) as u32;
+            // S32-002: Allowlist check — arbitrary (fun2, fun3, fun4) writes
+            // could corrupt EC state (power limits, thermal, charging, fan).
+            // Only the combinations used by the app's own set_* functions pass.
+            if !is_allowed_wmi_write(fun2, fun3) {
+                return make_err(format!(
+                    "wmi_ec_write rejected: (fun2=0x{fun2:04X}, fun3=0x{fun3:04X}) is not in the allowlist"
+                ));
+            }
             match crate::hw::wmi_ec::wmi_write(fun2, fun3, fun4) {
                 Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
                 Err(e) => make_err(e.to_string()),

@@ -78,11 +78,32 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
                     "File is not an ICC profile (.icm/.icc)".to_string(),
                 ));
             }
+        } else {
+            return Err(HardwareError::Other(
+                "File has no extension — expected .icm/.icc".to_string(),
+            ));
+        }
+
+        // S32-002: Canonicalize and contain the path to the system color
+        // profiles directory. A crafted .icc path from a compromised webview
+        // must not be able to load arbitrary files (or be used to probe the
+        // filesystem) — restrict to the known profiles location.
+        let canonical = std::fs::canonicalize(&path)
+            .map_err(|e| HardwareError::Other(format!("Cannot resolve ICC path: {e}")))?;
+        let profiles_dir = get_color_profiles_dir();
+        if !canonical.starts_with(&profiles_dir) {
+            return Err(HardwareError::Other(format!(
+                "ICC profile must be inside the system color profiles directory ({}), got {}",
+                profiles_dir.display(),
+                canonical.display()
+            )));
         }
 
         let device_w: Vec<u16> = display.encode_utf16().chain(std::iter::once(0)).collect();
-        let profile_w: Vec<u16> = profile_path
-            .encode_utf16()
+        use std::os::windows::ffi::OsStrExt;
+        let profile_w: Vec<u16> = canonical
+            .as_os_str()
+            .encode_wide()
             .chain(std::iter::once(0))
             .collect();
 
@@ -125,7 +146,7 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
         };
 
         if result != 0 {
-            log::info!("Loaded ICC profile {} for {}", profile_path, display);
+            log::info!("Loaded ICC profile {} for {}", canonical.display(), display);
             Ok(())
         } else {
             Err(HardwareError::Other(format!(
@@ -138,6 +159,19 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
     Err(HardwareError::NotSupported(
         "ICC profile loading only available on Windows".into(),
     ))
+}
+
+/// S32-002: Canonical path of the system color profiles directory
+/// (`%SystemRoot%\System32\spool\drivers\color`). Used to contain
+/// `load_icc_profile` paths.
+#[cfg(windows)]
+fn get_color_profiles_dir() -> std::path::PathBuf {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    std::path::PathBuf::from(&system_root)
+        .join("System32")
+        .join("spool")
+        .join("drivers")
+        .join("color")
 }
 
 /// Unload (remove) the ICC profile for a display, reverting to sRGB.

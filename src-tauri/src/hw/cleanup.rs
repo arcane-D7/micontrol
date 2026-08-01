@@ -303,12 +303,42 @@ fn clean_directory(path: &std::path::Path) -> (u64, u64, u64, Vec<String>) {
         removed: &mut u64,
         skipped: &mut u64,
         errors: &mut Vec<String>,
+        depth: usize,
     ) {
+        // S32-002: Hard depth limit — never recurse deeper than 12 levels and
+        // never follow directory symlinks/junctions/reparse points. A junction
+        // planted in %TEMP% could otherwise point at an arbitrary directory
+        // (e.g. C:\Windows\System32) and get recursively deleted.
+        if depth > 12 {
+            return;
+        }
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
                 let entry_path = entry.path();
+                // Check for reparse points BEFORE is_dir() — on Windows,
+                // is_dir() follows symlinks/junctions, so a junction to a
+                // directory would pass is_dir() and be recursed into.
+                let is_reparse = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false)
+                    || is_reparse_point(&entry_path);
+                if is_reparse {
+                    // Skip symlinks/junctions entirely; only delete the link
+                    // itself (not its target).
+                    if let Ok(meta) = entry.metadata() {
+                        let size = meta.len();
+                        match std::fs::remove_file(&entry_path) {
+                            Ok(()) => {
+                                *freed += size;
+                                *removed += 1;
+                            }
+                            Err(_) => {
+                                *skipped += 1;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if entry_path.is_dir() {
-                    clean_dir_recursive(&entry_path, freed, removed, skipped, errors);
+                    clean_dir_recursive(&entry_path, freed, removed, skipped, errors, depth + 1);
                     // Try to remove the now-empty directory
                     let _ = std::fs::remove_dir(&entry_path);
                 } else {
@@ -327,9 +357,30 @@ fn clean_directory(path: &std::path::Path) -> (u64, u64, u64, Vec<String>) {
         }
     }
 
-    clean_dir_recursive(path, &mut freed, &mut removed, &mut skipped, &mut errors);
+    clean_dir_recursive(path, &mut freed, &mut removed, &mut skipped, &mut errors, 0);
 
     (freed, removed, skipped, errors)
+}
+
+/// S32-002: Detect whether a path is a reparse point (symlink, junction or
+/// mount point) using `GetFileAttributesW` FILE_ATTRIBUTE_REPARSE_POINT.
+#[cfg(windows)]
+fn is_reparse_point(path: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesW, FILE_ATTRIBUTE_REPARSE_POINT, INVALID_FILE_ATTRIBUTES,
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: path_w is a valid null-terminated wide string.
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+    attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_path: &std::path::Path) -> bool {
+    false
 }
 
 /// Get the Windows TEMP directory.

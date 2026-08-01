@@ -207,11 +207,35 @@ pub async fn read_ecram_raw(address: String, count: u32) -> Result<String, Error
             return Err(HardwareError::Other("count must be 1–256".to_string()));
         }
 
+        // S32-002: Restrict raw reads to the known EC address regions.
+        // Arbitrary physical-address reads should not be exposed to the webview.
+        if !is_known_ec_range(addr, count as usize) {
+            return Err(HardwareError::Other(format!(
+                "address 0x{addr:08X} is outside the known EC register regions"
+            )));
+        }
+
         let bytes = crate::hw::ecram::read_ecram(addr, count as usize)?;
         Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
     })
     .await
     .map_err(ErrorResponse::from)
+}
+
+/// S32-002: Returns true when `addr..addr+len` is within one of the known EC
+/// register regions (ERAM, SMA2, IOT_STATUS, IOT_SENSORS, sensor block).
+fn is_known_ec_range(addr: u64, len: usize) -> bool {
+    use crate::hw::ecram;
+    let regions = [
+        (ecram::get_eram_base(), ecram::ERAM_SIZE as u64),
+        (ecram::SMA2_BASE, ecram::SMA2_SIZE as u64),
+        (ecram::IOT_STATUS_BASE, ecram::IOT_STATUS_SIZE as u64),
+        (ecram::ECRAM_SENSOR_BLOCK, ecram::ECRAM_SENSOR_SIZE as u64),
+    ];
+    let end = addr.saturating_add(len as u64);
+    regions
+        .iter()
+        .any(|(start, size)| addr >= *start && end <= start + size)
 }
 
 /// Returns whether the current process is running with an elevated (Administrator) token.
