@@ -18,6 +18,7 @@ pub mod ecram;
 pub mod ecram_service_mgmt;
 pub mod errors;
 pub mod eye_protection;
+pub mod face;
 pub mod fan;
 pub mod fn_key;
 pub mod hotkeys;

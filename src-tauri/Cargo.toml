@@ -23,6 +23,9 @@ path = "src/bin/micontrol_bridge.rs"
 [features]
 default = []
 diag = []
+# Enable the face-unlock camera + service components. Off by default so the
+# base build does not require a C++ toolchain (opencv crate).
+face = ["dep:opencv", "dep:windows-service"]
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
@@ -53,6 +56,15 @@ rayon = "1.10"
 aes-gcm = "0.10"
 zip = "2"
 hkdf = "0.12"
+
+# ── Face unlock (Windows Hello-style) ────────────────────────────────────────
+# onnxruntime for face detection + recognition models.
+ort = { version = "2.0.0-rc.13", features = ["download-binaries", "tls-native"], default-features = false }
+# OpenCV for camera capture + image preprocessing (optional: requires C++
+# toolchain to build; enabled via the `face` feature).
+opencv = { version = "0.100.1", optional = true, features = ["videoio", "imgproc"] }
+windows-service = { version = "0.7", optional = true }
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -96,6 +108,11 @@ windows = { version = "0.58", features = [
   "Win32_System_Diagnostics",
   "Win32_System_Recovery",
   "Win32_System_ErrorReporting",
+  "Win32_Security_Credentials",
+  "Win32_Security_Authentication_Identity",
+  "Win32_Security_Cryptography",
+  "Win32_System_SystemInformation",
+  "Win32_UI_Shell_Common",
 ] }
 windows-core = "0.58"
 windows-targets = "0.52"
