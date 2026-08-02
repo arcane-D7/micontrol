@@ -174,6 +174,28 @@ FunctionEnd
   Pop $0
   DetailPrint "MiControlBridge service install: $0"
 
+  ; ── Face Unlock (Windows Hello-style, RGB webcam) ──────────────────────────
+  ; Optional: the auth service + Credential Provider + models. All guarded —
+  ; if the files are missing from the bundle, the app still works (the Face
+  ; Unlock tab will show the service as not installed).
+  DetailPrint "Configurando Face Unlock..."
+  ${If} ${FileExists} "$INSTDIR\micontrol_face_svc.exe"
+    ; Install the LocalSystem auth service (auto-start).
+    nsExec::ExecToLog '"$INSTDIR\micontrol_face_svc.exe" install'
+    Pop $0
+    DetailPrint "  MiControlFace service install: $0"
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\micontrol_facecp.dll"
+    ; Register the Credential Provider DLL (COM class + CP registration).
+    DetailPrint "  Registando micontrol_facecp.dll como Credential Provider..."
+    nsExec::ExecToLog '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\micontrol_facecp.dll"'
+    Pop $0
+    DetailPrint "  regsvr32 returned: $0"
+  ${EndIf}
+  ; Ensure the face data directory exists (SYSTEM-writable).
+  CreateDirectory "$PROGRAMDATA\MiControl\face"
+  DetailPrint "Face Unlock configurado."
+
   DetailPrint "Configuração de hardware concluída."
 !macroend
 
@@ -193,6 +215,18 @@ FunctionEnd
   nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" uninstall'
   Pop $0
   DetailPrint "MiControlBridge service removed: $0"
+
+  ; Remove the Face Unlock auth service + Credential Provider
+  ${If} ${FileExists} "$INSTDIR\micontrol_face_svc.exe"
+    nsExec::ExecToLog '"$INSTDIR\micontrol_face_svc.exe" remove'
+    Pop $0
+    DetailPrint "MiControlFace service removed: $0"
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\micontrol_facecp.dll"
+    nsExec::ExecToLog '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\micontrol_facecp.dll"'
+    Pop $0
+    DetailPrint "micontrol_facecp.dll unregistered: $0"
+  ${EndIf}
 
   ; Stop and remove the IoTService Windows service
   nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'

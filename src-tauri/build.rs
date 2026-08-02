@@ -21,6 +21,12 @@ fn main() {
 
         // Copy micontrol_bridge.exe (autonomous elevated service).
         copy_aux_binary(&target_dir, &profile, "micontrol_bridge.exe", &dst_dir);
+
+        // Copy micontrol_face_svc.exe (face auth service, LocalSystem).
+        copy_aux_binary(&target_dir, &profile, "micontrol_face_svc.exe", &dst_dir);
+
+        // Copy micontrol_facecp.dll (Credential Provider).
+        copy_aux_binary(&target_dir, &profile, "micontrol_facecp.dll", &dst_dir);
     }
 
     let windows_attrs =
