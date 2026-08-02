@@ -16,11 +16,15 @@ interface FaceSettings {
   liveness_enabled: boolean;
   antispoof_enabled: boolean;
   antispoof_threshold: number;
+  antispoof_max_frames: number;
   lockout_max_fails: number;
   lockout_seconds: number;
+  multi_face_protection_enabled: boolean;
   face_unlock_enabled: boolean;
   face_unlock_logon_enabled: boolean;
   face_unlock_workstation_enabled: boolean;
+  renew_days: number;
+  language: string;
 }
 
 const DEFAULT_SETTINGS: FaceSettings = {
@@ -29,11 +33,15 @@ const DEFAULT_SETTINGS: FaceSettings = {
   liveness_enabled: true,
   antispoof_enabled: true,
   antispoof_threshold: 0.55,
+  antispoof_max_frames: 10,
   lockout_max_fails: 5,
   lockout_seconds: 30,
+  multi_face_protection_enabled: false,
   face_unlock_enabled: true,
   face_unlock_logon_enabled: true,
   face_unlock_workstation_enabled: true,
+  renew_days: 60,
+  language: 'en',
 };
 
 export default function FaceUnlockTab() {
@@ -45,6 +53,9 @@ export default function FaceUnlockTab() {
   const [user, setUser] = useState('');
   const [password, setPassword] = useState('');
   const [diagnostics, setDiagnostics] = useState<string>('');
+  const [enrollName, setEnrollName] = useState('');
+  const [enrollLabel, setEnrollLabel] = useState('front');
+  const [enrollFrames, setEnrollFrames] = useState(4);
 
   const load = useCallback(async () => {
     try {
@@ -122,6 +133,41 @@ export default function FaceUnlockTab() {
       setDiagnostics(JSON.stringify(d, null, 2));
     } catch (e) {
       setDiagnostics(`error: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const enroll = async () => {
+    if (!enrollName.trim()) {
+      show('err', 'Enter a profile name (must match the Windows account name).');
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await invoke<{ ok: boolean; name: string; label: string; frames: number }>(
+        'face_enroll',
+        { name: enrollName.trim(), frames: enrollFrames, label: enrollLabel },
+      );
+      show('ok', `Enrolled "${r.name}" (${r.frames} frames, label "${r.label}").`);
+      await load();
+    } catch (e) {
+      show('err', `enroll error: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleMaster = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      await invoke('face_set_settings', {
+        settings: { ...settings, face_unlock_enabled: enabled },
+      });
+      setSettings((s) => ({ ...s, face_unlock_enabled: enabled }));
+      show('ok', enabled ? 'Face Unlock enabled.' : 'Face Unlock disabled (tile hidden).');
+    } catch (e) {
+      show('err', `toggle error: ${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -212,6 +258,68 @@ export default function FaceUnlockTab() {
         </div>
       )}
 
+      {/* Master toggle */}
+      <div className="card">
+        <div
+          className="card-title"
+          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+        >
+          <span>Face Unlock enabled</span>
+          <input
+            type="checkbox"
+            checked={settings.face_unlock_enabled}
+            onChange={(e) => void toggleMaster(e.target.checked)}
+            disabled={busy}
+          />
+        </div>
+        <p className="page-subtitle" style={{ margin: 0 }}>
+          When disabled, the Face Unlock tile is hidden from the lock screen but your enrolled
+          faces, settings and stored password are kept.
+        </p>
+      </div>
+
+      {/* Enrollment */}
+      <div className="card">
+        <div className="card-title">Enroll a face</div>
+        <p className="page-subtitle">
+          Enter the Windows account name shown on the lock screen (e.g. <code>alice</code>). The
+          camera captures {enrollFrames} frames and stores a feature vector — no photos.
+        </p>
+        <div
+          style={{ display: 'flex', gap: 8, maxWidth: 640, flexWrap: 'wrap', alignItems: 'center' }}
+        >
+          <input
+            placeholder="Windows account name"
+            value={enrollName}
+            onChange={(e) => setEnrollName(e.target.value)}
+            style={{ flex: 1, minWidth: 160 }}
+          />
+          <input
+            placeholder="Label (e.g. front, glasses)"
+            value={enrollLabel}
+            onChange={(e) => setEnrollLabel(e.target.value)}
+            style={{ flex: 1, minWidth: 120 }}
+          />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 13 }}>Frames</span>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              value={enrollFrames}
+              onChange={(e) => setEnrollFrames(Number(e.target.value))}
+              style={{ width: 60 }}
+            />
+          </label>
+          <button className="btn btn-primary" onClick={() => void enroll()} disabled={busy}>
+            📷 Enroll
+          </button>
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+          Tip: enroll 2+ templates (different angles/lighting) to improve unlock reliability.
+        </p>
+      </div>
+
       {/* Settings */}
       <div className="card">
         <div className="card-title">Settings</div>
@@ -277,6 +385,56 @@ export default function FaceUnlockTab() {
               onChange={(e) =>
                 setSettings({ ...settings, face_unlock_workstation_enabled: e.target.checked })
               }
+            />
+          </label>
+          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Match margin (anti-misrouting)</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              value={settings.match_margin}
+              onChange={(e) => setSettings({ ...settings, match_margin: Number(e.target.value) })}
+              style={{ width: 80 }}
+            />
+          </label>
+          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Anti-spoof threshold</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={settings.antispoof_threshold}
+              onChange={(e) =>
+                setSettings({ ...settings, antispoof_threshold: Number(e.target.value) })
+              }
+              style={{ width: 80 }}
+            />
+          </label>
+          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Reject if 2+ faces in frame</span>
+            <input
+              type="checkbox"
+              checked={settings.multi_face_protection_enabled}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  multi_face_protection_enabled: e.target.checked,
+                })
+              }
+            />
+          </label>
+          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Re-enrollment reminder (days)</span>
+            <input
+              type="number"
+              min={0}
+              max={3650}
+              value={settings.renew_days}
+              onChange={(e) => setSettings({ ...settings, renew_days: Number(e.target.value) })}
+              style={{ width: 80 }}
             />
           </label>
         </div>
@@ -347,6 +505,7 @@ function TemplateList() {
   const [profiles, setProfiles] = useState<{ name: string; templates: number; labels: string[] }[]>(
     [],
   );
+  const [busy, setBusy] = useState(false);
 
   const loadTemplates = useCallback(async () => {
     try {
@@ -362,6 +521,24 @@ function TemplateList() {
   useEffect(() => {
     void loadTemplates();
   }, [loadTemplates]);
+
+  const deleteAll = async (name: string) => {
+    setBusy(true);
+    try {
+      // Delete templates from last to first.
+      const p = profiles.find((x) => x.name === name);
+      if (p) {
+        for (let i = p.templates - 1; i >= 0; i--) {
+          await invoke('face_delete_template', { name, index: i });
+        }
+      }
+      await loadTemplates();
+    } catch (e) {
+      console.warn('delete error:', e);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (profiles.length === 0) {
     return (
@@ -393,6 +570,14 @@ function TemplateList() {
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{p.labels.join(', ')}</div>
             )}
           </div>
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => void deleteAll(p.name)}
+            disabled={busy}
+            style={{ fontSize: 12, padding: '4px 10px' }}
+          >
+            🗑 Delete
+          </button>
         </li>
       ))}
     </ul>

@@ -15,7 +15,7 @@ use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
 #[cfg(windows)]
 use commands::face::{
-    face_delete_template, face_diagnostics, face_get_settings, face_list_templates,
+    face_delete_template, face_diagnostics, face_enroll, face_get_settings, face_list_templates,
     face_service_install, face_set_password, face_set_settings, face_status,
 };
 #[allow(deprecated)]
@@ -465,6 +465,7 @@ pub fn run() {
             face_set_settings,
             face_set_password,
             face_diagnostics,
+            face_enroll,
         ])
         .setup(|app| {
             // Hardware discovery — load cached profile or scan on first run

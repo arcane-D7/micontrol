@@ -334,4 +334,69 @@ mod tests {
         assert!(!snap.done);
         assert!(snap.success.is_none());
     }
+
+    /// E2E mock: full flow with liveness (blink challenge) then recognition.
+    #[test]
+    fn e2e_mock_full_flow_with_liveness() {
+        let mut store = store_with("alice", emb(0.5));
+        store.settings.liveness_enabled = true;
+        store.settings.match_margin = 0.0; // single profile → no rival
+        let mut session = AuthSession::new(&store);
+        // Force a deterministic blink challenge.
+        session.liveness_force_challenge(Challenge::Blink(2));
+
+        // Drive the session like the service would: a few open-eye frames,
+        // then two blinks, then a matching embedding.
+        session.feed(0.30, 0.0, None);
+        session.feed(0.30, 0.0, None);
+        assert!(!session.done());
+        // Blink 1
+        session.feed(0.10, 0.0, None);
+        session.feed(0.30, 0.0, None);
+        // Blink 2 → liveness passes → recognition with matching embedding
+        session.feed(0.10, 0.0, None);
+        session.feed(0.30, 0.0, Some(emb(0.5)));
+
+        assert!(session.done());
+        let r = session.result().unwrap();
+        assert!(r.success);
+        assert_eq!(r.name.as_deref(), Some("alice"));
+        assert!(r.similarity > 0.9);
+    }
+
+    /// E2E mock: liveness fails (never blinks) → rejected, biometric=true.
+    #[test]
+    fn e2e_mock_liveness_failure_counts_biometric() {
+        let mut store = store_with("alice", emb(0.5));
+        store.settings.liveness_enabled = true;
+        let mut session = AuthSession::new(&store);
+        session.liveness_force_challenge(Challenge::Blink(1));
+
+        // Eyes always open → never blinks → liveness never completes.
+        for _ in 0..10 {
+            session.feed(0.30, 0.0, None);
+        }
+        // Even a matching embedding must not unlock without liveness.
+        session.feed(0.30, 0.0, Some(emb(0.5)));
+        assert!(!session.done());
+    }
+
+    /// E2E mock: margin rejects a second close profile (anti-misrouting).
+    #[test]
+    fn e2e_mock_margin_rejects_close_rival() {
+        let mut store = FaceStore::new();
+        store.settings.liveness_enabled = false;
+        store.settings.match_threshold = 0.0; // accept any similarity
+        store.settings.match_margin = 0.2; // require clear winner
+                                           // alice emb 0.5; bob emb 0.45 — cosine ≈ 0.999, margin ≈ 0.0007 < 0.2.
+        store.add_template("alice", emb(0.5), "front").unwrap();
+        store.add_template("bob", emb(0.45), "front").unwrap();
+
+        let mut session = AuthSession::new(&store);
+        session.feed(0.3, 0.0, Some(emb(0.5)));
+        assert!(session.done());
+        let r = session.result().unwrap();
+        assert!(!r.success, "close rival must be rejected by margin");
+        assert!(r.biometric);
+    }
 }
