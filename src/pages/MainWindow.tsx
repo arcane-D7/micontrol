@@ -21,6 +21,7 @@ const FanTab = lazy(() => import('./tabs/fan'));
 const AudioTab = lazy(() => import('./tabs/audio'));
 const CastTab = lazy(() => import('./tabs/cast'));
 const IotTab = lazy(() => import('./tabs/iot'));
+const FaceUnlockTab = lazy(() => import('./tabs/face'));
 const WiFiTab = lazy(() => import('./tabs/wifi'));
 const EcrDebugTab = lazy(() => import('./tabs/ecrdebug'));
 const TouchpadTab = lazy(() => import('./tabs/touchpad'));
@@ -55,6 +56,7 @@ const NAV_ITEMS = [
   { id: 'cast', icon: '📺', label: 'nav.cast' },
   { id: 'touchpad', icon: '🖱️', label: 'nav.touchpad' },
   { id: 'iot', icon: '🔌', label: 'nav.iot' },
+  { id: 'faceUnlock', icon: '😀', label: 'nav.faceUnlock' },
   { id: 'wifi', icon: '📶', label: 'nav.wifi' },
   { id: 'startup', icon: '🚀', label: 'nav.startup' },
   { id: 'system', icon: '🔧', label: 'nav.system' },
@@ -310,6 +312,8 @@ export default function MainWindow({
         return <CastTab />;
       case 'iot':
         return <IotTab />;
+      case 'faceUnlock':
+        return <FaceUnlockTab />;
       case 'wifi':
         return <WiFiTab />;
       case 'ecrdebug':

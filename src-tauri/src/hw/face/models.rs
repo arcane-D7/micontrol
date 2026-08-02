@@ -11,6 +11,7 @@
 //! model files must exist at runtime.
 
 use crate::hw::face::config::{EMBEDDING_DIM, MODELS_DIR};
+#[allow(unused_imports)] // FaceError used only when the `face` feature is on
 use crate::hw::face::errors::{FaceError, FaceResult};
 use std::path::PathBuf;
 

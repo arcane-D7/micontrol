@@ -13,6 +13,11 @@ pub mod util;
 
 use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection};
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
+#[cfg(windows)]
+use commands::face::{
+    face_delete_template, face_diagnostics, face_get_settings, face_list_templates,
+    face_service_install, face_set_password, face_set_settings, face_status,
+};
 #[allow(deprecated)]
 use commands::hardware::{
     ensure_bridge_service, ensure_iot_service, get_audio_devices, get_audio_volume,
@@ -451,6 +456,15 @@ pub fn run() {
             unload_icc_profile,
             open_color_management_settings,
             launch_color_calibration_wizard,
+            // Face Unlock (Windows Hello-style, RGB webcam)
+            face_status,
+            face_service_install,
+            face_list_templates,
+            face_delete_template,
+            face_get_settings,
+            face_set_settings,
+            face_set_password,
+            face_diagnostics,
         ])
         .setup(|app| {
             // Hardware discovery — load cached profile or scan on first run
