@@ -807,11 +807,76 @@ mod pipe_server {
     const PIPE_BUF_SIZE: u32 = 4096;
     const BUFSIZE: u32 = 4096;
 
+    /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
+    /// access to the named pipe.
+    ///
+    /// When the service runs as `NT AUTHORITY\SYSTEM`, pipes created without
+    /// explicit security inherit a DACL that only SYSTEM can access — the
+    /// unprivileged MiControl app would then fail to open
+    /// `\\.\pipe\ecram_service` (ERROR_ACCESS_DENIED). Granting Everyone
+    /// access mirrors what the original Xiaomi IoTService does and is safe
+    /// because the pipe payloads are opaque EC commands with their own
+    /// authentication at the app layer.
+    fn build_pipe_security_attributes() -> Option<windows::Win32::Security::SECURITY_ATTRIBUTES> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::GENERIC_READ;
+        use windows::Win32::Foundation::GENERIC_WRITE;
+        use windows::Win32::Security::{
+            Authorization::{
+                BuildExplicitAccessWithNameW, SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS,
+            },
+            SetSecurityDescriptorDacl, ACE_FLAGS, ACL, SECURITY_DESCRIPTOR,
+        };
+
+        unsafe {
+            // Build explicit access granting GENERIC_READ|GENERIC_WRITE to Everyone.
+            let mut everyone_w: Vec<u16> = "Everyone".encode_utf16().chain(Some(0)).collect();
+            let mut ea = EXPLICIT_ACCESS_W::default();
+            // SAFETY: BuildExplicitAccessWithNameW copies the trustee name internally.
+            BuildExplicitAccessWithNameW(
+                &mut ea,
+                PCWSTR(everyone_w.as_ptr()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                SET_ACCESS,
+                ACE_FLAGS(0), // NO_INHERITANCE
+            );
+
+            let entries = [ea];
+            let mut new_acl: *mut ACL = std::ptr::null_mut();
+            // SAFETY: SetEntriesInAclW allocates a new ACL (leaked intentionally —
+            // it lives for the lifetime of the pipe server process).
+            let _ = SetEntriesInAclW(Some(&entries), None, &mut new_acl);
+            if new_acl.is_null() {
+                return None;
+            }
+
+            let mut sd = SECURITY_DESCRIPTOR::default();
+            // SAFETY: SetSecurityDescriptorDacl initializes the DACL of sd.
+            let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
+                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+            );
+            if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
+                return None;
+            }
+
+            Some(windows::Win32::Security::SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>()
+                    as u32,
+                lpSecurityDescriptor: (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+                bInheritHandle: false.into(),
+            })
+        }
+    }
+
     /// Run the named pipe server. Blocks until `shutdown` is set.
     pub fn run_pipe_server(shutdown: Arc<AtomicBool>) {
         let pipe_name_w: Vec<u16> = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect();
 
         eprintln!("[ecram_service] pipe server starting on {PIPE_NAME}");
+
+        // Create a permissive DACL so the unprivileged app can connect even
+        // when we run as SYSTEM.
+        let security = build_pipe_security_attributes();
 
         while !shutdown.load(Ordering::SeqCst) {
             let handle = unsafe {
@@ -823,7 +888,9 @@ mod pipe_server {
                     PIPE_BUF_SIZE,
                     PIPE_BUF_SIZE,
                     0,
-                    None,
+                    security
+                        .as_ref()
+                        .map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
                 )
             };
 

@@ -111,6 +111,43 @@ FunctionEnd
   nsExec::ExecToLog '"$SYSDIR\sc.exe" start IoTSvc'
   Pop $0
 
+  ; ── Deploy our ecram_service as the DriverStore IoTService.exe ─────────────
+  ; The IoTDriver.sys security check requires a process named "IoTService.exe"
+  ; located inside the driver's DriverStore FileRepository directory. We must
+  ; replace that binary with our ecram_service.exe so EC RAM access works
+  ; without the original Xiaomi IoTService (which rejects our IOCTLs).
+  DetailPrint "Configurando ecram_service no DriverStore..."
+  FindFirst $R0 $R1 "$SYSDIR\DriverStore\FileRepository\iotdriver.inf_*\IoTService.exe"
+  ${If} $R0 = 0
+    ; $R1 contains the found file path. Use it.
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+    Pop $R2
+    Sleep 2000
+    ; Backup the existing IoTService.exe (only if no backup yet)
+    ${IfNot} ${FileExists} "$R1.bak"
+      CopyFiles /SILENT "$R1" "$R1.bak"
+    ${EndIf}
+    ; Replace with our ecram_service.exe
+    CopyFiles /SILENT "$INSTDIR\ecram_service.exe" "$R1"
+    DetailPrint "  ecram_service deployed como IoTService.exe"
+    ; Recreate the service pointing to the DriverStore exe
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+    Pop $R2
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" delete IoTSvc'
+    Pop $R2
+    Sleep 1000
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" create IoTSvc binPath= "$R1" service start= auto DisplayName= "MiControl IoT Bridge Service"'
+    Pop $R2
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" config IoTSvc obj= LocalSystem'
+    Pop $R2
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" start IoTSvc'
+    Pop $R2
+    DetailPrint "  IoTSvc reiniciado com ecram_service."
+  ${Else}
+    DetailPrint "  Aviso: DriverStore do IoTDriver não encontrado — ecram_service não deployado."
+  ${EndIf}
+  FindClose $R0
+
   ; ── Scheduled task for elevated hardware operations (no UAC on use) ────────
   ; Registered via XML so we can set MultipleInstancesPolicy=StopExisting and
   ; ExecutionTimeLimit=PT30S, preventing the task from getting stuck in "Queued"
