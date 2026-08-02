@@ -938,10 +938,18 @@ fn send_query<T: for<'de> Deserialize<'de>>(dst_id: u16, msg_type: u32) -> Resul
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/// Check if the IoTService pipe is available.
+/// Check if the IoT service is available.
+///
+/// Returns true if either backend is reachable:
+/// - the original Xiaomi MCPI pipe (`\\.\pipe\LOCAL\IoTService_IPC_Broker`), or
+/// - our custom ecram_service pipe (`\\.\pipe\ecram_service`), which replaces
+///   IoTService.exe when installed.
 pub fn is_pipe_available() -> bool {
     #[cfg(windows)]
     {
+        if crate::hw::ecram::is_pipe_broker_available() {
+            return true;
+        }
         let pipe_path = resolve_pipe_path();
         std::fs::OpenOptions::new()
             .read(true)
@@ -962,32 +970,60 @@ pub fn is_available() -> bool {
 
 // ── Device info queries ──────────────────────────────────────────────────────
 
+/// True when our custom ecram_service pipe is the active IoT backend.
+fn ec_pipe_active() -> bool {
+    crate::hw::ecram::is_pipe_broker_available()
+}
+
 /// Get the device model string (e.g., "Mi NoteBook Pro X 15").
 pub fn get_model() -> HardwareResult<String> {
+    if ec_pipe_active() {
+        return query_ec_string("model").map_err(HardwareError::from);
+    }
     let info: ModelInfo = send_query(DST_IOT_DRIVER, msg_type::GET_MODEL)?;
     Ok(info.model)
 }
 
 /// Get the firmware version string.
 pub fn get_fw_version() -> HardwareResult<String> {
+    if ec_pipe_active() {
+        return query_ec_string("fw_version").map_err(HardwareError::from);
+    }
     let info: FwVersionInfo = send_query(DST_IOT_DRIVER, msg_type::GET_FW_VERSION)?;
     Ok(info.fw_version)
 }
 
 /// Get the IoT device bind status (whether a Xiaomi account is linked).
 pub fn get_bind_status() -> HardwareResult<BindStatusInfo> {
+    if ec_pipe_active() {
+        return query_ec_bind_status().map_err(HardwareError::from);
+    }
     send_query::<BindStatusInfo>(DST_IOT_DRIVER, msg_type::GET_BIND_STATUS)
         .map_err(HardwareError::from)
 }
 
 /// Get the IoT device ID.
 pub fn get_device_id() -> HardwareResult<i64> {
+    if ec_pipe_active() {
+        return query_ec_device_id().map_err(HardwareError::from);
+    }
     let info: DeviceIdInfo = send_query(DST_IOT_DRIVER, msg_type::GET_DEVICE_ID)?;
     Ok(info.device_id)
 }
 
 /// Get the current device status string.
+///
+/// Prefers the ECRAM status region (via ecram_service) when the EC pipe is
+/// active; falls back to the MCPI GetDeviceStatus query otherwise.
 pub fn get_device_status() -> HardwareResult<String> {
+    if ec_pipe_active() {
+        if let Some(status) = read_device_status_from_ecram() {
+            return Ok(status);
+        }
+        return Err(HardwareError::Other(
+            "device status unavailable from ECRAM".to_string(),
+        ));
+    }
     let info: DeviceStatusInfo = send_query(DST_IOT_DRIVER, msg_type::GET_DEVICE_STATUS)?;
     Ok(info.status)
 }
@@ -995,7 +1031,30 @@ pub fn get_device_status() -> HardwareResult<String> {
 // ── Device control ───────────────────────────────────────────────────────────
 
 /// Set the device status.
+///
+/// The original IoTService routes SetDeviceStatus through WMI (Worker_WMI),
+/// which our ecram_service does not reimplement. When the EC pipe is active
+/// the op is accepted for protocol parity (the service reports it as
+/// handled); the actual status is read from the ECRAM status region.
 pub fn set_device_status(status: &str) -> HardwareResult<()> {
+    if ec_pipe_active() {
+        let status_json =
+            serde_json::to_string(status).map_err(|e| anyhow::anyhow!("serialize status: {e}"))?;
+        let request = format!(r#"{{"op":"iot_set_device_status","status":{status_json}}}"#);
+        let response = crate::hw::ecram::send_pipe_request(&request)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!(
+                "set device status failed: {err}"
+            )));
+        }
+        return Ok(());
+    }
     send_json_cmd_no_resp(
         DST_IOT_DRIVER,
         msg_type::SET_DEVICE_STATUS,
@@ -1008,6 +1067,19 @@ pub fn set_device_status(status: &str) -> HardwareResult<()> {
 
 /// Reset the IoT device.
 pub fn reset_device() -> HardwareResult<()> {
+    if ec_pipe_active() {
+        let response = crate::hw::ecram::send_pipe_request(r#"{"op":"iot_reset_device"}"#)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!("reset device failed: {err}")));
+        }
+        return Ok(());
+    }
     send_json_cmd_no_resp(
         DST_IOT_DRIVER,
         msg_type::RESET_DEVICE,
@@ -1021,10 +1093,29 @@ pub fn reset_device() -> HardwareResult<()> {
 /// Report the laptop status to the IoT device (boot ready, suspending, shutting down).
 pub fn send_laptop_status(status: LaptopStatus) -> HardwareResult<()> {
     log::info!(
-        "IoT IPC: sending laptop status {} ({})",
+        "IoT: sending laptop status {} ({})",
         status.as_str(),
         status.to_hw_value()
     );
+    if ec_pipe_active() {
+        let request = format!(
+            r#"{{"op":"iot_send_laptop_status","status":{}}}"#,
+            status.to_hw_value()
+        );
+        let response = crate::hw::ecram::send_pipe_request(&request)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!(
+                "send laptop status failed: {err}"
+            )));
+        }
+        return Ok(());
+    }
     send_json_cmd_no_resp(
         DST_IOT_DRIVER,
         msg_type::SEND_LAPTOP_STATUS,
@@ -1051,11 +1142,40 @@ pub fn report_shutting_down() -> HardwareResult<()> {
 }
 
 // ── WiFi management ──────────────────────────────────────────────────────────
-pub fn write_wifi_item(item: &WiFiItem) -> HardwareResult<()> {
-    log::info!("IoT IPC: writing WiFi item for SSID '{}'", item.ssid);
 
-    // Encrypt the password before sending over the pipe to prevent
-    // plaintext sniffing (CWE-312).
+/// Write a WiFi item to the IoT device's provisioning list.
+pub fn write_wifi_item(item: &WiFiItem) -> HardwareResult<()> {
+    log::info!("IoT: writing WiFi item for SSID '{}'", item.ssid);
+
+    if ec_pipe_active() {
+        // When talking to our ecram_service, the password goes to the EC
+        // verbatim (the original IoTService does no crypto at this layer).
+        let password = item.password.as_deref().unwrap_or("");
+        let connect = item.enable;
+        let ssid_json = serde_json::to_string(&item.ssid)
+            .map_err(|e| anyhow::anyhow!("serialize ssid: {e}"))?;
+        let password_json = serde_json::to_string(password)
+            .map_err(|e| anyhow::anyhow!("serialize password: {e}"))?;
+        let request = format!(
+            r#"{{"op":"iot_write_wifi_item","ssid":{ssid_json},"password":{password_json},"connect":{connect}}}"#
+        );
+        let response = crate::hw::ecram::send_pipe_request(&request)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!(
+                "write wifi item failed: {err}"
+            )));
+        }
+        return Ok(());
+    }
+
+    // Original IoTService path: encrypt the password before sending over the
+    // pipe to prevent plaintext sniffing (CWE-312).
     let encrypted_item = if let Some(ref password) = item.password {
         let encrypted_password = encrypt_wifi_password(password)
             .map_err(|e| anyhow::anyhow!("Failed to encrypt WiFi password: {e}"))?;
@@ -1073,7 +1193,27 @@ pub fn write_wifi_item(item: &WiFiItem) -> HardwareResult<()> {
 
 /// Delete a WiFi network from the IoT device's provisioning list by SSID.
 pub fn delete_wifi_item(ssid: &str) -> HardwareResult<()> {
-    log::info!("IoT IPC: deleting WiFi item for SSID '{ssid}'");
+    log::info!("IoT: deleting WiFi item for SSID '{ssid}'");
+
+    if ec_pipe_active() {
+        let ssid_json =
+            serde_json::to_string(ssid).map_err(|e| anyhow::anyhow!("serialize ssid: {e}"))?;
+        let request = format!(r#"{{"op":"iot_delete_wifi_item","ssid":{ssid_json}}}"#);
+        let response = crate::hw::ecram::send_pipe_request(&request)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!(
+                "delete wifi item failed: {err}"
+            )));
+        }
+        return Ok(());
+    }
+
     send_json_cmd_no_resp(
         DST_IOT_DRIVER,
         msg_type::DELETE_WIFI_ITEM,
@@ -1084,6 +1224,36 @@ pub fn delete_wifi_item(ssid: &str) -> HardwareResult<()> {
 
 /// Get a WiFi item from the provisioning list by index.
 pub fn get_wifi_by_index(index: u32) -> HardwareResult<WiFiItemInfo> {
+    if ec_pipe_active() {
+        let request = format!(r#"{{"op":"iot_get","cmd":"wifi_by_index","index":{index}}}"#);
+        let response = crate::hw::ecram::send_pipe_request(&request)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!(
+                "get wifi by index failed: {err}"
+            )));
+        }
+        return Ok(WiFiItemInfo {
+            ssid: parsed
+                .get("ssid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            connected: parsed
+                .get("connected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            enabled: parsed
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        });
+    }
     send_json_cmd::<WiFiItemInfo>(
         DST_IOT_DRIVER,
         msg_type::GET_WIFI_BY_INDEX,
@@ -1094,24 +1264,58 @@ pub fn get_wifi_by_index(index: u32) -> HardwareResult<WiFiItemInfo> {
 
 /// Get the number of provisioned WiFi networks.
 pub fn read_wifi_count() -> HardwareResult<u32> {
+    if ec_pipe_active() {
+        return query_ec_wifi_count().map_err(HardwareError::from);
+    }
     let info: WiFiCountInfo = send_query(DST_IOT_DRIVER, msg_type::READ_WIFI_COUNT)?;
     Ok(info.count)
 }
 
 /// Get the current WiFi connection status.
 pub fn read_wifi_status() -> HardwareResult<WiFiStatusInfo> {
+    if ec_pipe_active() {
+        return query_ec_wifi_status().map_err(HardwareError::from);
+    }
     send_query::<WiFiStatusInfo>(DST_IOT_DRIVER, msg_type::READ_WIFI_STATUS)
         .map_err(HardwareError::from)
 }
 
 /// Remove all provisioned WiFi networks.
 pub fn empty_wifi_items() -> HardwareResult<()> {
+    if ec_pipe_active() {
+        let response = crate::hw::ecram::send_pipe_request(r#"{"op":"iot_empty_wifi"}"#)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!(
+                "empty wifi items failed: {err}"
+            )));
+        }
+        return Ok(());
+    }
     send_ipc_message(DST_IOT_DRIVER, msg_type::EMPTY_WIFI_ITEMS, &[])?;
     Ok(())
 }
 
 /// Force the IoT device to connect to the provisioned WiFi.
 pub fn connect_wifi() -> HardwareResult<()> {
+    if ec_pipe_active() {
+        let response = crate::hw::ecram::send_pipe_request(r#"{"op":"iot_connect_wifi"}"#)?;
+        let parsed: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| anyhow::anyhow!("invalid JSON response: {e}"))?;
+        if !parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(HardwareError::Other(format!("connect wifi failed: {err}")));
+        }
+        return Ok(());
+    }
     send_ipc_message(DST_IOT_DRIVER, msg_type::CONNECT_WIFI, &[])?;
     Ok(())
 }
@@ -1119,7 +1323,17 @@ pub fn connect_wifi() -> HardwareResult<()> {
 // ── Power & EC events ────────────────────────────────────────────────────────
 
 /// Send a power event notification to IoTService.
+///
+/// With the original IoTService, the client sends power events to the service
+/// via the MCPI pipe. Our ecram_service IS the IoTService replacement and
+/// monitors power/EC events itself (via WMI/EC RAM), so when the EC pipe is
+/// active these notifications are already handled internally — we no-op to
+/// avoid failing against a service that does not implement the MCPI pipe.
 pub fn notify_power_event(event: &PowerEvent) -> HardwareResult<()> {
+    if ec_pipe_active() {
+        log::debug!("IoT: power event {event:?} handled internally by ecram_service");
+        return Ok(());
+    }
     let json = serde_json::to_vec(event).context("Serialize power event")?;
     send_ipc_message(DST_IOT_DRIVER, msg_type::POWER_EVENT, &json)?;
     Ok(())
@@ -1127,6 +1341,12 @@ pub fn notify_power_event(event: &PowerEvent) -> HardwareResult<()> {
 
 /// Send an EC event notification to IoTService.
 pub fn notify_ec_event(event_func: u32, event_value: u32) -> HardwareResult<()> {
+    if ec_pipe_active() {
+        log::debug!(
+            "IoT: EC event (func={event_func}, value={event_value}) handled internally by ecram_service"
+        );
+        return Ok(());
+    }
     let json = serde_json::to_vec(&EcEvent {
         event_func,
         event_value,
@@ -1183,7 +1403,23 @@ pub struct IotDeviceInfo {
 pub fn get_device_info() -> IotDeviceInfo {
     // Check which pipe is available
     let ecram_pipe_available = crate::hw::ecram::is_pipe_broker_available();
-    let mcpi_pipe_available = is_available(); // checks MCPI pipe path
+    // MCPI availability is checked directly against its pipe path — NOT via
+    // `is_available()`, which also reports the ecram pipe as available.
+    let mcpi_pipe_available = {
+        #[cfg(windows)]
+        {
+            let pipe_path = resolve_pipe_path();
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&pipe_path)
+                .is_ok()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    };
 
     log::info!(
         "[iot] get_device_info: ecram_pipe={ecram_pipe_available}, mcpi_pipe={mcpi_pipe_available}"

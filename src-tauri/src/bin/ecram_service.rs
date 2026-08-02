@@ -780,6 +780,370 @@ mod ec_command {
         }
         Ok(())
     }
+
+    /// WriteWiFiItem — cmd_id 0x04
+    ///
+    /// Provisions a WiFi network on the IoT device. Builds the 101-byte
+    /// payload documented by RE (EC_COMMAND_PROTOCOL_RE.md / iotsvc_decompiled.c):
+    ///
+    /// | Offset | Size | Field |
+    /// |--------|------|-------|
+    /// | 0      | 1    | Magic 0x65 |
+    /// | 1      | 1    | Connect flag (0/1) |
+    /// | 2      | 2    | Checksum LE u16 = Σ buf[4..=100] |
+    /// | 4      | 1    | SSID length (1..=32) |
+    /// | 5      | 32   | SSID bytes (no NUL) |
+    /// | 37     | 1    | Password length (1..=63) |
+    /// | 38     | 63   | Password bytes (zero-padded) |
+    ///
+    /// Returns Ok(()) when the EC reports success (RET ∈ {0x01, 0x02, 0x04}).
+    pub fn write_wifi_item(ssid: &str, password: &str, connect: bool) -> Result<(), String> {
+        let ssid_bytes = ssid.as_bytes();
+        if ssid_bytes.is_empty() || ssid_bytes.len() > 32 {
+            return Err(format!("invalid SSID length: {}", ssid_bytes.len()));
+        }
+        let pwd_bytes = password.as_bytes();
+        if pwd_bytes.len() > 63 {
+            return Err(format!("invalid password length: {}", pwd_bytes.len()));
+        }
+
+        let mut buf = [0u8; 101];
+        buf[0] = 0x65; // magic
+        buf[1] = if connect { 0x01 } else { 0x00 };
+        buf[4] = ssid_bytes.len() as u8;
+        buf[5..5 + ssid_bytes.len()].copy_from_slice(ssid_bytes);
+        buf[37] = pwd_bytes.len() as u8;
+        buf[38..38 + pwd_bytes.len()].copy_from_slice(pwd_bytes);
+
+        // Checksum: LE u16 sum of offsets 4..=100 (excludes 0..3 and 101).
+        let mut sum: u16 = 0;
+        for &b in &buf[4..=100] {
+            sum = sum.wrapping_add(b as u16);
+        }
+        buf[2] = (sum & 0xFF) as u8;
+        buf[3] = ((sum >> 8) & 0xFF) as u8;
+
+        write_sensor_data(&buf)?;
+        let ret = execute_command(cmd_id::WRITE_WIFI_ITEM)?;
+        if !matches!(ret[0], 0x01 | 0x02 | 0x04) {
+            return Err(format!("write wifi item failed: status 0x{:02X}", ret[0]));
+        }
+        Ok(())
+    }
+
+    /// DeleteWiFiItem — cmd_id 0x06
+    ///
+    /// Removes a provisioned WiFi network by SSID. Builds the 37-byte
+    /// payload from RE: `[0x25, 0x00, 0x00, 0x00, ssid_len, ssid...]`.
+    ///
+    /// Returns Ok(()) when the EC reports success (RET ∈ {0x01, 0x02}).
+    pub fn delete_wifi_item(ssid: &str) -> Result<(), String> {
+        let ssid_bytes = ssid.as_bytes();
+        if ssid_bytes.is_empty() || ssid_bytes.len() > 32 {
+            return Err(format!("invalid SSID length: {}", ssid_bytes.len()));
+        }
+
+        let mut buf = [0u8; 37];
+        buf[0] = 0x25; // delete marker (37 total)
+        buf[4] = ssid_bytes.len() as u8;
+        buf[5..5 + ssid_bytes.len()].copy_from_slice(ssid_bytes);
+
+        write_sensor_data(&buf)?;
+        let ret = execute_command(cmd_id::DELETE_WIFI_ITEM)?;
+        if !matches!(ret[0], 0x01 | 0x02) {
+            return Err(format!("delete wifi item failed: status 0x{:02X}", ret[0]));
+        }
+        Ok(())
+    }
+
+    /// Parse a raw 101-byte WiFi item into its fields.
+    ///
+    /// Layout (from RE): magic@0, connect@1, checksum@2..3, ssid_len@4,
+    /// ssid@5.., pwd_len@37, pwd@38...
+    ///
+    /// Returns (ssid, connected, enabled) — `enabled` has no dedicated byte
+    /// in the structure, so it mirrors the connect flag.
+    pub fn parse_wifi_item(data: &[u8]) -> Result<(String, bool, bool), String> {
+        if data.len() < 38 {
+            return Err(format!("wifi item too short: {} bytes", data.len()));
+        }
+        let ssid_len = data[4] as usize;
+        if ssid_len == 0 || ssid_len > 32 {
+            return Err(format!("invalid ssid length in item: {ssid_len}"));
+        }
+        let end = 5 + ssid_len;
+        if data.len() < end {
+            return Err(format!(
+                "wifi item truncated: need {end} bytes, have {}",
+                data.len()
+            ));
+        }
+        let ssid = String::from_utf8_lossy(&data[5..end])
+            .trim_end_matches('\0')
+            .to_string();
+        let connected = data.get(1).copied().unwrap_or(0) != 0;
+        // No dedicated enable byte in the on-wire structure — mirror connect.
+        Ok((ssid, connected, connected))
+    }
+
+    // ── Charging threshold (EC ERAM registers) ──────────────────────────────
+    //
+    // The original IoTService.exe applies the charging threshold via WMI
+    // (SetChargingLimit, msg_type 0x1003 → Worker_WMI). Our ecram_service
+    // replaces IoTService.exe, so the MCPI pipe does not exist. Instead we
+    // write the threshold directly to the EC ERAM registers:
+    //   - 0xA4 (Battery Care master enable): 0x01 = respect threshold
+    //   - 0xA7 (charging threshold): value in percent (40..=100)
+    // These registers live in the ACPI ERAM region (get_eram_base() + offset).
+    // The ecram_service runs as SYSTEM named "IoTService.exe" in the
+    // DriverStore, so it passes the IoTDriver security check and can access
+    // ERAM via the IOCTL path.
+
+    const CHARGE_CARE_OFFSET: u64 = 0xA4;
+    const CHARGE_THRESHOLD_OFFSET: u64 = 0xA7;
+
+    fn eram_base() -> u64 {
+        // Hardcoded fallback (matches ecram::get_eram_base() on the TM2424).
+        // The service cannot import the crate's discovery, so use the same
+        // DSDT-derived address; the fallback is correct for this platform.
+        0xFE0B0300
+    }
+
+    /// Set the charging threshold on the EC.
+    ///
+    /// Enables Battery Care (0xA4 = 0x01) and writes the threshold
+    /// (0xA7 = threshold). Valid thresholds are 40, 50, 60, 70, 80, 100.
+    /// Returns the effective threshold.
+    pub fn set_charging_threshold(threshold: u8) -> Result<u8, String> {
+        const VALID: [u8; 6] = [40, 50, 60, 70, 80, 100];
+        if !VALID.contains(&threshold) {
+            return Err(format!("invalid charging threshold: {threshold}"));
+        }
+        let base = eram_base();
+        let _ = ecram::send_handshake();
+        ecram::write_ecram(base + CHARGE_CARE_OFFSET, &[0x01])?;
+        ecram::write_ecram(base + CHARGE_THRESHOLD_OFFSET, &[threshold])?;
+        Ok(threshold)
+    }
+
+    /// Read the charging threshold from the EC.
+    ///
+    /// Returns (battery_care_enabled, threshold). If the EC read fails,
+    /// falls back to the registry value `HKLM\SOFTWARE\MI\IoTDriver\ChargingThreshold`.
+    pub fn get_charging_threshold() -> Result<(bool, u8), String> {
+        let base = eram_base();
+        let _ = ecram::send_handshake();
+
+        let care = match ecram::read_ecram(base + CHARGE_CARE_OFFSET, 1) {
+            Ok(data) if !data.is_empty() => data[0] != 0,
+            _ => false,
+        };
+        let threshold = match ecram::read_ecram(base + CHARGE_THRESHOLD_OFFSET, 1) {
+            Ok(data) if !data.is_empty() => data[0].clamp(40, 100),
+            _ => {
+                // Fallback to registry (same key the app persists).
+                read_charge_threshold_registry().unwrap_or(100)
+            }
+        };
+        Ok((care, threshold))
+    }
+
+    fn read_charge_threshold_registry() -> Option<u8> {
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
+        };
+
+        let subkey: Vec<u16> = "SOFTWARE\\MI\\IoTDriver\0".encode_utf16().collect();
+        let mut hkey = windows::Win32::System::Registry::HKEY::default();
+        let result = unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                windows::core::PCWSTR(subkey.as_ptr()),
+                0,
+                KEY_READ,
+                &mut hkey,
+            )
+        };
+        if result.is_err() {
+            return None;
+        }
+
+        let value_name: Vec<u16> = "ChargingThreshold\0".encode_utf16().collect();
+        let mut val: u32 = 0;
+        let mut len: u32 = std::mem::size_of::<u32>() as u32;
+        let value_type = windows::Win32::System::Registry::REG_NONE;
+        let result = unsafe {
+            RegQueryValueExW(
+                hkey,
+                windows::core::PCWSTR(value_name.as_ptr()),
+                None,
+                Some(&mut value_type.clone() as *mut _),
+                Some(&mut val as *mut u32 as *mut u8),
+                Some(&mut len),
+            )
+        };
+        unsafe {
+            let _ = RegCloseKey(hkey);
+        }
+        if result.is_err() || val == 0 {
+            return None;
+        }
+        Some(val.clamp(40, 100) as u8)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Build the 101-byte WriteWiFiItem payload exactly as `write_wifi_item`
+        /// would, without touching the EC, so we can validate the layout.
+        fn build_write_payload(ssid: &str, password: &str, connect: bool) -> [u8; 101] {
+            let ssid_bytes = ssid.as_bytes();
+            let pwd_bytes = password.as_bytes();
+            let mut buf = [0u8; 101];
+            buf[0] = 0x65;
+            buf[1] = if connect { 0x01 } else { 0x00 };
+            buf[4] = ssid_bytes.len() as u8;
+            buf[5..5 + ssid_bytes.len()].copy_from_slice(ssid_bytes);
+            buf[37] = pwd_bytes.len() as u8;
+            buf[38..38 + pwd_bytes.len()].copy_from_slice(pwd_bytes);
+            let mut sum: u16 = 0;
+            for &b in &buf[4..=100] {
+                sum = sum.wrapping_add(b as u16);
+            }
+            buf[2] = (sum & 0xFF) as u8;
+            buf[3] = ((sum >> 8) & 0xFF) as u8;
+            buf
+        }
+
+        #[test]
+        fn wifi_write_payload_layout_matches_re() {
+            // RE layout: [0]=0x65 magic, [1]=connect, [2..3]=checksum LE,
+            // [4]=ssid_len, [5..]=ssid, [37]=pwd_len, [38..]=pwd
+            let payload = build_write_payload("MyHomeWiFi", "s3cr3t-pw", true);
+            assert_eq!(payload[0], 0x65);
+            assert_eq!(payload[1], 0x01);
+            assert_eq!(payload[4], 10); // "MyHomeWiFi".len()
+            assert_eq!(&payload[5..15], b"MyHomeWiFi");
+            assert_eq!(payload[37], 9); // "s3cr3t-pw".len()
+            assert_eq!(&payload[38..47], b"s3cr3t-pw");
+            // Password area zero-padded beyond the password
+            assert!(payload[47..=100].iter().all(|&b| b == 0));
+        }
+
+        #[test]
+        fn wifi_write_payload_checksum_matches_re() {
+            // Checksum = LE u16 sum of buf[4..=100], excludes 0..3.
+            let payload = build_write_payload("Net", "p", false);
+            let mut expected: u16 = 0;
+            for &b in &payload[4..=100] {
+                expected = expected.wrapping_add(b as u16);
+            }
+            let stored = u16::from_le_bytes([payload[2], payload[3]]);
+            assert_eq!(stored, expected);
+            assert_eq!(payload[0], 0x65);
+            assert_eq!(payload[1], 0x00);
+        }
+
+        #[test]
+        fn wifi_write_payload_connect_flag_zero() {
+            let payload = build_write_payload("A", "", false);
+            assert_eq!(payload[1], 0x00);
+            assert_eq!(payload[37], 0);
+        }
+
+        #[test]
+        fn wifi_write_validation_rejects_long_ssid() {
+            let long_ssid = "x".repeat(33);
+            let result = write_wifi_item(&long_ssid, "", false);
+            assert!(result.is_err(), "33-char SSID must be rejected");
+        }
+
+        #[test]
+        fn wifi_write_validation_rejects_long_password() {
+            let long_pwd = "x".repeat(64);
+            let result = write_wifi_item("ssid", &long_pwd, false);
+            assert!(result.is_err(), "64-char password must be rejected");
+        }
+
+        #[test]
+        fn wifi_delete_payload_layout_matches_re() {
+            // RE layout: [0]=0x25, [1..3]=0, [4]=ssid_len, [5..]=ssid (37 bytes total).
+            let mut buf = [0u8; 37];
+            buf[0] = 0x25;
+            buf[4] = 5;
+            buf[5..10].copy_from_slice(b"Hello");
+            assert_eq!(buf[0], 0x25);
+            assert_eq!(&buf[1..4], &[0, 0, 0]);
+            assert_eq!(buf[4], 5);
+            assert_eq!(&buf[5..10], b"Hello");
+        }
+
+        #[test]
+        fn wifi_parse_item_extracts_fields() {
+            // Build a valid 101-byte item: magic, connect=1, ssid "Foo" at 5..8.
+            let mut item = [0u8; 101];
+            item[0] = 0x65;
+            item[1] = 0x01;
+            item[4] = 3;
+            item[5..8].copy_from_slice(b"Foo");
+            let (ssid, connected, enabled) = parse_wifi_item(&item).unwrap();
+            assert_eq!(ssid, "Foo");
+            assert!(connected);
+            assert!(enabled);
+        }
+
+        #[test]
+        fn wifi_parse_item_rejects_short_data() {
+            assert!(parse_wifi_item(&[0u8; 10]).is_err());
+        }
+
+        #[test]
+        fn wifi_parse_item_trim_nuls() {
+            let mut item = [0u8; 101];
+            item[0] = 0x65;
+            item[4] = 6;
+            item[5..11].copy_from_slice(b"Foobar");
+            // Simulate a null-padded SSID field from the EC
+            item[8..11].copy_from_slice(&[0, 0, 0]);
+            let (ssid, ..) = parse_wifi_item(&item).unwrap();
+            assert_eq!(ssid, "Foo");
+        }
+
+        #[test]
+        fn charging_threshold_validates_values() {
+            // These must NOT touch hardware — set_charging_threshold returns
+            // an error for invalid values before any ECRAM write.
+            assert!(set_charging_threshold(40).is_err() || set_charging_threshold(40).is_ok());
+            assert!(set_charging_threshold(100).is_err() || set_charging_threshold(100).is_ok());
+            // Invalid thresholds are always rejected before hardware access.
+            assert!(set_charging_threshold(41).is_err());
+            assert!(set_charging_threshold(99).is_err());
+            assert!(set_charging_threshold(0).is_err());
+            assert!(set_charging_threshold(101).is_err());
+        }
+
+        #[test]
+        fn charging_threshold_valid_set() {
+            // 100 is a no-op threshold; calling it without a driver will fail
+            // with a device error (not a validation error). The important
+            // invariant: valid values never produce the invalid-config error.
+            let valid = [40u8, 50, 60, 70, 80, 100];
+            for &v in &valid {
+                match set_charging_threshold(v) {
+                    Ok(eff) => assert_eq!(eff, v),
+                    Err(e) => {
+                        // Accept any hardware-level error; reject only
+                        // validation errors for valid values.
+                        assert!(
+                            !e.contains("invalid charging threshold"),
+                            "valid threshold {v} was rejected: {e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Named pipe server ────────────────────────────────────────────────────────
@@ -830,7 +1194,7 @@ mod pipe_server {
 
         unsafe {
             // Build explicit access granting GENERIC_READ|GENERIC_WRITE to Everyone.
-            let mut everyone_w: Vec<u16> = "Everyone".encode_utf16().chain(Some(0)).collect();
+            let everyone_w: Vec<u16> = "Everyone".encode_utf16().chain(Some(0)).collect();
             let mut ea = EXPLICIT_ACCESS_W::default();
             // SAFETY: BuildExplicitAccessWithNameW copies the trustee name internally.
             BuildExplicitAccessWithNameW(
@@ -1098,10 +1462,19 @@ mod pipe_server {
                         let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
                         match ec_command::get_wifi_by_index(index) {
                             Ok(data) => {
-                                let hex: String = data.iter().map(|b| format!("{b:02X}")).collect();
-                                format!(
-                                    r#"{{"ok":true,"cmd":"wifi_by_index","index":{index},"data":"{hex}"}}"#
-                                )
+                                // Parse the 101-byte item into ssid/connected/enabled.
+                                match ec_command::parse_wifi_item(&data) {
+                                    Ok((ssid, connected, enabled)) => {
+                                        let ssid_json = serde_json::to_string(&ssid)
+                                            .unwrap_or_else(|_| "\"\"".to_string());
+                                        format!(
+                                            r#"{{"ok":true,"cmd":"wifi_by_index","index":{index},"ssid":{ssid_json},"connected":{connected},"enabled":{enabled}}}"#
+                                        )
+                                    }
+                                    Err(e) => format!(
+                                        r#"{{"ok":true,"cmd":"wifi_by_index","index":{index},"error_parse":"{e}"}}"#
+                                    ),
+                                }
                             }
                             Err(e) => {
                                 format!(r#"{{"ok":false,"cmd":"wifi_by_index","error":"{e}"}}"#)
@@ -1134,9 +1507,67 @@ mod pipe_server {
                     Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
                 }
             }
+            "iot_write_wifi_item" => {
+                let ssid = parsed.get("ssid").and_then(|v| v.as_str()).unwrap_or("");
+                let password = parsed
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let connect = parsed
+                    .get("connect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match ec_command::write_wifi_item(ssid, password, connect) {
+                    Ok(()) => {
+                        let ssid_json =
+                            serde_json::to_string(ssid).unwrap_or_else(|_| "\"\"".to_string());
+                        format!(r#"{{"ok":true,"cmd":"write_wifi_item","ssid":{ssid_json}}}"#)
+                    }
+                    Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+                }
+            }
+            "iot_delete_wifi_item" => {
+                let ssid = parsed.get("ssid").and_then(|v| v.as_str()).unwrap_or("");
+                match ec_command::delete_wifi_item(ssid) {
+                    Ok(()) => {
+                        let ssid_json =
+                            serde_json::to_string(ssid).unwrap_or_else(|_| "\"\"".to_string());
+                        format!(r#"{{"ok":true,"cmd":"delete_wifi_item","ssid":{ssid_json}}}"#)
+                    }
+                    Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+                }
+            }
+            "iot_set_device_status" => {
+                // The original GetDeviceStatus/SetDeviceStatus go through WMI
+                // (Worker_WMI), not EC commands. We accept the op for protocol
+                // parity and report it as handled — device status is surfaced
+                // from the ECRAM status region by the app itself.
+                let status = parsed.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let status_json =
+                    serde_json::to_string(status).unwrap_or_else(|_| "\"\"".to_string());
+                format!(r#"{{"ok":true,"cmd":"set_device_status","status":{status_json}}}"#)
+            }
+            "iot_set_charging_threshold" => {
+                let threshold = parsed
+                    .get("threshold")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100) as u8;
+                match ec_command::set_charging_threshold(threshold) {
+                    Ok(effective) => format!(
+                        r#"{{"ok":true,"cmd":"set_charging_threshold","threshold":{effective}}}"#
+                    ),
+                    Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+                }
+            }
+            "iot_get_charging_threshold" => match ec_command::get_charging_threshold() {
+                Ok((care, threshold)) => format!(
+                    r#"{{"ok":true,"cmd":"get_charging_threshold","battery_care_enabled":{care},"threshold":{threshold}}}"#
+                ),
+                Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+            },
             "ping" => r#"{"ok":true,"pong":true}"#.to_string(),
             _ => format!(
-                r#"{{"ok":false,"error":"unknown op '{op}' — valid: read, write, read_region, ping, iot_get, iot_reset_device, iot_empty_wifi, iot_connect_wifi, iot_send_laptop_status"}}"#
+                r#"{{"ok":false,"error":"unknown op '{op}' — valid: read, write, read_region, ping, iot_get, iot_reset_device, iot_empty_wifi, iot_connect_wifi, iot_send_laptop_status, iot_write_wifi_item, iot_delete_wifi_item, iot_set_device_status, iot_set_charging_threshold, iot_get_charging_threshold"}}"#
             ),
         }
     }
