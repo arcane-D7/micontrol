@@ -11,7 +11,7 @@
 //! model files must exist at runtime.
 
 use crate::hw::face::config::{EMBEDDING_DIM, MODELS_DIR};
-use crate::hw::face::errors::FaceResult;
+use crate::hw::face::errors::{FaceError, FaceResult};
 use std::path::PathBuf;
 
 #[allow(dead_code)] // fields only read when the `face` feature is enabled
@@ -95,8 +95,8 @@ impl FaceDetector {
     /// if possible.
     #[cfg(feature = "face")]
     pub fn load(&mut self) -> FaceResult<()> {
-        use ort::session::{Session, SessionOutputs};
-        use std::sync::Arc;
+        use ort::ep;
+        use ort::session::builder::SessionBuilder;
 
         let det_path = self.det_model_path();
         if !det_path.exists() {
@@ -107,37 +107,34 @@ impl FaceDetector {
             return Err(FaceError::MissingModel(rec_path.display().to_string()));
         }
 
+        // ort 2.0: the global Environment is configured implicitly; sessions
+        // attach to it. We select the CPU execution provider explicitly.
+        let cpu_ep = ep::CPU::default().build();
+
         if self.session_det.is_none() {
             log::info!("[face.models] loading detection model {det_path:?}");
-            let env = Arc::new(
-                ort::environment::Environment::builder()
-                    .with_name("micontrol_face")
-                    .with_execution_providers([ort::ExecutionProvider::CPU::default().build()])
-                    .build()
-                    .map_err(|e| FaceError::Model(format!("ort env: {e}")))?,
-            );
-            let session = Session::builder()
-                .with_environment(env)
+            let mut builder = SessionBuilder::new()
+                .map_err(|e| FaceError::Model(format!("session builder: {e}")))?;
+            builder = builder
+                .with_execution_providers([cpu_ep.clone()])
+                .map_err(|e| FaceError::Model(format!("det EP: {e}")))?;
+            let session = builder
                 .commit_from_file(&det_path)
                 .map_err(|e| FaceError::Model(format!("det session: {e}")))?;
             self.session_det = Some(session);
         }
         if self.session_rec.is_none() {
             log::info!("[face.models] loading recognition model {rec_path:?}");
-            let env = Arc::new(
-                ort::environment::Environment::builder()
-                    .with_name("micontrol_face")
-                    .with_execution_providers([ort::ExecutionProvider::CPU::default().build()])
-                    .build()
-                    .map_err(|e| FaceError::Model(format!("ort env: {e}")))?,
-            );
-            let session = Session::builder()
-                .with_environment(env)
+            let mut builder = SessionBuilder::new()
+                .map_err(|e| FaceError::Model(format!("session builder: {e}")))?;
+            builder = builder
+                .with_execution_providers([cpu_ep])
+                .map_err(|e| FaceError::Model(format!("rec EP: {e}")))?;
+            let session = builder
                 .commit_from_file(&rec_path)
                 .map_err(|e| FaceError::Model(format!("rec session: {e}")))?;
             self.session_rec = Some(session);
         }
-        let _ = SessionOutputs::default();
         Ok(())
     }
 
@@ -152,22 +149,26 @@ impl FaceDetector {
         &mut self,
         frame: &crate::hw::face::camera::Frame,
     ) -> FaceResult<Vec<DetectedFace>> {
-        use ort::inputs;
         // Resize to det_size (bilinear-ish via nearest for simplicity; a real
         // impl should use proper resize + letterbox — see note in PLAN).
         let (dw, dh) = self.det_size;
         let rgb = frame.to_rgb();
         let resized = resize_nearest(&rgb, frame.width, frame.height, dw as usize, dh as usize);
-        let tensor = ndarray::Array3::from_shape_vec((1, dh as usize, dw as usize, 3), resized)
-            .map_err(|e| FaceError::Model(format!("input shape: {e}")))?
-            .into_dynamic();
+        // NHWC input (InsightFace SCRFD expects [1, 320, 320, 3] float [0,1]).
+        // Use the `(shape, Vec)` tensor input form — no ndarray version pinning.
+        let mut data = vec![0.0f32; dh as usize * dw as usize * 3];
+        for (out, &b) in data.iter_mut().zip(resized.iter()) {
+            *out = b as f32 / 255.0;
+        }
 
         let session = self
             .session_det
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| FaceError::Model("detector not loaded".into()))?;
+        let tensor = ort::value::Tensor::from_array(([1usize, dh as usize, dw as usize, 3], data))
+            .map_err(|e| FaceError::Model(format!("tensor: {e}")))?;
         let outputs = session
-            .run(inputs![tensor].map_err(|e| FaceError::Model(format!("inputs: {e}")))?)
+            .run(ort::inputs![tensor])
             .map_err(|e| FaceError::Model(format!("detect run: {e}")))?;
 
         // Parse SCRFD outputs. The exact output tensor names/order depend on

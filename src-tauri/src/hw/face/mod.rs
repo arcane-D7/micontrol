@@ -38,6 +38,7 @@ pub mod errors;
 pub mod liveness;
 pub mod matcher;
 pub mod models;
+pub mod pipe_server;
 pub mod service;
 pub mod store;
 

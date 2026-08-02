@@ -41,7 +41,7 @@ impl Frame {
 #[allow(dead_code)] // only exercised when the `face` feature is enabled
 pub struct Camera {
     index: u32,
-    #[cfg(feature = "face")]
+    #[cfg(feature = "face-opencv")]
     inner: Option<opencv::videoio::VideoCapture>,
 }
 
@@ -63,7 +63,7 @@ impl Camera {
 
     /// Open the camera at `index`, retrying with backoff until a frame reads.
     /// `timeout_s` caps the total retry time.
-    #[cfg(feature = "face")]
+    #[cfg(feature = "face-opencv")]
     pub fn open(index: u32, timeout_s: f32) -> FaceResult<Self> {
         use std::time::{Duration, Instant};
 
@@ -111,7 +111,7 @@ impl Camera {
         }
     }
 
-    #[cfg(not(feature = "face"))]
+    #[cfg(not(feature = "face-opencv"))]
     pub fn open(_index: u32, _timeout_s: f32) -> FaceResult<Self> {
         Err(FaceError::NotSupported(
             "face feature disabled (camera capture requires the opencv crate)".into(),
@@ -119,7 +119,7 @@ impl Camera {
     }
 
     /// Read one frame. Errors if not opened or the read fails.
-    #[cfg(feature = "face")]
+    #[cfg(feature = "face-opencv")]
     pub fn read(&mut self) -> FaceResult<Frame> {
         let cap = self
             .inner
@@ -154,19 +154,19 @@ impl Camera {
         })
     }
 
-    #[cfg(not(feature = "face"))]
+    #[cfg(not(feature = "face-opencv"))]
     pub fn read(&mut self) -> FaceResult<Frame> {
         Err(FaceError::NotSupported("face feature disabled".into()))
     }
 }
 
 /// Helper: small helper for the retry loop.
-#[cfg(feature = "face")]
+#[cfg(feature = "face-opencv")]
 fn cap_fail() {
     // No-op placeholder for logging symmetry.
 }
 
-#[cfg(feature = "face")]
+#[cfg(feature = "face-opencv")]
 fn continue_or_timeout(start: std::time::Instant, timeout_s: f32, attempt: u32) -> FaceResult<()> {
     use std::time::Duration;
     if start.elapsed().as_secs_f32() >= timeout_s {
@@ -180,7 +180,7 @@ fn continue_or_timeout(start: std::time::Instant, timeout_s: f32, attempt: u32) 
 
 impl Drop for Camera {
     fn drop(&mut self) {
-        #[cfg(feature = "face")]
+        #[cfg(feature = "face-opencv")]
         if let Some(mut cap) = self.inner.take() {
             let _ = cap.release();
         }

@@ -201,6 +201,20 @@ impl AuthSession {
         }
     }
 
+    /// Force a specific liveness challenge (used by tests and the service to
+    /// make the challenge deterministic). Returns true if liveness is enabled
+    /// and the challenge was set.
+    pub fn liveness_force_challenge(&mut self, challenge: Challenge) -> bool {
+        if let Some(liv) = self.liveness.as_mut() {
+            *liv = LivenessState::new(challenge);
+            self.challenge = challenge;
+            self.phase = Phase::Liveness;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Convenience: run the whole pipeline on one frame (single-shot, used by
     /// dev/console auth). Feed must be called repeatedly for liveness.
     pub fn snapshot(&self) -> PollSnapshot {
