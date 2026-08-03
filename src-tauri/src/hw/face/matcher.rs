@@ -65,20 +65,20 @@ pub fn best_match_with_margin(
     }
     let mut idx = 0usize;
     let mut best = sims[0];
-    for i in 1..sims.len() {
-        if sims[i] > best {
-            best = sims[i];
+    for (i, &s) in sims.iter().enumerate().skip(1) {
+        if s > best {
+            best = s;
             idx = i;
         }
     }
     // Margin vs the most-similar different profile.
     let mut rival_max = f32::MIN;
     let mut has_rival = false;
-    for i in 0..sims.len() {
+    for (i, &s) in sims.iter().enumerate() {
         if i != idx && names[i] != names[idx] {
             has_rival = true;
-            if sims[i] > rival_max {
-                rival_max = sims[i];
+            if s > rival_max {
+                rival_max = s;
             }
         }
     }
@@ -101,8 +101,8 @@ pub fn best_match(probe: &[f32], gallery: &[Vec<f32>]) -> MatchResult {
     }
     let mut idx = 0usize;
     let mut best = cosine_similarity(probe, &gallery[0]);
-    for i in 1..gallery.len() {
-        let s = cosine_similarity(probe, &gallery[i]);
+    for (i, g) in gallery.iter().enumerate().skip(1) {
+        let s = cosine_similarity(probe, g);
         if s > best {
             best = s;
             idx = i;

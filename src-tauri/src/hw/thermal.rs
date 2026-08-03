@@ -48,7 +48,7 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
             Ok(r) => r,
             Err(e) => {
                 log::debug!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed: {e}");
-                return Err(e.into());
+                return Err(e);
             }
         };
 

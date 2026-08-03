@@ -8,6 +8,7 @@
 //! - Versioned binary format with a magic header.
 //! - Multi-template per profile (same-name "add angle" appends, FIFO cap).
 //! - Atomic write (temp file + rename) to survive interrupted saves.
+#![allow(clippy::doc_lazy_continuation)]
 
 use crate::hw::face::config::{EMBEDDING_DIM, MAX_TEMPLATES_PER_NAME, STORE_MAGIC};
 use crate::hw::face::errors::{FaceError, FaceResult};

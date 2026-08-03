@@ -89,11 +89,11 @@ impl LivenessState {
     /// Random challenge factory (blink 1–2 times, or a turn).
     pub fn random_challenge() -> Challenge {
         // Deterministic-ish for tests; the caller seeds with real entropy.
-        let n = (std::time::SystemTime::now()
+        let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0)
-            % 4) as u32;
+            % 4;
         match n {
             0 => Challenge::Blink(1),
             1 => Challenge::Blink(2),

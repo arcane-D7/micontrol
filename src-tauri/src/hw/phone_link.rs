@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PhoneLinkStatus {
     /// Whether Phone Link is installed on this PC
     pub installed: bool,
@@ -26,18 +26,6 @@ pub struct PhoneLinkStatus {
     pub package_version: Option<String>,
     /// Whether Phone Link is currently running
     pub running: bool,
-}
-
-impl Default for PhoneLinkStatus {
-    fn default() -> Self {
-        Self {
-            installed: false,
-            paired: false,
-            device_name: None,
-            package_version: None,
-            running: false,
-        }
-    }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

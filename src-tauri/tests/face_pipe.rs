@@ -7,7 +7,7 @@
 //! The auth runner is mocked at the handler level (no camera / ONNX
 //! models needed), so these tests run in CI without hardware.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use micontrol_lib::hw::face::pipe_server;

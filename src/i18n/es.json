@@ -220,6 +220,13 @@
     "osTurboDisabled": "OS Turbo desactivado",
     "osTurboThrottled": "Procesos limitados",
     "osTurboPowerPlan": "Plan de energía",
+    "osTurboExplainSummary": "¿Qué hace realmente OS Turbo?",
+    "osTurboExplainDetails": "OS Turbo es una optimización a nivel de sistema que reequilibra cómo Windows programa el tiempo de CPU. NO toca los registros de hardware EC/TDP — funciona enteramente a nivel del planificador del SO.",
+    "osTurboExplainBullet1": "Cambia el plan de energía activo de Windows a 'Mejor rendimiento' (elimina los límites de frecuencia de CPU y los retrasos de ahorro de energía).",
+    "osTurboExplainBullet2": "Limita procesos de fondo conocidos usando EcoQoS (Energy-Quality-of-Service) para que usen menos CPU y cedan a tu aplicación en primer plano.",
+    "osTurboExplainBullet3": "Mantiene la aplicación en primer plano priorizada por el planificador.",
+    "osTurboExplainBullet4": "Al desactivarse, restaura el plan 'Equilibrado' y elimina las etiquetas de limitación EcoQoS.",
+    "osTurboExplainNote": "Úsalo para cargas de trabajo exigentes en primer plano (juegos, renderizado, edición de vídeo). Es complementario al Modo Rendimiento de hardware — afectan a capas diferentes (planificador vs. TDP/ventilador).",
     "channels": {
       "title": "Diagnóstico de canales",
       "subtitle": "Comprueba qué canales de control de TDP están disponibles",

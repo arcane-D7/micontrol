@@ -41,10 +41,10 @@ mod lsa_impl {
     }
 
     fn open_policy(access: u32) -> FaceResult<LSA_HANDLE> {
-        let mut attrs = LSA_OBJECT_ATTRIBUTES::default();
+        let attrs = LSA_OBJECT_ATTRIBUTES::default();
         // SAFETY: valid object attributes; name is null (local policy).
         let mut policy = LSA_HANDLE::default();
-        let status = unsafe { LsaOpenPolicy(None, &mut attrs, access, &mut policy) };
+        let status = unsafe { LsaOpenPolicy(None, &attrs, access, &mut policy) };
         if status != NTSTATUS(0) {
             return Err(FaceError::CredVault(format!(
                 "LsaOpenPolicy failed: 0x{:08X}",
@@ -102,12 +102,8 @@ mod lsa_impl {
         let data = unsafe { &*data_ptr };
         let len_u16 = (data.Length as usize) / 2;
         // SAFETY: Buffer is a valid pointer with Length bytes.
-        let password = unsafe {
-            std::slice::from_raw_parts(data.Buffer.0 as *const u16, len_u16)
-                .iter()
-                .map(|&c| c)
-                .collect::<Vec<u16>>()
-        };
+        let password =
+            unsafe { std::slice::from_raw_parts(data.Buffer.0 as *const u16, len_u16).to_vec() };
         let password = String::from_utf16_lossy(&password);
         // SAFETY: LSA-allocated buffer must be freed with LsaFreeReturnBuffer via LocalFree.
         unsafe { LocalFree(windows::Win32::Foundation::HLOCAL(data_ptr as *mut _)) };

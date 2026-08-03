@@ -884,10 +884,9 @@ pub fn read_named_region(region: &str) -> HardwareResult<Vec<u8>> {
         .or_else(|e| {
             log::debug!(target: "hw::ecram", "Direct read of {region} failed ({e}), trying pipe broker");
             read_ecram_via_pipe(addr, size)
-                .ok_or_else(|| e)
-                .map(|data| {
+                .ok_or(e)
+                .inspect(|data| {
                     log::debug!(target: "hw::ecram", "Pipe broker read {region}: {len} bytes", len = data.len());
-                    data
                 })
         })
         .or_else(|e| {
@@ -1001,10 +1000,9 @@ pub fn read_eram_map() -> HardwareResult<EramMap> {
         .or_else(|e| {
             log::debug!(target: "hw::ecram", "Direct ERAM read failed ({e}), trying pipe broker");
             read_ecram_via_pipe(get_eram_base(), 0x100)
-                .ok_or_else(|| e)
-                .map(|data| {
+                .ok_or(e)
+                .inspect(|data| {
                     log::debug!(target: "hw::ecram", "Pipe broker ERAM read: {len} bytes", len = data.len());
-                    data
                 })
         });
 
@@ -1421,7 +1419,7 @@ mod tests {
     #[test]
     fn ecram_max_index_value() {
         assert_eq!(ECRAM_MAX_INDEX, 0xFF);
-        assert_eq!(ECRAM_MAX_INDEX as usize, ERAM_SIZE - 1);
+        assert_eq!(ECRAM_MAX_INDEX, ERAM_SIZE - 1);
     }
 
     #[test]
@@ -1493,7 +1491,7 @@ mod tests {
     fn parse_safe_writes_json_valid() {
         let json = r#"{
             "description": "test",
-            "offsets": ["0x1B", "0x40", "0x42", "0x4A", "0x4B", "0x68", "0x96", "0xAE", "0xB2"]
+            "offsets": ["0x1B", "0x40", "0x42", "0x4A", "0x4B", "0x68", "0x96", "0xA4", "0xA7", "0xAE", "0xB2"]
         }"#;
         let offsets = parse_safe_writes_json(json).expect("valid JSON should parse");
         assert_eq!(offsets, DEFAULT_SAFE_WRITE_OFFSETS);
@@ -1517,7 +1515,7 @@ mod tests {
     fn parse_safe_writes_json_empty_array() {
         let json = r#"{ "offsets": [] }"#;
         let offsets = parse_safe_writes_json(json);
-        assert!(offsets.map_or(false, |v| v.is_empty()));
+        assert!(offsets.is_some_and(|v| v.is_empty()));
     }
 
     #[test]

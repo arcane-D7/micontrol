@@ -109,7 +109,7 @@ fn find_mpcmdrun() -> HardwareResult<PathBuf> {
         ));
     }
 
-    let entries = std::fs::read_dir(&base).map_err(|e| HardwareError::Io(e))?;
+    let entries = std::fs::read_dir(&base).map_err(HardwareError::Io)?;
 
     let mut versions: Vec<String> = entries
         .filter_map(|e| e.ok())

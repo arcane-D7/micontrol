@@ -183,7 +183,7 @@ pub fn scan_networks() -> HardwareResult<Vec<WifiNetwork>> {
         // same SSID from multiple APs (e.g., 2.4GHz + 5GHz) appears multiple
         // times. We keep the entry with the strongest signal and preserve
         // the connected flag.
-        networks.sort_by(|a, b| b.signal.cmp(&a.signal));
+        networks.sort_by_key(|n| std::cmp::Reverse(n.signal));
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut deduped: Vec<WifiNetwork> = Vec::with_capacity(networks.len());
         for net in networks {

@@ -302,7 +302,7 @@ fn clean_directory(path: &std::path::Path) -> (u64, u64, u64, Vec<String>) {
         freed: &mut u64,
         removed: &mut u64,
         skipped: &mut u64,
-        errors: &mut Vec<String>,
+        _errors: &mut Vec<String>,
         depth: usize,
     ) {
         // S32-002: Hard depth limit — never recurse deeper than 12 levels and
@@ -338,7 +338,7 @@ fn clean_directory(path: &std::path::Path) -> (u64, u64, u64, Vec<String>) {
                     continue;
                 }
                 if entry_path.is_dir() {
-                    clean_dir_recursive(&entry_path, freed, removed, skipped, errors, depth + 1);
+                    clean_dir_recursive(&entry_path, freed, removed, skipped, _errors, depth + 1);
                     // Try to remove the now-empty directory
                     let _ = std::fs::remove_dir(&entry_path);
                 } else {

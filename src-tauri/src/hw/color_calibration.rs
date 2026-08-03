@@ -88,10 +88,10 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
         // profiles directory. A crafted .icc path from a compromised webview
         // must not be able to load arbitrary files (or be used to probe the
         // filesystem) — restrict to the known profiles location.
-        let canonical = std::fs::canonicalize(&path)
+        let canonical = std::fs::canonicalize(path)
             .map_err(|e| HardwareError::Other(format!("Cannot resolve ICC path: {e}")))?;
         let profiles_dir = get_color_profiles_dir();
-        if !canonical.starts_with(&profiles_dir) {
+        if !canonical.starts_with(profiles_dir.as_path()) {
             return Err(HardwareError::Other(format!(
                 "ICC profile must be inside the system color profiles directory ({}), got {}",
                 profiles_dir.display(),
@@ -108,14 +108,13 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
             .collect();
 
         let result = unsafe {
-            let mscms = windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::PCSTR(
-                b"mscms.dll\0".as_ptr(),
-            ))
-            .map_err(|e| HardwareError::Other(format!("Failed to load mscms.dll: {e}")))?;
+            let mscms =
+                windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::s!("mscms.dll"))
+                    .map_err(|e| HardwareError::Other(format!("Failed to load mscms.dll: {e}")))?;
 
             let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
                 mscms,
-                windows::core::PCSTR(b"SetICMProfileW\0".as_ptr()),
+                windows::core::s!("SetICMProfileW"),
             )
             .ok_or_else(|| HardwareError::Other("SetICMProfileW not found".to_string()))?;
 
@@ -372,14 +371,13 @@ fn get_icm_profile_gdi(device_name: &str) -> Option<String> {
     let mut size = profile_path.len() as u32;
 
     let result = unsafe {
-        let mscms = windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::PCSTR(
-            b"mscms.dll\0".as_ptr(),
-        ))
-        .ok()?;
+        let mscms =
+            windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::s!("mscms.dll"))
+                .ok()?;
 
         let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
             mscms,
-            windows::core::PCSTR(b"GetICMProfileW\0".as_ptr()),
+            windows::core::s!("GetICMProfileW"),
         )?;
 
         let hdc = windows::Win32::Graphics::Gdi::CreateDCW(
@@ -435,18 +433,17 @@ fn get_wcs_default_profile(device_name: &str) -> Option<String> {
         .collect();
 
     unsafe {
-        let mscms = windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::PCSTR(
-            b"mscms.dll\0".as_ptr(),
-        ))
-        .ok()?;
+        let mscms =
+            windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::s!("mscms.dll"))
+                .ok()?;
 
         let size_proc = windows::Win32::System::LibraryLoader::GetProcAddress(
             mscms,
-            windows::core::PCSTR(b"WcsGetDefaultColorProfileSize\0".as_ptr()),
+            windows::core::s!("WcsGetDefaultColorProfileSize"),
         )?;
         let get_proc = windows::Win32::System::LibraryLoader::GetProcAddress(
             mscms,
-            windows::core::PCSTR(b"WcsGetDefaultColorProfile\0".as_ptr()),
+            windows::core::s!("WcsGetDefaultColorProfile"),
         )?;
 
         let wcs_get_size: unsafe extern "system" fn(

@@ -40,10 +40,8 @@ fn is_permanent_hresult(hres: u32) -> bool {
 #[cfg(windows)]
 fn extract_hresult_from_error(err: &(dyn std::error::Error + 'static)) -> Option<u32> {
     // Check for wmi::WMIError::HResultError
-    if let Some(wmi_err) = err.downcast_ref::<wmi::WMIError>() {
-        if let wmi::WMIError::HResultError { hres } = wmi_err {
-            return Some(*hres as u32);
-        }
+    if let Some(wmi::WMIError::HResultError { hres }) = err.downcast_ref::<wmi::WMIError>() {
+        return Some(*hres as u32);
     }
     // Check for windows::core::Error (from direct COM calls in wmi_ec.rs, hq_wmi.rs)
     if let Some(win_err) = err.downcast_ref::<windows::core::Error>() {

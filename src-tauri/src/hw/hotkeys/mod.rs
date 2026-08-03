@@ -3162,7 +3162,7 @@ mod wmi_debounce_tests {
 
         // Simulate two different HID classes with the same distinguish byte.
         // Debounce key = (class_idx << 8) | distinguish_byte.
-        let key_a = (0u32 << 8) | 0x23; // HID_EVENT20, AI key
+        let key_a = 0x23; // HID_EVENT20, AI key (class 0)
         let key_b = (1u32 << 8) | 0x23; // HID_EVENT21, same detail byte
 
         assert!(

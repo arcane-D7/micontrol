@@ -181,17 +181,15 @@ pub async fn check_driver_updates() -> HardwareResult<DriverUpdateCheck> {
     let mut updates = Vec::new();
     for off in &official {
         for inst in &installed {
-            if drivers_match(off, inst) {
-                if version_is_newer(&off.version, &inst.driver_version) {
-                    updates.push(DriverUpdate {
-                        device_name: inst.device_name.clone(),
-                        installed_version: inst.driver_version.clone(),
-                        official_version: off.version.clone(),
-                        download_url: off.download_url.clone(),
-                        category: off.category.clone(),
-                        official_name: off.name.clone(),
-                    });
-                }
+            if drivers_match(off, inst) && version_is_newer(&off.version, &inst.driver_version) {
+                updates.push(DriverUpdate {
+                    device_name: inst.device_name.clone(),
+                    installed_version: inst.driver_version.clone(),
+                    official_version: off.version.clone(),
+                    download_url: off.download_url.clone(),
+                    category: off.category.clone(),
+                    official_name: off.name.clone(),
+                });
             }
         }
     }
@@ -209,7 +207,7 @@ pub async fn check_driver_updates() -> HardwareResult<DriverUpdateCheck> {
 /// Returns the path to the downloaded file.
 pub async fn download_driver_package(url: &str) -> HardwareResult<std::path::PathBuf> {
     let temp_dir = std::env::temp_dir().join("micontrol_drivers");
-    std::fs::create_dir_all(&temp_dir).map_err(|e| HardwareError::Io(e))?;
+    std::fs::create_dir_all(&temp_dir).map_err(HardwareError::Io)?;
 
     let filename = url.rsplit('/').next().unwrap_or("driver.zip");
     let dest = temp_dir.join(filename);
@@ -229,7 +227,7 @@ pub async fn download_driver_package(url: &str) -> HardwareResult<std::path::Pat
         .await
         .map_err(|e| HardwareError::Other(format!("Read bytes: {e}")))?;
 
-    std::fs::write(&dest, &bytes).map_err(|e| HardwareError::Io(e))?;
+    std::fs::write(&dest, &bytes).map_err(HardwareError::Io)?;
 
     log::info!(
         "Downloaded driver package: {} ({} bytes)",
@@ -364,11 +362,16 @@ fn extract_version_from_url(url: &str) -> Option<String> {
     for part in parts {
         // Version pattern: digits separated by dots, possibly with letters
         if part.chars().filter(|c| *c == '.').count() >= 2 {
-            // Check if it looks like a version (starts with digit)
-            if part.starts_with(|c: char| c.is_ascii_digit()) {
-                // Extract just the version part (before any underscore)
-                let version = part.split('_').next().unwrap_or(part);
-                return Some(version.to_string());
+            // Split the segment on underscores and look for a token that
+            // starts with a digit and has at least two dots — the actual
+            // version (e.g. "23.170.0.1G" inside
+            // "12.Intel_AX211_WLAN_23.170.0.1G_ICPS_40.25.926.173.zip").
+            for token in part.split('_') {
+                if token.chars().filter(|c| *c == '.').count() >= 2
+                    && token.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    return Some(token.to_string());
+                }
             }
         }
     }

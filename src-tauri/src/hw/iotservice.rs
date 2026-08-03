@@ -512,15 +512,6 @@ fn encrypt_wifi_password(password: &str) -> Result<String, String> {
     encrypt_with_key(password, &key, &nonce_hex)
 }
 
-/// Decrypt a WiFi password using the shared HMAC key.
-///
-/// Input format: `{nonce_hex}:{encrypted_hex}`
-#[cfg(test)]
-fn decrypt_wifi_password(encrypted: &str) -> Result<String, String> {
-    let key = crate::util::auth::get_or_create_key()?;
-    decrypt_with_key(encrypted, &key)
-}
-
 // ── Pipe communication ───────────────────────────────────────────────────────
 
 /// Resolve the pipe path: use discovered path if available, otherwise default.
@@ -1574,7 +1565,7 @@ fn read_fw_version_from_registry() -> Option<String> {
             windows::core::PCWSTR(value_name.as_ptr()),
             None,
             Some(&mut value_type.clone() as *mut _),
-            Some(buf.as_mut_ptr() as *mut u8),
+            Some(buf.as_mut_ptr()),
             Some(&mut buf_len),
         )
     };
@@ -1884,7 +1875,7 @@ mod tests {
         // We don't actually try the pipe — that would hang in CI.
         const VALID: &[u8] = &[40, 50, 60, 70, 80, 100];
         for &v in VALID {
-            assert!(v >= 40 && v <= 100);
+            assert!((40..=100).contains(&v));
         }
         // 99 is not a valid threshold
         assert!(!VALID.contains(&99));

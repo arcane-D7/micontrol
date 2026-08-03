@@ -401,8 +401,10 @@ fn is_stale(timestamp: u64, max_age_days: u64) -> bool {
 
 fn run_discovery() -> HardwareProfile {
     log::info!("=== Hardware discovery started ===");
-    let mut p = HardwareProfile::default();
-    p.discovered_at = now_unix();
+    let mut p = HardwareProfile {
+        discovered_at: now_unix(),
+        ..HardwareProfile::default()
+    };
 
     p.device_model = probe_device_model();
 
@@ -525,7 +527,7 @@ fn read_model_from_bios_registry() -> Option<String> {
             windows::core::PCWSTR(value_name.as_ptr()),
             None,
             Some(&mut value_type.clone() as *mut _),
-            Some(buf.as_mut_ptr() as *mut u8),
+            Some(buf.as_mut_ptr()),
             Some(&mut buf_len),
         )
     };

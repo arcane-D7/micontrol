@@ -216,10 +216,10 @@ export default function IotDeviceCard() {
           laptop is powered off or in sleep mode.
         </p>
         <p style={{ margin: '0 0 8px 0' }}>
-          <strong>IoT WiFi</strong> — This is the IoT chip's own WiFi module, which is completely
-          separate from your Windows WiFi. The chip uses this WiFi to maintain a cloud connection
-          for remote management when the laptop is asleep or powered off. If the chip is not bound
-          to the cloud, IoT WiFi will show "Not connected" — this is expected.
+          <strong>IoT WiFi</strong> — This is the IoT chip&apos;s own WiFi module, which is
+          completely separate from your Windows WiFi. The chip uses this WiFi to maintain a cloud
+          connection for remote management when the laptop is asleep or powered off. If the chip is
+          not bound to the cloud, IoT WiFi will show &quot;Not connected&quot; — this is expected.
         </p>
         <p style={{ margin: 0 }}>
           <strong>Device Status</strong> — Queried via WMI (not EC commands). Reflects the ACPI

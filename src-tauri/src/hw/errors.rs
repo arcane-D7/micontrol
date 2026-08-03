@@ -409,7 +409,7 @@ mod tests {
                 source: "".into(),
             }
             .code(),
-            HardwareError::Io(std::io::Error::new(std::io::ErrorKind::Other, "")).code(),
+            HardwareError::Io(std::io::Error::other("")).code(),
             HardwareError::Hid("".into()).code(),
             HardwareError::InvalidConfig("".into()).code(),
             HardwareError::Timeout("".into()).code(),

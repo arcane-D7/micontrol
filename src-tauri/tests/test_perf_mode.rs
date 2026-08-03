@@ -3,8 +3,6 @@
 //! This test creates a proper HMAC-signed command file, runs the elevated helper,
 //! and checks that the registry value changes.
 
-use std::process::Command;
-
 #[test]
 #[ignore = "Requires admin privileges and MiControl scheduled task"]
 fn test_performance_mode_persists() {
