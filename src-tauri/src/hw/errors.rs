@@ -184,6 +184,18 @@ impl From<anyhow::Error> for HardwareError {
     }
 }
 
+impl From<String> for HardwareError {
+    fn from(e: String) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl From<&str> for HardwareError {
+    fn from(e: &str) -> Self {
+        Self::Other(e.to_string())
+    }
+}
+
 impl From<serde_json::Error> for HardwareError {
     fn from(e: serde_json::Error) -> Self {
         Self::InvalidConfig(format!("JSON: {e}"))

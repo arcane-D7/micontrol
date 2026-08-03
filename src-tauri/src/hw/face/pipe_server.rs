@@ -1,0 +1,211 @@
+//! Named-pipe server for the face auth service.
+//!
+//! Port of the reference `face_hello/service.py` pipe protocol:
+//! - Message-mode pipe, one JSON request per message.
+//! - DACL: SYSTEM + Administrators only.
+//! - `FILE_FLAG_FIRST_PIPE_INSTANCE` anti-squatting.
+//! - Commands: `ping`, `auth_start`, `auth_poll` (production).
+//! - The sign-in password never crosses the pipe.
+//!
+//! The service is single-instance serial: it accepts one client, handles the
+//! request, responds, disconnects, then re-creates the pipe instance.
+
+use crate::hw::face::config::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_NAME};
+use crate::hw::face::errors::{FaceError, FaceResult};
+use serde_json::{json, Value};
+
+/// Response to a request.
+pub type PipeResponse = Value;
+
+#[cfg(windows)]
+mod winpipe {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows::Win32::Security::{
+        Authorization::{
+            BuildExplicitAccessWithNameW, SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS,
+        },
+        SetSecurityDescriptorDacl, ACE_FLAGS, ACL, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        FlushFileBuffers, ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_OVERLAPPED,
+        PIPE_ACCESS_DUPLEX,
+    };
+    use windows::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
+        PIPE_TYPE_MESSAGE, PIPE_WAIT,
+    };
+    use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
+    use windows::Win32::System::IO::CancelIoEx;
+
+    const PIPE_BUF_SIZE: u32 = 65536;
+    const MAX_CONNECTIONS: u32 = 1; // serial: one client at a time
+
+    /// Build SECURITY_ATTRIBUTES with a DACL granting SYSTEM + Administrators.
+    fn build_security() -> Option<SECURITY_ATTRIBUTES> {
+        unsafe {
+            // SYSTEM SID well-known: S-1-5-18 (WinLocalSystemSid)
+            // Administrators SID: S-1-5-32-544
+            let sys_trustee: Vec<u16> = "SYSTEM\0".encode_utf16().collect();
+            let adm_trustee: Vec<u16> = "Administrators\0".encode_utf16().collect();
+
+            let mut ea_sys = EXPLICIT_ACCESS_W::default();
+            BuildExplicitAccessWithNameW(
+                &mut ea_sys,
+                PCWSTR(sys_trustee.as_ptr()),
+                0xF01FF, // GENERIC_ALL
+                SET_ACCESS,
+                ACE_FLAGS(0),
+            );
+            let mut ea_adm = EXPLICIT_ACCESS_W::default();
+            BuildExplicitAccessWithNameW(
+                &mut ea_adm,
+                PCWSTR(adm_trustee.as_ptr()),
+                0xF01FF,
+                SET_ACCESS,
+                ACE_FLAGS(0),
+            );
+
+            let entries = [ea_sys, ea_adm];
+            let mut new_acl: *mut ACL = std::ptr::null_mut();
+            if SetEntriesInAclW(Some(&entries), None, &mut new_acl).is_err() || new_acl.is_null() {
+                return None;
+            }
+
+            let mut sd = SECURITY_DESCRIPTOR::default();
+            let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
+                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+            );
+            if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
+                return None;
+            }
+
+            Some(SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+                bInheritHandle: false.into(),
+            })
+        }
+    }
+
+    /// Accept one client, invoke `handle`, respond, disconnect.
+    /// Returns Ok(true) if a client was served, Ok(false) on timeout/shutdown.
+    pub fn serve_one<F>(handle: &F, shutdown: &std::sync::atomic::AtomicBool) -> FaceResult<bool>
+    where
+        F: Fn(&Value) -> Value,
+    {
+        let pipe_name_w: Vec<u16> = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect();
+        let security = build_security();
+
+        let handle_win = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(pipe_name_w.as_ptr()),
+                PIPE_ACCESS_DUPLEX
+                    | FILE_FLAG_OVERLAPPED
+                    | FILE_FLAGS_AND_ATTRIBUTES(FILE_FLAG_FIRST_PIPE_INSTANCE),
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                MAX_CONNECTIONS,
+                PIPE_BUF_SIZE,
+                PIPE_BUF_SIZE,
+                0,
+                security.as_ref().map(|s| s as *const SECURITY_ATTRIBUTES),
+            )
+        };
+
+        if handle_win == INVALID_HANDLE_VALUE {
+            // Pipe name already in use (squatted or previous instance alive).
+            return Err(FaceError::Pipe(format!(
+                "CreateNamedPipe failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        let event = unsafe {
+            CreateEventW(None, true, false, PCWSTR::null())
+                .map_err(|e| FaceError::Pipe(format!("CreateEventW: {e}")))?
+        };
+
+        let mut overlapped = unsafe {
+            windows::Win32::System::IO::OVERLAPPED {
+                hEvent: event,
+                ..std::mem::zeroed()
+            }
+        };
+
+        // Connect (non-blocking, overlapped) with a 500 ms timeout loop.
+        let _ = unsafe { ConnectNamedPipe(handle_win, Some(&mut overlapped)) };
+
+        loop {
+            if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                unsafe {
+                    CancelIoEx(handle_win, Some(&overlapped)).ok();
+                    CloseHandle(event).ok();
+                    CloseHandle(handle_win).ok();
+                }
+                return Ok(false);
+            }
+            let wait = unsafe { WaitForSingleObject(event, 500) };
+            if wait == WAIT_OBJECT_0 {
+                break;
+            }
+            // timeout → retry connect
+            unsafe {
+                CancelIoEx(handle_win, Some(&overlapped)).ok();
+                ResetEvent(event).ok();
+                let _ = ConnectNamedPipe(handle_win, Some(&mut overlapped));
+            }
+        }
+
+        // Read the request.
+        let mut buf = [0u8; 65536];
+        let mut bytes_read = 0u32;
+        let read_ok = unsafe { ReadFile(handle_win, Some(&mut buf), Some(&mut bytes_read), None) };
+        if read_ok.is_err() || bytes_read == 0 {
+            unsafe {
+                DisconnectNamedPipe(handle_win).ok();
+                CloseHandle(event).ok();
+                CloseHandle(handle_win).ok();
+            }
+            return Ok(true);
+        }
+
+        // Parse JSON, invoke handler.
+        let req: Value = serde_json::from_slice(&buf[..bytes_read as usize]).unwrap_or(Value::Null);
+        let resp = handle(&req);
+        let resp_bytes = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{}".to_vec());
+
+        unsafe {
+            let mut written = 0u32;
+            WriteFile(handle_win, Some(&resp_bytes), Some(&mut written), None).ok();
+            FlushFileBuffers(handle_win).ok();
+            DisconnectNamedPipe(handle_win).ok();
+            CloseHandle(event).ok();
+            CloseHandle(handle_win).ok();
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(not(windows))]
+mod winpipe {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    pub fn serve_one<F>(_handle: &F, shutdown: &AtomicBool) -> FaceResult<bool>
+    where
+        F: Fn(&Value) -> Value,
+    {
+        let _ = shutdown;
+        Ok(false)
+    }
+}
+
+pub use winpipe::serve_one;
+
+/// Build the standard error response.
+pub fn err_response(reason: impl Into<String>) -> PipeResponse {
+    json!({ "ok": false, "reason": reason.into() })
+}

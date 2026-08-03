@@ -111,6 +111,43 @@ FunctionEnd
   nsExec::ExecToLog '"$SYSDIR\sc.exe" start IoTSvc'
   Pop $0
 
+  ; ── Deploy our ecram_service as the DriverStore IoTService.exe ─────────────
+  ; The IoTDriver.sys security check requires a process named "IoTService.exe"
+  ; located inside the driver's DriverStore FileRepository directory. We must
+  ; replace that binary with our ecram_service.exe so EC RAM access works
+  ; without the original Xiaomi IoTService (which rejects our IOCTLs).
+  DetailPrint "Configurando ecram_service no DriverStore..."
+  FindFirst $R0 $R1 "$SYSDIR\DriverStore\FileRepository\iotdriver.inf_*\IoTService.exe"
+  ${If} $R0 = 0
+    ; $R1 contains the found file path. Use it.
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+    Pop $R2
+    Sleep 2000
+    ; Backup the existing IoTService.exe (only if no backup yet)
+    ${IfNot} ${FileExists} "$R1.bak"
+      CopyFiles /SILENT "$R1" "$R1.bak"
+    ${EndIf}
+    ; Replace with our ecram_service.exe
+    CopyFiles /SILENT "$INSTDIR\ecram_service.exe" "$R1"
+    DetailPrint "  ecram_service deployed como IoTService.exe"
+    ; Recreate the service pointing to the DriverStore exe
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
+    Pop $R2
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" delete IoTSvc'
+    Pop $R2
+    Sleep 1000
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" create IoTSvc binPath= "$R1" service start= auto DisplayName= "MiControl IoT Bridge Service"'
+    Pop $R2
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" config IoTSvc obj= LocalSystem'
+    Pop $R2
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" start IoTSvc'
+    Pop $R2
+    DetailPrint "  IoTSvc reiniciado com ecram_service."
+  ${Else}
+    DetailPrint "  Aviso: DriverStore do IoTDriver não encontrado — ecram_service não deployado."
+  ${EndIf}
+  FindClose $R0
+
   ; ── Scheduled task for elevated hardware operations (no UAC on use) ────────
   ; Registered via XML so we can set MultipleInstancesPolicy=StopExisting and
   ; ExecutionTimeLimit=PT30S, preventing the task from getting stuck in "Queued"
@@ -127,6 +164,38 @@ FunctionEnd
   Delete "$TEMP\MCElev.xml"
   DetailPrint "MiControlElevated task registered: $0"
 
+  ; ── Autonomous elevated bridge service (MiControlBridge) ────────────────────
+  ; Installed as a Windows service running as NT AUTHORITY\SYSTEM. Provides a
+  ; named pipe (\\.\pipe\micontrol_bridge) for privileged commands WITHOUT any
+  ; UAC prompt after installation. The main app prefers this path; the
+  ; scheduled task above remains only as a fallback.
+  DetailPrint "Instalando serviço MiControlBridge (bridge elevada autónoma)..."
+  nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" install'
+  Pop $0
+  DetailPrint "MiControlBridge service install: $0"
+
+  ; ── Face Unlock (Windows Hello-style, RGB webcam) ──────────────────────────
+  ; Optional: the auth service + Credential Provider + models. All guarded —
+  ; if the files are missing from the bundle, the app still works (the Face
+  ; Unlock tab will show the service as not installed).
+  DetailPrint "Configurando Face Unlock..."
+  ${If} ${FileExists} "$INSTDIR\micontrol_face_svc.exe"
+    ; Install the LocalSystem auth service (auto-start).
+    nsExec::ExecToLog '"$INSTDIR\micontrol_face_svc.exe" install'
+    Pop $0
+    DetailPrint "  MiControlFace service install: $0"
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\micontrol_facecp.dll"
+    ; Register the Credential Provider DLL (COM class + CP registration).
+    DetailPrint "  Registando micontrol_facecp.dll como Credential Provider..."
+    nsExec::ExecToLog '"$SYSDIR\regsvr32.exe" /s "$INSTDIR\micontrol_facecp.dll"'
+    Pop $0
+    DetailPrint "  regsvr32 returned: $0"
+  ${EndIf}
+  ; Ensure the face data directory exists (SYSTEM-writable).
+  CreateDirectory "$PROGRAMDATA\MiControl\face"
+  DetailPrint "Face Unlock configurado."
+
   DetailPrint "Configuração de hardware concluída."
 !macroend
 
@@ -141,6 +210,23 @@ FunctionEnd
   nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "MiControlElevated" /f'
   Pop $0
   DetailPrint "MiControlElevated task removed: $0"
+
+  ; Remove the autonomous bridge service (if present)
+  nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" uninstall'
+  Pop $0
+  DetailPrint "MiControlBridge service removed: $0"
+
+  ; Remove the Face Unlock auth service + Credential Provider
+  ${If} ${FileExists} "$INSTDIR\micontrol_face_svc.exe"
+    nsExec::ExecToLog '"$INSTDIR\micontrol_face_svc.exe" remove'
+    Pop $0
+    DetailPrint "MiControlFace service removed: $0"
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\micontrol_facecp.dll"
+    nsExec::ExecToLog '"$SYSDIR\regsvr32.exe" /s /u "$INSTDIR\micontrol_facecp.dll"'
+    Pop $0
+    DetailPrint "micontrol_facecp.dll unregistered: $0"
+  ${EndIf}
 
   ; Stop and remove the IoTService Windows service
   nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'

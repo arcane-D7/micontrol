@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Default capabilities for MiControl",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:default",
+    "shell:default",
+    "mcp-bridge:default"
+  ]
 }

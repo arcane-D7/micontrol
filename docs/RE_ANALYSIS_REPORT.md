@@ -266,10 +266,12 @@ driver's DriverStore directory:
 
 ### 4.5 Limitations
 
-1. **ERAM region not accessible** — The driver's allowed address ranges do not
+1. **ERAM region not accessible via IoTDriver** — The driver's allowed address ranges do not
    include ERAM (0xFE0B0300). This means AC adapter wattage (ADPW at ERAM+0x81)
-   cannot be read through the existing driver.
-2. **SMA2 region not accessible** — Similarly not in allowed ranges.
+   cannot be read through the existing driver. However, AC adapter wattage IS
+   available via WMI (ACPI WMAA method `read_adapter_power()` in `wmi_ec.rs`),
+   which is the primary path used by MiControl.
+2. **SMA2 region not accessible via IoTDriver** — Similarly not in allowed ranges.
 3. **Secure Boot prevents driver modification** — Modifying IoTDriver.sys to
    add ERAM/SMA2 to the allowed ranges would require re-signing the driver,
    which is not possible with Secure Boot enabled.
@@ -294,8 +296,8 @@ Most MiControl features work via WMI (`MICommonInterface` in `root\WMI`):
 - ✅ IOT_STATUS region (0xFE0B0F00) — Driver status
 - ✅ IOT_SENSORS region (0xFE0B0F08) — Sensor data
 - ✅ ECRAM sensor block (0xFE0B0E00) — EC sensor readings
-- ❌ ERAM region (0xFE0B0300) — AC adapter wattage (ADPW) — NOT accessible
-- ❌ SMA2 region (0xFE0B0A00) — NOT accessible
+- ❌ ERAM region (0xFE0B0300) — AC adapter wattage (ADPW) — NOT accessible via IoTDriver (but available via WMI)
+- ❌ SMA2 region (0xFE0B0A00) — NOT accessible via IoTDriver
 
 ### 5.3 Deployment
 

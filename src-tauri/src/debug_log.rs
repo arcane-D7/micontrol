@@ -43,11 +43,29 @@ fn is_tauri_dev() -> bool {
 
 fn init_dev_file_logger() -> Result<()> {
     let log_dir = resolve_log_dir()?;
-    std::fs::create_dir_all(&log_dir).with_context(|| format!("create log dir {log_dir:?}"))?;
+    // The log dir can become unreadable if a previous elevated instance left
+    // an ACL that denies the current user (e.g. after an admin relaunch or a
+    // Windows profile permission change). Do NOT fail the whole app for this —
+    // fall back to console-only logging instead.
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        eprintln!(
+            "[debug_log] WARNING: cannot create log dir {:?} — falling back to console-only logging",
+            log_dir
+        );
+        return init_console_only_logger();
+    }
 
     let log_path = log_dir.join("tauri-dev-trace.log");
-    let log_file =
-        fern::log_file(&log_path).with_context(|| format!("open dev log file {log_path:?}"))?;
+    let log_file = match fern::log_file(&log_path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!(
+                "[debug_log] WARNING: cannot open dev log file {:?} ({e}) — falling back to console-only logging",
+                log_path
+            );
+            None
+        }
+    };
 
     let _ = DEV_LOG_PATH.set(log_path.clone());
 
@@ -58,7 +76,7 @@ fn init_dev_file_logger() -> Result<()> {
         log::LevelFilter::Info
     };
 
-    fern::Dispatch::new()
+    let mut dispatch = fern::Dispatch::new()
         .level(base_level)
         .level_for("hyper", log::LevelFilter::Info)
         .level_for("mio", log::LevelFilter::Info)
@@ -73,10 +91,13 @@ fn init_dev_file_logger() -> Result<()> {
                 target = record.target(),
             ))
         })
-        .chain(std::io::stdout())
-        .chain(log_file)
-        .apply()
-        .context("apply fern logger")?;
+        .chain(std::io::stdout());
+
+    if let Some(file) = log_file {
+        dispatch = dispatch.chain(file);
+    }
+
+    dispatch.apply().context("apply fern logger")?;
 
     log::info!(
         target: "devlog",
@@ -84,6 +105,26 @@ fn init_dev_file_logger() -> Result<()> {
         log_path.display(),
         trace_enabled
     );
+    Ok(())
+}
+
+/// Console-only logger used when the dev log file cannot be opened
+/// (e.g. ACL denies access after an elevated run). Ensures the app still
+/// starts and logs to stdout in Tauri dev mode.
+fn init_console_only_logger() -> Result<()> {
+    fern::Dispatch::new()
+        .level(log::LevelFilter::Info)
+        .format(|out, message, record| {
+            let ts = humantime::format_rfc3339_millis(SystemTime::now());
+            out.finish(format_args!(
+                "{ts} [{level:<5}] {target}: {message}",
+                level = record.level(),
+                target = record.target(),
+            ))
+        })
+        .chain(std::io::stdout())
+        .apply()
+        .context("apply console-only fern logger")?;
     Ok(())
 }
 

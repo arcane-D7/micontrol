@@ -7,7 +7,10 @@ use crate::hw::audio::{
     list_audio_devices as hw_list_audio, set_playback_mute as hw_set_mute,
     set_playback_volume as hw_set_volume, AudioDeviceList, AudioVolumeResult,
 };
-use crate::hw::charging::{get_charging_threshold as hw_get_charge, ChargingResult};
+use crate::hw::charging::{
+    get_battery_care as hw_get_battery_care, get_charging_threshold as hw_get_charge,
+    ChargingResult,
+};
 use crate::hw::errors::{ErrorResponse, HardwareError};
 use crate::hw::iotservice;
 use crate::hw::iotservice::{
@@ -75,6 +78,25 @@ pub async fn set_charging_threshold(
         serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
     *lock_or_recover(&state.charging_threshold) = result.threshold;
     Ok(result)
+}
+
+// ── Battery Care Toggle (EC register 0xA4) ─────────────────────────────────
+
+#[tauri::command]
+pub async fn get_battery_care() -> Result<bool, ErrorResponse> {
+    run_blocking(hw_get_battery_care)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_battery_care(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_battery_care",
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Returns diagnostic information about the performance mode control channel:
@@ -185,11 +207,35 @@ pub async fn read_ecram_raw(address: String, count: u32) -> Result<String, Error
             return Err(HardwareError::Other("count must be 1–256".to_string()));
         }
 
+        // S32-002: Restrict raw reads to the known EC address regions.
+        // Arbitrary physical-address reads should not be exposed to the webview.
+        if !is_known_ec_range(addr, count as usize) {
+            return Err(HardwareError::Other(format!(
+                "address 0x{addr:08X} is outside the known EC register regions"
+            )));
+        }
+
         let bytes = crate::hw::ecram::read_ecram(addr, count as usize)?;
         Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
     })
     .await
     .map_err(ErrorResponse::from)
+}
+
+/// S32-002: Returns true when `addr..addr+len` is within one of the known EC
+/// register regions (ERAM, SMA2, IOT_STATUS, IOT_SENSORS, sensor block).
+fn is_known_ec_range(addr: u64, len: usize) -> bool {
+    use crate::hw::ecram;
+    let regions = [
+        (ecram::get_eram_base(), ecram::ERAM_SIZE as u64),
+        (ecram::SMA2_BASE, ecram::SMA2_SIZE as u64),
+        (ecram::IOT_STATUS_BASE, ecram::IOT_STATUS_SIZE as u64),
+        (ecram::ECRAM_SENSOR_BLOCK, ecram::ECRAM_SENSOR_SIZE as u64),
+    ];
+    let end = addr.saturating_add(len as u64);
+    regions
+        .iter()
+        .any(|(start, size)| addr >= *start && end <= start + size)
 }
 
 /// Returns whether the current process is running with an elevated (Administrator) token.
@@ -204,6 +250,26 @@ pub fn is_elevated() -> bool {
 #[tauri::command]
 pub async fn iot_pipe_available() -> Result<bool, ErrorResponse> {
     Ok(iotservice::is_available())
+}
+
+/// Ensure the ecram_service (IoT bridge) is installed and running.
+/// Called from the frontend when the IoT pipe is not available.
+#[tauri::command]
+pub async fn ensure_iot_service() -> Result<serde_json::Value, ErrorResponse> {
+    let result = elev_bridge::run_elevated("ensure_ecram_service", serde_json::Value::Null)
+        .await
+        .map_err(ErrorResponse::from)?;
+    Ok(result)
+}
+
+/// Ensure the autonomous MiControlBridge service is installed and running.
+/// Returns the service status. Called at startup by the backend and exposed
+/// so the UI can surface bridge status in the System tab.
+#[tauri::command]
+pub async fn ensure_bridge_service() -> Result<serde_json::Value, ErrorResponse> {
+    crate::elev_bridge::ensure_bridge_service()
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 /// Get all available IoT device info via IoTService IPC.
@@ -895,6 +961,23 @@ pub async fn get_primary_thermal_zone() -> Result<crate::hw::thermal::ThermalZon
     run_blocking(crate::hw::thermal::get_primary_thermal_zone)
         .await
         .map_err(ErrorResponse::from)
+}
+
+// ── Fn-Key Customization (EC 0x4A) ──────────────────────────────────────────
+
+/// Get the current Fn-key mode (Fn-lock state).
+#[tauri::command]
+pub async fn get_function_key() -> Result<crate::hw::fn_key::FnKeyStatus, ErrorResponse> {
+    run_blocking(crate::hw::fn_key::get_function_key)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Set the Fn-key mode (Fn-lock toggle). Requires elevation.
+#[tauri::command]
+pub async fn set_function_key(mode: crate::hw::fn_key::FnKeyMode) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated("set_function_key", serde_json::json!({ "mode": mode })).await?;
+    Ok(())
 }
 
 #[cfg(test)]

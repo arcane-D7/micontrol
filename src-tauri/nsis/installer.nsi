@@ -204,6 +204,10 @@ Function PageReinstall
     Sleep 1000
   ${EndIf}
 
+  ; Kill the elevated bridge helper (micontrol_bridge.exe) — it runs even when
+  ; the app is closed and locks $INSTDIR\micontrol_bridge.exe.
+  Call KillBridgeProcess
+
   ; Stop the IoTService Windows service so it releases locks on driver files
   Call StopIoTService
 
@@ -973,6 +977,11 @@ Function KillAppProcess
     !endif
     Pop $1
     ${If} $1 <> 0
+      ; Main app not running — also kill the elevated bridge service helper
+      ; (micontrol_bridge.exe) which can lock files in $INSTDIR even when the
+      ; app is closed. It runs as a standalone process (installed service or
+      ; scheduled-task child), so the app kill above does not stop it.
+      Call KillBridgeProcess
       Return  ; process not found — safe to proceed
     ${EndIf}
     ; Process found — kill it
@@ -987,6 +996,43 @@ Function KillAppProcess
     ${If} $0 < 5
       Goto kill_loop
     ${EndIf}
+FunctionEnd
+
+; ── Bridge process killer ────────────────────────────────────────────────────
+; Stops the MiControlBridge Windows service and kills micontrol_bridge.exe
+; with a retry loop (up to 5 attempts, 500ms apart).
+;
+; micontrol_bridge.exe is the autonomous elevated helper installed alongside
+; the app. It runs as a Windows service named "MiControlBridge"
+; (StartMode=Auto), so killing the process alone is NOT enough — the SCM will
+; restart it immediately. We must stop the service first (which also kills
+; the process), then verify the process is gone.
+;
+; It holds a lock on $INSTDIR\micontrol_bridge.exe, so the installer must
+; release it before overwriting that binary, otherwise NSIS fails with
+; "Error opening file for writing ... micontrol_bridge.exe".
+Function KillBridgeProcess
+  ; Stop the service gracefully (sc stop). If the service is not installed,
+  ; sc returns non-zero which we ignore.
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlBridge'
+  Pop $1
+  Sleep 1000
+
+  StrCpy $0 0  ; retry counter
+  bridge_kill_loop:
+    nsis_tauri_utils::FindProcess "micontrol_bridge.exe"
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — safe to proceed
+    ${EndIf}
+    nsis_tauri_utils::KillProcess "micontrol_bridge.exe"
+    Pop $1
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto bridge_kill_loop
+    ${EndIf}
+    DetailPrint "Warning: micontrol_bridge.exe could not be killed after 5 attempts."
 FunctionEnd
 
 ; ── IoTService stopper ────────────────────────────────────────────────────────
@@ -1054,6 +1100,8 @@ Function un.KillAppProcess
     !endif
     Pop $1
     ${If} $1 <> 0
+      ; Main app not running — also kill the elevated bridge helper.
+      Call un.KillBridgeProcess
       Return  ; process not found — safe to proceed
     ${EndIf}
     ; Process found — kill it
@@ -1068,6 +1116,29 @@ Function un.KillAppProcess
     ${If} $0 < 5
       Goto un_kill_loop
     ${EndIf}
+FunctionEnd
+
+Function un.KillBridgeProcess
+  ; Stop the MiControlBridge service first (otherwise SCM restarts the process).
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlBridge'
+  Pop $1
+  Sleep 1000
+
+  StrCpy $0 0  ; retry counter
+  un_bridge_kill_loop:
+    nsis_tauri_utils::FindProcess "micontrol_bridge.exe"
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — safe to proceed
+    ${EndIf}
+    nsis_tauri_utils::KillProcess "micontrol_bridge.exe"
+    Pop $1
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto un_bridge_kill_loop
+    ${EndIf}
+    DetailPrint "Warning: micontrol_bridge.exe could not be killed after 5 attempts."
 FunctionEnd
 
 Function un.StopIoTService

@@ -5,6 +5,14 @@ import HardwareDiscovery from '../../components/HardwareDiscovery';
 import type { useHardware } from '../../hooks/useHardware';
 import type { IotRegionName } from '../../types/hardware';
 import type { Hardware } from './shared';
+import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../../types/error';
+
+const translate: TranslateFn = (key) => t(key as never);
+
+/** Safely convert any error to a display string, avoiding [object Object]. */
+function errToString(e: unknown): string {
+  return getUserFriendlyMessage(parseErrorResponse(e), translate);
+}
 
 type HardwareInstance = ReturnType<typeof useHardware>;
 
@@ -98,7 +106,7 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
       setEcramMap(map);
       setRegions({ ERAM: hexes[0], SMA2: hexes[1], IOT_STATUS: hexes[2], IOT_SENSORS: hexes[3] });
     } catch (e) {
-      setError(String(e));
+      setError(errToString(e));
     } finally {
       setLoading(false);
     }
@@ -117,7 +125,7 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
         const refreshTimeout = window.setTimeout(() => void refreshIot(), 300);
         timeoutRefs.current.push(refreshTimeout);
       } catch (e) {
-        setError(`Write failed: ${String(e)}`);
+        setError(`Write failed: ${errToString(e)}`);
       }
     },
     [hw, refreshIot],
@@ -146,7 +154,7 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
       }
       setRawReadResult(lines.join('\n'));
     } catch (e) {
-      setRawReadResult(`Error: ${String(e)}`);
+      setRawReadResult(`Error: ${errToString(e)}`);
     } finally {
       setRawReadLoading(false);
     }
@@ -533,7 +541,7 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
                     const writeRefreshTimeout = window.setTimeout(() => void refreshIot(), 200);
                     timeoutRefs.current.push(writeRefreshTimeout);
                   } catch (e) {
-                    setWriteStatus(`Write failed: ${String(e)}`);
+                    setWriteStatus(`Write failed: ${errToString(e)}`);
                   }
                 }}
               >

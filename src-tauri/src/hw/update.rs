@@ -41,6 +41,33 @@ pub struct XiaomiDriverInfo {
     pub signer: String,
 }
 
+/// Detailed driver information from Win32_PnPSignedDriver WMI class.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriverDetail {
+    /// Device name (friendly name)
+    pub device_name: String,
+    /// Driver device class (e.g. "Display", "System", "HIDClass")
+    pub device_class: String,
+    /// Hardware ID (first from the list)
+    pub hardware_id: String,
+    /// Driver manufacturer
+    pub manufacturer: String,
+    /// Driver version (e.g. "1.0.0.1")
+    pub driver_version: String,
+    /// Driver date (e.g. "20250514000000.000000-000")
+    pub driver_date: String,
+    /// Driver INF file name (e.g. "oem71.inf")
+    pub inf_name: String,
+    /// Driver provider (e.g. "Xiaomi Inc.")
+    pub driver_provider_name: String,
+    /// Whether the driver is digitally signed
+    pub is_signed: bool,
+    /// Signer name (e.g. "Microsoft Windows Hardware Compatibility Publisher")
+    pub signer: String,
+    /// Driver status (e.g. "OK", "Error", "Unknown")
+    pub status: String,
+}
+
 /// Full update / version status returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateStatus {
@@ -337,6 +364,55 @@ fn build_driver_info(map: &HashMap<String, String>) -> Option<XiaomiDriverInfo> 
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Get detailed driver information via Win32_PnPSignedDriver WMI class.
+///
+/// Returns all signed drivers on the system, including hardware IDs,
+/// driver versions, dates, and signer information.
+pub fn get_drivers_detail() -> HardwareResult<Vec<DriverDetail>> {
+    #[cfg(windows)]
+    {
+        use crate::hw::wmi_cache;
+        use crate::util::wmi_extract;
+
+        wmi_cache::with_cimv2(|wmi| {
+            let drivers: Vec<HashMap<String, wmi::Variant>> = wmi.raw_query(
+                "SELECT DeviceName, DeviceClass, HardwareID, Manufacturer, \
+                 DriverVersion, DriverDate, InfName, DriverProviderName, \
+                 IsSigned, Signer, Status \
+                 FROM Win32_PnPSignedDriver",
+            )?;
+
+            let result = drivers
+                .into_iter()
+                .map(|d| DriverDetail {
+                    device_name: wmi_extract::extract_string_or(&d, "DeviceName", ""),
+                    device_class: wmi_extract::extract_string_or(&d, "DeviceClass", ""),
+                    hardware_id: wmi_extract::extract_string_or(&d, "HardwareID", ""),
+                    manufacturer: wmi_extract::extract_string_or(&d, "Manufacturer", ""),
+                    driver_version: wmi_extract::extract_string_or(&d, "DriverVersion", ""),
+                    driver_date: wmi_extract::extract_string_or(&d, "DriverDate", ""),
+                    inf_name: wmi_extract::extract_string_or(&d, "InfName", ""),
+                    driver_provider_name: wmi_extract::extract_string_or(
+                        &d,
+                        "DriverProviderName",
+                        "",
+                    ),
+                    is_signed: wmi_extract::extract_bool(&d, "IsSigned").unwrap_or(false),
+                    signer: wmi_extract::extract_string_or(&d, "Signer", ""),
+                    status: wmi_extract::extract_string_or(&d, "Status", "Unknown"),
+                })
+                .collect();
+
+            Ok(result)
+        })
+        .map_err(|e| HardwareError::Wmi(format!("Win32_PnPSignedDriver query failed: {e}")))
+    }
+    #[cfg(not(windows))]
+    Err(HardwareError::NotSupported(
+        "Driver details only available on Windows".into(),
+    ))
+}
 
 fn variant_str(map: &HashMap<String, wmi::Variant>, key: &str) -> String {
     match map.get(key) {

@@ -26,7 +26,8 @@
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://sentry.io https://github.com https://*.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-    }
+    },
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": true,
@@ -40,7 +41,11 @@
     ],
     "resources": {
       "drivers/VirtualControlHID/*": "drivers/VirtualControlHID/",
-      "drivers/IoTDriver/*": "drivers/IoTDriver/"
+      "drivers/IoTDriver/*": "drivers/IoTDriver/",
+      "bin/ecram_service.exe": "ecram_service.exe",
+      "bin/micontrol_bridge.exe": "micontrol_bridge.exe",
+      "bin/micontrol_facecp.dll": "micontrol_facecp.dll",
+      "bin/micontrol_face_svc.exe": "micontrol_face_svc.exe"
     },
     "windows": {
       "nsis": {

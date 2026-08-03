@@ -6,6 +6,8 @@
 pub mod ai;
 pub mod ai_logs;
 pub mod credentials;
+#[cfg(windows)]
+pub mod face;
 pub mod hardware;
 pub mod hotkeys;
 pub mod privacy;

@@ -11,6 +11,7 @@ assets-reference/
 
 # Rust / Tauri build
 src-tauri/target/
+src-tauri/bin/
 
 # Vite cache
 .vite/
@@ -27,6 +28,10 @@ src-tauri/target/
 *.log
 *.txt
 npm-debug.log*
+
+# Benchmark traces
+.bench/
+.bench_trace_*
 
 # Editor directories
 .vscode/settings.json

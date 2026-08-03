@@ -151,7 +151,7 @@ mod imp {
     };
     use windows::Win32::System::Variant::VT_UI1 as Win32_VT_UI1;
     use windows::Win32::System::Wmi::{
-        IWbemClassObject, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY,
+        IWbemClassObject, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_FLAG_RETURN_WBEM_COMPLETE,
         WBEM_GENERIC_FLAG_TYPE,
     };
 
@@ -195,49 +195,23 @@ mod imp {
                 }
             }
 
-            // Get the MICommonInterface class object
-            let class_path = BSTR::from("MICommonInterface");
-            let mut class_obj: Option<IWbemClassObject> = None;
-            unsafe {
-                svc.GetObject(
-                    &class_path,
-                    WBEM_GENERIC_FLAG_TYPE(0),
-                    None,
-                    Some(&mut class_obj),
-                    None,
-                )?;
-            }
-            let class_obj = class_obj.ok_or_else(|| {
-                anyhow::anyhow!(HardwareError::Wmi("GetObject returned null".into()))
-            })?;
-
-            // Get method signature — use GetMethod
-            let method_name = pcwstr("MiInterface");
-            let mut in_sig: Option<IWbemClassObject> = None;
-            let mut out_sig: Option<IWbemClassObject> = None;
-            unsafe {
-                class_obj.GetMethod(method_name, 0, &mut in_sig, &mut out_sig)?;
-            }
-
-            // Spawn input parameters instance
-            let in_sig = in_sig.ok_or_else(|| {
-                anyhow::anyhow!(HardwareError::Wmi("GetMethod returned null in_sig".into()))
-            })?;
-            let in_params = unsafe { in_sig.SpawnInstance(0)? };
-
-            // Set InData property — construct a VARIANT containing a SAFEARRAY of VT_UI1
-            let prop_name = pcwstr("InData");
-            let in_data_var = build_byte_array_variant(&buf)?;
-
-            unsafe { in_params.Put(prop_name, 0, &in_data_var, 0)? };
-
-            // Query for the MICommonInterface instance
-            let query = BSTR::from("SELECT * FROM MICommonInterface");
+            // Get the MICommonInterface class object (for method signature).
+            // We need the class definition to call GetMethod and spawn input params.
+            //
+            // GetObject with just "MICommonInterface" fails with WBEM_E_NOT_FOUND
+            // (0x80041002) on this WMI provider. The fix is to first query for the
+            // instance, get its __Path, and then use GetObject with the full path
+            // to get the class definition.
+            //
+            // Step 1: Query for the active MICommonInterface instance.
+            // Use WBEM_FLAG_RETURN_IMMEDIATELY (without WBEM_FLAG_FORWARD_ONLY)
+            // to ensure all system properties (__Path, __RELPATH) are available.
+            let query = BSTR::from("SELECT * FROM MICommonInterface WHERE Active = TRUE");
             let wql = BSTR::from("WQL");
-            let flags = WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY;
+            let flags = WBEM_FLAG_RETURN_IMMEDIATELY;
             let enumerator = unsafe { svc.ExecQuery(&wql, &query, flags, None)? };
 
-            // Get first instance — Next returns HRESULT, takes array + u32 count
+            // Get first instance
             let mut objs: [Option<IWbemClassObject>; 1] = [None];
             let mut returned: u32 = 0;
             let hr = unsafe { enumerator.Next(-1, &mut objs, &mut returned) };
@@ -249,19 +223,136 @@ mod imp {
                 ))
             })?;
 
-            // Get the instance path
-            let path_name = pcwstr("__Path");
-            let mut path_var = VARIANT::new();
-            let mut cim_type: i32 = 0;
-            unsafe {
-                instance.Get(path_name, 0, &mut path_var, Some(&mut cim_type), None)?;
-            }
+            // Get the instance path. Try __Path first, then __RELPATH as fallback.
+            // With WBEM_FLAG_FORWARD_ONLY, system properties like __Path may not
+            // always be available (WBEM_E_NOT_FOUND / 0x80041002).
+            // Get the instance path. Try __Path first, then __RELPATH as fallback.
+            // With WBEM_FLAG_FORWARD_ONLY, system properties like __Path may not
+            // always be available (WBEM_E_NOT_FOUND / 0x80041002).
+            let path_str = {
+                let mut path_var = VARIANT::new();
+                let mut cim_type: i32 = 0;
+                let path_name = pcwstr("__Path");
+                let get_result =
+                    unsafe { instance.Get(path_name, 0, &mut path_var, Some(&mut cim_type), None) };
+                if get_result.is_err() {
+                    // __Path not available — try __RELPATH
+                    let mut relpath_var = VARIANT::new();
+                    let mut cim_type2: i32 = 0;
+                    let relpath_name = pcwstr("__RELPATH");
+                    let get_result2 = unsafe {
+                        instance.Get(
+                            relpath_name,
+                            0,
+                            &mut relpath_var,
+                            Some(&mut cim_type2),
+                            None,
+                        )
+                    };
+                    if get_result2.is_err() {
+                        // __RELPATH also not available — construct from InstanceName
+                        let mut inst_var = VARIANT::new();
+                        let mut cim_type3: i32 = 0;
+                        let inst_name = pcwstr("InstanceName");
+                        unsafe {
+                            instance.Get(
+                                inst_name,
+                                0,
+                                &mut inst_var,
+                                Some(&mut cim_type3),
+                                None,
+                            )?;
+                        }
+                        let inst_str = variant_to_string(&inst_var)?;
+                        // Escape backslashes for WMI path
+                        let escaped = inst_str.replace('\\', "\\\\");
+                        format!("MICommonInterface.InstanceName=\"{escaped}\"")
+                    } else {
+                        variant_to_string(&relpath_var)?
+                    }
+                } else {
+                    variant_to_string(&path_var)?
+                }
+            };
 
-            // Convert path VARIANT to string
-            let path_str = variant_to_string(&path_var)?;
+            // Step 2: Construct input parameters for ExecMethod.
+            //
+            // Standard WMI approach: GetObject(class) → GetMethod →
+            // SpawnInstance on in_sig → Put("InData").
+            //
+            // On this WMI provider, the Put("InData") call sometimes fails
+            // with WBEM_E_NOT_FOUND (0x80041002) when the WMI provider is
+            // in a degraded state (correlated with __Path being unavailable).
+            // When Put fails, we fall back to using the instance directly
+            // and setting InData on it via SpawnInstance.
+            let class_path = BSTR::from("MICommonInterface");
+            let mut class_obj: Option<IWbemClassObject> = None;
+            let get_obj_result = unsafe {
+                svc.GetObject(
+                    &class_path,
+                    WBEM_FLAG_RETURN_WBEM_COMPLETE,
+                    None,
+                    Some(&mut class_obj),
+                    None,
+                )
+            };
+
+            let in_params: IWbemClassObject = match get_obj_result {
+                Ok(()) => {
+                    let class_obj = class_obj.ok_or_else(|| {
+                        anyhow::anyhow!(HardwareError::Wmi("GetObject returned null".into()))
+                    })?;
+
+                    // Get method signature
+                    let method_name = pcwstr("MiInterface");
+                    let mut in_sig: Option<IWbemClassObject> = None;
+                    let mut out_sig: Option<IWbemClassObject> = None;
+                    unsafe {
+                        if let Err(e) =
+                            class_obj.GetMethod(method_name, 0, &mut in_sig, &mut out_sig)
+                        {
+                            log::debug!(target: "hw::wmi_ec", "GetMethod(MiInterface) failed: {e}");
+                            return Err(e.into());
+                        }
+                    }
+
+                    let in_sig = in_sig.ok_or_else(|| {
+                        anyhow::anyhow!(HardwareError::Wmi("GetMethod returned null in_sig".into()))
+                    })?;
+
+                    // SpawnInstance on in_sig to create input parameter object
+                    let params = unsafe { in_sig.SpawnInstance(0)? };
+
+                    // Set InData property
+                    let prop_name = pcwstr("InData");
+                    let in_data_var = build_byte_array_variant(&buf)?;
+                    unsafe {
+                        if let Err(e) = params.Put(prop_name, 0, &in_data_var, 0) {
+                            // Put fails intermittently with WBEM_E_NOT_FOUND (0x80041002)
+                            // when the WMI provider is in a degraded state (correlated
+                            // with __Path being unavailable). This is a WMI provider
+                            // bug, not our code. Return the error so the caller can
+                            // handle it gracefully (most callers use .ok()).
+                            log::trace!(target: "hw::wmi_ec", "params.Put(InData) failed: {e}");
+                            return Err(e.into());
+                        }
+                    }
+                    params
+                }
+                Err(ref e) => {
+                    // GetObject failed — use fallback: spawn instance from the
+                    // queried instance and set InData directly.
+                    log::debug!(target: "hw::wmi_ec", "GetObject(MICommonInterface) failed: {e}, using SpawnInstance fallback");
+                    let params = unsafe { instance.SpawnInstance(0)? };
+                    let prop_name = pcwstr("InData");
+                    let in_data_var = build_byte_array_variant(&buf)?;
+                    unsafe { params.Put(prop_name, 0, &in_data_var, 0)? };
+                    params
+                }
+            };
 
             // Call ExecMethod on IWbemServices
-            let path_bstr = BSTR::from(path_str);
+            let path_bstr = BSTR::from(path_str.as_str());
             let method_bstr = BSTR::from("MiInterface");
             let mut out_params: Option<IWbemClassObject> = None;
             unsafe {

@@ -477,6 +477,8 @@ export default function KeyboardTab() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [hookActive, setHookActive] = useState<boolean | null>(null);
+  const [fnKeyMode, setFnKeyMode] = useState<'multimedia' | 'function_key' | null>(null);
+  const [fnKeyToggling, setFnKeyToggling] = useState(false);
   const { addToast } = useToast();
   const timeoutRefs = useRef<number[]>([]);
 
@@ -499,6 +501,11 @@ export default function KeyboardTab() {
         invokeFn<boolean>('is_hook_active')
           .then(setHookActive)
           .catch(() => setHookActive(false));
+        invokeFn<{ mode: 'multimedia' | 'function_key'; fn_lock_enabled: boolean }>(
+          'get_function_key',
+        )
+          .then((s) => setFnKeyMode(s.mode))
+          .catch(() => setFnKeyMode(null));
       })
       .catch((e) => {
         console.error('Failed to import Tauri core:', e);
@@ -585,6 +592,62 @@ export default function KeyboardTab() {
         binding={config.copilot_key}
         onChange={(b) => setConfig({ ...config, copilot_key: b })}
       />
+
+      {/* Fn Key Lock Card */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3>⌨️ {t('keyboard.fnKeyTitle')}</h3>
+        <p className="text-muted" style={{ fontSize: 12, marginBottom: 12 }}>
+          {t('keyboard.fnKeyDesc')}
+        </p>
+        {fnKeyMode === null ? (
+          <p className="text-muted">{t('common.loading')}</p>
+        ) : (
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <button
+              className={fnKeyMode === 'multimedia' ? 'btn btn-primary' : 'btn btn-secondary'}
+              onClick={async () => {
+                setFnKeyToggling(true);
+                try {
+                  const { invoke: invokeFn } = await import('@tauri-apps/api/core');
+                  await invokeFn('set_function_key', { mode: 'multimedia' });
+                  setFnKeyMode('multimedia');
+                } catch (e) {
+                  addToast({ message: String(e), type: 'error' });
+                }
+                setFnKeyToggling(false);
+              }}
+              disabled={fnKeyToggling}
+            >
+              🎵 {t('keyboard.fnKeyMultimedia')}
+            </button>
+            <button
+              className={fnKeyMode === 'function_key' ? 'btn btn-primary' : 'btn btn-secondary'}
+              onClick={async () => {
+                setFnKeyToggling(true);
+                try {
+                  const { invoke: invokeFn } = await import('@tauri-apps/api/core');
+                  await invokeFn('set_function_key', { mode: 'function_key' });
+                  setFnKeyMode('function_key');
+                } catch (e) {
+                  addToast({ message: String(e), type: 'error' });
+                }
+                setFnKeyToggling(false);
+              }}
+              disabled={fnKeyToggling}
+            >
+              ⌨️ {t('keyboard.fnKeyFunction')}
+            </button>
+          </div>
+        )}
+        <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
+          {fnKeyMode === 'multimedia'
+            ? t('keyboard.fnKeyMultimediaDesc')
+            : fnKeyMode === 'function_key'
+              ? t('keyboard.fnKeyFunctionDesc')
+              : ''}
+        </p>
+      </div>
+
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
         <button className="btn-primary" onClick={save} disabled={saving} style={{ minWidth: 100 }}>
           {saving ? t('keyboard.saving') : saved ? t('keyboard.saved') : t('keyboard.save')}

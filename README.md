@@ -14,6 +14,7 @@
 - **Hardware Control** — Manage fan curves, battery charge thresholds, display brightness & HDR, audio volume & devices, keyboard backlight, and touchpad settings.
 - **IoT Service Integration** — Communicate with the embedded controller via EC RAM access, handle hotkeys, and cast the screen wirelessly.
 - **EC RAM Access** — Direct embedded controller RAM read/write via a custom `IoTService.exe` replacement binary that proxies IOCTLs to the Xiaomi `IoTDriver.sys` kernel driver. Uses named pipe IPC (`\\.\pipe\ecram_service`) with JSON protocol. See [RE Analysis Report](docs/RE_ANALYSIS_REPORT.md) for full reverse engineering details.
+- **EC Command Protocol** — Full implementation of the 4-phase EC command state machine with 16 cmd_ids covering cloud binding status, WiFi provisioning, firmware/model queries, device ID, and laptop power status notifications. See [EC Command Protocol RE Report](docs/EC_COMMAND_PROTOCOL_RE.md) for protocol details.
 - **Driver Management** — Scan, install, and update hardware drivers with guided workflows.
 - **System Info Dashboard** — Real-time CPU, GPU, RAM, and storage monitoring at a glance.
 - **AI-Powered Analysis** — Optional AI system advisor that analyses your hardware logs and provides personalised recommendations for thermal management, performance modes, and battery health. Supports OpenAI, Ollama, and any OpenAI-compatible provider. See [AI Features Documentation](docs/ai-features.md) for details on data handling, privacy, and supported models.
@@ -111,6 +112,7 @@ miPC is a Tauri v2 desktop application with a React 19 frontend and a Rust backe
 - **Backend** — Rust modules organized by hardware domain (`hw/battery.rs`, `hw/display.rs`, `hw/ecram.rs`, `hw/fan.rs`, `hw/wmi_ec.rs`, etc.), exposed via Tauri command handlers.
 - **Elevated Bridge** — A secure subprocess for privileged operations (driver installs, EC RAM access). Every request is HMAC-signed, nonce-protected against replay, and logged to an integrity-verified audit trail.
 - **EC RAM Service** — A custom `IoTService.exe` replacement binary (`src-tauri/src/bin/ecram_service.rs`) that proxies IOCTLs to the Xiaomi `IoTDriver.sys` kernel driver. Communicates with MiControl via named pipe IPC (`\\.\pipe\ecram_service`, JSON protocol). Required because the driver validates the calling process name and directory. See [RE Analysis Report](docs/RE_ANALYSIS_REPORT.md) for details.
+- **EC Command Protocol** — The ecram_service binary implements the full 4-phase EC command state machine (RamIsReady → WriteCommand → ReadCmdAck → ReadCmdRet) with 16 cmd_ids for cloud binding, WiFi management, firmware/model queries, device ID, and laptop power status notifications. EC reset is performed before and after each command for reliability. See [EC Command Protocol RE Report](docs/EC_COMMAND_PROTOCOL_RE.md) for the complete protocol specification.
 
 ---
 
@@ -119,6 +121,7 @@ miPC is a Tauri v2 desktop application with a React 19 frontend and a Rust backe
 | Document                                                           | Description                                                                                                                                               |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [RE Analysis Report](docs/RE_ANALYSIS_REPORT.md)                   | Complete reverse engineering of IoTDriver.sys & IoTService.exe — IOCTLs, buffer layout, security check, allowed address ranges, custom replacement binary |
+| [EC Command Protocol RE](docs/EC_COMMAND_PROTOCOL_RE.md)           | Reverse engineering of the 4-phase EC command state machine — 16 cmd_ids, ECRAM address map, per-feature response layouts, error codes                    |
 | [Hardware Investigation](docs/HARDWARE_INVESTIGATION.md)           | Consolidated hardware findings — ACPI DSDT, WMI WMAA, EC RAM field map, hotkey events, IoTService IPC protocol                                            |
 | [IoTService RE Analysis (Phase 1)](docs/iotservice-re-analysis.md) | Ghidra strings analysis of IoTService.exe — IPC commands, pipe protocol, source file mapping                                                              |
 | [Architecture](docs/architecture.md)                               | System architecture overview, HAL module inventory, EC RAM access architecture, data flow                                                                 |

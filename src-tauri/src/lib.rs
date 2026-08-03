@@ -5,7 +5,7 @@
 
 mod commands;
 mod debug_log;
-mod elev_bridge;
+pub mod elev_bridge;
 pub mod elevated;
 pub mod hw;
 mod state;
@@ -13,9 +13,15 @@ pub mod util;
 
 use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection};
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
+#[cfg(windows)]
+use commands::face::{
+    face_delete_template, face_diagnostics, face_enroll, face_get_settings, face_list_templates,
+    face_service_install, face_set_password, face_set_settings, face_status,
+};
 #[allow(deprecated)]
 use commands::hardware::{
-    get_audio_devices, get_audio_volume, get_cast_devices, get_charging_threshold, get_ecram_map,
+    ensure_bridge_service, ensure_iot_service, get_audio_devices, get_audio_volume,
+    get_battery_care, get_cast_devices, get_charging_threshold, get_ecram_map, get_function_key,
     get_iot_bind_status, get_iot_device_id, get_iot_device_info, get_iot_device_status,
     get_iot_fw_version, get_iot_model, get_iot_region_hex, get_iot_wifi_by_index,
     get_iot_wifi_count, get_iot_wifi_list, get_iot_wifi_status, get_perf_debug,
@@ -26,13 +32,14 @@ use commands::hardware::{
     iot_pipe_available, iot_report_shutting_down, iot_report_suspending, iot_report_windows_ready,
     iot_reset_device, iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw,
     relaunch_as_admin, send_iot_laptop_status, set_audio_default_endpoint, set_audio_mute,
-    set_audio_volume, set_charging_threshold, set_performance_mode, start_casting, stop_casting,
-    wifi_connect, wifi_disconnect, wifi_scan, wifi_status, wmi_ec_get_performance_mode,
-    wmi_ec_read, wmi_ec_read_adapter_power, wmi_ec_read_battery_health, wmi_ec_read_sensor_data,
-    wmi_ec_set_auto_illumination, wmi_ec_set_brightness_data, wmi_ec_set_epof_flag,
-    wmi_ec_set_label_mode, wmi_ec_set_lid_open_type, wmi_ec_set_mi_usage_type,
-    wmi_ec_set_performance_mode, wmi_ec_set_pl1_flag, wmi_ec_set_removable_type,
-    wmi_ec_set_sagv_mode, wmi_ec_set_wmid_type, wmi_ec_write, write_iot_hex,
+    set_audio_volume, set_battery_care, set_charging_threshold, set_function_key,
+    set_performance_mode, start_casting, stop_casting, wifi_connect, wifi_disconnect, wifi_scan,
+    wifi_status, wmi_ec_get_performance_mode, wmi_ec_read, wmi_ec_read_adapter_power,
+    wmi_ec_read_battery_health, wmi_ec_read_sensor_data, wmi_ec_set_auto_illumination,
+    wmi_ec_set_brightness_data, wmi_ec_set_epof_flag, wmi_ec_set_label_mode,
+    wmi_ec_set_lid_open_type, wmi_ec_set_mi_usage_type, wmi_ec_set_performance_mode,
+    wmi_ec_set_pl1_flag, wmi_ec_set_removable_type, wmi_ec_set_sagv_mode, wmi_ec_set_wmid_type,
+    wmi_ec_write, write_iot_hex,
 };
 use commands::hotkeys::{
     get_detected_key, get_hotkey_config, grant_script_consent, is_hook_active, set_hotkey_config,
@@ -40,14 +47,23 @@ use commands::hotkeys::{
 };
 use commands::privacy::{export_user_data, reveal_in_explorer};
 use commands::system::{
-    debug_ecram_dump, get_ai_brightness_config, get_autostart, get_available_refresh_rates,
-    get_battery_info, get_display_info, get_fan_info, get_hardware_profile,
-    get_hardware_state_batch, get_process_list, get_system_info, get_touchpad_info,
-    get_update_status, install_driver, run_hardware_discovery, set_adaptive_refresh_rate,
-    set_ai_brightness, set_ai_brightness_config, set_autostart, set_brightness, set_fan_mode,
-    set_hdr, set_refresh_rate, set_touchpad_edge_slide, set_touchpad_gesture_screenshot,
-    set_touchpad_haptics, set_touchpad_haptics_intensity, set_touchpad_repress,
-    set_touchpad_sensitivity, trigger_driver_scan,
+    check_official_driver_updates, clean_junk_files, clear_error_log, custom_security_scan,
+    debug_ecram_dump, download_driver_package, fetch_official_drivers, full_security_scan,
+    get_ai_brightness_config, get_audio_effects, get_autostart, get_available_refresh_rates,
+    get_battery_info, get_color_status, get_crash_recovery_status, get_defender_status,
+    get_display_info, get_drivers_detail, get_error_log_config, get_eye_protection, get_fan_info,
+    get_hardware_profile, get_hardware_state_batch, get_model_code, get_os_turbo,
+    get_phone_link_status, get_process_list, get_system_info, get_threat_history,
+    get_touchpad_info, get_update_status, install_driver, launch_color_calibration_wizard,
+    launch_phone_link, launch_phone_link_feature, load_icc_profile, log_frontend_error,
+    mark_clean_exit, open_color_management_settings, open_phone_link_settings,
+    open_windows_security, quick_security_scan, read_error_log, run_hardware_discovery,
+    scan_junk_files, set_adaptive_refresh_rate, set_ai_brightness, set_ai_brightness_config,
+    set_autostart, set_brightness, set_error_logging_enabled, set_eye_protection, set_fan_mode,
+    set_hdr, set_mic_noise_canceling, set_os_turbo, set_refresh_rate, set_speaker_noise_canceling,
+    set_touchpad_edge_slide, set_touchpad_gesture_screenshot, set_touchpad_haptics,
+    set_touchpad_haptics_intensity, set_touchpad_repress, set_touchpad_sensitivity,
+    set_voice_focus, trigger_driver_scan, unload_icc_profile, update_defender_signatures,
 };
 use state::AppState;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -209,7 +225,7 @@ pub fn run() {
     // 7. Start hardware polling
     // 8. Run Tauri application
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // When a second instance is launched, focus the existing window instead.
             if let Some(window) = app.get_webview_window("main") {
@@ -219,7 +235,15 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_shell::init());
+
+    // MCP Bridge plugin — enables AI assistants to inspect and interact
+    // with the Tauri app (screenshots, DOM, IPC calls, console logs).
+    // Only loaded in debug builds to avoid shipping it in production.
+    #[cfg(debug_assertions)]
+    let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+
+    builder
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // Window
@@ -230,6 +254,9 @@ pub fn run() {
             set_performance_mode,
             get_charging_threshold,
             set_charging_threshold,
+            // Battery Care toggle (EC 0xA4)
+            get_battery_care,
+            set_battery_care,
             get_perf_debug,
             get_ecram_map,
             get_iot_region_hex,
@@ -239,6 +266,8 @@ pub fn run() {
             relaunch_as_admin,
             // IoTService IPC
             iot_pipe_available,
+            ensure_iot_service,
+            ensure_bridge_service,
             get_iot_device_info,
             get_iot_wifi_list,
             iot_notify_event,
@@ -376,6 +405,67 @@ pub fn run() {
             // Thermal zone (ACPI temperature)
             get_thermal_zones,
             get_primary_thermal_zone,
+            // Fn-Key Customization (EC 0x4A)
+            get_function_key,
+            set_function_key,
+            // Eye Protection (blue light filter)
+            get_eye_protection,
+            set_eye_protection,
+            // OS Turbo (system optimization)
+            get_os_turbo,
+            set_os_turbo,
+            // Crash Recovery
+            get_crash_recovery_status,
+            mark_clean_exit,
+            // Driver Details
+            get_drivers_detail,
+            // Official Driver Update Check
+            check_official_driver_updates,
+            fetch_official_drivers,
+            get_model_code,
+            download_driver_package,
+            // AI Noise Cancellation
+            get_audio_effects,
+            set_mic_noise_canceling,
+            set_speaker_noise_canceling,
+            set_voice_focus,
+            // System Cleanup
+            scan_junk_files,
+            clean_junk_files,
+            // Security Scan
+            quick_security_scan,
+            full_security_scan,
+            custom_security_scan,
+            update_defender_signatures,
+            get_defender_status,
+            get_threat_history,
+            open_windows_security,
+            // Phone Link
+            get_phone_link_status,
+            launch_phone_link,
+            launch_phone_link_feature,
+            open_phone_link_settings,
+            // Color Calibration
+            get_color_status,
+            get_error_log_config,
+            set_error_logging_enabled,
+            read_error_log,
+            clear_error_log,
+            log_frontend_error,
+            load_icc_profile,
+            unload_icc_profile,
+            open_color_management_settings,
+            launch_color_calibration_wizard,
+            // Face Unlock (Windows Hello-style, RGB webcam)
+            face_status,
+            face_service_install,
+            face_list_templates,
+            face_delete_template,
+            face_get_settings,
+            face_set_settings,
+            face_set_password,
+            face_diagnostics,
+            face_enroll,
         ])
         .setup(|app| {
             // Hardware discovery — load cached profile or scan on first run
@@ -387,6 +477,14 @@ pub fn run() {
 
             // S24-016: Load persisted AI usage stats on startup.
             crate::util::ai_usage::load_on_startup();
+
+            // S26-005: Initialize crash recovery (Restart Manager + WER LocalDumps).
+            if let Err(e) = crate::hw::crash_recovery::init_crash_recovery() {
+                log::warn!("Crash recovery init failed (non-fatal): {e}");
+            }
+
+            // Initialize error logging system (7-day retention, on by default)
+            crate::util::error_log::init();
 
             // S26-004: Auto-rotate HMAC key if needed (replaces misleading --rotate-key message).
             if crate::util::auth::key_needs_rotation() {
@@ -406,6 +504,23 @@ pub fn run() {
             if let Err(e) = crate::hw::hotkeys::start_hook() {
                 log::warn!("Hotkey hook failed to start, continuing without hotkeys: {e}");
             }
+
+            // S32-002: Ensure the autonomous MiControlBridge service is
+            // installed and running (installed at install time; self-heal here
+            // for dev builds / upgrades). This runs BEFORE any elevated
+            // command so the app never falls back to repeated UAC prompts.
+            tauri::async_runtime::spawn(async {
+                match crate::elev_bridge::ensure_bridge_service().await {
+                    Ok(status) => {
+                        log::info!("[bridge] ensure_bridge_service: {status}");
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[bridge] ensure_bridge_service failed (will use scheduled task): {e}"
+                        );
+                    }
+                }
+            });
 
             // Apply Copilot key interception fixes (disables Windows Shell
             // interception + writes Scancode Map for permanent remap).
@@ -475,6 +590,12 @@ pub fn run() {
             #[cfg(windows)]
             crate::hw::osd::init();
 
+            // Start power event listener for sleep/resume detection.
+            // Resets sensors (ambient light, WMI cache) after the system
+            // wakes from sleep to prevent "Sensor unavailable" errors.
+            #[cfg(windows)]
+            crate::hw::power_listener::start_power_listener();
+
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
 
@@ -493,6 +614,8 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
+                        // S26-005: Mark clean exit before quitting from tray.
+                        crate::hw::crash_recovery::mark_clean_exit();
                         app.exit(0);
                     }
                     "open" => {
@@ -546,6 +669,8 @@ pub fn run() {
                         // allowing close can still leave the process alive. Force full
                         // app shutdown when the main window is closed.
                         if window.label() == "main" {
+                            // S26-005: Mark clean exit before shutting down.
+                            crate::hw::crash_recovery::mark_clean_exit();
                             window.app_handle().exit(0);
                         }
                     } else {

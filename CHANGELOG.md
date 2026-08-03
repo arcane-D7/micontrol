@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **EC Command Protocol** — Full implementation of the 4-phase EC command state machine (RamIsReady → WriteCommand → ReadCmdAck → ReadCmdRet) in `ecram_service.rs`. Supports all 16 EC cmd_ids: GetBindStatus, SetBindStatus, ResetDevice, WriteWiFiItem, EmptyWiFiItems, DeleteWiFiItem, ReadWiFiStatus, ReadWiFiCount, GetWiFiByIndex, GetFwVersion, GetModel, ConnectWiFi, GetDeviceID, and SendLaptopStatus (SUSPEND/SHUTDOWN/WIN_READY). EC reset is performed before and after each command for reliability.
+- **EC Command Protocol RE Report** (`docs/EC_COMMAND_PROTOCOL_RE.md`) — Complete reverse engineering documentation of the EC command protocol: 4-phase state machine, 7-byte command template, ACK/RET polling patterns, ECRAM address map, per-feature response layouts, and error codes.
+- **IoT Device UI documentation** — Updated `IotDeviceCard.tsx` with explanatory sections clarifying that Cloud Binding is about Xiaomi IoT cloud registration (not Mi Home), IoT WiFi is the chip's own WiFi module (separate from Windows WiFi), and a collapsible table listing all 16 EC commands with descriptions.
+- **Pipe operations in ecram_service** — JSON pipe protocol operations: `iot_get`, `iot_reset_device`, `iot_empty_wifi`, `iot_connect_wifi`, `iot_send_laptop_status` for frontend-to-backend IoT command forwarding.
+- **WiFi provisioning ops in ecram_service** — `iot_write_wifi_item` (cmd 0x04, 101-byte payload with checksum per RE), `iot_delete_wifi_item` (cmd 0x06, 37-byte payload), and parsed `wifi_by_index` responses (`ssid`/`connected`/`enabled` from the 101-byte item). Payload layouts verified against `iotsvc_decompiled.c`.
+- **Charging threshold ops in ecram_service** — `iot_set_charging_threshold` / `iot_get_charging_threshold` with ECRAM register write (0xA4 Battery Care + 0xA7 threshold) and registry fallback.
+- **EC command helpers in iotservice.rs** — `send_ec_pipe_command()`, `query_ec_string()`, `query_ec_device_id()`, `query_ec_bind_status()`, `query_ec_wifi_status()`, `query_ec_wifi_count()` with fallback to registry/WMI/cached data.
+- **Generic pipe client in ecram.rs** — `send_pipe_request()` for communicating with ecram_service.exe.
+- **Option 3: ecram pipe as primary IoT backend** — All `iotservice.rs` public functions (`get_model`, `get_fw_version`, `get_bind_status`, `get_device_id`, `get_device_status`, `set_device_status`, `reset_device`, `send_laptop_status`, `write_wifi_item`, `delete_wifi_item`, `get_wifi_by_index`, `read_wifi_count`, `read_wifi_status`, `empty_wifi_items`, `connect_wifi`) now prefer the ecram_service JSON pipe when it is active, falling back to the original MCPI protocol for stock setups. `is_pipe_available()` reports the ecram pipe as IoT-service availability.
+- **Charging via ecram pipe** — `set_charging_threshold`/`get_charging_threshold` in `charging.rs` use the ecram_service pipe when available (with registry fallback), eliminating the dead MCPI-pipe path when ecram_service replaces IoTService.exe.
+
+### Changed
+
+- Updated `README.md` — Added EC Command Protocol to features, architecture, and documentation table.
+- Updated `AGENTS.md` — Added EC command protocol references and ecram_service pipe operations documentation.
+- Updated `.gitignore` — Added `.bench/` and `.bench_trace_*` patterns to prevent benchmark trace files from being committed.
+
+### Removed
+
+- **Log file cleanup** — Deleted 44 temporary log files (build logs, trace logs, patch logs, test logs) and 2 test PowerShell scripts that were leftover from development. Screenshots `screenshot.png` and `screenshot2.png` removed from version control.
+
 ## [0.1.3] - 2026-07-03
 
 ### Fixed
@@ -36,8 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Limitations
 
-- **ERAM region (0xFE0B0300) not accessible** — IoTDriver.sys hardcoded address ranges do not include ERAM. AC adapter wattage (ADPW at ERAM+0x81) cannot be read via driver. Use WMI as alternative.
-- **SMA2 region (0xFE0B0A00) not accessible** — Same limitation as ERAM.
+- **ERAM region (0xFE0B0300) not accessible via IoTDriver** — IoTDriver.sys hardcoded address ranges do not include ERAM. AC adapter wattage (ADPW at ERAM+0x81) cannot be read via the driver, but IS available via WMI (ACPI WMAA method `read_adapter_power()`).
+- **SMA2 region (0xFE0B0A00) not accessible via IoTDriver** — Same limitation as ERAM.
 - **Secure Boot prevents driver modification** — IoTDriver.sys cannot be patched to add ERAM/SMA2 ranges without disabling Secure Boot.
 
 ## [1.0.0] - 2025-01-XX

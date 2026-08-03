@@ -278,5 +278,5 @@ To deploy the custom IoTService.exe:
   - `0xFE0B0F00` / 0x80 bytes (IOT_STATUS + IOT_SENSORS)
   - `0xFE0B0AB8` / 0x08 bytes (small status region)
   - `0xFE0B0E00` / 0x100 bytes (ECRAM sensor block)
-- ERAM (`0xFE0B0300`) and SMA2 (`0xFE0B0A00`) are **not accessible** — not in allowed ranges
+- ERAM (`0xFE0B0300`) and SMA2 (`0xFE0B0A00`) are **not accessible via IoTDriver** — not in allowed ranges. AC adapter wattage is available via WMI instead.
 - See [RE_ANALYSIS_REPORT.md](./RE_ANALYSIS_REPORT.md) for complete details

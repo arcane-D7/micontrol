@@ -1,3 +1,7 @@
+[workspace]
+members = ["cp"]
+resolver = "2"
+
 [package]
 name = "micontrol"
 version = "0.1.13"
@@ -16,9 +20,24 @@ path = "src/main.rs"
 name = "ecram_service"
 path = "src/bin/ecram_service.rs"
 
+[[bin]]
+name = "micontrol_bridge"
+path = "src/bin/micontrol_bridge.rs"
+
+[[bin]]
+name = "micontrol_face_svc"
+path = "src/bin/micontrol_face_svc.rs"
+required-features = ["face"]
+
 [features]
 default = []
 diag = []
+# Enable the face-unlock auth service + camera pipeline. Uses onnxruntime
+# (ort) + windows-service — no C++ toolchain required. OpenCV is optional
+# and only pulled in via the `face-opencv` feature (requires libclang).
+face = ["dep:windows-service"]
+# Opt-in OpenCV camera backend (needs C++ toolchain / libclang).
+face-opencv = ["face", "dep:opencv"]
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
@@ -26,6 +45,7 @@ tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-mcp-bridge = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
@@ -49,6 +69,15 @@ aes-gcm = "0.10"
 zip = "2"
 hkdf = "0.12"
 
+# ── Face unlock (Windows Hello-style) ────────────────────────────────────────
+# onnxruntime for face detection + recognition models.
+ort = { version = "2.0.0-rc.13", features = ["download-binaries", "tls-native", "std", "ndarray"], default-features = false }
+# OpenCV for camera capture + image preprocessing (optional: requires C++
+# toolchain to build; enabled via the `face` feature).
+opencv = { version = "0.100.1", optional = true, features = ["videoio", "imgproc"] }
+windows-service = { version = "0.7", optional = true }
+base64 = "0.22"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
   "Win32_System_Registry",
@@ -61,6 +90,8 @@ windows = { version = "0.58", features = [
   "Win32_System_WindowsProgramming",
   "Win32_System_Ole",
   "Win32_System_Variant",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_Devices_PortableDevices",
   "Win32_System_Services",
   "Win32_System_Threading",
   "Win32_System_Pipes",
@@ -78,6 +109,7 @@ windows = { version = "0.58", features = [
   "Win32_Graphics_Gdi",
   "Win32_Devices_Display",
   "Devices_Sensors",
+  "Win32_Devices_Sensors",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",
   "Win32_NetworkManagement_WiFi",
@@ -85,8 +117,17 @@ windows = { version = "0.58", features = [
   "Devices_Enumeration",
   "Foundation",
   "Foundation_Collections",
+  "Win32_System_Diagnostics",
+  "Win32_System_Recovery",
+  "Win32_System_ErrorReporting",
+  "Win32_Security_Credentials",
+  "Win32_Security_Authentication_Identity",
+  "Win32_Security_Cryptography",
+  "Win32_System_SystemInformation",
+  "Win32_UI_Shell_Common",
 ] }
 windows-core = "0.58"
+windows-targets = "0.52"
 wmi = "0.13"
 winreg = "0.52"
 

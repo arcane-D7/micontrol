@@ -133,65 +133,74 @@ export default function WiFiManager() {
         {networks.length === 0 ? (
           <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>{t('wifi.noNetworks')}</p>
         ) : (
-          networks.map((n) => (
-            <div
-              key={n.ssid}
-              className="stat-row"
-              style={{
-                padding: '8px 10px',
-                marginBottom: 4,
-                borderRadius: 'var(--r-xs)',
-                cursor: 'pointer',
-              }}
-              onClick={() => setSelectedSsid(selectedSsid === n.ssid ? null : n.ssid)}
-            >
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>
-                  {n.ssid}
-                  {n.connected && (
-                    <span style={{ color: 'var(--success)', marginLeft: 8 }}>
-                      ● {t('wifi.connected')}
-                    </span>
-                  )}
+          networks.map((n) => {
+            const isHidden = n.ssid === '<Hidden Network>';
+            return (
+              <div
+                key={n.ssid + (n.connected ? '-conn' : '')}
+                className="stat-row"
+                style={{
+                  padding: '8px 10px',
+                  marginBottom: 4,
+                  borderRadius: 'var(--r-xs)',
+                  cursor: isHidden ? 'default' : 'pointer',
+                  opacity: isHidden ? 0.6 : 1,
+                }}
+                onClick={() =>
+                  !isHidden && setSelectedSsid(selectedSsid === n.ssid ? null : n.ssid)
+                }
+              >
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500 }}>
+                    {isHidden ? '🔒 ' : ''}
+                    {n.ssid}
+                    {n.connected && (
+                      <span style={{ color: 'var(--success)', marginLeft: 8 }}>
+                        ● {t('wifi.connected')}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                    {isHidden
+                      ? t('wifi.hiddenNetwork')
+                      : `${t('wifi.signal')}: ${n.signal}% • ${n.security || 'Open'}`}
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
-                  {t('wifi.signal')}: {n.signal}% • {n.security || 'Open'}
-                </div>
+                {selectedSsid === n.ssid && !n.connected && !isHidden && (
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <input
+                      type="password"
+                      placeholder={t('wifi.password')}
+                      aria-label={t('wifi.passwordLabel')}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        padding: '4px 8px',
+                        borderRadius: 'var(--r-xs)',
+                        border: '1px solid var(--border)',
+                        background: 'var(--bg)',
+                        color: 'var(--text)',
+                        width: 140,
+                        fontSize: 12,
+                      }}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleConnect(n.ssid);
+                      }}
+                      disabled={connecting}
+                      style={{ padding: '4px 10px', fontSize: 12 }}
+                    >
+                      {connecting ? '...' : t('wifi.connect')}
+                    </button>
+                  </div>
+                )}
               </div>
-              {selectedSsid === n.ssid && !n.connected && (
-                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <input
-                    type="password"
-                    placeholder={t('wifi.password')}
-                    aria-label={t('wifi.passwordLabel')}
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    style={{
-                      padding: '4px 8px',
-                      borderRadius: 'var(--r-xs)',
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg)',
-                      color: 'var(--text)',
-                      width: 140,
-                      fontSize: 12,
-                    }}
-                  />
-                  <button
-                    className="btn btn-primary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleConnect(n.ssid);
-                    }}
-                    disabled={connecting}
-                    style={{ padding: '4px 10px', fontSize: 12 }}
-                  >
-                    {connecting ? '...' : t('wifi.connect')}
-                  </button>
-                </div>
-              )}
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 

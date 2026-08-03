@@ -38,6 +38,12 @@ pub struct BatteryInfo {
     /// when the IoT driver is not available, or before the register offset is
     /// confirmed. Use `debug_ecram_dump` to identify the correct offset.
     pub ac_input_power_mw: Option<i32>,
+    /// Derived health classification: "Good", "Fair", or "Poor".
+    /// Based on wear level: ≥80% Good, 60-80% Fair, <60% Poor.
+    pub health_label: String,
+    /// True if the AC adapter is negotiating hyper charging (>65W sustained).
+    /// The TM2424 ships with a 100W GaN adapter.
+    pub is_hyper_charging: bool,
 }
 
 /// Cached static battery data that never changes at runtime.
@@ -164,6 +170,8 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
         time_to_full_minutes: Option<i32>,
         charge_rate_mw: i32,
         voltage_mv: u32,
+        health_label: String,
+        is_hyper_charging: bool,
     }
 
     let snapshot = wmi_cache::with_wmi(|wmi| {
@@ -246,6 +254,21 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
             None
         };
 
+        // Derived health label from wear level
+        let health_label = if health_percent >= 80.0 {
+            "Good".to_string()
+        } else if health_percent >= 60.0 {
+            "Fair".to_string()
+        } else {
+            "Poor".to_string()
+        };
+
+        // Hyper charging: sustained input >65W (65000mW)
+        // TM2424 ships with 100W GaN adapter; hyper charging is active
+        // when the charge rate exceeds 65W while plugged in.
+        // We use charging_rate (ChargeRate from WMI BatteryStatus) as a proxy.
+        let is_hyper_charging = is_plugged && charging_rate > 65000;
+
         Ok(BatterySnapshot {
             level,
             is_charging,
@@ -263,6 +286,8 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
             time_to_full_minutes,
             charge_rate_mw: charging_rate,
             voltage_mv,
+            health_label,
+            is_hyper_charging,
         })
     })?;
 
@@ -303,6 +328,8 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
         charge_rate_mw: snapshot.charge_rate_mw,
         voltage_mv: snapshot.voltage_mv,
         ac_input_power_mw,
+        health_label: snapshot.health_label,
+        is_hyper_charging: snapshot.is_hyper_charging,
     })
 }
 
@@ -417,6 +444,8 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
         charge_rate_mw: 0,
         voltage_mv: 11400,
         ac_input_power_mw: None,
+        health_label: "Good".to_string(),
+        is_hyper_charging: false,
     })
 }
 

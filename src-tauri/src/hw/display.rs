@@ -12,6 +12,17 @@ use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, Ordering};
 /// retry a DLL that cannot load — avoids a WARN log on every brightness change.
 static IGCL_SET_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
+/// S32-003: Set while the Windows display color calibration wizard (dccw.exe)
+/// is open. While set, the adaptive-brightness loop stops touching the
+/// backlight/LUT so the wizard can save its calibration without
+/// "Access is denied" (the LUT would otherwise be locked by our gamma ramp).
+pub static CALIBRATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` while the display color calibration wizard is running.
+pub fn is_calibration_in_progress() -> bool {
+    CALIBRATION_IN_PROGRESS.load(Ordering::Relaxed)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DisplayInfo {
     pub brightness: u8,
@@ -114,8 +125,12 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     let brightness = get_brightness_wmi().unwrap_or_else(|_| get_brightness_igcl().unwrap_or(80));
     let hdr_enabled = get_hdr_state();
     let refresh_rate_hz = get_refresh_rate().unwrap_or(120);
-    // S25-009: Propagate error from get_available_refresh_rates.
-    let available_refresh_rates = get_available_refresh_rates()?;
+    // S25-009: Don't let refresh-rate enumeration failure nuke the entire display info.
+    // If we can't enumerate rates, fall back to the current rate as the only option.
+    let available_refresh_rates = get_available_refresh_rates().unwrap_or_else(|e| {
+        log::warn!(target: "hw::display", "get_available_refresh_rates failed: {e}, using current rate as fallback");
+        vec![refresh_rate_hz]
+    });
     // DRR is active when the display is set to its highest supported refresh rate.
     let dynamic_refresh_rate_capable = available_refresh_rates
         .last()
@@ -231,15 +246,220 @@ pub fn set_ai_brightness_config(config: AiBrightnessConfig) -> HardwareResult<()
 
 // ── Ambient light sensor ──────────────────────────────────────────────────────
 
+/// Global flag to force sensor re-initialization on next read.
+/// Set to `true` when a power-resume event is detected so the sensor
+/// instance is re-created instead of returning stale `None`.
+static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Request a sensor reset on the next polling cycle.
+/// Called when a WM_POWERBROADCAST resume event is received.
+pub fn request_sensor_reset() {
+    SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
+    log::info!("[display] Sensor reset requested (power resume event)");
+}
+
+/// Cached LightSensor instance — re-created only when a reset is requested.
+/// This avoids calling `LightSensor::GetDefault()` on every 2-second poll,
+/// which can be slow and may return `None` transiently after sleep/wake.
 #[cfg(windows)]
-fn get_ambient_lux() -> Option<f32> {
+static CACHED_LIGHT_SENSOR: std::sync::OnceLock<
+    std::sync::Mutex<Option<windows::Devices::Sensors::LightSensor>>,
+> = std::sync::OnceLock::new();
+
+/// Fallback ambient-light reader using the WinRT `Windows.Devices.Sensors.LightSensor` API.
+/// This works well in UWP/WinUI apps, but in an unpackaged desktop app it frequently
+/// returns `None` even when a HID ALS sensor is present in Device Manager.
+#[cfg(windows)]
+fn get_ambient_lux_winrt() -> Option<f32> {
     use windows::Devices::Sensors::LightSensor;
-    let sensor = LightSensor::GetDefault().ok()?;
-    log::debug!("[display] Ambient light sensor found");
+
+    // Check if a reset was requested (e.g., after sleep/wake)
+    let needs_reset = SENSOR_RESET_REQUESTED.swap(false, Ordering::SeqCst);
+
+    let cache = CACHED_LIGHT_SENSOR.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock().ok()?;
+
+    if needs_reset || guard.is_none() {
+        // Re-create the sensor instance
+        match LightSensor::GetDefault() {
+            Ok(sensor) => {
+                log::debug!(
+                    "[display] WinRT ambient light sensor {}",
+                    if needs_reset {
+                        "re-initialized (reset)"
+                    } else {
+                        "found"
+                    }
+                );
+                *guard = Some(sensor);
+            }
+            Err(_) => {
+                log::debug!("[display] WinRT ambient light sensor not available");
+                *guard = None;
+                return None;
+            }
+        }
+    }
+
+    let sensor = guard.as_ref()?;
     let reading = sensor.GetCurrentReading().ok()?;
     let lux = reading.IlluminanceInLux().ok()?;
-    log::debug!("[display] Ambient lux: {lux}");
+    log::debug!("[display] WinRT ambient lux: {lux}");
     Some(lux)
+}
+
+/// Primary ambient-light reader using the classic COM Sensor API (`ISensorManager`).
+/// This is the API that Windows itself uses for the "Adaptive brightness" power-plan
+/// setting and it works for unpackaged desktop applications, unlike the WinRT API.
+#[cfg(windows)]
+fn get_ambient_lux_com() -> Option<f32> {
+    use windows::Win32::Devices::Sensors::{
+        ISensorManager, SensorManager as CLSID_SensorManager, SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX,
+        SENSOR_TYPE_AMBIENT_LIGHT,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
+
+    // S32-003: On this laptop (and several Xiaomi models) the sensor stack
+    // enumerates TWO ambient-light sensors:
+    //   sensor[0]: a placeholder that always reports a fixed value (69 lux here)
+    //   sensor[1]: the real HID ALS sensor that responds to light changes
+    // Both report SENSOR_STATE_READY and the same category/type, so the only
+    // reliable way to tell them apart is to observe which one VARIES between
+    // consecutive reads. We cache the last reading per sensor index and pick
+    // the sensor with the largest delta (most responsive). If nothing varies
+    // (e.g. steady light), we keep the most recently responsive sensor, and
+    // fall back to the first finite reading.
+
+    // SAFETY: `CoInitializeEx` is idempotent for the same apartment model and is safe
+    // to call from each thread. If the thread is already in a different apartment model
+    // the call returns RPC_E_CHANGED_MODE, which we ignore because the runtime may have
+    // already initialized COM for us.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+
+    // SAFETY: we keep all COM objects alive in this scope and release them when they drop.
+    unsafe {
+        let manager: ISensorManager = CoCreateInstance(&CLSID_SensorManager, None, CLSCTX_ALL)
+            .map_err(|e| {
+                log::debug!("[display] COM SensorManager not available: {e}");
+                e
+            })
+            .ok()?;
+        let collection = manager.GetSensorsByType(&SENSOR_TYPE_AMBIENT_LIGHT).ok()?;
+        let count = collection.GetCount().ok()?;
+        if count == 0 {
+            log::debug!("[display] COM SensorManager: no ambient light sensors found");
+            return None;
+        }
+
+        // Read every sensor's current lux value.
+        let mut readings: Vec<Option<f32>> = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let sensor = collection.GetAt(i).ok()?;
+            let report = sensor.GetData().ok()?;
+            let pv = report
+                .GetSensorValue(&SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX)
+                .ok()?;
+            let lux = f64::try_from(&pv).ok()? as f32;
+            log::debug!("[display] COM sensor[{i}] ambient lux: {lux}");
+            readings.push(if lux.is_finite() { Some(lux) } else { None });
+        }
+
+        let lux = select_responsive_sensor(&readings);
+        log::debug!("[display] COM selected lux: {lux:?}");
+        lux
+    }
+}
+
+/// Per-sensor last-read cache used to detect which ALS sensor actually responds
+/// to light (the others are placeholders that return a fixed value).
+#[cfg(windows)]
+static COM_LUX_HISTORY: std::sync::OnceLock<std::sync::Mutex<Vec<Option<f32>>>> =
+    std::sync::OnceLock::new();
+
+/// Choose the most responsive ambient-light sensor from a set of simultaneous
+/// readings, using cached previous readings to measure variability.
+///
+/// Strategy:
+///   1. Compute the absolute delta between each sensor's current and previous
+///      reading. The sensor with the largest delta is the real one.
+///   2. If all deltas are 0 (steady light), reuse the index of the sensor that
+///      was responsive in the last poll (cached).
+///   3. If never responsive, fall back to the first finite reading.
+#[cfg(windows)]
+fn select_responsive_sensor(readings: &[Option<f32>]) -> Option<f32> {
+    select_responsive_sensor_impl(readings)
+}
+
+/// Test hook: public wrapper around the responsive-sensor selector so the
+/// selection logic can be validated from integration tests.
+#[cfg(windows)]
+pub fn test_select_responsive(readings: Vec<Option<f32>>) -> Option<f32> {
+    select_responsive_sensor_impl(&readings)
+}
+
+#[cfg(windows)]
+fn select_responsive_sensor_impl(readings: &[Option<f32>]) -> Option<f32> {
+    let history = COM_LUX_HISTORY.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut guard = history.lock().ok()?;
+
+    // Resize the history cache to match the sensor count.
+    if guard.len() != readings.len() {
+        guard.resize(readings.len(), None);
+    }
+    // Snapshot the PREVIOUS readings (before we overwrite them below) so we
+    // can measure variability between this poll and the last poll.
+    let prev: Vec<Option<f32>> = guard.clone();
+
+    // 1. Find the sensor with the largest absolute change vs the previous poll.
+    let mut best_index: Option<usize> = None;
+    let mut best_delta: f32 = 0.0;
+    for (i, reading) in readings.iter().enumerate() {
+        if let (Some(cur), Some(prev_v)) = (reading, prev[i]) {
+            let delta = (cur - prev_v).abs();
+            if delta > best_delta {
+                best_delta = delta;
+                best_index = Some(i);
+            }
+        }
+    }
+
+    // 2. Update the history with ALL current readings (not just the chosen
+    //    one) so every sensor accumulates history for future polls.
+    for (i, reading) in readings.iter().enumerate() {
+        guard[i] = *reading;
+    }
+
+    // 3. Return the most responsive sensor's current reading.
+    if let Some(idx) = best_index {
+        if let Some(v) = readings[idx] {
+            return Some(v);
+        }
+    }
+
+    // 4. Steady light (nothing changed): reuse the last sensor that ever had
+    //    a recorded value different from its first-seen value. Simpler and
+    //    robust enough: prefer the sensor whose history is non-empty and whose
+    //    value differs from the very first reading ever stored for it. We
+    //    approximate "responsive ever" by preferring the LAST finite sensor,
+    //    since the placeholder is typically index 0.
+    let last_finite = readings.iter().rposition(|r| r.is_some());
+    if let Some(idx) = last_finite {
+        return readings[idx];
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn get_ambient_lux() -> Option<f32> {
+    // Try the classic COM Sensor API first: it works for unpackaged desktop apps.
+    if let Some(lux) = get_ambient_lux_com() {
+        return Some(lux);
+    }
+    // Fall back to WinRT, which works on some systems depending on the sensor driver.
+    get_ambient_lux_winrt()
 }
 
 #[cfg(not(windows))]
@@ -289,6 +509,14 @@ pub async fn adaptive_brightness_loop() {
     let mut adaptbright_suppressed = false;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        // S32-003: While the display color calibration wizard is open, do NOT
+        // touch the backlight. Writing brightness while dccw.exe is saving its
+        // gamma ramp causes "Access is denied" / "Close other programs".
+        if CALIBRATION_IN_PROGRESS.load(Ordering::Relaxed) {
+            log::debug!("[adaptive_brightness] paused — color calibration in progress");
+            continue;
+        }
 
         // Skip the iteration when the display is off (lid closed, sleep, etc.)
         // to avoid wasting CPU and fighting with the OS power manager.
@@ -1087,9 +1315,15 @@ fn get_refresh_rate() -> HardwareResult<u32> {
         use std::collections::HashMap;
 
         if let Ok(Some(hz)) = wmi_cache::with_cimv2(|wmi| {
-            let results: Vec<HashMap<String, wmi::Variant>> = wmi
+            let results: Vec<HashMap<String, wmi::Variant>> = match wmi
                 .raw_query("SELECT CurrentRefreshRate FROM Win32_VideoController")
-                .unwrap_or_default();
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::debug!(target: "hw::display", "Win32_VideoController raw_query error: {e}");
+                    return Ok(None);
+                }
+            };
             if let Some(row) = results.first() {
                 match row.get("CurrentRefreshRate") {
                     Some(wmi::Variant::UI4(v)) => Ok(Some(*v)),

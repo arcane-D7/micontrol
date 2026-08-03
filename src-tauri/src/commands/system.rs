@@ -12,7 +12,7 @@ use crate::hw::display::{
     get_ai_brightness_config as hw_get_ai_cfg, get_available_refresh_rates as hw_get_refresh_rates,
     get_display_info as hw_get_display, set_hdr as hw_set_hdr, AiBrightnessConfig, DisplayInfo,
 };
-use crate::hw::errors::ErrorResponse;
+use crate::hw::errors::{ErrorResponse, HardwareError};
 use crate::hw::fan::{get_fan_info as hw_get_fan, FanInfo, FanMode};
 use crate::hw::performance::get_performance_mode as hw_get_perf;
 use crate::hw::processes::{get_process_list as hw_get_processes, ProcessInfo};
@@ -385,4 +385,374 @@ pub async fn get_hardware_state_batch() -> Result<HardwareState, ErrorResponse> 
     })
     .await
     .map_err(ErrorResponse::from)
+}
+
+// ── Eye Protection ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_eye_protection(
+) -> Result<crate::hw::eye_protection::EyeProtectionStatus, ErrorResponse> {
+    run_blocking(crate::hw::eye_protection::get_eye_protection)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_eye_protection(enabled: bool, intensity: Option<u8>) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_eye_protection",
+        serde_json::json!({ "enabled": enabled, "intensity": intensity }),
+    )
+    .await?;
+    Ok(())
+}
+
+// ── OS Turbo ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_os_turbo() -> Result<crate::hw::os_turbo::OsTurboStatus, ErrorResponse> {
+    run_blocking(crate::hw::os_turbo::get_os_turbo)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_os_turbo(
+    enabled: bool,
+) -> Result<crate::hw::os_turbo::OsTurboStatus, ErrorResponse> {
+    let raw = elev_bridge::run_elevated("set_os_turbo", serde_json::json!({ "enabled": enabled }))
+        .await?;
+    let result: crate::hw::os_turbo::OsTurboStatus =
+        serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
+    Ok(result)
+}
+
+// ── Crash Recovery ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_crash_recovery_status(
+) -> Result<crate::hw::crash_recovery::CrashRecoveryStatus, ErrorResponse> {
+    run_blocking(crate::hw::crash_recovery::init_crash_recovery)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn mark_clean_exit() -> Result<(), ErrorResponse> {
+    run_blocking(|| {
+        crate::hw::crash_recovery::mark_clean_exit();
+        Ok::<(), crate::hw::errors::HardwareError>(())
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
+// ── Driver Details ───────────────────────────────────────────────────────────
+
+/// Get detailed driver information via Win32_PnPSignedDriver WMI class.
+#[tauri::command]
+pub async fn get_drivers_detail() -> Result<Vec<crate::hw::update::DriverDetail>, ErrorResponse> {
+    run_blocking(crate::hw::update::get_drivers_detail)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+// ── Official Driver Update Check ──────────────────────────────────────────────
+
+/// Check installed drivers against Xiaomi's official driver portal.
+#[tauri::command]
+pub async fn check_official_driver_updates(
+) -> Result<crate::hw::driver_update::DriverUpdateCheck, ErrorResponse> {
+    crate::hw::driver_update::check_driver_updates()
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Fetch the list of official drivers for a specific model code.
+#[tauri::command]
+pub async fn fetch_official_drivers(
+    model_code: Option<String>,
+) -> Result<Vec<crate::hw::driver_update::OfficialDriver>, ErrorResponse> {
+    let code = match model_code {
+        Some(c) => c,
+        None => crate::hw::driver_update::detect_model_code().map_err(ErrorResponse::from)?,
+    };
+    crate::hw::driver_update::fetch_official_drivers(&code)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Detect the laptop model code (e.g. "TM2424").
+#[tauri::command]
+pub async fn get_model_code() -> Result<String, ErrorResponse> {
+    crate::hw::driver_update::detect_model_code().map_err(ErrorResponse::from)
+}
+
+/// Download a driver package from Xiaomi's CDN.
+#[tauri::command]
+pub async fn download_driver_package(url: String) -> Result<String, ErrorResponse> {
+    let path = crate::hw::driver_update::download_driver_package(&url)
+        .await
+        .map_err(ErrorResponse::from)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+// ── Security Scan ────────────────────────────────────────────────────────────
+
+/// Run a quick security scan via Windows Defender.
+#[tauri::command]
+pub async fn quick_security_scan(
+) -> Result<crate::hw::security_scan::SecurityScanResult, ErrorResponse> {
+    run_blocking(crate::hw::security_scan::quick_scan)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Run a full system security scan.
+#[tauri::command]
+pub async fn full_security_scan(
+) -> Result<crate::hw::security_scan::SecurityScanResult, ErrorResponse> {
+    run_blocking(crate::hw::security_scan::full_scan)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Run a custom security scan on a specific path.
+#[tauri::command]
+pub async fn custom_security_scan(
+    path: String,
+) -> Result<crate::hw::security_scan::SecurityScanResult, ErrorResponse> {
+    run_blocking(move || crate::hw::security_scan::custom_scan(&path))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Update Windows Defender signatures.
+#[tauri::command]
+pub async fn update_defender_signatures(
+) -> Result<crate::hw::security_scan::SecurityScanResult, ErrorResponse> {
+    run_blocking(crate::hw::security_scan::update_signatures)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Get Windows Defender status.
+#[tauri::command]
+pub async fn get_defender_status() -> Result<crate::hw::security_scan::DefenderStatus, ErrorResponse>
+{
+    run_blocking(crate::hw::security_scan::get_defender_status)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Get threat detection history.
+#[tauri::command]
+pub async fn get_threat_history() -> Result<crate::hw::security_scan::ThreatHistory, ErrorResponse>
+{
+    run_blocking(crate::hw::security_scan::get_threat_history)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Open Windows Security app (Windows Defender).
+#[tauri::command]
+pub async fn open_windows_security() -> Result<(), ErrorResponse> {
+    run_blocking(|| {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Start-Process 'windowsdefender:'"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status()
+                .map_err(|e| {
+                    HardwareError::Other(format!("Failed to open Windows Security: {e}"))
+                })?;
+        }
+        #[cfg(not(windows))]
+        {
+            return Err(HardwareError::Other(
+                "Windows Security is only available on Windows".to_string(),
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
+// ── Phone Link ────────────────────────────────────────────────────────────────
+
+/// Get Phone Link status.
+#[tauri::command]
+pub async fn get_phone_link_status() -> Result<crate::hw::phone_link::PhoneLinkStatus, ErrorResponse>
+{
+    run_blocking(|| Ok(crate::hw::phone_link::get_phone_link_status()))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Launch Phone Link app.
+#[tauri::command]
+pub async fn launch_phone_link() -> Result<(), ErrorResponse> {
+    run_blocking(crate::hw::phone_link::launch_phone_link)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Launch a specific Phone Link feature.
+#[tauri::command]
+pub async fn launch_phone_link_feature(feature: String) -> Result<(), ErrorResponse> {
+    run_blocking(move || crate::hw::phone_link::launch_phone_link_feature(&feature))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Open Phone Link settings in Windows Settings.
+#[tauri::command]
+pub async fn open_phone_link_settings() -> Result<(), ErrorResponse> {
+    run_blocking(crate::hw::phone_link::open_phone_link_settings)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+// ── Color Calibration ─────────────────────────────────────────────────────────
+
+/// Get color profile information for all displays.
+#[tauri::command]
+pub async fn get_color_status(
+) -> Result<crate::hw::color_calibration::ColorCalibrationStatus, ErrorResponse> {
+    run_blocking(crate::hw::color_calibration::get_color_status)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Load an ICC profile for a display.
+#[tauri::command]
+pub async fn load_icc_profile(display: String, profile_path: String) -> Result<(), ErrorResponse> {
+    run_blocking(move || crate::hw::color_calibration::load_icc_profile(&display, &profile_path))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Unload ICC profile (revert to sRGB).
+#[tauri::command]
+pub async fn unload_icc_profile(display: String) -> Result<(), ErrorResponse> {
+    run_blocking(move || crate::hw::color_calibration::unload_icc_profile(&display))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Open Windows Color Management settings.
+#[tauri::command]
+pub async fn open_color_management_settings() -> Result<(), ErrorResponse> {
+    run_blocking(crate::hw::color_calibration::open_color_management_settings)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Launch Windows Display Color Calibration wizard.
+#[tauri::command]
+pub async fn launch_color_calibration_wizard() -> Result<(), ErrorResponse> {
+    run_blocking(crate::hw::color_calibration::launch_color_calibration_wizard)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+// ── AI Noise Cancellation ────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_audio_effects(
+) -> Result<crate::hw::audio_effects::AudioEffectsStatus, ErrorResponse> {
+    run_blocking(crate::hw::audio_effects::get_audio_effects)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn set_mic_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_mic_noise_canceling",
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_speaker_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_speaker_noise_canceling",
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_voice_focus(enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated("set_voice_focus", serde_json::json!({ "enabled": enabled })).await?;
+    Ok(())
+}
+
+// ── System Cleanup ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn scan_junk_files() -> Result<Vec<crate::hw::cleanup::CleanupItem>, ErrorResponse> {
+    run_blocking(crate::hw::cleanup::scan_junk_files)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn clean_junk_files(
+    categories: Vec<crate::hw::cleanup::CleanupCategory>,
+) -> Result<Vec<crate::hw::cleanup::CleanupResult>, ErrorResponse> {
+    let result = elev_bridge::run_elevated(
+        "clean_junk_files",
+        serde_json::json!({ "categories": categories }),
+    )
+    .await?;
+    // The elevated dispatch returns the CleanupResult array as a JSON value
+    match serde_json::from_value::<Vec<crate::hw::cleanup::CleanupResult>>(result) {
+        Ok(results) => Ok(results),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+// ── Error Logging ────────────────────────────────────────────────────────────
+
+/// Get the error logging configuration.
+#[tauri::command]
+pub async fn get_error_log_config() -> Result<crate::util::error_log::ErrorLogConfig, ErrorResponse>
+{
+    Ok(crate::util::error_log::get_config())
+}
+
+/// Enable or disable error logging.
+#[tauri::command]
+pub async fn set_error_logging_enabled(enabled: bool) -> Result<(), ErrorResponse> {
+    crate::util::error_log::set_enabled(enabled);
+    Ok(())
+}
+
+/// Read the error log (last N lines).
+#[tauri::command]
+pub async fn read_error_log(max_lines: Option<usize>) -> Result<String, ErrorResponse> {
+    Ok(crate::util::error_log::read_log(max_lines.unwrap_or(500)))
+}
+
+/// Clear the error log file.
+#[tauri::command]
+pub async fn clear_error_log() -> Result<(), ErrorResponse> {
+    crate::util::error_log::clear_log();
+    Ok(())
+}
+
+/// Log a frontend error to the error log file.
+#[tauri::command]
+pub async fn log_frontend_error(target: String, message: String) -> Result<(), ErrorResponse> {
+    crate::util::error_log::log_error(&target, &message);
+    Ok(())
 }

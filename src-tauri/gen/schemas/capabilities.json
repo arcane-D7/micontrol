@@ -4,6 +4,12 @@
     "description": "Default capabilities for MiControl",
     "local": true,
     "windows": ["main"],
-    "permissions": ["core:default"]
+    "permissions": [
+      "core:default",
+      "updater:default",
+      "process:default",
+      "shell:default",
+      "mcp-bridge:default"
+    ]
   }
 }
