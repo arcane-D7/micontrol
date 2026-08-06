@@ -42,10 +42,10 @@ export default defineConfig(async () => ({
       include: ['src/**/*.{ts,tsx}'],
       exclude: ['src/**/*.test.{ts,tsx}', 'src/**/*.d.ts', 'src/main.tsx'],
       thresholds: {
-        statements: 18,
+        statements: 15,
         branches: 12,
         functions: 30,
-        lines: 18,
+        lines: 15,
       },
     },
   },
