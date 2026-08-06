@@ -110,5 +110,8 @@ jobs:
       - name: Frontend build
         run: npm run build
 
-      - name: Tauri build smoke test
-        run: npm run tauri build
+      # Bundle/signing happens in release.yml (has TAURI_SIGNING_PRIVATE_KEY
+      # secrets). Here we only smoke-test compilation; --no-bundle keeps fork
+      # PRs working since they cannot access repository secrets.
+      - name: Tauri compile smoke test
+        run: npm run tauri build -- --no-bundle

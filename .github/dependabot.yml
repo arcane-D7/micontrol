@@ -1,51 +1,61 @@
+# Dependabot is DISABLED for this repository.
+#
+# Keep this file with an empty `updates:` list. Dependabot reads this file and
+# will NOT open new pull requests or schedule update jobs while the list is
+# empty. All previous configuration (npm / cargo / github-actions) is retained
+# below as a comment for easy re-enabling later.
 version: 2
 
-updates:
-  # npm dependencies
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 10
-    groups:
-      minor-updates:
-        update-types:
-          - "minor"
-          - "patch"
-    reviewers:
-      - "mafsc"
-    labels:
-      - "dependencies"
-      - "npm"
+updates: []
 
-  # cargo dependencies
-  - package-ecosystem: "cargo"
-    directory: "/src-tauri"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 10
-    groups:
-      minor-updates:
-        update-types:
-          - "minor"
-          - "patch"
-    reviewers:
-      - "mafsc"
-    labels:
-      - "dependencies"
-      - "cargo"
-
-  # GitHub Actions
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-    open-pull-requests-limit: 5
-    reviewers:
-      - "mafsc"
-    labels:
-      - "dependencies"
-      - "github-actions"
+# ── Previous configuration (disabled) ─────────────────────────────────────
+#
+# updates:
+#   # npm dependencies
+#   - package-ecosystem: "npm"
+#     directory: "/"
+#     schedule:
+#       interval: "weekly"
+#       day: "monday"
+#     open-pull-requests-limit: 10
+#     groups:
+#       minor-updates:
+#         update-types:
+#           - "minor"
+#           - "patch"
+#     reviewers:
+#       - "mafsc"
+#     labels:
+#       - "dependencies"
+#       - "npm"
+#
+#   # cargo dependencies
+#   - package-ecosystem: "cargo"
+#     directory: "/src-tauri"
+#     schedule:
+#       interval: "weekly"
+#       day: "monday"
+#     open-pull-requests-limit: 10
+#     groups:
+#       minor-updates:
+#         update-types:
+#           - "minor"
+#           - "patch"
+#     reviewers:
+#       - "mafsc"
+#     labels:
+#       - "dependencies"
+#       - "cargo"
+#
+#   # GitHub Actions
+#   - package-ecosystem: "github-actions"
+#     directory: "/"
+#     schedule:
+#       interval: "weekly"
+#       day: "monday"
+#     open-pull-requests-limit: 5
+#     reviewers:
+#       - "mafsc"
+#     labels:
+#       - "dependencies"
+#       - "github-actions"

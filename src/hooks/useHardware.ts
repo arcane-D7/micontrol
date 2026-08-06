@@ -109,11 +109,16 @@ export function useHardware() {
   const SLOW_POLL_INTERVAL = 15000;
 
   // Safe wrapper: catches per-invoke failures so one failing query doesn't
-  // abort the entire batch. Returns the fallback value on failure.
+  // abort the entire batch. Returns the fallback value on failure. If the
+  // query is essential (fallback is null → no data for that hardware), the
+  // error is surfaced so the user sees why a feature is unavailable.
   const safe = useCallback(
     <T>(p: Promise<T>, fallback: T, label: string): Promise<T> =>
       p.catch((e) => {
         console.warn(`[hardware] ${label} failed:`, e);
+        if (fallback === null) {
+          setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+        }
         return fallback;
       }),
     [],
@@ -128,7 +133,9 @@ export function useHardware() {
     if (fanResult) setFan(fanResult);
     if (systemResult) setSystemInfo(systemResult);
     if (audioResult) setAudioState(audioResult);
-    setError(null);
+    // Do NOT clear the error here. Polls run independently; a successful fast
+    // poll must not erase an error surfaced by another reading's failure.
+    // Errors are cleared by an all-success initial load or clearError().
   }, [safe]);
 
   const slowPoll = useCallback(async () => {
@@ -148,7 +155,8 @@ export function useHardware() {
     }
     if (perfMode) setPerformanceModeState(perfMode);
     setChargingThresholdState(chargeThreshold);
-    setError(null);
+    // Do NOT clear the error here (see fastPoll). Only the initial load with
+    // full success or clearError() clears the error state.
   }, [safe]);
 
   const initialLoadRef = useRef(false);
@@ -197,7 +205,11 @@ export function useHardware() {
           if (touchpadResult !== null) setTouchpad(touchpadResult);
           if (perfMode) setPerformanceModeState(perfMode);
           setChargingThresholdState(chargeThreshold);
-          setError(null);
+          // Only clear the error when all essential readings succeeded; a
+          // safe() miss for hardware data keeps the error visible.
+          if (fanResult && systemResult && batteryResult !== null && touchpadResult !== null) {
+            setError(null);
+          }
 
           // Load hardware profile, auto-discover if not cached
           try {
@@ -516,7 +528,9 @@ export function useHardware() {
         new Promise<void>((resolve) => setTimeout(resolve, 2000)),
       ]);
       setUpdateStatus(status);
-      setError(null);
+      // Do NOT clear a hardware error here — this auto-runs on mount and
+      // would erase a real hardware failure surfaced by the initial load.
+      // Errors are cleared by an all-success initial load or clearError().
     } catch (e) {
       // non-fatal — update panel shows fallback
       console.warn('get_update_status error:', e);
@@ -535,7 +549,7 @@ export function useHardware() {
     try {
       const profile = await invoke<HardwareProfile | null>('get_hardware_profile');
       setHardwareProfile(profile ?? null);
-      setError(null);
+      // Do NOT clear a hardware error here — see refreshUpdateStatus.
     } catch (e) {
       console.warn('get_hardware_profile error:', e);
       setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
