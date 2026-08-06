@@ -510,7 +510,7 @@ pub async fn apply_copilot_fix() {
     // This tells Windows Shell not to consume the Copilot key, allowing it
     // to pass through to our hooks.
     log::info!("[hotkeys] Applying Copilot key fix: disabling Windows Copilot interception...");
-    match crate::elev_bridge::run_elevated(
+    match crate::elev_bridge::run_elevated_no_prompt(
         "disable_copilot_key",
         serde_json::json!({ "enabled": true }),
     )
@@ -559,7 +559,7 @@ pub async fn apply_copilot_fix() {
         // Scancode Map entry format: [target_lo, target_hi, source_lo, source_hi]
         // Copilot key source: scan 0x6E, extended (0xE0)
         let mappings = serde_json::json!([[target_lo, target_hi, 0x6E, 0xE0]]);
-        match crate::elev_bridge::run_elevated(
+        match crate::elev_bridge::run_elevated_no_prompt(
             "set_scancode_map",
             serde_json::json!({ "mappings": mappings, "clear": false }),
         )

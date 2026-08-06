@@ -45,10 +45,10 @@ const FAN_REG_SPEED: &str = "FixedSpeed";
 // domain. The Power field is in deciwatts (×0.1 W); Temperature is Celsius.
 // One WMI query returns all participants, so we read temps and TDP together.
 
-struct EsifReadings {
-    cpu_temp: Option<f32>,
-    gpu_temp: Option<f32>,
-    tdp_watts: Option<f32>,
+pub struct EsifReadings {
+    pub cpu_temp: Option<f32>,
+    pub gpu_temp: Option<f32>,
+    pub tdp_watts: Option<f32>,
 }
 
 fn get_esif_readings() -> HardwareResult<EsifReadings> {
@@ -148,13 +148,125 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
     }
 }
 
+/// Read ESIF/ACPI thermal readings through the elevated bridge service.
+///
+/// The unprivileged MiControl process is DENIED access to the
+/// `EsifDeviceInformation` and `MSAcpi_ThermalZoneTemperature` WMI classes
+/// (HRESULT 0x80041003 "Access to a CIM resource was not available to the
+/// client"). The bridge service runs as `NT AUTHORITY\SYSTEM`, so it CAN
+/// read those classes. This is the fallback used when the direct (in-process)
+/// WMI query returns no usable data.
+pub async fn get_elevated_thermal_readings() -> EsifReadings {
+    let raw = match crate::elev_bridge::run_elevated_no_prompt(
+        "read_thermal_readings",
+        serde_json::json!({}),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!(target: "hw::fan", "Elevated thermal read unavailable: {e}");
+            return EsifReadings {
+                cpu_temp: None,
+                gpu_temp: None,
+                tdp_watts: None,
+            };
+        }
+    };
+
+    let mut cpu_temp: Option<f32> = None;
+    let mut gpu_temp: Option<f32> = None;
+    let mut tdp_watts: Option<f32> = None;
+
+    // ESIF participants: max Temperature = CPU hotspot; _10 = GPU domain.
+    if let Some(esif) = raw
+        .get("esif")
+        .and_then(|v| v.get("participants"))
+        .and_then(|a| a.as_array())
+    {
+        let max_temp = esif
+            .iter()
+            .filter_map(|p| p.get("temp_c").and_then(|t| t.as_u64()).map(|t| t as f32))
+            .fold(f32::NEG_INFINITY, f32::max);
+        if max_temp.is_finite() {
+            cpu_temp = Some(max_temp.clamp(0.0, 120.0));
+        }
+        gpu_temp = esif
+            .iter()
+            .find(|p| {
+                p.get("instance")
+                    .and_then(|i| i.as_str())
+                    .is_some_and(|s| s.ends_with("_10"))
+            })
+            .and_then(|p| p.get("temp_c").and_then(|t| t.as_u64()))
+            .map(|t| (t as f32).clamp(0.0, 120.0));
+        tdp_watts = esif
+            .iter()
+            .find(|p| {
+                p.get("instance")
+                    .and_then(|i| i.as_str())
+                    .is_some_and(|s| s.ends_with("_0"))
+            })
+            .and_then(|p| p.get("power_dw").and_then(|t| t.as_u64()))
+            .map(|dw| ((dw as f32) / 10.0).clamp(0.0, 150.0));
+    }
+
+    // ACPI thermal zone fallback (CPU-side).
+    if cpu_temp.is_none() {
+        if let Some(zones) = raw
+            .get("acpi")
+            .and_then(|v| v.get("zones"))
+            .and_then(|a| a.as_array())
+        {
+            if let Some(t) = zones.iter().find_map(|z| {
+                z.get("temp_c")
+                    .and_then(|t| t.as_f64())
+                    .filter(|t| *t > 0.0)
+            }) {
+                cpu_temp = Some((t as f32).clamp(0.0, 120.0));
+            }
+        }
+    }
+
+    EsifReadings {
+        cpu_temp,
+        gpu_temp,
+        tdp_watts,
+    }
+}
+
+/// Compute `FanInfo` using only the local (in-process) WMI reads.
+///
+/// Preferred entry point for synchronous contexts (e.g. the hardware-state
+/// batch job). For the interactive `get_fan_info` command, use
+/// [`get_fan_info_seeded`] with readings fetched via the elevated bridge,
+/// because the thermal WMI classes deny unprivileged callers.
 pub fn get_fan_info() -> HardwareResult<FanInfo> {
+    get_fan_info_seeded(EsifReadings {
+        cpu_temp: None,
+        gpu_temp: None,
+        tdp_watts: None,
+    })
+}
+
+/// Compute `FanInfo`, seeding the ESIF readings with values fetched from the
+/// elevated bridge when the direct (in-process) WMI query is denied.
+pub fn get_fan_info_seeded(elevated: EsifReadings) -> HardwareResult<FanInfo> {
     let speed_rpm = get_fan_rpm_wmi().unwrap_or(0);
     let esif = get_esif_readings().unwrap_or(EsifReadings {
         cpu_temp: None,
         gpu_temp: None,
         tdp_watts: None,
     });
+
+    // If the direct (unprivileged) WMI read returned nothing — which is
+    // expected on this platform because the thermal classes deny non-elevated
+    // callers — use the readings fetched via the elevated bridge (SYSTEM).
+    let esif = if esif.cpu_temp.is_none() && esif.gpu_temp.is_none() {
+        elevated
+    } else {
+        esif
+    };
 
     // ── Temperature fallback chain ──────────────────────────────────────────
     // 1. Intel ESIF/DPTF (WMI EsifDeviceInformation) — most accurate

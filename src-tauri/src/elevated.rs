@@ -1536,6 +1536,90 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
+        // Read thermal readings (ESIF + ACPI) as the elevated SYSTEM process.
+        // The unprivileged MiControl process is DENIED access to the
+        // `EsifDeviceInformation` and `MSAcpi_ThermalZoneTemperature` WMI
+        // classes (error 0x80041003 "Access to a CIM resource was not
+        // available to the client"). Running inside the bridge service (which
+        // executes as NT AUTHORITY\SYSTEM) grants access, so CPU/GPU
+        // temperature and TDP can be read via the pipe instead of failing.
+        "read_thermal_readings" => {
+            use std::collections::HashMap;
+            let mut result = serde_json::json!({});
+
+            // ESIF participants (CPU hotspot + GPU/secondary SoC _10).
+            let esif = crate::hw::wmi_cache::with_wmi(|wmi| {
+                let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+                    .raw_query("SELECT InstanceName, Temperature, Power FROM EsifDeviceInformation")
+                    .unwrap_or_default();
+                Ok(rows)
+            });
+            match esif {
+                Ok(rows) if !rows.is_empty() => {
+                    let participants: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "instance": crate::util::wmi_extract::extract_string(r, "InstanceName").unwrap_or_default(),
+                                "temp_c": crate::util::wmi_extract::extract_u32(r, "Temperature").unwrap_or(0),
+                                "power_dw": crate::util::wmi_extract::extract_u32(r, "Power").unwrap_or(0),
+                            })
+                        })
+                        .collect();
+                    result["esif"] = serde_json::json!({
+                        "ok": true,
+                        "participants": participants,
+                        "count": rows.len(),
+                    });
+                }
+                Ok(_) => {
+                    result["esif"] = serde_json::json!({ "ok": false, "error": "no participants" });
+                }
+                Err(e) => {
+                    result["esif"] = serde_json::json!({ "ok": false, "error": e.to_string() });
+                }
+            }
+
+            // ACPI thermal zones.
+            let acpi = crate::hw::wmi_cache::with_wmi(|wmi| {
+                let rows: Vec<HashMap<String, wmi::Variant>> = wmi
+                    .raw_query(
+                        "SELECT InstanceName, Active, CurrentTemperature, CriticalTripPoint \
+                         FROM MSAcpi_ThermalZoneTemperature",
+                    )
+                    .unwrap_or_default();
+                Ok(rows)
+            });
+            match acpi {
+                Ok(rows) if !rows.is_empty() => {
+                    let zones: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "instance": crate::util::wmi_extract::extract_string(r, "InstanceName").unwrap_or_default(),
+                                "active": crate::util::wmi_extract::extract_bool(r, "Active").unwrap_or(false),
+                                // tenths of Kelvin → Celsius
+                                "temp_c": crate::util::wmi_extract::extract_i32(r, "CurrentTemperature").map(|t| (t as f64 / 10.0) - 273.15).unwrap_or(0.0),
+                            })
+                        })
+                        .collect();
+                    result["acpi"] = serde_json::json!({
+                        "ok": true,
+                        "zones": zones,
+                        "count": rows.len(),
+                    });
+                }
+                Ok(_) => {
+                    result["acpi"] = serde_json::json!({ "ok": false, "error": "no zones" });
+                }
+                Err(e) => {
+                    result["acpi"] = serde_json::json!({ "ok": false, "error": e.to_string() });
+                }
+            }
+
+            make_ok(result)
+        }
+
         // S32-002: Install + start the autonomous MiControlBridge service.
         // Called once (usually at app startup) when the service pipe is not
         // available. Uses the bundled micontrol_bridge.exe `install` command.

@@ -1223,10 +1223,19 @@ mod pipe_server {
                 return None;
             }
 
+            // Leak the SECURITY_DESCRIPTOR (heap-allocation). It MUST outlive
+            // the SECURITY_ATTRIBUTES returned here: CreateNamedPipeW reads
+            // lpSecurityDescriptor asynchronously while cloning the object
+            // attributes. A stack-allocated SD would be destroyed when this
+            // function returns, leaving a dangling pointer → the pipe inherits
+            // a garbage DACL (SYSTEM-only in practice) and the unprivileged
+            // MiControl app gets ERROR_ACCESS_DENIED on GENERIC_WRITE.
+            let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
+
             Some(windows::Win32::Security::SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>()
                     as u32,
-                lpSecurityDescriptor: (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+                lpSecurityDescriptor: sd_leaked.cast(),
                 bInheritHandle: false.into(),
             })
         }

@@ -131,7 +131,29 @@ pub async fn set_ai_brightness_config(config: AiBrightnessConfig) -> Result<(), 
 
 #[tauri::command]
 pub async fn get_fan_info() -> Result<FanInfo, ErrorResponse> {
-    run_blocking(hw_get_fan).await.map_err(ErrorResponse::from)
+    // S36-038: The unprivileged process is DENIED access to the thermal WMI
+    // classes (EsifDeviceInformation / MSAcpi_ThermalZoneTemperature →
+    // 0x80041003 "Access to a CIM resource was not available to the client").
+    //
+    // First try the in-process read (fast, no round-trip). If CPU/GPU
+    // temperatures come back empty AND the elevated bridge is available,
+    // re-run with readings fetched from the bridge service (SYSTEM process,
+    // which CAN read those WMI classes).
+    let local = run_blocking(crate::hw::fan::get_fan_info)
+        .await
+        .map_err(ErrorResponse::from)?;
+
+    if local.cpu_temp_celsius.is_none() && local.gpu_temp_celsius.is_none() {
+        let elevated = crate::hw::fan::get_elevated_thermal_readings().await;
+        let has_thermal = elevated.cpu_temp.is_some() || elevated.gpu_temp.is_some();
+        if has_thermal {
+            return run_blocking(move || crate::hw::fan::get_fan_info_seeded(elevated))
+                .await
+                .map_err(ErrorResponse::from);
+        }
+    }
+
+    Ok(local)
 }
 
 #[tauri::command]
@@ -306,7 +328,11 @@ pub async fn get_hardware_profile() -> Option<HardwareProfile> {
 
 #[tauri::command]
 pub async fn run_hardware_discovery() -> Result<HardwareProfile, ErrorResponse> {
-    let raw = elev_bridge::run_elevated("run_hardware_discovery", serde_json::Value::Null).await?;
+    // No UAC: discovery runs at startup (auto-discovery when no cached
+    // profile exists) and must never pop a consent prompt.
+    let raw =
+        elev_bridge::run_elevated_no_prompt("run_hardware_discovery", serde_json::Value::Null)
+            .await?;
     serde_json::from_value(raw)
         .map_err(|e| ErrorResponse::from(anyhow::anyhow!("Unexpected profile result: {e}")))
 }

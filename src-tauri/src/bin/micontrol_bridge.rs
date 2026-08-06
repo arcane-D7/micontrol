@@ -335,6 +335,75 @@ mod pipe_server {
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
     use windows::Win32::System::IO::CancelIoEx;
 
+    /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
+    /// access to the named pipe.
+    ///
+    /// When the service runs as `NT AUTHORITY\SYSTEM`, pipes created without
+    /// explicit security inherit a DACL that only SYSTEM can access — the
+    /// unprivileged MiControl app would then fail to open
+    /// `\\.\pipe\micontrol_bridge` (ERROR_ACCESS_DENIED, error 5) and every
+    /// elevated command would fall back to the scheduled task / UAC prompt at
+    /// startup. Granting Everyone access is safe because the bridge protocol
+    /// is HMAC-SHA256-authenticated (shared key in `%ProgramData%\MiControl`
+    /// with a freshness window), so an arbitrary process cannot forge commands.
+    fn build_pipe_security_attributes() -> Option<windows::Win32::Security::SECURITY_ATTRIBUTES> {
+        use windows::Win32::Foundation::GENERIC_READ;
+        use windows::Win32::Foundation::GENERIC_WRITE;
+        use windows::Win32::Security::{
+            Authorization::{
+                BuildExplicitAccessWithNameW, SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS,
+            },
+            SetSecurityDescriptorDacl, ACE_FLAGS, ACL, SECURITY_DESCRIPTOR,
+        };
+
+        unsafe {
+            // Build explicit access granting GENERIC_READ|GENERIC_WRITE to Everyone.
+            let everyone_w: Vec<u16> = "Everyone".encode_utf16().chain(Some(0)).collect();
+            let mut ea = EXPLICIT_ACCESS_W::default();
+            // SAFETY: BuildExplicitAccessWithNameW copies the trustee name internally.
+            BuildExplicitAccessWithNameW(
+                &mut ea,
+                PCWSTR(everyone_w.as_ptr()),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                SET_ACCESS,
+                ACE_FLAGS(0), // NO_INHERITANCE
+            );
+
+            let entries = [ea];
+            let mut new_acl: *mut ACL = std::ptr::null_mut();
+            // SAFETY: SetEntriesInAclW allocates a new ACL (leaked intentionally —
+            // it lives for the lifetime of the pipe server process).
+            let _ = SetEntriesInAclW(Some(&entries), None, &mut new_acl);
+            if new_acl.is_null() {
+                return None;
+            }
+
+            let mut sd = SECURITY_DESCRIPTOR::default();
+            // SAFETY: SetSecurityDescriptorDacl initializes the DACL of sd.
+            let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
+                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+            );
+            if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
+                return None;
+            }
+
+            // Leak the SECURITY_DESCRIPTOR (heap-allocation). It MUST outlive
+            // the SECURITY_ATTRIBUTES returned here: CreateNamedPipeW reads
+            // lpSecurityDescriptor while cloning the object attributes. A
+            // stack-allocated SD would be destroyed when this function returns,
+            // leaving a dangling pointer → the pipe gets a garbage/SYSTEM-only
+            // DACL and the unprivileged app is denied access.
+            let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
+
+            Some(windows::Win32::Security::SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>()
+                    as u32,
+                lpSecurityDescriptor: sd_leaked.cast(),
+                bInheritHandle: false.into(),
+            })
+        }
+    }
+
     pub fn run(shutdown: Arc<AtomicBool>) {
         let pipe_name_w: Vec<u16> = OsStr::new(BRIDGE_PIPE_NAME)
             .encode_wide()
@@ -351,7 +420,9 @@ mod pipe_server {
                     PIPE_BUF_SIZE,
                     PIPE_BUF_SIZE,
                     0,
-                    None,
+                    build_pipe_security_attributes()
+                        .as_ref()
+                        .map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
                 )
             };
 

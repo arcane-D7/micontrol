@@ -254,11 +254,15 @@ pub async fn iot_pipe_available() -> Result<bool, ErrorResponse> {
 
 /// Ensure the ecram_service (IoT bridge) is installed and running.
 /// Called from the frontend when the IoT pipe is not available.
+///
+/// Uses the no-prompt elevated path: if the bridge pipe is down, the
+/// scheduled task (already elevated) handles this — never a UAC popup.
 #[tauri::command]
 pub async fn ensure_iot_service() -> Result<serde_json::Value, ErrorResponse> {
-    let result = elev_bridge::run_elevated("ensure_ecram_service", serde_json::Value::Null)
-        .await
-        .map_err(ErrorResponse::from)?;
+    let result =
+        elev_bridge::run_elevated_no_prompt("ensure_ecram_service", serde_json::Value::Null)
+            .await
+            .map_err(ErrorResponse::from)?;
     Ok(result)
 }
 

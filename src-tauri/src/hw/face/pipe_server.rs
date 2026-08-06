@@ -83,9 +83,15 @@ mod winpipe {
                 return None;
             }
 
+            // Leak the SECURITY_DESCRIPTOR so it outlives the returned
+            // SECURITY_ATTRIBUTES. A stack-allocated SD would be destroyed on
+            // return, leaving a dangling lpSecurityDescriptor that
+            // CreateNamedPipeW reads as a garbage DACL.
+            let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
+
             Some(SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
+                lpSecurityDescriptor: sd_leaked.cast(),
                 bInheritHandle: false.into(),
             })
         }

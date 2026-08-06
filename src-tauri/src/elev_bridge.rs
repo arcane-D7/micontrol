@@ -84,12 +84,18 @@ pub fn is_bridge_service_available() -> bool {
 /// dispatches `ensure_bridge_service` through the elevated path (scheduled
 /// task, which is already elevated — no UAC). Callers typically invoke this
 /// once at app startup and log the result.
+///
+/// IMPORTANT: This never shows a UAC prompt. If the scheduled task is also
+/// unavailable, it returns an error and the app simply falls back to the
+/// scheduled-task path for individual commands — a UAC popup at boot (the
+/// classic "do you want to install this driver?" experience) is exactly what
+/// the autonomous-bridge design is meant to prevent.
 pub async fn ensure_bridge_service() -> Result<Value, String> {
     if is_bridge_service_available() {
         return Ok(serde_json::json!({ "status": "already_running" }));
     }
     log::info!("MiControlBridge service not available — installing via elevated path");
-    run_elevated("ensure_bridge_service", serde_json::json!({})).await
+    run_elevated_no_prompt("ensure_bridge_service", serde_json::json!({})).await
 }
 static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
@@ -141,6 +147,27 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
 /// `cmd` must match one of the branches in `elevated::dispatch()`.
 /// `args` is the JSON arguments object (use `serde_json::json!({...})`).
 pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, String> {
+    run_elevated_impl(cmd, args, true).await
+}
+
+/// Dispatch a privileged command WITHOUT ever showing a UAC prompt.
+///
+/// Uses the same bridge-first / scheduled-task fallback chain as
+/// [`run_elevated`], but if no path succeeds it returns an error instead of
+/// popping the elevation consent dialog. Use this for non-critical reads
+/// (e.g. thermal/temperature polling at startup) where a UAC prompt at boot
+/// would be a terrible user experience — the worst case is a missing value.
+pub async fn run_elevated_no_prompt(cmd: &'static str, args: Value) -> Result<Value, String> {
+    run_elevated_impl(cmd, args, false).await
+}
+
+/// Shared implementation; `allow_uac` controls whether the function may
+/// escalate via a `ShellExecuteExW("runas")` UAC prompt as a last resort.
+async fn run_elevated_impl(
+    cmd: &'static str,
+    args: Value,
+    allow_uac: bool,
+) -> Result<Value, String> {
     // Serialise elevated calls. The scheduled-task path has no request-id argv,
     // so the elevated helper discovers the newest pending file. Running one at a
     // time prevents cross-request mixups.
@@ -228,35 +255,60 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
 
     if !task_ok {
         // Self-healing: try to re-register the scheduled task with the correct
-        // path before falling back to UAC. This fixes the case where the task
-        // was registered during `cargo tauri dev` and points to the debug exe.
+        // path. This fixes the case where the task was registered during
+        // `cargo tauri dev` and points to the debug exe.
         let healed = tokio::task::spawn_blocking(ensure_task_correct_path)
             .await
             .map_err(|e| format!("task heal task panicked: {e}"))?;
 
+        let no_uac = || async {
+            log::warn!(
+                "Scheduled task unavailable and UAC prompts are disabled for this \
+                 command — returning error instead"
+            );
+            let _ = tokio::fs::remove_file(&cmd_path).await;
+            Err(format!(
+                "Elevated command not executed: scheduled task '{}' is unavailable \
+                 and UAC fallback is disabled for this operation.",
+                TASK_NAME
+            ))
+        };
+
         match healed {
             TaskHealResult::AlreadyCorrect => {
                 // Task was fine — the original /run failure was transient.
-                // Retry once before falling back to UAC.
+                // Retry once before falling back.
                 let retry_ok = run_schtasks_run().await;
                 if !retry_ok {
-                    log::warn!(
-                        "Scheduled task still failing after AlreadyCorrect, falling back to UAC"
-                    );
-                    launch_uac_fallback(&request_id, &cmd_path).await?;
+                    if allow_uac {
+                        log::warn!(
+                            "Scheduled task still failing after AlreadyCorrect, falling back to UAC"
+                        );
+                        launch_uac_fallback(&request_id, &cmd_path).await?;
+                    } else {
+                        no_uac().await?;
+                    }
                 }
             }
             TaskHealResult::Healed => {
                 let retry_ok = run_schtasks_run().await;
                 if !retry_ok {
-                    log::warn!(
-                        "Scheduled task still failed after self-healing, falling back to UAC"
-                    );
-                    launch_uac_fallback(&request_id, &cmd_path).await?;
+                    if allow_uac {
+                        log::warn!(
+                            "Scheduled task still failed after self-healing, falling back to UAC"
+                        );
+                        launch_uac_fallback(&request_id, &cmd_path).await?;
+                    } else {
+                        no_uac().await?;
+                    }
                 }
             }
             TaskHealResult::Failed => {
-                launch_uac_fallback(&request_id, &cmd_path).await?;
+                if allow_uac {
+                    launch_uac_fallback(&request_id, &cmd_path).await?;
+                } else {
+                    no_uac().await?;
+                }
             }
         }
     }
@@ -304,10 +356,18 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
         if start.elapsed() > timeout {
             // The scheduled task ran but produced no result.  This usually means
             // the task is registered without the `--elevated` argument (so the
-            // full GUI launched instead of the helper).  Try the UAC fallback
-            // as a self-healing one-shot before giving up.
+            // full GUI launched instead of the helper).
             #[cfg(windows)]
             {
+                if !allow_uac {
+                    let _ = tokio::fs::remove_file(&cmd_path).await;
+                    return Err(format!(
+                        "Elevated command '{}' timed out after {} s and UAC fallback is \
+                         disabled for this operation.",
+                        cmd,
+                        timeout.as_secs()
+                    ));
+                }
                 // Re-write the command file in case the bad task process
                 // consumed or deleted it.
                 let _ = tokio::fs::write(&cmd_path, payload.to_string()).await;
