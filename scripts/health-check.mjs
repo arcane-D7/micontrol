@@ -68,8 +68,18 @@ function checkToolchain() {
     if (/node-version:\s*['"]?\d/.test(content)) {
       problems.push(`${f}: hardcoded node-version — use node-version-file: '.nvmrc' instead`);
     }
-    if (/rust-toolchain@(stable|master)/.test(content)) {
-      problems.push(`${f}: hardcoded rust-toolchain@stable — pin via src-tauri/rust-toolchain.toml instead`);
+    // dtolnay/rust-toolchain must pin an exact toolchain. `@stable` is a
+    // floating revision; `@master` is only acceptable when an explicit
+    // `toolchain:` input is provided (e.g. `toolchain: '1.95.0'`).
+    const actionRe = /uses:\s*dtolnay\/rust-toolchain@(stable|master)/g;
+    let m;
+    while ((m = actionRe.exec(content)) !== null) {
+      const tail = content.slice(m.index, m.index + 400);
+      if (m[1] === 'stable') {
+        problems.push(`${f}: rust-toolchain@stable is a floating revision — pin an exact toolchain via src-tauri/rust-toolchain.toml + toolchain: input`);
+      } else if (!/\btoolchain:\s*['"]?\d+\.\d+\.\d+/.test(tail) || /\btoolchain:\s*['"]?stable/.test(tail)) {
+        problems.push(`${f}: rust-toolchain@master must specify an exact toolchain: '1.95.0' input`);
+      }
     }
   }
 
