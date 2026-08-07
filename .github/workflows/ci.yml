@@ -159,4 +159,4 @@ jobs:
       # secrets). Here we only smoke-test compilation; --no-bundle keeps fork
       # PRs working since they cannot access repository secrets.
       - name: Tauri compile smoke test
-        run: pnpm run tauri build -- --no-bundle
+        run: pnpm run tauri build --no-bundle
