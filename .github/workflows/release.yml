@@ -20,74 +20,74 @@ jobs:
   health-check:
     name: Health checks
     runs-on: windows-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain
         with:
           components: clippy, rustfmt
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        shell: pwsh
+        run: |
+          $attempts = 3
+          $last = 1
+          for ($i = 1; $i -le $attempts; $i++) {
+            Write-Host "npm ci attempt $i/$attempts"
+            npm ci
+            $last = $LASTEXITCODE
+            if ($last -eq 0) { break }
+            if ($i -lt $attempts) { Start-Sleep -Seconds 15 }
+          }
+          exit $last
 
-      - name: Version consistency check
-        run: npm run version:check
-
-      - name: Rust formatting check
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-
-      - name: Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-
-      - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
-        env:
-          RUST_TEST_THREADS: '1'
-
-      - name: TypeScript type check
-        run: npx tsc --noEmit
-
-      - name: ESLint
-        run: npm run lint
-
-      - name: Prettier check
-        run: npm run format:check
-
-      - name: Frontend build
-        run: npm run build
-
-      - name: i18n completeness check
-        run: node scripts/check-i18n.mjs
+      # Identical to the local health check (single source of truth).
+      - name: Health check
+        shell: pwsh
+        run: node scripts/health-check.mjs
 
   build-and-publish:
     name: Build & publish
     runs-on: windows-latest
     needs: health-check
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        shell: pwsh
+        run: |
+          $attempts = 3
+          $last = 1
+          for ($i = 1; $i -le $attempts; $i++) {
+            Write-Host "npm ci attempt $i/$attempts"
+            npm ci
+            $last = $LASTEXITCODE
+            if ($last -eq 0) { break }
+            if ($i -lt $attempts) { Start-Sleep -Seconds 15 }
+          }
+          exit $last
 
       - name: Build Tauri app
         run: npm run tauri build
