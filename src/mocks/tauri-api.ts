@@ -615,3 +615,14 @@ export const PluginListener = class {};
 export const addPluginListener = async () => ({ unregister: async () => {} });
 export const checkPermissions = async () => ({});
 export const requestPermissions = async () => ({});
+// Minimal Resource base class — plugins (e.g. updater) subclass it and
+// consume the resource id via super(rid) + .rid.
+export class Resource {
+  rid: number;
+
+  constructor(rid: number) {
+    this.rid = rid;
+  }
+
+  async close(): Promise<void> {}
+}
