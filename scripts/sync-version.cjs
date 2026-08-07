@@ -98,7 +98,7 @@ function check() {
       const status = version === pkg.version ? '✓' : '✗';
       console.error(`  ${status} ${file}: ${version}`);
     }
-    console.error('\nRun `npm run version:sync` to fix.');
+    console.error('\nRun `pnpm run version:sync` to fix.');
     process.exit(1);
   }
 }

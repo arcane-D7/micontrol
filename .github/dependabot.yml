@@ -11,7 +11,7 @@ updates: []
 # ── Previous configuration (disabled) ─────────────────────────────────────
 #
 # updates:
-#   # npm dependencies
+#   # pnpm dependencies
 #   - package-ecosystem: "npm"
 #     directory: "/"
 #     schedule:

@@ -97,7 +97,7 @@ BREAKING CHANGE: Settings schema changed, old configs need migration.
 ### `release.yml`
 
 - **Trigger**: Tag push `v*.*.*`
-- **Job 1 — Health Checks**: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`, `tsc --noEmit`, `eslint`, `prettier --check`, `npm run build`, i18n check
+- **Job 1 — Health Checks**: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`, `tsc --noEmit`, `eslint`, `prettier --check`, `pnpm run build`, i18n check
 - **Job 2 — Build & Publish**: Builds Tauri app with signing, generates `latest.json`, creates GitHub Release with installer artifacts
 - **Job 2 depends on Job 1**: Release only proceeds if all health checks pass
 
@@ -166,16 +166,16 @@ If the automated pipeline is broken, you can manually trigger a release:
 
 ```bash
 # Bump patch version: 1.0.0 → 1.0.1
-npm run release patch
+pnpm run release patch
 
 # Bump minor version: 1.0.0 → 1.1.0
-npm run release minor
+pnpm run release minor
 
 # Bump major version: 1.0.0 → 2.0.0
-npm run release major
+pnpm run release major
 
 # Or specify an explicit version
-npm run release 1.2.3
+pnpm run release 1.2.3
 ```
 
 This bumps version, syncs configs, commits, tags, and pushes — triggering `release.yml`.
@@ -238,7 +238,7 @@ git push origin main
 
 ## Troubleshooting
 
-- **Build fails**: Check that all versions are synced (`npm run version:check`)
+- **Build fails**: Check that all versions are synced (`pnpm run version:check`)
 - **Signing fails**: Verify the `TAURI_SIGNING_PRIVATE_KEY` secret is set correctly
 - **Release not created**: Ensure the workflow has `permissions: contents: write`
 
@@ -251,7 +251,7 @@ MiControl includes a custom `IoTService.exe` replacement binary (`src-tauri/src/
 The binary is built as part of the normal Tauri release build:
 
 ```bash
-npm run tauri build
+pnpm run tauri build
 ```
 
 The resulting binary is at `src-tauri/target/release/ecram_service.exe`.

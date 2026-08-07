@@ -32,11 +32,16 @@ jobs:
           toolchain: '1.95.0'
           components: clippy, rustfmt
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
+          cache: 'pnpm'
 
       - name: Install dependencies
         shell: pwsh
@@ -44,8 +49,8 @@ jobs:
           $attempts = 3
           $last = 1
           for ($i = 1; $i -le $attempts; $i++) {
-            Write-Host "npm ci attempt $i/$attempts"
-            npm ci
+            Write-Host "pnpm install attempt $i/$attempts"
+            pnpm install --frozen-lockfile
             $last = $LASTEXITCODE
             if ($last -eq 0) { break }
             if ($i -lt $attempts) { Start-Sleep -Seconds 15 }
@@ -73,11 +78,16 @@ jobs:
           toolchain: '1.95.0'
           components: clippy, rustfmt
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
-          cache: 'npm'
+          cache: 'pnpm'
 
       - name: Install dependencies
         shell: pwsh
@@ -85,8 +95,8 @@ jobs:
           $attempts = 3
           $last = 1
           for ($i = 1; $i -le $attempts; $i++) {
-            Write-Host "npm ci attempt $i/$attempts"
-            npm ci
+            Write-Host "pnpm install attempt $i/$attempts"
+            pnpm install --frozen-lockfile
             $last = $LASTEXITCODE
             if ($last -eq 0) { break }
             if ($i -lt $attempts) { Start-Sleep -Seconds 15 }
@@ -94,7 +104,7 @@ jobs:
           exit $last
 
       - name: Build Tauri app
-        run: npm run tauri build
+        run: pnpm run tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

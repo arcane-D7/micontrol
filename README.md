@@ -46,14 +46,14 @@ Grab the latest NSIS installer from the [Releases page](https://github.com/arcan
 git clone https://github.com/arcane-D7/micontrol.git
 cd miPC
 
-# Install frontend dependencies
-npm install
+# Install frontend dependencies (pnpm)
+pnpm install
 
 # Run in development mode
-npm run tauri dev
+pnpm run tauri dev
 
 # Build for production
-npm run tauri build
+pnpm run tauri build
 ```
 
 #### Running Checks
@@ -66,11 +66,11 @@ cargo test --manifest-path src-tauri/Cargo.toml
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
 # Frontend
-npm ci
+pnpm install --frozen-lockfile
 npx tsc --noEmit
-npm run lint
-npm run format:check
-npm run build
+pnpm run lint
+pnpm run format:check
+pnpm run build
 ```
 
 ---
@@ -174,7 +174,7 @@ This project follows a [Code of Conduct](CODE_OF_CONDUCT.md) — be respectful, 
 **Full Tauri build:**
 
 ```bash
-npm run tauri build
+pnpm run tauri build
 ```
 
 These checks run automatically in CI on every pull request.
@@ -186,7 +186,7 @@ This project uses [husky](https://typicode.github.io/husky/) and [lint-staged](h
 When you first clone the repository, run:
 
 ```bash
-npm install
+pnpm install
 ```
 
 This will automatically install the husky pre-commit hook. On every commit, lint-staged will:

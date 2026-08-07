@@ -2,7 +2,7 @@
 /**
  * Health check — single source of truth for local dev and CI.
  *
- * Local:   npm run health-check
+ * Local:   pnpm run health-check
  * CI:      ci.yml / release.yml invoke this exact script, so the pipeline
  *          can never drift from what you run locally.
  *
@@ -20,15 +20,15 @@ import process from 'node:process';
 const ROOT = path.resolve(import.meta.dirname, '..');
 
 const STEPS = [
-  { id: 'version', name: 'Version consistency check', cmd: 'npm', args: ['run', 'version:check'] },
+  { id: 'version', name: 'Version consistency check', cmd: 'pnpm', args: ['run', 'version:check'] },
   { id: 'fmt', name: 'Rust formatting check', cmd: 'cargo', args: ['fmt', '--check'], cwd: 'src-tauri' },
   { id: 'clippy', name: 'Rust clippy (warnings denied)', cmd: 'cargo', args: ['clippy', '--', '-D', 'warnings'], cwd: 'src-tauri' },
   { id: 'test-rust', name: 'Rust tests', cmd: 'cargo', args: ['test', '--', '--test-threads=1'], cwd: 'src-tauri', env: { RUST_TEST_THREADS: '1' } },
   { id: 'tsc', name: 'TypeScript type check', cmd: 'npx', args: ['tsc', '--noEmit'] },
-  { id: 'lint', name: 'ESLint', cmd: 'npm', args: ['run', 'lint'] },
-  { id: 'format', name: 'Prettier check', cmd: 'npm', args: ['run', 'format:check'] },
+  { id: 'lint', name: 'ESLint', cmd: 'pnpm', args: ['run', 'lint'] },
+  { id: 'format', name: 'Prettier check', cmd: 'pnpm', args: ['run', 'format:check'] },
   { id: 'test-front', name: 'Frontend tests + coverage', cmd: 'npx', args: ['vitest', 'run', '--coverage'] },
-  { id: 'build', name: 'Frontend build', cmd: 'npm', args: ['run', 'build'] },
+  { id: 'build', name: 'Frontend build', cmd: 'pnpm', args: ['run', 'build'] },
   { id: 'i18n', name: 'i18n completeness check', cmd: 'node', args: ['scripts/check-i18n.mjs'] },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];

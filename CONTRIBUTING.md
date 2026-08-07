@@ -6,7 +6,7 @@ Thank you for your interest in contributing to miPC! This document outlines the 
 
 ### Prerequisites
 
-- **Node.js** 20+ and npm
+- **Node.js** 24+ (see `.nvmrc`) and **pnpm** (via Corepack)
 - **Rust** stable toolchain (install via [rustup](https://rustup.rs/))
 - **Windows 10/11** (this is a Windows-only application)
 - **Visual Studio Build Tools** with C++ workload
@@ -24,12 +24,12 @@ Thank you for your interest in contributing to miPC! This document outlines the 
 2. Install frontend dependencies:
 
    ```bash
-   npm install
+   pnpm install
    ```
 
 3. Run the development server:
    ```bash
-   npm run tauri dev
+   pnpm run tauri dev
    ```
 
 ### Project Structure
@@ -70,8 +70,8 @@ micontrol/
    cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
    cargo test --manifest-path src-tauri/Cargo.toml
    npx tsc --noEmit
-   npm run lint
-   npm run build
+   pnpm run lint
+   pnpm run build
    ```
 4. Commit with a conventional commit message
 5. Push and create a pull request
@@ -98,7 +98,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 
 #### TypeScript/React
 
-- Run `npm run lint` before committing
+- Run `pnpm run lint` before committing
 - Use functional components with hooks
 - Add TypeScript types for all props
 - Use the i18n system for all user-facing strings
@@ -118,7 +118,7 @@ The custom `ecram_service.rs` binary (`src-tauri/src/bin/ecram_service.rs`) is a
 ### Testing
 
 - Rust tests: `cargo test --manifest-path src-tauri/Cargo.toml`
-- Frontend tests: `npm test`
+- Frontend tests: `pnpm test`
 - Integration tests: `cargo test --manifest-path src-tauri/Cargo.toml --test '*'`
 
 ### Pull Request Process

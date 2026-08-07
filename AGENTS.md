@@ -44,17 +44,17 @@ This is a **Tauri v2 + React/TypeScript desktop application** with Rust backend 
 Use commands defined in `package.json` and Tauri CLI. Common commands:
 
 ```bash
-# Install frontend deps
-npm install
+# Install frontend deps (pnpm)
+pnpm install
 
 # Dev (Vite + Tauri)
-npm run tauri dev
+pnpm run tauri dev
 
 # Build desktop app
-npm run tauri build
+pnpm run tauri build
 
 # Frontend only
-npm run dev
+pnpm run dev
 ```
 
 For Rust side, standard Cargo commands apply in `src-tauri/`:
@@ -74,7 +74,7 @@ cargo build --manifest-path src-tauri/Cargo.toml --release --bin ecram_service
 
 Before finishing executable code changes:
 
-- If frontend changed: run `npm run build` (Vite build must pass).
+- If frontend changed: run `pnpm run build` (Vite build must pass).
 - If Rust changed: run `cargo check --manifest-path src-tauri/Cargo.toml`.
 - Tauri dev must start without runtime errors.
 
