@@ -5,7 +5,7 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.17] - 2026-08-08
 
 ### Fixed
 
@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Circuit breaker for elevated thermal reads** — `get_elevated_thermal_readings()` backs off 60s after 3 consecutive failures instead of spawning a crashing helper on every 2s/15s poll cycle.
   - Added `micontrol_bridge self-test` CLI mode to validate the pipe DACL without admin (create throwaway pipe, connect as unprivileged user, round-trip).
 
-> **Note:** the fix ships in the next release; the currently installed v0.1.16 app must be updated (or the MiControlBridge service reloaded from the new `micontrol_bridge.exe`) for the fix to take effect.
+> **Note:** this release fixes the crash loop described above; the previously installed v0.1.16 app must be updated for the fix to take effect (the installer reloads the `MiControlBridge` service from the new `micontrol_bridge.exe`).
 
 ## [0.1.16] - 2026-08-08
 

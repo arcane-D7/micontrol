@@ -120,16 +120,25 @@ jobs:
           $installerUrl = "https://github.com/arcane-D7/micontrol/releases/latest/download/$installerName"
           node scripts/generate-latest-json.mjs "$version" "$sigPath" "$installerUrl" "src-tauri/target/release/bundle/nsis/latest.json"
 
+      - name: Prepare release body from CHANGELOG
+        shell: pwsh
+        run: |
+          $tagName = "${{ github.ref_name }}"
+          $version = $tagName -replace '^v', ''
+          node scripts/extract-changelog.mjs "$version" "$env:RUNNER_TEMP/release-body.md"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          body_path: ${{ runner.temp }}/release-body.md
           files: |
             src-tauri/target/release/bundle/**/*.msi
             src-tauri/target/release/bundle/**/*.exe
             src-tauri/target/release/bundle/**/*.zip
             src-tauri/target/release/bundle/**/*.sig
             src-tauri/target/release/bundle/nsis/latest.json
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
