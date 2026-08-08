@@ -156,7 +156,45 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
 /// client"). The bridge service runs as `NT AUTHORITY\SYSTEM`, so it CAN
 /// read those classes. This is the fallback used when the direct (in-process)
 /// WMI query returns no usable data.
+///
+/// # Failure backoff (circuit breaker)
+/// An elevated round-trip is comparatively expensive (service pipe or a
+/// scheduled-task launch). When it fails repeatedly — e.g. the bridge service
+/// is not installed or its pipe denies access — retrying on every 2s/15s poll
+/// wasted resources and, in the worst case, spawned a crashing helper every
+/// cycle. We therefore back off after consecutive failures: 3 failures in a
+/// row open the circuit and skip elevated attempts for `BACKOFF_SECS` (60s).
 pub async fn get_elevated_thermal_readings() -> EsifReadings {
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+    use std::sync::OnceLock;
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+    static CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
+    static BACKOFF_UNTIL: OnceLock<std::sync::Mutex<Option<StdInstant>>> = OnceLock::new();
+
+    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+    const BACKOFF_SECS: u64 = 60;
+
+    // Circuit open? Skip the elevated round-trip entirely.
+    let backoff_until = BACKOFF_UNTIL.get_or_init(|| std::sync::Mutex::new(None));
+    if let Some(until) = *backoff_until.lock().unwrap_or_else(|p| p.into_inner()) {
+        if until > StdInstant::now() {
+            log::debug!(
+                target: "hw::fan",
+                "Elevated thermal read in backoff — skipping (resumes in {:?})",
+                until.saturating_duration_since(StdInstant::now())
+            );
+            return EsifReadings {
+                cpu_temp: None,
+                gpu_temp: None,
+                tdp_watts: None,
+            };
+        }
+        // Backoff expired — reset state and try again.
+        *backoff_until.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        CONSECUTIVE_FAILURES.store(0, AtomicOrdering::Relaxed);
+    }
+
     let raw = match crate::elev_bridge::run_elevated_no_prompt(
         "read_thermal_readings",
         serde_json::json!({}),
@@ -165,7 +203,22 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
     {
         Ok(v) => v,
         Err(e) => {
-            log::debug!(target: "hw::fan", "Elevated thermal read unavailable: {e}");
+            // Failure path — count towards the circuit breaker.
+            let failures = CONSECUTIVE_FAILURES.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            if failures >= MAX_CONSECUTIVE_FAILURES {
+                log::warn!(
+                    target: "hw::fan",
+                    "Elevated thermal read failed {failures} consecutive times — \
+                     opening circuit for {BACKOFF_SECS}s"
+                );
+                *backoff_until.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(StdInstant::now() + StdDuration::from_secs(BACKOFF_SECS));
+            } else {
+                log::debug!(
+                    target: "hw::fan",
+                    "Elevated thermal read unavailable ({failures}/{MAX_CONSECUTIVE_FAILURES}): {e}"
+                );
+            }
             return EsifReadings {
                 cpu_temp: None,
                 gpu_temp: None,
@@ -174,6 +227,8 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
         }
     };
 
+    // Success — reset the failure counter.
+    CONSECUTIVE_FAILURES.store(0, AtomicOrdering::Relaxed);
     let mut cpu_temp: Option<f32> = None;
     let mut gpu_temp: Option<f32> = None;
     let mut tdp_watts: Option<f32> = None;

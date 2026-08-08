@@ -468,11 +468,23 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
         .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
     auth::sign_payload(&mut payload, &key);
 
-    // Open the pipe (blocking — do it on a blocking thread).
+    // Open the pipe (blocking — do it on a blocking thread). Bound the whole
+    // round-trip with a timeout so a wedged bridge service can never hold the
+    // serialized ELEV_REQUEST_LOCK forever (a hung pipe previously stalled
+    // every subsequent elevated command and froze the UI).
     let body = payload.to_string();
-    let result: Result<String, String> = tokio::task::spawn_blocking(move || pipe_request(&body))
-        .await
-        .map_err(|e| format!("pipe request task panicked: {e}"))?;
+    let result = tokio::time::timeout(
+        Duration::from_secs(ELEV_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || pipe_request(&body)),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
+             (service did not respond)"
+        )
+    })?
+    .map_err(|e| format!("pipe request task panicked: {e}"))?;
 
     let content = result?;
 
@@ -508,17 +520,27 @@ async fn run_via_service_pipe(_cmd: &str, _args: Value) -> Result<Value, String>
 }
 
 /// Perform a synchronous request/response round-trip on the bridge named pipe.
+///
+/// Uses OVERLAPPED I/O with a bounded wait so a wedged bridge service can
+/// never block the calling thread indefinitely (a previous synchronous
+/// `ReadFile` could hang forever and stall the whole elevated-command chain).
 #[cfg(windows)]
 fn pipe_request(body: &str) -> Result<String, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING,
+        CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult};
+
+    const PIPE_OP_TIMEOUT_MS: u32 = 8_000; // per read/write wait
+    const MAX_RESPONSE_BYTES: usize = 16_384;
 
     let path_w: Vec<u16> = std::ffi::OsStr::new(BRIDGE_PIPE_NAME)
         .encode_wide()
@@ -532,7 +554,7 @@ fn pipe_request(body: &str) -> Result<String, String> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
             HANDLE::default(),
         )
         .map_err(|e| format!("Open bridge pipe: {e}"))?
@@ -542,32 +564,102 @@ fn pipe_request(body: &str) -> Result<String, String> {
         return Err("INVALID_HANDLE_VALUE opening bridge pipe".to_string());
     }
 
-    // Write the request.
-    let req_bytes = body.as_bytes();
-    let mut written = 0u32;
-    unsafe {
-        WriteFile(handle, Some(req_bytes), Some(&mut written), None)
-            .map_err(|e| format!("WriteFile bridge pipe: {e}"))?;
-    }
+    // Event used for both the write and read overlapped waits.
+    let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+        .map_err(|e| format!("CreateEventW bridge pipe: {e}"))?;
 
-    // Read the response (loop until full JSON object).
-    let mut response_buf = [0u8; 16384];
+    let mut write_result: Result<(), windows::core::Error> = Ok(());
+    let mut written = 0u32;
+
+    // Write the request via overlapped I/O with a bounded wait.
+    let req_bytes = body.as_bytes();
+    let mut write_ov: windows::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    write_ov.hEvent = event;
+    let mut write_pending = false;
+    unsafe {
+        // SAFETY: handle/event valid, req_bytes valid for the operation duration.
+        let op = WriteFile(
+            handle,
+            Some(req_bytes),
+            Some(&mut written),
+            Some(&mut write_ov),
+        );
+        if op.is_err() {
+            let last_err = std::io::Error::last_os_error();
+            let code = last_err.raw_os_error().unwrap_or(0);
+            if code == 997
+            /* ERROR_IO_PENDING */
+            {
+                write_pending = true;
+            } else {
+                write_result = Err(windows::core::Error::from_win32());
+            }
+        }
+        if write_pending {
+            // Wait for completion with timeout, then collect the result.
+            let wait = WaitForSingleObject(event, PIPE_OP_TIMEOUT_MS);
+            if wait == WAIT_TIMEOUT {
+                let _ = CancelIoEx(handle, Some(&write_ov));
+                write_result = Err(windows::core::Error::from_win32());
+            } else if wait != WAIT_OBJECT_0 {
+                write_result = Err(windows::core::Error::from_win32());
+            } else {
+                let mut transferred = 0u32;
+                if GetOverlappedResult(handle, &write_ov, &mut transferred, false).is_err() {
+                    write_result = Err(windows::core::Error::from_win32());
+                }
+                // transferred bytes are not needed — a successful write of the
+                // full request body is implied by GetOverlappedResult OK.
+            }
+        }
+    }
+    write_result.map_err(|e| format!("WriteFile bridge pipe: {e}"))?;
+
+    // Read the response via overlapped I/O with per-read bounded waits until
+    // the full JSON object is received (ends with '}').
+    let mut response_buf = [0u8; MAX_RESPONSE_BYTES];
     let mut total_read = 0usize;
     loop {
         if total_read >= response_buf.len() {
-            break;
+            break; // Cap the response size; bridge responses are bounded.
         }
         let mut bytes_read = 0u32;
-        let result = unsafe {
-            ReadFile(
+        let mut read_ov: windows::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+        read_ov.hEvent = event;
+        unsafe {
+            // SAFETY: buffers valid, handle valid.
+            let op = ReadFile(
                 handle,
                 Some(&mut response_buf[total_read..]),
                 Some(&mut bytes_read),
-                None,
-            )
-        };
-        if result.is_err() || bytes_read == 0 {
-            break;
+                Some(&mut read_ov),
+            );
+            if op.is_err() {
+                let last_err = std::io::Error::last_os_error();
+                let code = last_err.raw_os_error().unwrap_or(0);
+                if code != 997
+                /* ERROR_IO_PENDING */
+                {
+                    break; // EOF or real error — stop reading.
+                }
+                // Pending: wait with timeout, then collect the result.
+                let wait = WaitForSingleObject(event, PIPE_OP_TIMEOUT_MS);
+                if wait == WAIT_TIMEOUT {
+                    let _ = CancelIoEx(handle, Some(&read_ov));
+                    break;
+                }
+                if wait != WAIT_OBJECT_0 {
+                    break;
+                }
+                let mut transferred = 0u32;
+                if GetOverlappedResult(handle, &read_ov, &mut transferred, false).is_err() {
+                    break;
+                }
+                bytes_read = transferred;
+            }
+        }
+        if bytes_read == 0 {
+            break; // EOF.
         }
         total_read += bytes_read as usize;
         if total_read > 0 && response_buf[total_read - 1] == b'}' {
@@ -576,11 +668,12 @@ fn pipe_request(body: &str) -> Result<String, String> {
     }
 
     unsafe {
+        CloseHandle(event).ok();
         CloseHandle(handle).ok();
     }
 
     if total_read == 0 {
-        return Err("No response from bridge service".to_string());
+        return Err("No response from bridge service (timed out or empty)".to_string());
     }
     Ok(String::from_utf8_lossy(&response_buf[..total_read]).to_string())
 }

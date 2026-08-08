@@ -78,9 +78,17 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        "self-test" => {
+            // Validation mode (no admin required): create a test pipe with the
+            // exact DACL used by the server, then connect as the current user.
+            // Proves the Everyone RW DACL works end-to-end WITHOUT reinstalling
+            // the service (which needs elevation).
+            let code = pipe_server::self_test();
+            std::process::exit(code);
+        }
         other => {
             eprintln!("[micontrol_bridge] Unknown mode: {other}");
-            eprintln!("Usage: micontrol_bridge <service|console|install|uninstall>");
+            eprintln!("Usage: micontrol_bridge <service|console|install|uninstall|self-test>");
             std::process::exit(1);
         }
     }
@@ -344,37 +352,70 @@ mod pipe_server {
     /// `\\.\pipe\micontrol_bridge` (ERROR_ACCESS_DENIED, error 5) and every
     /// elevated command would fall back to the scheduled task / UAC prompt at
     /// startup. Granting Everyone access is safe because the bridge protocol
-    /// is HMAC-SHA256-authenticated (shared key in `%ProgramData%\MiControl`
+    /// is HMAC-SHA256-authenticated (shared key in `%LocalAppData%\MiControl`
     /// with a freshness window), so an arbitrary process cannot forge commands.
+    ///
+    /// IMPORTANT: the DACL must be built from the canonical *Everyone* SID
+    /// (S-1-1-0) rather than by name. `BuildExplicitAccessWithNameW` resolves
+    /// the trustee through the SAM/LSA account-name lookup, which can return
+    /// `ERROR_TRUSTED_RELATIONSHIP_FAILURE` or fail to translate on
+    /// non-English Windows or restricted systems; every failure path here
+    /// previously returned `None` silently, leaving the pipe SYSTEM-only and
+    /// denying the unprivileged app (exactly the v0.1.16 "pipe exists but
+    /// ACCESS_DENIED" failure). Constructing the SD from the well-known SID
+    /// avoids the name lookup entirely and is deterministic.
     fn build_pipe_security_attributes() -> Option<windows::Win32::Security::SECURITY_ATTRIBUTES> {
         use windows::Win32::Foundation::GENERIC_READ;
         use windows::Win32::Foundation::GENERIC_WRITE;
+        use windows::Win32::Security::Authorization::{
+            SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS, TRUSTEE_IS_SID,
+            TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+        };
         use windows::Win32::Security::{
-            Authorization::{
-                BuildExplicitAccessWithNameW, SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS,
-            },
-            SetSecurityDescriptorDacl, ACE_FLAGS, ACL, SECURITY_DESCRIPTOR,
+            CreateWellKnownSid, SetSecurityDescriptorDacl, WinWorldSid, ACE_FLAGS, ACL,
+            SECURITY_DESCRIPTOR,
         };
 
         unsafe {
-            // Build explicit access granting GENERIC_READ|GENERIC_WRITE to Everyone.
-            let everyone_w: Vec<u16> = "Everyone".encode_utf16().chain(Some(0)).collect();
-            let mut ea = EXPLICIT_ACCESS_W::default();
-            // SAFETY: BuildExplicitAccessWithNameW copies the trustee name internally.
-            BuildExplicitAccessWithNameW(
-                &mut ea,
-                PCWSTR(everyone_w.as_ptr()),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                SET_ACCESS,
-                ACE_FLAGS(0), // NO_INHERITANCE
+            // Canonical *Everyone* SID (S-1-1-0) — language-independent, no
+            // account-name lookup. We allocate a fixed SID buffer (large
+            // enough for any well-known SID) and let CreateWellKnownSid fill it.
+            let mut sid_buf = [0u8; 68]; // SID max size (SID + 15 sub-authorities)
+            let mut sid_len = sid_buf.len() as u32;
+            let _ = CreateWellKnownSid(
+                WinWorldSid,
+                None,
+                windows::Win32::Security::PSID(sid_buf.as_mut_ptr().cast::<std::ffi::c_void>()),
+                &mut sid_len,
             );
+            let sid_ptr = sid_buf.as_mut_ptr() as *mut std::ffi::c_void as *mut std::ffi::c_void;
+
+            // Build an EXPLICIT_ACCESS granting GENERIC_READ|GENERIC_WRITE to the SID.
+            let mut ea = EXPLICIT_ACCESS_W::default();
+            ea.grfAccessPermissions = (GENERIC_READ.0 | GENERIC_WRITE.0) as u32;
+            ea.grfAccessMode = SET_ACCESS;
+            ea.grfInheritance = ACE_FLAGS(0); // NO_INHERITANCE
+            ea.Trustee = TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                // IMPORTANT: for TRUSTEE_IS_SID the TrusteeForm makes
+                // ptstrName point at the SID bytes cast to u16*.
+                MultipleTrusteeOperation:
+                    windows::Win32::Security::Authorization::MULTIPLE_TRUSTEE_OPERATION::default(),
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+                ptstrName: windows_core::PWSTR(sid_ptr.cast::<u16>()),
+            };
 
             let entries = [ea];
             let mut new_acl: *mut ACL = std::ptr::null_mut();
             // SAFETY: SetEntriesInAclW allocates a new ACL (leaked intentionally —
             // it lives for the lifetime of the pipe server process).
-            let _ = SetEntriesInAclW(Some(&entries), None, &mut new_acl);
-            if new_acl.is_null() {
+            let hr = SetEntriesInAclW(Some(&entries), None, &mut new_acl);
+            if hr.is_err() || new_acl.is_null() {
+                let last_err = std::io::Error::last_os_error();
+                log::error!(
+                    "[micontrol_bridge] SetEntriesInAclW failed: {last_err} — pipe will be SYSTEM-only"
+                );
                 return None;
             }
 
@@ -384,15 +425,19 @@ mod pipe_server {
                 (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
             );
             if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
+                log::error!(
+                    "[micontrol_bridge] SetSecurityDescriptorDacl failed — pipe will be SYSTEM-only"
+                );
                 return None;
             }
 
             // Leak the SECURITY_DESCRIPTOR (heap-allocation). It MUST outlive
             // the SECURITY_ATTRIBUTES returned here: CreateNamedPipeW reads
-            // lpSecurityDescriptor while cloning the object attributes. A
-            // stack-allocated SD would be destroyed when this function returns,
-            // leaving a dangling pointer → the pipe gets a garbage/SYSTEM-only
-            // DACL and the unprivileged app is denied access.
+            // lpSecurityDescriptor asynchronously while cloning the object
+            // attributes. A stack-allocated SD would be destroyed when this
+            // function returns, leaving a dangling pointer → the pipe inherits
+            // a garbage DACL (SYSTEM-only in practice) and the unprivileged
+            // MiControl app gets ERROR_ACCESS_DENIED on GENERIC_WRITE.
             let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
 
             Some(windows::Win32::Security::SECURITY_ATTRIBUTES {
@@ -571,6 +616,131 @@ mod pipe_server {
                 .as_str()
                 .unwrap_or("Bridge dispatch failed")
                 .to_string())
+        }
+    }
+
+    /// Validate the Everyone-RW DACL WITHOUT admin: create a throwaway pipe
+    /// using the exact same security attributes as the real server, connect as
+    /// the current (unprivileged) user, and do a tiny read/write round-trip.
+    /// Exit code 0 = DACL works; 1 = DACL broken (ACCESS_DENIED would hit the
+    /// real app, exactly the v0.1.16 bug).
+    pub fn self_test() -> i32 {
+        use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, ReadFile, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows::Win32::System::Pipes::DisconnectNamedPipe;
+        use windows::Win32::System::Threading::CreateEventW;
+
+        const TEST_PIPE: &str = r"\\.\pipe\micontrol_bridge_selftest";
+        let pipe_name_w: Vec<u16> = OsStr::new(TEST_PIPE).encode_wide().chain(Some(0)).collect();
+
+        // Spawn a minimal server in this process (same DACL path).
+        let server_handle = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(pipe_name_w.as_ptr()),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                PIPE_BUF_SIZE,
+                PIPE_BUF_SIZE,
+                0,
+                build_pipe_security_attributes()
+                    .as_ref()
+                    .map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
+            )
+        };
+        if server_handle == INVALID_HANDLE_VALUE {
+            eprintln!(
+                "[self-test] CreateNamedPipeW failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return 1;
+        }
+
+        // Connect the server side.
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) };
+        let Ok(event) = event else {
+            eprintln!("[self-test] CreateEventW failed");
+            unsafe {
+                CloseHandle(server_handle).ok();
+            }
+            return 1;
+        };
+        let mut overlapped = unsafe {
+            windows::Win32::System::IO::OVERLAPPED {
+                hEvent: event,
+                ..std::mem::zeroed()
+            }
+        };
+        let _ = unsafe { ConnectNamedPipe(server_handle, Some(&mut overlapped)) };
+
+        // Now connect as the current (unprivileged) user → the whole point.
+        let client_handle = unsafe {
+            CreateFileW(
+                PCWSTR(pipe_name_w.as_ptr()),
+                (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        };
+        if client_handle.is_err() {
+            eprintln!(
+                "[self-test] FAIL: client CreateFileW -> ACCESS_DENIED ({}) — DACL is SYSTEM-only; \
+                 the real app would hit the same wall (v0.1.16 bug).",
+                std::io::Error::last_os_error()
+            );
+            unsafe {
+                CloseHandle(server_handle).ok();
+                CloseHandle(event).ok();
+            }
+            return 1;
+        }
+        let client_handle = client_handle.unwrap();
+
+        // Round-trip: client writes "ping", server reads it.
+        let ping = b"ping";
+        let mut written = 0u32;
+        let wr = unsafe { WriteFile(client_handle, Some(ping), Some(&mut written), None) };
+        if wr.is_err() || written != ping.len() as u32 {
+            eprintln!(
+                "[self-test] FAIL: client write failed: {}",
+                std::io::Error::last_os_error()
+            );
+            unsafe {
+                CloseHandle(server_handle).ok();
+                CloseHandle(event).ok();
+                CloseHandle(client_handle).ok();
+            }
+            return 1;
+        }
+
+        let mut buf = [0u8; 16];
+        let mut bytes_read = 0u32;
+        let rd = unsafe { ReadFile(server_handle, Some(&mut buf), Some(&mut bytes_read), None) };
+        if rd.is_ok() && bytes_read >= 4 && &buf[..4] == ping {
+            println!("[self-test] PASS: unprivileged client connected + round-tripped (DACL OK)");
+            let code = 0;
+            unsafe {
+                DisconnectNamedPipe(server_handle).ok();
+                CloseHandle(server_handle).ok();
+                CloseHandle(event).ok();
+                CloseHandle(client_handle).ok();
+            }
+            code
+        } else {
+            eprintln!(
+                "[self-test] FAIL: server read did not match (DACL may be OK but I/O broken)"
+            );
+            unsafe {
+                CloseHandle(server_handle).ok();
+                CloseHandle(event).ok();
+                CloseHandle(client_handle).ok();
+            }
+            1
         }
     }
 }
