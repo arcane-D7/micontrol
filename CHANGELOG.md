@@ -5,6 +5,18 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Elevated-helper crash loop (v0.1.16 regression)** — The MiControlBridge service pipe's DACL was built with a name-based `BuildExplicitAccessWithNameW("Everyone")` lookup that silently failed, leaving the pipe SYSTEM-only. Every poll then fell back to the scheduled-task helper `micontrol.exe --elevated`, which crashed with `0xc0000005` in `combase.dll` on WMI/COM every ~15s, orphaned `elev_cmd_*.json` files accumulated, and every elevated `invoke` hung ~15s (no success toasts, frozen tabs).
+  - **Pipe DACL rebuilt from the canonical Everyone SID (S-1-1-0)** via `CreateWellKnownSid` + `TRUSTEE_IS_SID` — language-independent, no account-name lookup; failures are now logged instead of silently returning a SYSTEM-only pipe.
+  - **Bounded bridge round-trip** — `run_via_service_pipe` is wrapped in a 15s timeout and `pipe_request` now uses OVERLAPPED I/O with per-operation 8s waits (`WaitForSingleObject` + `GetOverlappedResult` + `CancelIoEx`) so a wedged bridge service can never hold the serialized elevated lock forever.
+  - **Circuit breaker for elevated thermal reads** — `get_elevated_thermal_readings()` backs off 60s after 3 consecutive failures instead of spawning a crashing helper on every 2s/15s poll cycle.
+  - Added `micontrol_bridge self-test` CLI mode to validate the pipe DACL without admin (create throwaway pipe, connect as unprivileged user, round-trip).
+
+> **Note:** the fix ships in the next release; the currently installed v0.1.16 app must be updated (or the MiControlBridge service reloaded from the new `micontrol_bridge.exe`) for the fix to take effect.
+
 ## [0.1.16] - 2026-08-08
 
 ### Changed
