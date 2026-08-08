@@ -5,10 +5,46 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.16] - 2026-08-08
+
+### Changed
+
+- **Migrated package manager from npm to pnpm** — Added `packageManager: pnpm@11.5.0` to `package.json`, generated `pnpm-lock.yaml` via `pnpm import`, and added `pnpm-workspace.yaml` with `allowBuilds: esbuild: true` (required for Vite's native esbuild binary on pnpm 11). Updated `ci.yml`, `release.yml`, and `landing.yml` to use `pnpm/action-setup@v4` + `cache: 'pnpm'` + `pnpm install --frozen-lockfile` (keeping the PowerShell retry loops), and `tauri.conf.json` `beforeDevCommand`/`beforeBuildCommand` to `pnpm run dev`/`pnpm run build`. Removed `package-lock.json`. Updated docs (README, CONTRIBUTING, AGENTS, release.md) and scripts (`health-check.mjs`, `sync-version.cjs`) accordingly.
+- Updated `CHANGELOG.md` — Documented versions 0.1.14, 0.1.15, and 0.1.16 (this release); moved the previously-unreleased EC Command Protocol notes into 0.1.14.
+
+### Fixed
+
+- **CI Build smoke test with pnpm** — `pnpm run tauri build -- --no-bundle` passed `--no-bundle` as a positional arg to cargo (pnpm forwards args directly, unlike npm which requires a literal `--` separator). Changed to `pnpm run tauri build --no-bundle`.
+- **Landing page build** — `@tauri-apps/plugin-updater@2.10.1` imports `{ Resource, Channel, invoke }` from `@tauri-apps/api/core`; the browser mock (`src/mocks/tauri-api.ts`, aliased by `vite.config.landing.ts`) only exported `Channel`, so rollup failed with "Resource is not exported". Added a minimal `Resource` base class (rid + no-op `close()`) matching the real Tauri core API shape used by plugin subclasses.
+
+## [0.1.15] - 2026-08-06
 
 ### Added
 
+- **Post-install verification script** (`scripts/verify-v0.1.15.ps1`) — Automated verification of the installed v0.1.15 release.
+- **Toolchain pinning** — `.nvmrc` (Node 24.15.0) and `src-tauri/rust-toolchain.toml` (Rust 1.95.0) now pin exact versions matching local development, removing local/CI divergence.
+
+### Changed
+
+- **CI mirrors local health check exactly** — `scripts/health-check.mjs` is the single source of truth driving both local dev and CI (`ci.yml` and `release.yml` invoke the same script), so the pipeline cannot drift from what runs locally. CI splits the 11 steps across jobs for parallelism (static checks + Rust tests/coverage).
+- **CI hardening** — Added concurrency cancellation (`cancel-in-progress`), job timeouts (30/30/45 min), and npm ci retry loops (3 attempts with backoff) for infrastructure flakiness.
+- **CI build job is secret-free** — Uses `tauri build --no-bundle` so fork PRs cannot fail on missing `TAURI_SIGNING_*` secrets; bundling/signing stays in `release.yml`.
+- **Rust toolchain action pinned** — `dtolnay/rust-toolchain@master` with explicit `toolchain: '1.95.0'` input, and the toolchain consistency check accepts pinned `@master` while still rejecting `@stable` and bare `@master`.
+- **Coverage threshold aligned** — Lowered to 15% lines/statements to match actual coverage while still guarding against regressions.
+- **Dependabot disabled** — Empty `updates:` list so it no longer opens PRs or triggers workflow runs; previous npm/cargo/github-actions config retained as comments for easy re-enabling.
+
+### Fixed
+
+- **No UAC prompts at boot** — `run_elevated_no_prompt` added to the elevated bridge for non-critical reads (thermal, discovery, Copilot fix, IoT ensure); bridge service path preferred so no UAC prompt ever appears at startup.
+- **Pipe DACLs (error 5 at boot)** — Leaked `SECURITY_DESCRIPTOR` in `ecram_service` and face `pipe_server`; added Everyone RW DACL to `micontrol_bridge` so the unprivileged app can open pipes.
+- **Temperature readings** — `read_thermal_readings` via the bridge (SYSTEM) since thermal WMI classes deny unprivileged callers; `get_fan_info` seeds ESIF from elevated readings when the local read is empty.
+- **useHardware error-state regression** — `safe()` now surfaces an error when essential hardware data is missing; polls and auto-run mount handlers no longer clear a legitimate hardware error, only an all-success initial load or explicit `clearError()`.
+
+## [0.1.14] - 2026-08-03
+
+### Added
+
+- **Face Unlock module** — Windows Hello-style face unlock using the RGB webcam with native Rust recognition: face matcher, liveness detection, credential vault, and face store; LocalSystem authentication service with named pipe; COM Credential Provider DLL; UI tab; installer integration. Includes 39 unit/integration/mock tests.
 - **EC Command Protocol** — Full implementation of the 4-phase EC command state machine (RamIsReady → WriteCommand → ReadCmdAck → ReadCmdRet) in `ecram_service.rs`. Supports all 16 EC cmd_ids: GetBindStatus, SetBindStatus, ResetDevice, WriteWiFiItem, EmptyWiFiItems, DeleteWiFiItem, ReadWiFiStatus, ReadWiFiCount, GetWiFiByIndex, GetFwVersion, GetModel, ConnectWiFi, GetDeviceID, and SendLaptopStatus (SUSPEND/SHUTDOWN/WIN_READY). EC reset is performed before and after each command for reliability.
 - **EC Command Protocol RE Report** (`docs/EC_COMMAND_PROTOCOL_RE.md`) — Complete reverse engineering documentation of the EC command protocol: 4-phase state machine, 7-byte command template, ACK/RET polling patterns, ECRAM address map, per-feature response layouts, and error codes.
 - **IoT Device UI documentation** — Updated `IotDeviceCard.tsx` with explanatory sections clarifying that Cloud Binding is about Xiaomi IoT cloud registration (not Mi Home), IoT WiFi is the chip's own WiFi module (separate from Windows WiFi), and a collapsible table listing all 16 EC commands with descriptions.
@@ -19,18 +55,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Generic pipe client in ecram.rs** — `send_pipe_request()` for communicating with ecram_service.exe.
 - **Option 3: ecram pipe as primary IoT backend** — All `iotservice.rs` public functions (`get_model`, `get_fw_version`, `get_bind_status`, `get_device_id`, `get_device_status`, `set_device_status`, `reset_device`, `send_laptop_status`, `write_wifi_item`, `delete_wifi_item`, `get_wifi_by_index`, `read_wifi_count`, `read_wifi_status`, `empty_wifi_items`, `connect_wifi`) now prefer the ecram_service JSON pipe when it is active, falling back to the original MCPI protocol for stock setups. `is_pipe_available()` reports the ecram pipe as IoT-service availability.
 - **Charging via ecram pipe** — `set_charging_threshold`/`get_charging_threshold` in `charging.rs` use the ecram_service pipe when available (with registry fallback), eliminating the dead MCPI-pipe path when ecram_service replaces IoTService.exe.
+- **Hardware gap implementation** — Squash-merge of `feature/hardware-gap-implementation` (32 commits, 119 files, +23,505 lines): ALS sensor selection (real sensor instead of fixed placeholder), color calibration wizard (pausing display control during calibration), correct BLTP7853 touchpad HID protocol from XPM RE, exposed ecram_service pipe to the user when running as SYSTEM, plus new hardware modules: audio effects, cleanup (junk/file cleanup), crash recovery, driver update/scan, eye protection, fn key remap, OS turbo (performance modes), phone link, screen cast, security scan, system info expansion, WiFi manager improvements, and thermal handling (ESIF).
+- **New frontend tabs/pages** — `face.tsx`, `security.tsx`, `system.tsx`, `cleanup.tsx`, `color.tsx`, `crossdevice.tsx`, updated `ChargingProtection.tsx`, `FunctionExplain.tsx`, `WiFiManager.tsx`, `SettingsPage.tsx`, i18n updates across en/es/fr/pt.
 
 ### Changed
 
-- Updated `README.md` — Added EC Command Protocol to features, architecture, and documentation table.
-- Updated `AGENTS.md` — Added EC command protocol references and ecram_service pipe operations documentation.
+- **ecram_service now exposes the pipe to the user when running as SYSTEM** — Fix from the hardware-gap branch.
+- Updated `README.md` — Added EC Command Protocol to features, architecture, and documentation table, plus Face Unlock and hardware gap docs.
+- Updated `AGENTS.md` — Added EC command protocol references, ecram_service pipe operations documentation, and hardware module inventory.
 - Updated `.gitignore` — Added `.bench/` and `.bench_trace_*` patterns to prevent benchmark trace files from being committed.
+- Updated `docs/HARDWARE_INVESTIGATION.md`, `docs/RE_ANALYSIS_REPORT.md`, `docs/release.md`, `docs/architecture.md` — Hardware gap cross-references and architecture updates.
+- **Installer** — Stop MiControlBridge service before overwriting files; Face Unlock installer integration (COM credential provider DLL registration).
 
 ### Removed
 
 - **Log file cleanup** — Deleted 44 temporary log files (build logs, trace logs, patch logs, test logs) and 2 test PowerShell scripts that were leftover from development. Screenshots `screenshot.png` and `screenshot2.png` removed from version control.
+- Removed `test_iot_log.ps1` and `test_iot_log2.ps1` from `src-tauri/`.
 
-## [0.1.3] - 2026-07-03
+### Fixed
+
+- **CI green for release** — Resolved clippy warnings, failing tests, and i18n gaps (`fix(ci): resolve clippy warnings, failing tests, and i18n gaps for release`).
+
+## [0.1.13] - 2026-07-24
 
 ### Fixed
 
