@@ -388,22 +388,24 @@ mod pipe_server {
                 windows::Win32::Security::PSID(sid_buf.as_mut_ptr().cast::<std::ffi::c_void>()),
                 &mut sid_len,
             );
-            let sid_ptr = sid_buf.as_mut_ptr() as *mut std::ffi::c_void as *mut std::ffi::c_void;
+            let sid_ptr = sid_buf.as_mut_ptr() as *mut std::ffi::c_void;
 
             // Build an EXPLICIT_ACCESS granting GENERIC_READ|GENERIC_WRITE to the SID.
-            let mut ea = EXPLICIT_ACCESS_W::default();
-            ea.grfAccessPermissions = (GENERIC_READ.0 | GENERIC_WRITE.0) as u32;
-            ea.grfAccessMode = SET_ACCESS;
-            ea.grfInheritance = ACE_FLAGS(0); // NO_INHERITANCE
-            ea.Trustee = TRUSTEE_W {
-                pMultipleTrustee: std::ptr::null_mut(),
-                // IMPORTANT: for TRUSTEE_IS_SID the TrusteeForm makes
-                // ptstrName point at the SID bytes cast to u16*.
-                MultipleTrusteeOperation:
-                    windows::Win32::Security::Authorization::MULTIPLE_TRUSTEE_OPERATION::default(),
-                TrusteeForm: TRUSTEE_IS_SID,
-                TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
-                ptstrName: windows_core::PWSTR(sid_ptr.cast::<u16>()),
+            let ea = EXPLICIT_ACCESS_W {
+                grfAccessPermissions: (GENERIC_READ.0 | GENERIC_WRITE.0),
+                grfAccessMode: SET_ACCESS,
+                grfInheritance: ACE_FLAGS(0), // NO_INHERITANCE
+                Trustee: TRUSTEE_W {
+                    pMultipleTrustee: std::ptr::null_mut(),
+                    // IMPORTANT: for TRUSTEE_IS_SID the TrusteeForm makes
+                    // ptstrName point at the SID bytes cast to u16*.
+                    MultipleTrusteeOperation:
+                        windows::Win32::Security::Authorization::MULTIPLE_TRUSTEE_OPERATION::default(
+                        ),
+                    TrusteeForm: TRUSTEE_IS_SID,
+                    TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+                    ptstrName: windows_core::PWSTR(sid_ptr.cast::<u16>()),
+                },
             };
 
             let entries = [ea];
