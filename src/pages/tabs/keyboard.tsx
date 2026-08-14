@@ -376,7 +376,13 @@ function KeyBindingRow({
                         action: { type: 'cycle_performance_mode', modes: next },
                       });
                     }}
-                    style={{ margin: 0 }}
+                    style={{
+                      margin: 0,
+                      appearance: 'none',
+                      WebkitAppearance: 'none',
+                      width: 0,
+                      height: 0,
+                    }}
                   />
                   {m.label}
                 </label>

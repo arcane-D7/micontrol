@@ -250,7 +250,7 @@ export default function SecurityTab() {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <input
             type="text"
-            className="input"
+            className="text-input"
             placeholder={t('security.customScanPlaceholder')}
             value={customPath}
             onChange={(e) => setCustomPath(e.target.value)}

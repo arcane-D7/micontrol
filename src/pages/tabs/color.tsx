@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { PageHeader } from './PageHeader';
+import ToggleSwitch from '../../components/ToggleSwitch';
 import { t } from '../../hooks/useI18n';
 import { useToast } from '../../contexts/ToastContext';
 
@@ -204,11 +205,11 @@ export default function ColorTab() {
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
           <label className="toggle-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
+            <ToggleSwitch
               checked={eyeProtection?.enabled ?? false}
               onChange={handleToggleEyeProtection}
               disabled={eyeToggling || !eyeProtection}
+              ariaLabel={t('color.eyeProtection')}
             />
             <span>
               {eyeProtection?.enabled
@@ -270,7 +271,7 @@ export default function ColorTab() {
           {display.installed_profiles.length > 0 && (
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <select
-                className="input"
+                className="select-input"
                 value={selectedProfiles[display.device_name] || ''}
                 onChange={(e) =>
                   setSelectedProfiles((prev) => ({

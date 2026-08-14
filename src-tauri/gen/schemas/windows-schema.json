@@ -2373,6 +2373,36 @@
           "markdownDescription": "Denies the unminimize command without any pre-configured scope."
         },
         {
+          "description": "Allows the webview to forward console.* logs and observed IPC activity to the plugin's ring buffers.\n#### This default permission set includes:\n\n- `allow-push-log`\n- `allow-push-ipc`",
+          "type": "string",
+          "const": "mcp:default",
+          "markdownDescription": "Allows the webview to forward console.* logs and observed IPC activity to the plugin's ring buffers.\n#### This default permission set includes:\n\n- `allow-push-log`\n- `allow-push-ipc`"
+        },
+        {
+          "description": "Enables the push_ipc command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:allow-push-ipc",
+          "markdownDescription": "Enables the push_ipc command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the push_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:allow-push-log",
+          "markdownDescription": "Enables the push_log command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the push_ipc command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:deny-push-ipc",
+          "markdownDescription": "Denies the push_ipc command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the push_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:deny-push-log",
+          "markdownDescription": "Denies the push_log command without any pre-configured scope."
+        },
+        {
           "description": "Default permissions for MCP Bridge plugin\n#### This default permission set includes:\n\n- `allow-capture-native-screenshot`\n- `allow-emit-event`\n- `allow-execute-command`\n- `allow-execute-js`\n- `allow-get-backend-state`\n- `allow-get-ipc-events`\n- `allow-get-window-info`\n- `allow-list-windows`\n- `allow-report-ipc-event`\n- `allow-request-script-injection`\n- `allow-script-result`\n- `allow-start-ipc-monitor`\n- `allow-stop-ipc-monitor`",
           "type": "string",
           "const": "mcp-bridge:default",

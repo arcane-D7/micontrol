@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import ToggleSwitch from '../../components/ToggleSwitch';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 
@@ -176,11 +177,11 @@ export default function CleanupTab() {
               className="toggle-row"
               style={{ display: 'flex', alignItems: 'center', gap: 12 }}
             >
-              <input
-                type="checkbox"
+              <ToggleSwitch
                 checked={selected.has(item.category)}
                 onChange={() => toggleCategory(item.category)}
                 disabled={cleaning}
+                ariaLabel={item.description}
               />
               <span style={{ fontSize: 24 }}>{CATEGORY_ICONS[item.category] || '📁'}</span>
               <div style={{ flex: 1 }}>

@@ -122,7 +122,9 @@ const ELEV_TIMEOUT_MEDIUM_SECS: u64 = 45;
 /// shorter than that to avoid waiting for a killed helper.
 fn timeout_for_cmd(cmd: &str) -> Duration {
     match cmd {
-        "run_hardware_discovery" | "install_driver" => Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS),
+        "run_hardware_discovery" | "install_driver" | "trigger_driver_scan" => {
+            Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS)
+        }
         "wmi_ec_read_sensor_data"
         | "wmi_ec_read_battery_health"
         | "wmi_ec_read_adapter_power"
@@ -252,6 +254,15 @@ async fn run_elevated_impl(
     // Launch the scheduled task (returns immediately; task runs asynchronously).
     // CREATE_NO_WINDOW prevents the flash of a console window on every call.
     let task_ok = run_schtasks_run().await;
+
+    // S37-001: Release the serialization lock BEFORE the result-poll loop.
+    // Holding ELEV_REQUEST_LOCK across the 15 s poll serializes every
+    // elevated call behind a single slot: while the thermal poll (which runs
+    // every ~15 s) holds the lock, a set_performance_mode invoke would starve
+    // indefinitely. The lock only needs to guard the write+dispatch critical
+    // section above — the request_id is unique, so concurrent poll loops are
+    // safe.
+    drop(_guard);
 
     if !task_ok {
         // Self-healing: try to re-register the scheduled task with the correct

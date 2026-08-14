@@ -214,7 +214,15 @@ fn apply_ramp_via_ffi(ramp: &mut GammaRamp) -> HardwareResult<()> {
     if ok != 0 {
         Ok(())
     } else {
-        Err(HardwareError::Display("SetDeviceGammaRamp failed".into()))
+        // S42-001: This fails on Intel panels where the display driver (IGCL /
+        // PSR2) owns the gamma pipeline and does not expose the classic
+        // SetDeviceGammaRamp API. Surface a clear message so the UI can tell
+        // the user why the toggle cannot take effect instead of a cryptic
+        // Win32-style failure.
+        Err(HardwareError::Display(
+            "SetDeviceGammaRamp failed — this display driver (Intel IGCL) manages color itself; try Windows Night Light instead"
+                .into(),
+        ))
     }
 }
 

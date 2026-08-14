@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn empty_gallery_returns_empty() {
-        let r = best_match(&vec![1.0; 4], &[]);
+        let r = best_match(&[1.0; 4], &[]);
         assert_eq!(r, MatchResult::EMPTY);
     }
 

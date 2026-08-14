@@ -2,7 +2,12 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
+import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
 import InfoModal, { InfoRow, InfoSection } from './InfoModal';
+
+// `t` from useI18n types keys as a literal union; error.ts' TranslateFn takes
+// any string — wrap it (matches the pattern used across the codebase).
+const translate: TranslateFn = (key) => t(key as never);
 
 interface Props {
   /** Current charging threshold (0-100, where 100 = no limit) */
@@ -73,7 +78,7 @@ export default function ChargingProtection({ threshold, onThresholdChange }: Pro
       });
     } catch (e) {
       addToast({
-        message: `${t('charging.error')}: ${String(e)}`,
+        message: `${t('charging.error')}: ${getUserFriendlyMessage(parseErrorResponse(e), translate)}`,
         type: 'error',
         onRetry: () => void handleToggleBatteryCare(),
       });
@@ -91,7 +96,7 @@ export default function ChargingProtection({ threshold, onThresholdChange }: Pro
       addToast({ message: t('charging.applied'), type: 'success' });
     } catch (e) {
       addToast({
-        message: `${t('charging.error')}: ${String(e)}`,
+        message: `${t('charging.error')}: ${getUserFriendlyMessage(parseErrorResponse(e), translate)}`,
         type: 'error',
         onRetry: () => void handleThresholdChange(level),
       });

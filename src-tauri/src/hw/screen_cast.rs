@@ -32,11 +32,15 @@ pub fn list_cast_devices() -> HardwareResult<Vec<CastDevice>> {
 
     log::info!("[screen_cast] Enumerating Miracast devices via WinRT DeviceEnumeration");
 
-    // The device selector for Miracast/WiDi receivers.
-    // We query for devices that support the casting protocol.
-    // The AQS filter targets projection/casting devices.
+    // AQS filter that discovers wireless display (Miracast/WiDi) receivers.
+    // This is the exact selector used by Microsoft's own display-project sample:
+    //   System.Devices.Aep.ProtocolId:="{AA754C9A-3A24-4298-B530-6E4B13F77E15}"
+    // The GUID {AA754C9A-3A24-4298-B530-6E4B13F77E15} is the Wi-Fi Direct
+    // WirelessDisplay (Miracast) protocol id. The previous code used a
+    // different GUID ({e0cce415-...}) which matches no Miracast sink, so
+    // "Scan for devices" always returned zero results on real hardware.
     let selector =
-        HSTRING::from("System.Devices.Aep.ProtocolId:=\"{e0cce415-ef27-4e8e-9b8d-9f3d9a7d1f7d}\"");
+        HSTRING::from("System.Devices.Aep.ProtocolId:=\"{AA754C9A-3A24-4298-B530-6E4B13F77E15}\"");
 
     // FindAllAsyncAqsFilter returns IAsyncOperation<DeviceInformationCollection>
     let async_op = DeviceInformation::FindAllAsyncAqsFilter(&selector)
@@ -99,8 +103,6 @@ pub fn list_cast_devices() -> HardwareResult<Vec<CastDevice>> {
 /// via WinRT.
 #[cfg(windows)]
 pub fn start_casting(device_id: &str) -> HardwareResult<CastResult> {
-    use std::os::windows::process::CommandExt;
-
     log::info!("[screen_cast] Starting cast, device_id: {device_id:?}");
 
     // If a specific device ID is provided, validate it via WinRT CastingDevice.
@@ -128,26 +130,44 @@ pub fn start_casting(device_id: &str) -> HardwareResult<CastResult> {
         log::info!("[screen_cast] No device ID provided — opening Connect panel directly");
     }
 
-    // Open the Windows Connect panel via explorer.exe.
-    // Using explorer.exe to launch the protocol is more reliable than `cmd /c start`
-    // and avoids the `:project` suffix which is not a valid URI path component.
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let mut cmd = std::process::Command::new("explorer.exe");
-    cmd.arg("ms-settings-connectabledevices:");
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let result = cmd
-        .output()
-        .map_err(|e| HardwareError::Cast(format!("Failed to launch Connect panel: {e}")))?;
-
-    let success = result.status.success();
-    Ok(CastResult {
-        success,
-        message: if success {
-            "Connect panel opened. Select your device to start casting.".into()
-        } else {
-            "Failed to open Connect panel.".into()
-        },
-    })
+    // Open the Windows Connect panel via ShellExecuteW.
+    // `ms-settings:connectabledevices:devicediscovery` is the documented URI
+    // that opens the "Connect to a wireless display" projection flyout.
+    // (The previous `ms-settings-connectabledevices:` used a hyphen where a
+    // colon belongs — no Windows setting page exists for it, so explorer.exe
+    // popped an error dialog instead of the Connect panel.)
+    //
+    // We DO NOT spawn `explorer.exe ms-settings:...` here anymore: explorer.exe
+    // returns a non-zero exit code even when the URI is handled (the Shell
+    // forwards the protocol to SystemSettings and explorer exits with code 1),
+    // which made the UI report "Failed to open Connect panel" while nothing
+    // visibly happened. ShellExecuteW hands the URI to the Windows shell the
+    // same way double-clicking it would — reliable on every build.
+    const URI: windows::core::PCWSTR =
+        windows::core::w!("ms-settings:connectabledevices:devicediscovery");
+    // SAFETY: ShellExecuteW with a valid protocol string and "open" verb is a
+    // standard Win32 call. HWND is null (no parent window).
+    unsafe {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let hres = ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            URI,
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+        let success = hres.0 as isize > 32; // ShellExecute returns >32 on success
+        Ok(CastResult {
+            success,
+            message: if success {
+                "Connect panel opened. Select your device to start casting.".into()
+            } else {
+                format!("Failed to open Connect panel (code {}).", hres.0 as isize)
+            },
+        })
+    }
 }
 
 #[cfg(not(windows))]

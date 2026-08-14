@@ -66,6 +66,8 @@ pub struct FaceSettings {
     pub face_unlock_workstation_enabled: bool,
     /// Recommended re-enrollment interval (days); reminder only.
     pub renew_days: u32,
+    /// Camera index (0=default).
+    pub camera_index: u32,
     /// UI language (ISO code; unused by core logic).
     pub language: String,
 }
@@ -86,6 +88,7 @@ impl Default for FaceSettings {
             face_unlock_logon_enabled: true,
             face_unlock_workstation_enabled: true,
             renew_days: 60,
+            camera_index: 0,
             language: "en".to_string(),
         }
     }
@@ -160,6 +163,7 @@ impl FaceSettings {
             face_unlock_workstation_enabled
         );
         take_u32!("renew_days", renew_days);
+        take_u32!("camera_index", camera_index);
         take_str!("language", language);
 
         // Clamp sensible ranges.
@@ -168,6 +172,7 @@ impl FaceSettings {
         s.antispoof_threshold = s.antispoof_threshold.clamp(0.0, 1.0);
         s.antispoof_max_frames = s.antispoof_max_frames.clamp(1, 60);
         s.renew_days = s.renew_days.clamp(0, 3650);
+        s.camera_index = s.camera_index.min(8);
 
         (s, rejected)
     }

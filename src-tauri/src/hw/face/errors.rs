@@ -49,6 +49,14 @@ pub enum FaceError {
     #[error("Not supported: {0}")]
     NotSupported(String),
 
+    /// Local user enumeration failed.
+    #[error("User enumeration error: {0}")]
+    Users(String),
+
+    /// Windows Hello consent gate failed.
+    #[error("Windows Hello error: {0}")]
+    Hello(String),
+
     /// Generic/other error.
     #[error("Face error: {0}")]
     Other(String),
@@ -77,6 +85,8 @@ impl From<FaceError> for FaceErrorResponse {
             FaceError::CredVault(_) => "credvault",
             FaceError::Pipe(_) => "pipe",
             FaceError::NotSupported(_) => "not_supported",
+            FaceError::Users(_) => "users",
+            FaceError::Hello(_) => "hello",
             FaceError::Other(_) => "other",
         };
         FaceErrorResponse {

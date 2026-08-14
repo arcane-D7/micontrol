@@ -666,7 +666,13 @@
     "errorLoggingDesc": "Enregistre automatiquement les erreurs dans un fichier local pour le dépannage. Les journaux sont conservés pendant 7 jours puis supprimés automatiquement.",
     "errorLoggingEnable": "Activer la journalisation des erreurs",
     "errorLogView": "Voir le journal d'erreurs",
-    "errorLogClear": "Effacer le journal"
+    "errorLogClear": "Effacer le journal",
+    "mcpIntegration": "Intégration MCP",
+    "mcpIntegrationDesc": "Active le serveur de socket MCP (localhost:4000) permettant aux agents d'IA et aux outils de débogage d'inspecter et de contrôler l'application (lire le contenu, cliquer, taper, naviguer). Un redémarrage de l'application est nécessaire pour que la modification prenne effet.",
+    "mcpIntegrationEnable": "Activer l'intégration MCP",
+    "mcpIntegrationNote": "Note de sécurité : une fois activé, tout processus local peut contrôler l'application. Gardez-le désactivé sauf si vous utilisez activement un client MCP.",
+    "mcpIntegrationRestartHint": "Redémarrez l'application pour démarrer le serveur de socket MCP sur localhost:4000.",
+    "mcpIntegrationOffHint": "Le serveur de socket MCP s'arrêtera au prochain redémarrage de l'application."
   },
   "onboarding": {
     "welcome": {

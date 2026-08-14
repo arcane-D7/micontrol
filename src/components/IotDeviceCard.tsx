@@ -37,6 +37,10 @@ export default function IotDeviceCard() {
   const [ensuringService, setEnsuringService] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
 
+  // Hard cap on automatic retries so a missing bridge/service does not keep
+  // polling forever (throttle: 3 tries total, then stop and wait for the user).
+  const MAX_RETRIES = 3;
+
   const loadInfo = useCallback(async () => {
     try {
       const data = await invoke<IotDeviceInfo>('get_iot_device_info');
@@ -65,10 +69,10 @@ export default function IotDeviceCard() {
     void loadInfo();
   }, [loadInfo]);
 
-  // When pipe is not available, try to start the ecram_service bridge
-  // automatically, then retry.
+  // When pipe is not available, try to start the ecram_service bridge once,
+  // then retry a few times (bounded), then give up and wait for a manual tap.
   useEffect(() => {
-    if (info?.pipe_available === false && !ensuringService) {
+    if (info?.pipe_available === false && !ensuringService && retryCount < MAX_RETRIES) {
       setEnsuringService(true);
       invoke('ensure_iot_service')
         .then(() => {
@@ -83,11 +87,11 @@ export default function IotDeviceCard() {
           setEnsuringService(false);
         });
     }
-  }, [info?.pipe_available, ensuringService, loadInfo]);
+  }, [info?.pipe_available, ensuringService, retryCount, loadInfo]);
 
-  // Auto-retry every 5 seconds when pipe is not available
+  // Bounded auto-retry every 5 seconds (stops after MAX_RETRIES).
   useEffect(() => {
-    if (info?.pipe_available === false) {
+    if (info?.pipe_available === false && retryCount < MAX_RETRIES) {
       const timer = setTimeout(() => {
         setRetryCount((c) => c + 1);
         void loadInfo();
@@ -95,6 +99,12 @@ export default function IotDeviceCard() {
       return () => clearTimeout(timer);
     }
   }, [info?.pipe_available, retryCount, loadInfo]);
+
+  const retryNow = () => {
+    setRetryCount(0);
+    setLoading(true);
+    void loadInfo();
+  };
 
   if (loading) {
     return (
@@ -118,21 +128,24 @@ export default function IotDeviceCard() {
           </div>
           <div style={{ marginTop: 4 }}>
             Status: Not found
-            {retryCount > 0 && ` (retry ${retryCount}...)`}
+            {retryCount > 0 && ` (retry ${retryCount}/${MAX_RETRIES})`}
           </div>
           <div style={{ marginTop: 8, lineHeight: 1.5 }}>
             {ensuringService
               ? 'Starting IoT bridge service...'
-              : 'The IoT bridge service is not running. It will be started automatically and the system will retry every 5 seconds.'}
+              : retryCount >= MAX_RETRIES
+                ? 'Could not reach the IoT bridge after several attempts. The service may not be installed or your hardware may not have the IoT chip. You can try again manually.'
+                : 'The IoT bridge service is not running. It will be started automatically (up to a few attempts).'}
           </div>
         </div>
-        <button
-          className="btn btn-secondary"
-          style={{ marginTop: 12, width: '100%' }}
-          onClick={() => void loadInfo()}
-        >
-          🔄 Refresh now
-        </button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="btn btn-secondary" style={{ flex: 1 }} onClick={retryNow}>
+            🔄 Try again
+          </button>
+          <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => void loadInfo()}>
+            ↻ Refresh
+          </button>
+        </div>
       </div>
     );
   }

@@ -635,7 +635,13 @@
     "errorLoggingDesc": "Registra automaticamente os erros em um arquivo local para solução de problemas. Os registros são mantidos por 7 dias e excluídos automaticamente após esse período.",
     "errorLoggingEnable": "Ativar registro de erros",
     "errorLogView": "Ver registro de erros",
-    "errorLogClear": "Limpar registro"
+    "errorLogClear": "Limpar registro",
+    "mcpIntegration": "Integração MCP",
+    "mcpIntegrationDesc": "Ativa o servidor de socket MCP (localhost:4000) permitindo que agentes de IA e ferramentas de depuração inspecionem e controlem o aplicativo (ler conteúdo, clicar, digitar, navegar). É necessário reiniciar o aplicativo para que a alteração tenha efeito.",
+    "mcpIntegrationEnable": "Ativar integração MCP",
+    "mcpIntegrationNote": "Nota de segurança: quando ativado, qualquer processo local pode controlar o aplicativo. Mantenha desativado a menos que esteja usando ativamente um cliente MCP.",
+    "mcpIntegrationRestartHint": "Reinicie o aplicativo para iniciar o servidor de socket MCP em localhost:4000.",
+    "mcpIntegrationOffHint": "O servidor de socket MCP será encerrado no próximo reinício do aplicativo."
   },
   "onboarding": {
     "welcome": {

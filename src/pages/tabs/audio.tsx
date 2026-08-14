@@ -1,9 +1,15 @@
 import { memo, useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import ToggleSwitch from '../../components/ToggleSwitch';
 import { t } from '../../hooks/useI18n';
+import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../../types/error';
 import { PageHeader } from './PageHeader';
 import AudioControl from '../../components/AudioControl';
 import type { Hardware } from './shared';
+
+// `t` from useI18n types keys as a literal union; error.ts' TranslateFn takes
+// any string — wrap it (matches the pattern used across the codebase).
+const translate: TranslateFn = (key) => t(key as never);
 
 interface AudioEffectsStatus {
   mic_noise_canceling: boolean;
@@ -49,7 +55,7 @@ function AudioTab({ hw }: Props) {
       await invoke(cmd, { enabled: newVal });
       setEffects({ ...effects, [key]: newVal });
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(getUserFriendlyMessage(parseErrorResponse(e), translate));
     }
   };
 
@@ -90,10 +96,10 @@ function AudioTab({ hw }: Props) {
                 className="toggle-row"
                 style={{ display: 'flex', alignItems: 'center', gap: 8 }}
               >
-                <input
-                  type="checkbox"
+                <ToggleSwitch
                   checked={effects.mic_noise_canceling}
                   onChange={() => handleToggle('mic_noise_canceling')}
+                  ariaLabel={t('audio.micNoiseCanceling')}
                 />
                 <div>
                   <div>{t('audio.micNoiseCanceling')}</div>
@@ -106,10 +112,10 @@ function AudioTab({ hw }: Props) {
                 className="toggle-row"
                 style={{ display: 'flex', alignItems: 'center', gap: 8 }}
               >
-                <input
-                  type="checkbox"
+                <ToggleSwitch
                   checked={effects.speaker_noise_canceling}
                   onChange={() => handleToggle('speaker_noise_canceling')}
+                  ariaLabel={t('audio.speakerNoiseCanceling')}
                 />
                 <div>
                   <div>{t('audio.speakerNoiseCanceling')}</div>
@@ -122,10 +128,10 @@ function AudioTab({ hw }: Props) {
                 className="toggle-row"
                 style={{ display: 'flex', alignItems: 'center', gap: 8 }}
               >
-                <input
-                  type="checkbox"
+                <ToggleSwitch
                   checked={effects.voice_focus}
                   onChange={() => handleToggle('voice_focus')}
+                  ariaLabel={t('audio.voiceFocus')}
                 />
                 <div>
                   <div>{t('audio.voiceFocus')}</div>

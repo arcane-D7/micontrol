@@ -25,10 +25,8 @@ mod winpipe {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
     use windows::Win32::Security::{
-        Authorization::{
-            BuildExplicitAccessWithNameW, SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS,
-        },
-        SetSecurityDescriptorDacl, ACE_FLAGS, ACL, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
+        PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
     };
     use windows::Win32::Storage::FileSystem::{
         FlushFileBuffers, ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_OVERLAPPED,
@@ -45,53 +43,50 @@ mod winpipe {
     const MAX_CONNECTIONS: u32 = 1; // serial: one client at a time
 
     /// Build SECURITY_ATTRIBUTES with a DACL granting SYSTEM + Administrators.
+    ///
+    /// The DACL is built from the canonical SDDL string
+    /// `D:(A;;GA;;;SY)(A;;GA;;;BA)` (SYSTEM → Generic All, Builtin
+    /// Administrators → Generic All) via
+    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW` — the same
+    /// deterministic approach used by `micontrol_bridge` and `ecram_service`.
+    ///
+    /// Previous iterations used `BuildExplicitAccessWithNameW` +
+    /// `SetSecurityDescriptorDacl` on a default-initialized
+    /// `SECURITY_DESCRIPTOR` (all-zeros, never through
+    /// `InitializeSecurityDescriptor`), so the DACL was silently not applied:
+    /// the pipe inherited the process DACL (SYSTEM-only in practice when the
+    /// service runs as SYSTEM, and *any* process's default DACL otherwise).
+    /// SDDL parsing avoids all of that. The returned SECURITY_DESCRIPTOR is
+    /// heap-allocated by Windows and intentionally leaked (must outlive the
+    /// SECURITY_ATTRIBUTES usages).
     fn build_security() -> Option<SECURITY_ATTRIBUTES> {
         unsafe {
-            // SYSTEM SID well-known: S-1-5-18 (WinLocalSystemSid)
-            // Administrators SID: S-1-5-32-544
-            let sys_trustee: Vec<u16> = "SYSTEM\0".encode_utf16().collect();
-            let adm_trustee: Vec<u16> = "Administrators\0".encode_utf16().collect();
+            let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut psd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
 
-            let mut ea_sys = EXPLICIT_ACCESS_W::default();
-            BuildExplicitAccessWithNameW(
-                &mut ea_sys,
-                PCWSTR(sys_trustee.as_ptr()),
-                0xF01FF, // GENERIC_ALL
-                SET_ACCESS,
-                ACE_FLAGS(0),
+            let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                windows::core::PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut psd,
+                None,
             );
-            let mut ea_adm = EXPLICIT_ACCESS_W::default();
-            BuildExplicitAccessWithNameW(
-                &mut ea_adm,
-                PCWSTR(adm_trustee.as_ptr()),
-                0xF01FF,
-                SET_ACCESS,
-                ACE_FLAGS(0),
-            );
-
-            let entries = [ea_sys, ea_adm];
-            let mut new_acl: *mut ACL = std::ptr::null_mut();
-            if SetEntriesInAclW(Some(&entries), None, &mut new_acl).is_err() || new_acl.is_null() {
+            let psd_ptr = psd.0;
+            if result.is_err() || psd_ptr.is_null() {
+                let last_err = std::io::Error::last_os_error();
+                log::warn!(
+                    "face pipe: ConvertStringSecurityDescriptorToSecurityDescriptorW failed: {last_err} — pipe will be process-default DACL"
+                );
                 return None;
             }
 
-            let mut sd = SECURITY_DESCRIPTOR::default();
-            let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
-                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
-            );
-            if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
-                return None;
-            }
-
-            // Leak the SECURITY_DESCRIPTOR so it outlives the returned
-            // SECURITY_ATTRIBUTES. A stack-allocated SD would be destroyed on
-            // return, leaving a dangling lpSecurityDescriptor that
-            // CreateNamedPipeW reads as a garbage DACL.
-            let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
-
+            // psd is a heap allocation owned by the caller now; intentionally
+            // never freed (lives for the whole pipe-server process).
             Some(SECURITY_ATTRIBUTES {
                 nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: sd_leaked.cast(),
+                lpSecurityDescriptor: psd_ptr,
                 bInheritHandle: false.into(),
             })
         }

@@ -36,16 +36,13 @@ fn main() {
         print!("[scanning] FUN2=0x{fun2:04X} ... ");
         let mut group_hits = 0;
         for fun3 in 0u16..=0xFF {
-            match wmi_ec::wmi_read(fun2, fun3) {
-                Ok(resp) => {
-                    if resp.is_success() {
-                        println!("\n  [HIT] FUN3=0x{fun3:02X} → SGER=0x{:04X} FUTR=0x{:04X} FRD0=0x{:04X} FRD1=0x{:08X} FRD2=0x{:08X} FRD3=0x{:08X}",
-                            resp.sger, resp.futr, resp.frd0, resp.frd1, resp.frd2, resp.frd3);
-                        hits.push((fun2, fun3, resp));
-                        group_hits += 1;
-                    }
+            if let Ok(resp) = wmi_ec::wmi_read(fun2, fun3) {
+                if resp.is_success() {
+                    println!("\n  [HIT] FUN3=0x{fun3:02X} → SGER=0x{:04X} FUTR=0x{:04X} FRD0=0x{:04X} FRD1=0x{:08X} FRD2=0x{:08X} FRD3=0x{:08X}",
+                        resp.sger, resp.futr, resp.frd0, resp.frd1, resp.frd2, resp.frd3);
+                    hits.push((fun2, fun3, resp));
+                    group_hits += 1;
                 }
-                Err(_) => {}
             }
         }
         if group_hits == 0 {

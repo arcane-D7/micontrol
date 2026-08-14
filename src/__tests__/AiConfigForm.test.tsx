@@ -25,6 +25,7 @@ const mockSettings: AppSettings = {
   ai_analysis_enabled: false,
   ai_poll_interval_sec: 60,
   ai_daily_analyses: 2,
+  mcp_integration_enabled: false,
 };
 
 describe('AiConfigForm', () => {

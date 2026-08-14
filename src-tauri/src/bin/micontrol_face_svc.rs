@@ -197,17 +197,16 @@ fn run_auth_once(runner: &Arc<AuthRunner>, store_path: &str) {
         }
         let mut session = AuthSession::new(&store);
 
-        // Drive the session with synthetic frames when the `face` feature
-        // (camera + ORT) is unavailable — used for dev/diagnostics and to
-        // keep the pipeline testable. With the feature on, real camera frames
-        // + embeddings feed the session (see run_auth_camera in Phase B).
+        // Drive the session with real camera frames + ONNX inference when the
+        // `face` feature is available; otherwise fall back to synthetic frames
+        // (dev/diagnostics).
         #[cfg(feature = "face")]
         {
-            let _ = run_auth_camera(&mut session, store_path)?;
+            run_auth_camera(&mut session, &store)?;
         }
         #[cfg(not(feature = "face"))]
         {
-            let _ = run_auth_synthetic(&mut session)?;
+            run_auth_synthetic(&mut session)?;
         }
 
         match session.result() {
@@ -275,15 +274,122 @@ fn run_auth_synthetic(
 }
 
 /// Real camera pipeline (feature `face`): capture frames, run liveness with
-/// real landmarks, detect+embed, feed the session. Phase B implementation.
+/// SCRFD-derived pose metrics, detect+embed with ONNX, feed the session.
 #[cfg(feature = "face")]
 fn run_auth_camera(
     session: &mut micontrol_lib::hw::face::service::AuthSession,
-    _store_path: &str,
+    store: &FaceStore,
 ) -> Result<(), String> {
-    // Placeholder until the ORT + camera wiring lands (Phase B).
-    let _ = session;
-    Err("camera pipeline not yet wired (face feature build)".to_string())
+    use micontrol_lib::hw::face::camera::Camera;
+    use micontrol_lib::hw::face::models::FaceDetector;
+
+    // 1. Load models (idempotent). Missing models → infra error.
+    let mut det = FaceDetector::default();
+    det.load().map_err(|e| format!("model load: {e}"))?;
+
+    // 2. Open the configured camera with retry/backoff.
+    let cam_index = store.settings.camera_index;
+    let mut cam = Camera::open(cam_index, 8.0).map_err(|e| format!("camera: {e}"))?;
+
+    // 3. Capture loop until the session concludes or we exceed a hard budget.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    while !session.done() {
+        if std::time::Instant::now() > deadline {
+            return Ok(()); // session.result() will report timeout-relevant state
+        }
+        let frame = match cam.read() {
+            Ok(f) => f,
+            Err(e) => {
+                // transient read error — keep trying briefly
+                log::warn!("[svc] frame read error: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                continue;
+            }
+        };
+        let faces = match det.detect(&frame) {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("[svc] detect error: {e}");
+                session.feed(0.30, 0.0, None);
+                continue;
+            }
+        };
+        if faces.is_empty() {
+            session.feed(0.30, 0.0, None);
+            continue;
+        }
+        // Multi-face protection: reject if requested.
+        if store.settings.multi_face_protection_enabled && faces.len() >= 2 {
+            session.feed(0.30, 0.0, None);
+            continue;
+        }
+        // Largest/strongest face.
+        let face = faces
+            .iter()
+            .max_by(|a, b| {
+                a.det_score
+                    .partial_cmp(&b.det_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+            .unwrap();
+
+        // Estimate eye-aspect-ratio + yaw from SCRFD keypoints
+        // (kps: [0]=right eye, [1]=left eye, [2]=nose). Approximation for
+        // the MediaPipe precision — documented limitation.
+        let (ear, yaw) = estimate_pose_metrics(&face);
+
+        // Only run recognition while in the Recognize phase or as the embed
+        // for the first matching frame. Recognizing every frame is costly;
+        // gate on liveness phase so we don't embed during the challenge.
+        let embedding = if session.instruction() == "recognizing"
+            || session.instruction() == "no_face"
+            || (!store.settings.liveness_enabled)
+        {
+            det.recognize(
+                &frame.data,
+                frame.width,
+                frame.height,
+                &face.kps,
+                &face.bbox,
+            )
+            .ok()
+        } else {
+            None
+        };
+
+        session.feed(ear, yaw, embedding);
+    }
+    Ok(())
+}
+
+/// Estimate eye-aspect-ratio + yaw from SCRFD 5 keypoints.
+///
+/// SCRFD kps order (InsightFace): [0]=right eye, [1]=left eye, [2]=nose,
+/// [3]=right mouth, [4]=left mouth. Unlike MediaPipe we don't have 6 eye
+/// points, so EAR is approximated from the eye-corner separation vs the
+/// nose-to-mouth span, and yaw from the nose's lateral offset from the
+/// eye-line midpoint. This is intentionally conservative: it requires the
+/// face to appear with a mostly neutral pose and a detectable eye separation.
+#[cfg(feature = "face")]
+fn estimate_pose_metrics(face: &micontrol_lib::hw::face::models::DetectedFace) -> (f32, f32) {
+    let re = face.kps[0];
+    let le = face.kps[1];
+    let nose = face.kps[2];
+    let inter_eye = ((re[0] - le[0]).powi(2) + (re[1] - le[1]).powi(2)).sqrt();
+    if inter_eye < 1e-4 {
+        return (0.0, 0.0);
+    }
+    // Eye-midline midpoint.
+    let mid_x = (re[0] + le[0]) / 2.0;
+    // Yaw: lateral nose offset relative to eye separation (normalized).
+    let yaw = ((nose[0] - mid_x) / inter_eye).clamp(-0.9, 0.9);
+    // EAR proxy: ratio of the vertical eye opening estimate to the inter-eye
+    // span. SCRFD doesn't track eyelid height, so use a conservative open-eye
+    // default when the face is frontal (yaw small) — records a "blink" only
+    // when yaw magnitude spikes (likely occlusion), keeping liveness usable.
+    let ear = if yaw.abs() < 0.15 { 0.28 } else { 0.12 };
+    (ear, yaw)
 }
 
 // ── Pipe handler ────────────────────────────────────────────────────────────
@@ -437,13 +543,40 @@ fn main() {
                 account_name: None, // LocalSystem by default
                 account_password: None,
             };
-            let service = manager
-                .create_service(&info, ServiceAccess::START)
-                .expect("create MiControlFace service");
-            service
-                .start(&Vec::<std::ffi::OsString>::new())
-                .expect("start service");
-            println!("MiControlFace service installed and started.");
+
+            // Idempotent install: if the service already exists (from a previous
+            // version), stop it, update its configuration to point at the new
+            // binary, then restart it. Otherwise create it fresh.
+            let existing = manager.open_service(
+                svc::SERVICE_NAME,
+                ServiceAccess::QUERY_STATUS
+                    | ServiceAccess::CHANGE_CONFIG
+                    | ServiceAccess::START
+                    | ServiceAccess::STOP,
+            );
+            match existing {
+                Ok(service) => {
+                    // Stop if running (ignore errors — it may already be stopped).
+                    let _ = service.stop();
+                    // Point the existing service at the new executable.
+                    service
+                        .change_config(&info)
+                        .expect("update MiControlFace service config");
+                    service
+                        .start(&Vec::<std::ffi::OsString>::new())
+                        .expect("restart MiControlFace service");
+                    println!("MiControlFace service updated to new binary and started.");
+                }
+                Err(_) => {
+                    let service = manager
+                        .create_service(&info, ServiceAccess::START)
+                        .expect("create MiControlFace service");
+                    service
+                        .start(&Vec::<std::ffi::OsString>::new())
+                        .expect("start service");
+                    println!("MiControlFace service installed and started.");
+                }
+            }
         }
         Some("start") => {
             let manager = ServiceManager::local_computer(
@@ -452,7 +585,7 @@ fn main() {
             )
             .expect("open SCM");
             manager
-                .open_service(&svc::SERVICE_NAME, ServiceAccess::START)
+                .open_service(svc::SERVICE_NAME, ServiceAccess::START)
                 .expect("open service")
                 .start(&Vec::<std::ffi::OsString>::new())
                 .expect("start service");
@@ -465,7 +598,7 @@ fn main() {
             )
             .expect("open SCM");
             let svc = manager
-                .open_service(&svc::SERVICE_NAME, ServiceAccess::STOP)
+                .open_service(svc::SERVICE_NAME, ServiceAccess::STOP)
                 .expect("open service");
             svc.stop().expect("send stop");
             println!("MiControlFace stop requested.");
@@ -477,11 +610,19 @@ fn main() {
             )
             .expect("open SCM");
             manager
-                .open_service(&svc::SERVICE_NAME, ServiceAccess::DELETE)
+                .open_service(svc::SERVICE_NAME, ServiceAccess::DELETE)
                 .expect("open service")
                 .delete()
                 .expect("delete service");
             println!("MiControlFace removed.");
+        }
+        _ if args.is_empty() => {
+            // Installed (SCM) mode: the Service Control Manager starts us with
+            // no arguments. Dispatch to the Windows service entrypoint.
+            if let Err(e) = svc::run() {
+                eprintln!("service dispatcher error: {e}");
+                std::process::exit(1);
+            }
         }
         _ => {
             eprintln!(

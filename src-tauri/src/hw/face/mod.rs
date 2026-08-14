@@ -39,8 +39,10 @@ pub mod liveness;
 pub mod matcher;
 pub mod models;
 pub mod pipe_server;
+pub mod preview;
 pub mod service;
 pub mod store;
+pub mod users;
 
 pub use config::FaceSettings;
 pub use errors::{FaceError, FaceResult};

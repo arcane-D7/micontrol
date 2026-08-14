@@ -44,14 +44,22 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
     let exe_path = find_ecram_service_exe();
     let pipe_path = r"\\.\pipe\ecram_service";
 
-    // Check if pipe is already available (service already running).
-    // BUT: the original Xiaomi IoTService.exe also creates this pipe, yet
-    // rejects our ECRAM_READ ioctl with "Access is denied".  So we must
-    // additionally verify that the running IoTService.exe in the DriverStore
-    // is actually *our* ecram_service.exe (byte-for-byte).  If it's the
-    // original Xiaomi binary, we need to replace it even though the pipe
-    // exists.
-    let pipe_available = std::fs::metadata(pipe_path).is_ok();
+    // Probe the pipe with a real OPEN_EXISTING CreateFile, not `metadata`
+    // (std::fs::metadata never resolves a named pipe — it always errors with
+    // "The system cannot find the file specified" even when the pipe exists,
+    // because pipes have no file-system metadata). Access-denied on open
+    // means the pipe exists but a stale service process (old DACL) is
+    // serving it, so we treat it as NOT usable and force a restart below.
+    fn pipe_usable(path: &str) -> bool {
+        // Any open failure (permission-denied from a stale DACL, or not-found)
+        // means the pipe is NOT usable — force the restart path below.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .is_ok()
+    }
+    let pipe_available = pipe_usable(pipe_path);
 
     let our_exe = exe_path
         .as_deref()
@@ -60,7 +68,7 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
     // Find the DriverStore path where IoTService.exe lives.
     let driverstore_iot_exe = find_driverstore_iot_service_exe();
 
-    // If the pipe is available AND the DriverStore IoTService.exe is already
+    // If the pipe is usable AND the DriverStore IoTService.exe is already
     // our ecram_service.exe, we're genuinely done.
     if pipe_available {
         let already_ours = driverstore_iot_exe
@@ -82,12 +90,20 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             });
         }
 
-        // Pipe exists but the DriverStore exe is NOT ours — the original
+        // Pipe usable but the DriverStore exe is NOT ours — the original
         // Xiaomi IoTService.exe is running and will reject our ioctls.
         // Fall through to the replacement logic below.
         log::warn!(
             "[ecram_service_mgmt] Pipe exists but DriverStore IoTService.exe \
              is not our ecram_service.exe — replacing it now"
+        );
+    } else {
+        // Pipe is NOT usable. If we have already confirmed the DriverStore
+        // binary is ours, the only remaining cause is a stale service
+        // process still running the pre-DACL-fix binary. Restarting the
+        // service re-creates the pipe with the permissive DACL.
+        log::info!(
+            "[ecram_service_mgmt] Pipe not usable (missing or blocked). Proceeding to ensure the service runs our binary."
         );
     }
 
@@ -104,6 +120,31 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             (Ok(existing), Ok(ours)) => existing != ours,
             _ => true,
         };
+
+        // Always stop + kill a running service when the pipe is not usable.
+        // A stale process holds the OLD binary image in memory (with the
+        // SYSTEM-only pipe DACL) — replacing the file on disk alone does not
+        // fix the running instance; the service MUST be restarted so the new
+        // permissive-DACL pipe gets created.
+        if !pipe_available {
+            log::info!(
+                "[ecram_service_mgmt] Pipe unusable — stopping & killing stale IoTService process"
+            );
+            let _ = std::process::Command::new("sc")
+                .args(["stop", SERVICE_NAME])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", "IoTService.exe"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/IM", "ecram_service.exe"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
 
         if need_copy {
             // Stop the service before replacing the file
@@ -149,6 +190,8 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
     let installed = service_exists(SERVICE_NAME);
     if installed {
         let current_bin = get_service_bin_path(SERVICE_NAME);
+        // Canonical form (empirically REQUIRED): quoted path + `service`
+        // token. A bare-path service fails to start with error 2.
         let expected_bin = format!("\"{}\" service", target_exe);
         let expected_bin_no_quotes = target_exe.to_string();
 
@@ -202,13 +245,22 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
     // Start the service
     start_service(SERVICE_NAME)?;
 
-    // Wait for the pipe to become available (up to 10 seconds)
+    // Wait for the pipe to become usable (up to 10 seconds). We probe with
+    // OPEN_EXISTING (works for named pipes) rather than std::fs::metadata,
+    // which never resolves pipes.
     let mut pipe_ok = false;
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        if std::fs::metadata(pipe_path).is_ok() {
-            pipe_ok = true;
-            break;
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(pipe_path)
+        {
+            Ok(_) => {
+                pipe_ok = true;
+                break;
+            }
+            Err(_) => continue,
         }
     }
 
@@ -360,7 +412,11 @@ fn get_service_bin_path(_name: &str) -> Option<String> {
 fn install_service(name: &str, exe_path: &str) -> Result<(), String> {
     use std::process::Command;
 
-    // Create the service
+    // Create the service. binPath MUST be the QUOTED path + `service` token —
+    // empirically required on the live machine: a bare binPath (`X.exe`)
+    // makes `sc start` fail with error 2 "cannot find the file specified"
+    // even when the file exists. The quotes + token are the only form that
+    // reliably reaches RUNNING (verified across installs/repairs).
     let bin_path = format!("\"{}\" service", exe_path);
     let output = Command::new("sc")
         .args([

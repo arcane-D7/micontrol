@@ -16,6 +16,7 @@ interface CastResult {
 
 export default function ScreenCast() {
   const [devices, setDevices] = useState<CastDevice[]>([]);
+  const [selectedId, setSelectedId] = useState<string>('');
   const [casting, setCasting] = useState(false);
   const [loading, setLoading] = useState(false);
   const { addToast } = useToast();
@@ -25,6 +26,8 @@ export default function ScreenCast() {
     try {
       const list = await invoke<CastDevice[]>('get_cast_devices');
       setDevices(list);
+      // Keep the old selection only if it still exists in the refreshed list.
+      setSelectedId((prev) => (list.some((d) => d.id === prev) ? prev : ''));
       if (list.length === 0) {
         addToast({ message: t('cast.noDevices'), type: 'info' });
       }
@@ -40,9 +43,12 @@ export default function ScreenCast() {
   };
 
   const handleStartCast = async () => {
+    // Use the selected device when there is one; otherwise fall back to
+    // opening the system Connect panel (which lets the user pick a sink).
+    const deviceId = selectedId || '';
     setLoading(true);
     try {
-      const result = await invoke<CastResult>('start_casting', { deviceId: '' });
+      const result = await invoke<CastResult>('start_casting', { deviceId });
       if (result.success) {
         setCasting(true);
         addToast({ message: t('cast.panelOpened'), type: 'success' });
@@ -115,10 +121,31 @@ export default function ScreenCast() {
             {t('cast.availableDevices')}
           </div>
           {devices.map((d) => (
-            <div key={d.id} className="stat-row" style={{ padding: '6px 8px', marginBottom: 4 }}>
+            <label
+              key={d.id}
+              className="stat-row"
+              style={{
+                padding: '6px 8px',
+                marginBottom: 4,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                borderRadius: 'var(--r-sm)',
+                border: selectedId === d.id ? '1px solid var(--accent)' : '1px solid transparent',
+                background: selectedId === d.id ? 'var(--surface-2)' : 'transparent',
+              }}
+            >
+              <input
+                type="radio"
+                name="cast-device"
+                checked={selectedId === d.id}
+                onChange={() => setSelectedId(d.id)}
+                style={{ accentColor: 'var(--accent)', margin: 0 }}
+              />
               <span style={{ flex: 1, fontSize: 13 }}>{d.name}</span>
               <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{d.device_type}</span>
-            </div>
+            </label>
           ))}
         </div>
       )}

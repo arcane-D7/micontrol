@@ -15,8 +15,11 @@ use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
 #[cfg(windows)]
 use commands::face::{
-    face_delete_template, face_diagnostics, face_enroll, face_get_settings, face_list_templates,
-    face_service_install, face_set_password, face_set_settings, face_status,
+    face_camera_preview_frame, face_camera_preview_start, face_camera_preview_stop,
+    face_delete_template, face_diagnostics, face_download_models, face_enroll, face_get_settings,
+    face_hello_verify, face_install_models, face_list_templates, face_list_users,
+    face_models_remove_all, face_models_status, face_password_configured, face_service_install,
+    face_set_password, face_set_settings, face_status,
 };
 #[allow(deprecated)]
 use commands::hardware::{
@@ -122,6 +125,27 @@ fn rotate_logs(app: tauri::AppHandle) -> Result<u32, String> {
     util::data_deletion::rotate_logs(&app)
 }
 
+// ── MCP integration toggle (Settings → "MCP Integration") ───────────────────
+
+/// Get whether the MCP integration socket server is enabled (persisted).
+#[tauri::command]
+fn mcp_get_enabled() -> bool {
+    crate::util::mcp_config::is_enabled()
+}
+
+/// Persist the MCP integration toggle. Applying the change requires the app
+/// to restart (the MCP socket server is started/stopped at plugin setup).
+#[tauri::command]
+fn mcp_set_enabled(enabled: bool) -> Result<(), String> {
+    crate::util::mcp_config::set_enabled(enabled);
+    if enabled {
+        log::info!("[mcp] MCP integration enabled — restart app to open the socket server (TCP localhost:4000)");
+    } else {
+        log::info!("[mcp] MCP integration disabled — socket server will stop on next restart");
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(deprecated)]
 pub fn run() {
@@ -130,8 +154,19 @@ pub fn run() {
         eprintln!("failed to initialize logging: {e:#}");
     }
     if let Some(path) = crate::debug_log::dev_log_path() {
-        log::info!(target: "devlog", "current dev log file: {}", path.display());
+        log::info!(
+            target: "devlog",
+            "persistent log file: {} (file-backed: {})",
+            path.display(),
+            crate::debug_log::is_file_logged()
+        );
     }
+    log::debug!(
+        "log file location API: {}",
+        crate::debug_log::log_file_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unavailable)".into())
+    );
 
     // ── Sentry crash reporting ──────────────────────────────────────────────
     // Initialize before the Tauri builder so that panics during setup are caught.
@@ -239,9 +274,31 @@ pub fn run() {
 
     // MCP Bridge plugin — enables AI assistants to inspect and interact
     // with the Tauri app (screenshots, DOM, IPC calls, console logs).
-    // Only loaded in debug builds to avoid shipping it in production.
+    // Debug builds only (interactive debugging aid; not shipped to users
+    // unless they opt in via the Settings → "MCP Integration" toggle below).
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+
+    // P3GLEG tauri-plugin-mcp — MCP server (screenshots, DOM access,
+    // input simulation, IPC inspection, log querying). TCP localhost:4000.
+    //
+    // Availability (same capabilities in dev and in the installed app):
+    //   - start_socket_server = MCP integration toggle (registry flag,
+    //     persisted in Settings → "MCP Integration"). The socket server is a
+    //     local backdoor that grants any same-user process arbitrary JS
+    //     execution — it MUST stay OFF unless the user explicitly enables it.
+    //   - allow_release_builds(true) — the plugin otherwise refuses to start
+    //     the socket server in release builds; the user-facing toggle needs it.
+    //   - The frontend guest bindings (`setupPluginListeners`) run in all
+    //     builds so query_page/click/read_text work identically in the
+    //     installed app when the toggle is ON.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_mcp::init_with_config(
+        tauri_plugin_mcp::PluginConfig::new("MiControl".to_string())
+            .tcp_localhost(4000)
+            .allow_release_builds(true)
+            .start_socket_server(crate::util::mcp_config::is_enabled()),
+    ));
 
     builder
         .manage(AppState::default())
@@ -373,6 +430,9 @@ pub fn run() {
             // Data deletion (S10-012)
             delete_all_user_data,
             rotate_logs,
+            // MCP integration toggle (Settings → "MCP Integration")
+            mcp_get_enabled,
+            mcp_set_enabled,
             // Data export — GDPR Art.20 (S19-16)
             export_user_data,
             reveal_in_explorer,
@@ -464,8 +524,18 @@ pub fn run() {
             face_get_settings,
             face_set_settings,
             face_set_password,
+            face_password_configured,
+            face_list_users,
+            face_hello_verify,
             face_diagnostics,
             face_enroll,
+            face_download_models,
+            face_install_models,
+            face_models_status,
+            face_models_remove_all,
+            face_camera_preview_start,
+            face_camera_preview_stop,
+            face_camera_preview_frame,
         ])
         .setup(|app| {
             // Hardware discovery — load cached profile or scan on first run

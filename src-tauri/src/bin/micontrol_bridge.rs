@@ -355,97 +355,52 @@ mod pipe_server {
     /// is HMAC-SHA256-authenticated (shared key in `%LocalAppData%\MiControl`
     /// with a freshness window), so an arbitrary process cannot forge commands.
     ///
-    /// IMPORTANT: the DACL must be built from the canonical *Everyone* SID
-    /// (S-1-1-0) rather than by name. `BuildExplicitAccessWithNameW` resolves
-    /// the trustee through the SAM/LSA account-name lookup, which can return
-    /// `ERROR_TRUSTED_RELATIONSHIP_FAILURE` or fail to translate on
-    /// non-English Windows or restricted systems; every failure path here
-    /// previously returned `None` silently, leaving the pipe SYSTEM-only and
-    /// denying the unprivileged app (exactly the v0.1.16 "pipe exists but
-    /// ACCESS_DENIED" failure). Constructing the SD from the well-known SID
-    /// avoids the name lookup entirely and is deterministic.
+    /// Implementation: build the DACL from the canonical SDDL string
+    /// `D:(A;;GA;;;WD)` (Everyone/World → Generic All) via
+    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`. This is the
+    /// deterministic, language-independent way to grant Everyone access and it
+    /// works identically whether the process runs as the interactive user or
+    /// as SYSTEM. Previous iterations used `BuildExplicitAccessWithNameW`
+    /// (silently failed on non-English/restricted Windows) and then
+    /// `CreateWellKnownSid` + `SetEntriesInAclW` — which can return errors
+    /// under SYSTEM and leave the pipe SYSTEM-only; SDDL parsing avoids all of
+    /// that. The returned SECURITY_DESCRIPTOR is heap-allocated by Windows and
+    /// intentionally leaked (must outlive the SECURITY_ATTRIBUTES usages).
     fn build_pipe_security_attributes() -> Option<windows::Win32::Security::SECURITY_ATTRIBUTES> {
-        use windows::Win32::Foundation::GENERIC_READ;
-        use windows::Win32::Foundation::GENERIC_WRITE;
+        use windows::core::PCWSTR;
         use windows::Win32::Security::Authorization::{
-            SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS, TRUSTEE_IS_SID,
-            TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
-        use windows::Win32::Security::{
-            CreateWellKnownSid, SetSecurityDescriptorDacl, WinWorldSid, ACE_FLAGS, ACL,
-            SECURITY_DESCRIPTOR,
-        };
+        use windows::Win32::Security::SECURITY_ATTRIBUTES;
 
         unsafe {
-            // Canonical *Everyone* SID (S-1-1-0) — language-independent, no
-            // account-name lookup. We allocate a fixed SID buffer (large
-            // enough for any well-known SID) and let CreateWellKnownSid fill it.
-            let mut sid_buf = [0u8; 68]; // SID max size (SID + 15 sub-authorities)
-            let mut sid_len = sid_buf.len() as u32;
-            let _ = CreateWellKnownSid(
-                WinWorldSid,
+            use windows::Win32::Security::PSECURITY_DESCRIPTOR;
+            let sddl: Vec<u16> = "D:(A;;GA;;;WD)"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut psd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+
+            let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut psd,
                 None,
-                windows::Win32::Security::PSID(sid_buf.as_mut_ptr().cast::<std::ffi::c_void>()),
-                &mut sid_len,
             );
-            let sid_ptr = sid_buf.as_mut_ptr() as *mut std::ffi::c_void;
-
-            // Build an EXPLICIT_ACCESS granting GENERIC_READ|GENERIC_WRITE to the SID.
-            let ea = EXPLICIT_ACCESS_W {
-                grfAccessPermissions: (GENERIC_READ.0 | GENERIC_WRITE.0),
-                grfAccessMode: SET_ACCESS,
-                grfInheritance: ACE_FLAGS(0), // NO_INHERITANCE
-                Trustee: TRUSTEE_W {
-                    pMultipleTrustee: std::ptr::null_mut(),
-                    // IMPORTANT: for TRUSTEE_IS_SID the TrusteeForm makes
-                    // ptstrName point at the SID bytes cast to u16*.
-                    MultipleTrusteeOperation:
-                        windows::Win32::Security::Authorization::MULTIPLE_TRUSTEE_OPERATION::default(
-                        ),
-                    TrusteeForm: TRUSTEE_IS_SID,
-                    TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
-                    ptstrName: windows_core::PWSTR(sid_ptr.cast::<u16>()),
-                },
-            };
-
-            let entries = [ea];
-            let mut new_acl: *mut ACL = std::ptr::null_mut();
-            // SAFETY: SetEntriesInAclW allocates a new ACL (leaked intentionally —
-            // it lives for the lifetime of the pipe server process).
-            let hr = SetEntriesInAclW(Some(&entries), None, &mut new_acl);
-            if hr.is_err() || new_acl.is_null() {
+            let psd_ptr = psd.0;
+            if result.is_err() || psd_ptr.is_null() {
                 let last_err = std::io::Error::last_os_error();
-                log::error!(
-                    "[micontrol_bridge] SetEntriesInAclW failed: {last_err} — pipe will be SYSTEM-only"
+                eprintln!(
+                    "[micontrol_bridge] ConvertStringSecurityDescriptorToSecurityDescriptorW failed: {last_err} — pipe will be SYSTEM-only"
                 );
                 return None;
             }
 
-            let mut sd = SECURITY_DESCRIPTOR::default();
-            // SAFETY: SetSecurityDescriptorDacl initializes the DACL of sd.
-            let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
-                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
-            );
-            if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
-                log::error!(
-                    "[micontrol_bridge] SetSecurityDescriptorDacl failed — pipe will be SYSTEM-only"
-                );
-                return None;
-            }
-
-            // Leak the SECURITY_DESCRIPTOR (heap-allocation). It MUST outlive
-            // the SECURITY_ATTRIBUTES returned here: CreateNamedPipeW reads
-            // lpSecurityDescriptor asynchronously while cloning the object
-            // attributes. A stack-allocated SD would be destroyed when this
-            // function returns, leaving a dangling pointer → the pipe inherits
-            // a garbage DACL (SYSTEM-only in practice) and the unprivileged
-            // MiControl app gets ERROR_ACCESS_DENIED on GENERIC_WRITE.
-            let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
-
-            Some(windows::Win32::Security::SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>()
-                    as u32,
-                lpSecurityDescriptor: sd_leaked.cast(),
+            // psd is a heap allocation owned by the caller now; intentionally
+            // never freed (lives for the whole pipe-server process).
+            Some(SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: psd_ptr,
                 bInheritHandle: false.into(),
             })
         }
@@ -458,6 +413,12 @@ mod pipe_server {
             .collect();
 
         while !shutdown.load(Ordering::SeqCst) {
+            // Keep the SECURITY_ATTRIBUTES alive for the duration of the
+            // CreateNamedPipeW call — passing it as an inline temporary and
+            // converting to a raw pointer in the same expression is safe, but
+            // binding it explicitly guarantees the pointed-to memory cannot be
+            // recycled between the temporary's drop and the FFI read.
+            let sec_attr = build_pipe_security_attributes();
             let handle = unsafe {
                 CreateNamedPipeW(
                     PCWSTR(pipe_name_w.as_ptr()),
@@ -467,7 +428,7 @@ mod pipe_server {
                     PIPE_BUF_SIZE,
                     PIPE_BUF_SIZE,
                     0,
-                    build_pipe_security_attributes()
+                    sec_attr
                         .as_ref()
                         .map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
                 )
@@ -637,7 +598,9 @@ mod pipe_server {
         const TEST_PIPE: &str = r"\\.\pipe\micontrol_bridge_selftest";
         let pipe_name_w: Vec<u16> = OsStr::new(TEST_PIPE).encode_wide().chain(Some(0)).collect();
 
-        // Spawn a minimal server in this process (same DACL path).
+        // Spawn a minimal server in this process (same DACL path). Keep the
+        // SECURITY_ATTRIBUTES alive explicitly (see run() for rationale).
+        let sec_attr = build_pipe_security_attributes();
         let server_handle = unsafe {
             CreateNamedPipeW(
                 PCWSTR(pipe_name_w.as_ptr()),
@@ -647,7 +610,7 @@ mod pipe_server {
                 PIPE_BUF_SIZE,
                 PIPE_BUF_SIZE,
                 0,
-                build_pipe_security_attributes()
+                sec_attr
                     .as_ref()
                     .map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
             )

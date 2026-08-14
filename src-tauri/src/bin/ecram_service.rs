@@ -23,6 +23,7 @@
 
 #![cfg(windows)]
 
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -1181,61 +1182,61 @@ mod pipe_server {
     /// access mirrors what the original Xiaomi IoTService does and is safe
     /// because the pipe payloads are opaque EC commands with their own
     /// authentication at the app layer.
+    ///
+    /// Implementation: build the DACL from the canonical SDDL string
+    /// `D:(A;;GA;;;WD)` (Everyone/World → Generic All) via
+    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`. This is the
+    /// deterministic way to grant Everyone access and works identically
+    /// whether the process runs as the interactive user or as SYSTEM.
+    ///
+    /// Previous iterations used `BuildExplicitAccessWithNameW` +
+    /// `SetSecurityDescriptorDacl` on a default-initialized
+    /// `SECURITY_DESCRIPTOR` — but `SECURITY_DESCRIPTOR::default()` is
+    /// all-zeros (never through `InitializeSecurityDescriptor`), so the DACL
+    /// was silently not applied and the pipe inherited the SYSTEM-only DACL
+    /// of the process → the unprivileged MiControl app always got
+    /// ERROR_ACCESS_DENIED (error 5) when opening `\\.\pipe\ecram_service`.
+    /// (The pipe exists — hence "exists but access denied" — and the app's
+    /// is_pipe_broker_available() probe failed, leaving the IoT tab dead.)
+    /// SDDL parsing avoids all of that. The returned SECURITY_DESCRIPTOR is
+    /// heap-allocated by Windows and intentionally leaked (must outlive the
+    /// SECURITY_ATTRIBUTES usages).
     fn build_pipe_security_attributes() -> Option<windows::Win32::Security::SECURITY_ATTRIBUTES> {
         use windows::core::PCWSTR;
-        use windows::Win32::Foundation::GENERIC_READ;
-        use windows::Win32::Foundation::GENERIC_WRITE;
         use windows::Win32::Security::{
             Authorization::{
-                BuildExplicitAccessWithNameW, SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
             },
-            SetSecurityDescriptorDacl, ACE_FLAGS, ACL, SECURITY_DESCRIPTOR,
+            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
         };
 
         unsafe {
-            // Build explicit access granting GENERIC_READ|GENERIC_WRITE to Everyone.
-            let everyone_w: Vec<u16> = "Everyone".encode_utf16().chain(Some(0)).collect();
-            let mut ea = EXPLICIT_ACCESS_W::default();
-            // SAFETY: BuildExplicitAccessWithNameW copies the trustee name internally.
-            BuildExplicitAccessWithNameW(
-                &mut ea,
-                PCWSTR(everyone_w.as_ptr()),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                SET_ACCESS,
-                ACE_FLAGS(0), // NO_INHERITANCE
-            );
+            let sddl: Vec<u16> = "D:(A;;GA;;;WD)"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut psd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
 
-            let entries = [ea];
-            let mut new_acl: *mut ACL = std::ptr::null_mut();
-            // SAFETY: SetEntriesInAclW allocates a new ACL (leaked intentionally —
-            // it lives for the lifetime of the pipe server process).
-            let _ = SetEntriesInAclW(Some(&entries), None, &mut new_acl);
-            if new_acl.is_null() {
+            let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut psd,
+                None,
+            );
+            let psd_ptr = psd.0;
+            if result.is_err() || psd_ptr.is_null() {
+                let last_err = std::io::Error::last_os_error();
+                eprintln!(
+                    "[ecram_service] ConvertStringSecurityDescriptorToSecurityDescriptorW failed: {last_err} — pipe will be SYSTEM-only"
+                );
                 return None;
             }
 
-            let mut sd = SECURITY_DESCRIPTOR::default();
-            // SAFETY: SetSecurityDescriptorDacl initializes the DACL of sd.
-            let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
-                (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
-            );
-            if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
-                return None;
-            }
-
-            // Leak the SECURITY_DESCRIPTOR (heap-allocation). It MUST outlive
-            // the SECURITY_ATTRIBUTES returned here: CreateNamedPipeW reads
-            // lpSecurityDescriptor asynchronously while cloning the object
-            // attributes. A stack-allocated SD would be destroyed when this
-            // function returns, leaving a dangling pointer → the pipe inherits
-            // a garbage DACL (SYSTEM-only in practice) and the unprivileged
-            // MiControl app gets ERROR_ACCESS_DENIED on GENERIC_WRITE.
-            let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
-
-            Some(windows::Win32::Security::SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>()
-                    as u32,
-                lpSecurityDescriptor: sd_leaked.cast(),
+            // psd is a heap allocation owned by the caller now; intentionally
+            // never freed (lives for the whole pipe-server process).
+            Some(SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: psd_ptr,
                 bInheritHandle: false.into(),
             })
         }
@@ -2019,6 +2020,138 @@ fn cli_mode(args: &[String]) -> i32 {
                 }
             }
         }
+        // Install/repair the IoTSvc Windows service pointing at the given
+        // binary path. This exists because the NSIS installer CANNOT produce
+        // the binPath that starts successfully:
+        //   `sc create ... binPath= "C:\...\IoTService.exe" service`
+        // with the quotes + `service` token EMBEDDED IN THE VALUE. NSIS's
+        // ExecToLog passes the command line through CommandLineToArgvW, which
+        // strips outer quotes, so the SCM stores a BARE path and `sc start`
+        // fails with error 2 ("cannot find the file") even when the file
+        // exists (verified empirically across installs — only the quoted
+        // form reaches RUNNING). std::process::Command escapes the embedded
+        // quotes correctly (`\"` → literal quote in the token), exactly like
+        // hw::ecram_service_mgmt::install_service does.
+        // Deletes any existing entry (async-safe via SCM semantics: delete is
+        // synchronous when no handles are open) and recreates + starts.
+        "install-service" => {
+            if args.len() < 2 {
+                eprintln!("Usage: install-service <path-to-IoTService.exe>");
+                return 1;
+            }
+            let target = &args[1];
+            if !std::path::Path::new(target).exists() {
+                eprintln!("ERROR: target binary not found: {target}");
+                return 1;
+            }
+            let bin_path = format!("\"{target}\" service");
+            // Stop + delete any existing IoTSvc (ignore errors).
+            let _ = std::process::Command::new("sc")
+                .args(["stop", "IoTSvc"])
+                .creation_flags(0x08000000)
+                .output();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = std::process::Command::new("sc")
+                .args(["delete", "IoTSvc"])
+                .creation_flags(0x08000000)
+                .output();
+            // DeleteService is async; wait until `sc query` reports gone.
+            for _ in 0..20 {
+                let out = std::process::Command::new("sc")
+                    .args(["query", "IoTSvc"])
+                    .creation_flags(0x08000000)
+                    .output();
+                let gone = match out {
+                    Ok(o) => !o.status.success(),
+                    Err(_) => true,
+                };
+                if gone {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            // Create with the QUOTED binPath + `service` token (the proven form).
+            let create = std::process::Command::new("sc")
+                .args([
+                    "create",
+                    "IoTSvc",
+                    "binPath=",
+                    &bin_path,
+                    "start=",
+                    "auto",
+                    "DisplayName=",
+                    "MiControl IoT Bridge Service",
+                ])
+                .creation_flags(0x08000000)
+                .output();
+            match create {
+                Ok(o) if o.status.success() => {
+                    let _ = std::process::Command::new("sc")
+                        .args(["config", "IoTSvc", "obj=", "LocalSystem"])
+                        .creation_flags(0x08000000)
+                        .output();
+                    let _ = std::process::Command::new("sc")
+                        .args([
+                            "failure",
+                            "IoTSvc",
+                            "reset=",
+                            "86400",
+                            "actions=",
+                            "restart/5000/restart/10000/restart/30000",
+                        ])
+                        .creation_flags(0x08000000)
+                        .output();
+                    // Start + poll for RUNNING (StartService returns at START_PENDING).
+                    let start = std::process::Command::new("sc")
+                        .args(["start", "IoTSvc"])
+                        .creation_flags(0x08000000)
+                        .output();
+                    let start_err = match &start {
+                        Ok(o) => {
+                            String::from_utf8_lossy(&o.stdout).to_string()
+                                + &String::from_utf8_lossy(&o.stderr)
+                        }
+                        Err(e) => e.to_string(),
+                    };
+                    if let Ok(o) = &start {
+                        if !o.status.success() && !start_err.contains("1056") {
+                            eprintln!("ERROR: sc start IoTSvc failed: {start_err}");
+                            return 1;
+                        }
+                    }
+                    // Poll RUNNING (up to ~15 s).
+                    for _ in 0..30 {
+                        let q = std::process::Command::new("sc")
+                            .args(["query", "IoTSvc"])
+                            .creation_flags(0x08000000)
+                            .output();
+                        let text = match &q {
+                            Ok(o) => String::from_utf8_lossy(&o.stdout),
+                            Err(_) => std::borrow::Cow::Borrowed(""),
+                        };
+                        if text.contains("RUNNING") {
+                            println!("OK: IoTSvc is RUNNING (binPath={bin_path})");
+                            return 0;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                    eprintln!("ERROR: IoTSvc did not reach RUNNING within 15s");
+                    1
+                }
+                Ok(o) => {
+                    eprintln!(
+                        "ERROR: sc create IoTSvc failed: {}{}",
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    );
+                    1
+                }
+                Err(e) => {
+                    eprintln!("ERROR: could not run sc.exe: {e}");
+                    1
+                }
+            }
+        }
         _ => {
             eprintln!("Unknown command: {}", args[0]);
             1
@@ -2027,13 +2160,28 @@ fn cli_mode(args: &[String]) -> i32 {
 }
 
 fn main() {
-    // When started by SCM, there are no meaningful CLI args (or just the service name).
-    // Try to connect to SCM first. If it succeeds, we're running as a service.
-    // If it fails, we're running from a terminal — fall through to CLI mode.
+    // When started by SCM, the args are the SCM's service-name invocation:
+    // the Service Control Manager launches the binPath and passes the service
+    // NAME as argv[1] (e.g. `IoTService.exe IoTSvc`), NOT `service`.
+    //
+    // This binary must treat BOTH `service` AND the service name "IoTSvc" as
+    // "run in SCM mode" (StartServiceCtrlDispatcherW). Previously it only
+    // accepted the literal argument `service`, so an IoTSvc created with
+    // binPath = `"...\IoTService.exe"` (no trailing `service` arg — what the
+    // NSIS hook and any third-party service reconfigure use) was started by
+    // SCM with argv[1]="IoTSvc" → fell into CLI mode → printed
+    // "Unknown command: IoTSvc" → exited immediately → `sc start` failed
+    // with error 2 while the installer claimed success. The same fix must
+    // hold for any binPath that does NOT append `service`.
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // If the user explicitly asked for CLI mode, skip the SCM attempt.
-    if !args.is_empty() && args[0] != "service" {
+    // Treat a bare "service" OR the literal service name as SCM invocation.
+    let looks_like_scm = args
+        .first()
+        .is_some_and(|a| a.eq_ignore_ascii_case("service") || a.eq_ignore_ascii_case("IoTSvc"));
+
+    // If a non-service CLI command was explicitly requested, run it.
+    if !args.is_empty() && !looks_like_scm {
         std::process::exit(cli_mode(&args));
     }
 

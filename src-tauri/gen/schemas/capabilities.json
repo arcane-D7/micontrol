@@ -9,7 +9,8 @@
       "updater:default",
       "process:default",
       "shell:default",
-      "mcp-bridge:default"
+      "mcp-bridge:default",
+      "mcp:default"
     ]
   }
 }

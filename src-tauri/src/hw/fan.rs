@@ -45,6 +45,7 @@ const FAN_REG_SPEED: &str = "FixedSpeed";
 // domain. The Power field is in deciwatts (×0.1 W); Temperature is Celsius.
 // One WMI query returns all participants, so we read temps and TDP together.
 
+#[derive(Clone, Debug)]
 pub struct EsifReadings {
     pub cpu_temp: Option<f32>,
     pub gpu_temp: Option<f32>,
@@ -57,6 +58,34 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
         use crate::hw::wmi_cache;
         use crate::util::wmi_extract;
         use std::collections::HashMap;
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        use std::sync::OnceLock;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // S37-005: Failure cache. The unprivileged MiControl process is DENIED
+        // access to the EsifDeviceInformation WMI class (HRESULT 0x80041003),
+        // so this query is *expected* to fail on every poll. Before the cache,
+        // each 2 s fan poll issued a doomed WMI round-trip AND logged a WARN —
+        // flooding the log and wasting a WMI connection. We remember a failure
+        // for 60 s and short-circuit afterwards.
+        static LAST_FAILURE: OnceLock<AtomicU64> = OnceLock::new();
+        const FAILURE_CACHE_SECS: u64 = 60;
+        let last_fail = LAST_FAILURE.get_or_init(|| AtomicU64::new(0));
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Skip the doomed query while we're inside the failure window.
+        if last_fail
+            .load(AtomicOrdering::Relaxed)
+            .saturating_add(FAILURE_CACHE_SECS)
+            > now_epoch
+        {
+            log::debug!(target: "hw::fan", "ESIF WMI query in failure cache — skipping");
+            return Err(crate::hw::errors::HardwareError::Other(
+                "ESIF WMI denied (cached)".into(),
+            ));
+        }
 
         let query_result = wmi_cache::with_wmi(|wmi| {
             match wmi
@@ -64,9 +93,9 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
             {
                 Ok(r) => Ok(r),
                 Err(e) => {
-                    log::warn!(target: "hw::fan", "ESIF raw_query error: {e}");
-                    // Use anyhow::Error::from to preserve the WMIError type
-                    // so ShouldRetry can classify permanent HRESULTs.
+                    // Only debug-log here — the WARN is logged once per window
+                    // on the outer error path (below).
+                    last_fail.store(now_epoch, AtomicOrdering::Relaxed);
                     Err(anyhow::Error::from(e))
                 }
             }
@@ -75,7 +104,8 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
         let results: Vec<HashMap<String, wmi::Variant>> = match query_result {
             Ok(r) => r,
             Err(e) => {
-                log::warn!(target: "hw::fan", "ESIF WMI query failed: {e}");
+                last_fail.store(now_epoch, AtomicOrdering::Relaxed);
+                log::warn!(target: "hw::fan", "ESIF WMI query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
                 return Err(e);
             }
         };
@@ -166,11 +196,37 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
 /// row open the circuit and skip elevated attempts for `BACKOFF_SECS` (60s).
 pub async fn get_elevated_thermal_readings() -> EsifReadings {
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex as StdMutex, OnceLock};
     use std::time::{Duration as StdDuration, Instant as StdInstant};
 
     static CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
-    static BACKOFF_UNTIL: OnceLock<std::sync::Mutex<Option<StdInstant>>> = OnceLock::new();
+    static BACKOFF_UNTIL: OnceLock<StdMutex<Option<StdInstant>>> = OnceLock::new();
+
+    // ── S37-004: TTL cache of the last successful elevated thermal read ──────
+    // The app polls `get_fan_info` every 2 s (fast poll), and each call with
+    // empty local temps triggers a NEW elevated `read_thermal_readings`
+    // command file. The scheduled-task helper processes one command per
+    // invocation, so a 2 s thermal poll floods the single slot and starves
+    // writes like set_performance_mode / set_charging_threshold until their
+    // 15 s timeouts. Cache the successful reading for 15 s: the fan poll can
+    // reuse it, and only one elevated round-trip per cache window is made.
+    static CACHE: OnceLock<StdMutex<Option<(StdInstant, EsifReadings)>>> = OnceLock::new();
+    const THERMAL_CACHE_SECS: u64 = 15;
+
+    let cache = CACHE.get_or_init(|| StdMutex::new(None));
+    if let Ok(mut guard) = cache.lock() {
+        if let Some((at, ref readings)) = *guard {
+            if at.elapsed() < StdDuration::from_secs(THERMAL_CACHE_SECS) {
+                log::debug!(
+                    target: "hw::fan",
+                    "Elevated thermal read served from cache ({} ms old)",
+                    at.elapsed().as_millis()
+                );
+                return readings.clone();
+            }
+        }
+        *guard = None; // Expired — re-fetch.
+    }
 
     const MAX_CONSECUTIVE_FAILURES: u32 = 3;
     const BACKOFF_SECS: u64 = 60;
@@ -283,11 +339,18 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
         }
     }
 
-    EsifReadings {
+    let readings = EsifReadings {
         cpu_temp,
         gpu_temp,
         tdp_watts,
+    };
+
+    // ── S37-004: Store the successful reading in the TTL cache ──────────────
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((StdInstant::now(), readings.clone()));
     }
+
+    readings
 }
 
 /// Compute `FanInfo` using only the local (in-process) WMI reads.

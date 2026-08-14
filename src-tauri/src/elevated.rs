@@ -29,8 +29,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Called from `main()` when `--elevated` is present in argv.
-/// Always terminates via `std::process::exit`.
-pub fn run() -> ! {
+/// Processes all pending elevated commands and returns (clean shutdown).
+pub fn run() {
     // Initialize logging so elevated helper errors are visible in the dev trace log.
     if let Err(e) = crate::debug_log::init_logging() {
         eprintln!("Elevated helper: failed to initialize logging: {e}");
@@ -39,8 +39,29 @@ pub fn run() -> ! {
 
     let dir = elev_dir();
     let wanted_request = request_id_from_argv();
-    let pending = match select_pending_command(&dir, wanted_request.as_deref()) {
-        Ok(p) => p,
+
+    // S37-002: Process ALL pending commands, not just the most recent one.
+    // The app polls hardware every ~2 s (get_fan_info → thermal) and every
+    // 15 s (perf/battery), each writing its own elev_cmd. The scheduled task
+    // dispatches one helper process per /run, and that process must drain the
+    // whole queue — including set_performance_mode — or those requests starve
+    // behind the newer thermal poll until their 15 s timeout expires.
+    let pending_list = match select_all_pending_commands(&dir, wanted_request.as_deref()) {
+        Ok(list) if list.is_empty() => {
+            log::info!("Elevated helper: no pending commands");
+            let fallback_result_path = wanted_request
+                .as_deref()
+                .map(result_path_for_request)
+                .unwrap_or_else(|| dir.join("elev_result.json"));
+            let result = make_err("No pending elevated command file found".to_string());
+            let json = serde_json::to_string(&result)
+                .unwrap_or_else(|_| r#"{"ok":false,"error":"serialize_error"}"#.to_string());
+            let _ = std::fs::write(&fallback_result_path, json);
+            // S24-001: Flush nonces before exit to prevent nonce loss.
+            flush_nonces();
+            std::process::exit(0);
+        }
+        Ok(list) => list,
         Err(e) => {
             let fallback_result_path = wanted_request
                 .as_deref()
@@ -56,6 +77,18 @@ pub fn run() -> ! {
         }
     };
 
+    for pending in &pending_list {
+        process_pending(pending);
+    }
+
+    // S37-003: Flush nonces BEFORE the process ends, then return normally.
+    // Using std::process::exit(0) here while COM/WMI state is alive triggered
+    // 0xc0000005 in combase.dll at shutdown — returning from main lets the
+    // runtime unwind properly.
+    flush_nonces();
+}
+
+fn process_pending(pending: &PendingCommand) {
     // Remove stale result from a previous run for this same request id.
     let _ = std::fs::remove_file(&pending.result_path);
 
@@ -167,9 +200,8 @@ pub fn run() -> ! {
             log::warn!("Failed to write result file: {e}");
         }
     }
-    // S24-001: Flush nonces before exit to prevent nonce loss.
-    flush_nonces();
-    std::process::exit(0);
+    // Nonce persistence happens at the end of run() (S37-003) — this function
+    // returns so run() can process the next pending command.
 }
 
 /// Tracks seen nonces to detect replay attacks, with timestamps for TTL.
@@ -528,6 +560,14 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 Err(e) => make_err(e.to_string()),
             }
         }
+
+        // pnputil /scan-devices REQUIRES administrator privileges. When the
+        // app runs as a normal user the direct call fails (non-zero exit /
+        // access denied), so this must run through the elevated bridge.
+        "trigger_driver_scan" => match crate::hw::update::trigger_driver_scan() {
+            Ok(msg) => make_ok(Value::String(msg)),
+            Err(e) => make_err(e.to_string()),
+        },
 
         // ── Diagnostic commands ───────────────────────────────────────────
         // These are read-only probes used by the test binary to verify which
@@ -1629,6 +1669,47 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
+        // S42-020: Install + start the MiControlFace auth service (LocalSystem).
+        // Called from the Face Unlock tab when `service_installed` is false.
+        // Uses the bundled micontrol_face_svc.exe `install` command. Runs via
+        // the elevated helper (scheduled task / service pipe / UAC), so the
+        // SCM `OpenSCManager` write access never fails with ERROR_ACCESS_DENIED.
+        "face_service_install" => match install_face_service() {
+            Ok(status) => make_ok(serde_json::to_value(status).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
+
+        // S43-001: Store the Windows sign-in password in an LSA Secret. Requires
+        // `POLICY_CREATE_SECRET` (SYSTEM/elevated) — routed through the elevated
+        // helper so the unprivileged app UI can save it once at enrollment time.
+        // The password is wiped from memory by the caller-side SecureZeroMemory.
+        "face_set_password" => {
+            let user = cmd.args["user"].as_str().unwrap_or_default().to_string();
+            let password = cmd.args["password"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if user.is_empty() || password.is_empty() {
+                return make_err("face_set_password: missing user or password".to_string());
+            }
+            match crate::hw::face::credvault::store_password(&user, &password) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(format!("face_set_password: {e}")),
+            }
+        }
+
+        // S43-002: Check whether an LSA Secret exists for `user`. Read requires
+        // `POLICY_GET_PRIVATE_INFORMATION` (SYSTEM/elevated), so this must run
+        // elevated too — but it should never prompt UAC (read-only probe).
+        "face_password_configured" => {
+            let user = cmd.args["user"].as_str().unwrap_or_default().to_string();
+            if user.is_empty() {
+                return make_err("face_password_configured: missing user".to_string());
+            }
+            let configured = crate::hw::face::credvault::read_password(&user).is_ok();
+            make_ok(serde_json::json!({ "configured": configured, "unknown": false }))
+        }
+
         unknown => make_err(format!("Unknown elevated command: {unknown}")),
     }
 }
@@ -1664,7 +1745,43 @@ fn install_bridge_service() -> Result<Value, String> {
         "micontrol_bridge.exe not found (not bundled with this installation)".to_string()
     })?;
 
-    let output = Command::new(&bridge_exe)
+    // S36-006 (pipe-DACL self-heal): ensure the deployed bridge binary is the
+    // one we just found. If the found binary lives in the dev target dir while
+    // the installed copy under Program Files is stale (e.g. pre-SDDL-DACL),
+    // copy the fresh binary over the installed path so the service is
+    // (re)installed from the current code. This runs inside the elevated
+    // helper, so writing to `C:\Program Files\miControl\` is permitted.
+    let installed_bridge = std::env::var("ProgramFiles")
+        .map(|pf| {
+            PathBuf::from(&pf)
+                .join("miControl")
+                .join("micontrol_bridge.exe")
+        })
+        .unwrap_or_else(|_| bridge_exe.clone());
+    if installed_bridge != bridge_exe {
+        let _ = std::fs::create_dir_all(
+            installed_bridge
+                .parent()
+                .unwrap_or(PathBuf::new().as_path()),
+        );
+        if let Err(e) = std::fs::copy(&bridge_exe, &installed_bridge) {
+            log::warn!(
+                "install_bridge_service: could not refresh installed bridge copy \
+                 ({installed_bridge:?}) from {bridge_exe:?}: {e}"
+            );
+        } else {
+            log::info!(
+                "install_bridge_service: refreshed installed bridge binary from {bridge_exe:?}"
+            );
+        }
+    }
+
+    // Re-locate AFTER the copy: the service must be installed from the
+    // deployed (Program Files) copy when available, so the SCM record points
+    // at a stable path.
+    let install_exe = find_deployed_bridge_exe().unwrap_or(bridge_exe);
+
+    let output = Command::new(&install_exe)
         .arg("install")
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -1687,9 +1804,132 @@ fn install_bridge_service() -> Result<Value, String> {
     Err("Bridge service only supported on Windows".to_string())
 }
 
+/// S42-020: Install and start the `MiControlFace` auth service (LocalSystem).
+///
+/// Locates the bundled `micontrol_face_svc.exe` (next to the current exe, in
+/// Program Files, or in the dev target dir) and runs its `install` command.
+/// Mirrors `install_bridge_service`: deploys a fresh copy under Program Files
+/// before registering the SCM service so the record points at a stable path.
+#[cfg(windows)]
+fn install_face_service() -> Result<Value, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let svc_exe = find_face_svc_exe().ok_or_else(|| {
+        "micontrol_face_svc.exe not found (did the build enable the `face` feature?)".to_string()
+    })?;
+
+    // Deploy/refresh the Program Files copy so the SCM record is stable.
+    let installed_svc = std::env::var("ProgramFiles")
+        .map(|pf| {
+            PathBuf::from(&pf)
+                .join("miControl")
+                .join("micontrol_face_svc.exe")
+        })
+        .unwrap_or_else(|_| svc_exe.clone());
+    if installed_svc != svc_exe {
+        if let Some(parent) = installed_svc.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::copy(&svc_exe, &installed_svc) {
+            log::warn!(
+                "install_face_service: could not refresh installed copy \
+                 ({installed_svc:?}) from {svc_exe:?}: {e}"
+            );
+        } else {
+            log::info!("install_face_service: refreshed installed copy from {svc_exe:?}");
+        }
+    }
+
+    let install_exe = find_deployed_face_svc_exe().unwrap_or(svc_exe);
+
+    let output = Command::new(&install_exe)
+        .arg("install")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("Failed to run micontrol_face_svc install: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let combined = if stdout.is_empty() { stderr } else { stdout };
+    let exit_ok = output.status.success();
+
+    Ok(json!({
+        "exit_code": output.status.code().unwrap_or(-1),
+        "output": combined,
+        "service_installed": exit_ok,
+    }))
+}
+
+#[cfg(not(windows))]
+fn install_face_service() -> Result<Value, String> {
+    Err("Face auth service only supported on Windows".to_string())
+}
+
+/// Locate the bundled `micontrol_face_svc.exe` (dev target dir or next to the
+/// current exe / Program Files).
+#[cfg(windows)]
+fn find_face_svc_exe() -> Option<PathBuf> {
+    // 1. Same directory as current exe (installed mode).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("micontrol_face_svc.exe");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    // 2. Program Files\miControl.
+    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+    let candidate = PathBuf::from(&pf)
+        .join("miControl")
+        .join("micontrol_face_svc.exe");
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    // 3. Dev target dir.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let candidate = PathBuf::from(manifest)
+        .join("target")
+        .join("debug")
+        .join("micontrol_face_svc.exe");
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    None
+}
+
+/// Locate the *deployed* face service binary (Program Files over dev dir).
+#[cfg(windows)]
+fn find_deployed_face_svc_exe() -> Option<PathBuf> {
+    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+    let candidate = PathBuf::from(&pf)
+        .join("miControl")
+        .join("micontrol_face_svc.exe");
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    find_face_svc_exe()
+}
+
+#[cfg(not(windows))]
+fn find_deployed_face_svc_exe() -> Option<PathBuf> {
+    None
+}
+
 /// Locate the bundled `micontrol_bridge.exe`.
 #[cfg(windows)]
 fn find_bridge_exe() -> Option<PathBuf> {
+    // 0. %LOCALAPPDATA%\MiControl\micontrol_bridge.exe — an explicitly updated
+    // copy the app can write to without admin (used to deploy a fixed bridge).
+    if let Ok(base) = std::env::var("LOCALAPPDATA") {
+        let candidate = PathBuf::from(base)
+            .join("MiControl")
+            .join("micontrol_bridge.exe");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
     // 1. Same directory as current exe (installed mode).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -1719,8 +1959,22 @@ fn find_bridge_exe() -> Option<PathBuf> {
     None
 }
 
+/// Locate the *deployed* bridge binary (Program Files over dev/localappdata)
+/// so the SCM service record points at a stable path after self-healing.
+#[cfg(windows)]
+fn find_deployed_bridge_exe() -> Option<PathBuf> {
+    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+    let candidate = PathBuf::from(&pf)
+        .join("miControl")
+        .join("micontrol_bridge.exe");
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    find_bridge_exe()
+}
+
 #[cfg(not(windows))]
-fn find_bridge_exe() -> Option<PathBuf> {
+fn find_deployed_bridge_exe() -> Option<PathBuf> {
     None
 }
 
@@ -1772,11 +2026,18 @@ fn result_path_for_request(request_id: &str) -> PathBuf {
     elev_dir().join(format!("elev_result_{request_id}.json"))
 }
 
-fn select_pending_command(
+/// Section a list of ALL pending commands (S37-002).
+///
+/// When the scheduled task dispatches the helper without a `--request-id`,
+/// the helper drains every `elev_cmd_*.json` that has no matching result yet,
+/// ordered oldest-first. This prevents newer high-frequency polls (thermal via
+/// `get_fan_info`) from starving lower-frequency writes such as
+/// `set_performance_mode` / `set_charging_threshold`.
+fn select_all_pending_commands(
     dir: &std::path::Path,
     wanted: Option<&str>,
-) -> Result<PendingCommand, String> {
-    // Fast path: explicit --request-id from UAC fallback launch.
+) -> Result<Vec<PendingCommand>, String> {
+    // Fast path: explicit --request-id (UAC fallback) — exactly one command.
     if let Some(request_id) = wanted {
         let cmd_path = cmd_path_for_request(request_id);
         if !cmd_path.exists() {
@@ -1784,19 +2045,16 @@ fn select_pending_command(
                 "request-specific command file not found for request_id={request_id}"
             ));
         }
-        return Ok(PendingCommand {
+        return Ok(vec![PendingCommand {
             request_id: request_id.to_string(),
             result_path: result_path_for_request(request_id),
             cmd_path,
-        });
+        }]);
     }
 
-    // Fallback: no --request-id (scheduled task path). Scan the directory for
-    // the most recent `elev_cmd_*.json` file that doesn't have a matching
-    // `elev_result_*.json` yet.
     let entries = std::fs::read_dir(dir).map_err(|e| format!("Cannot read elev dir: {e}"))?;
 
-    let mut best: Option<(std::time::SystemTime, String)> = None;
+    let mut cmds: Vec<(std::time::SystemTime, String)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -1814,26 +2072,29 @@ fn select_pending_command(
             continue;
         }
 
-        // Pick the newest file by modification time
         let mtime = entry
             .metadata()
             .ok()
             .and_then(|m| m.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
 
-        if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
-            best = Some((mtime, request_id.to_string()));
-        }
+        // Verify the file is fresh enough to dispatch (avoid stale files from
+        // previous app sessions with long-pending requests).
+        cmds.push((mtime, request_id.to_string()));
     }
 
-    match best {
-        Some((_, request_id)) => Ok(PendingCommand {
+    // Oldest-first so earlier writes (e.g. set_performance_mode) get processed
+    // before the newer thermal poll in the same batch.
+    cmds.sort_by_key(|(mtime, _)| *mtime);
+
+    Ok(cmds
+        .into_iter()
+        .map(|(_, request_id)| PendingCommand {
             request_id: request_id.clone(),
             cmd_path: cmd_path_for_request(&request_id),
             result_path: result_path_for_request(&request_id),
-        }),
-        None => Err("No pending elevated command file found".to_string()),
-    }
+        })
+        .collect())
 }
 
 #[cfg(test)]

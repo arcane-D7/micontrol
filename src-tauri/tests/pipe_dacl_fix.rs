@@ -19,41 +19,37 @@ use windows::Win32::Storage::FileSystem::{
 
 const TEST_PIPE: &str = r"\\.\pipe\micontrol_dacl_verify";
 
-/// Same logic as `build_pipe_security_attributes()` in micontrol_bridge/ecram_service.
+/// Same logic as `build_pipe_security_attributes()` in
+/// micontrol_bridge/ecram_service (SDDL Everyone → Generic All).
 fn build_test_security() -> Option<windows::Win32::Security::SECURITY_ATTRIBUTES> {
-    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::core::PCWSTR;
     use windows::Win32::Security::{
-        Authorization::{
-            BuildExplicitAccessWithNameW, SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS,
-        },
-        SetSecurityDescriptorDacl, ACE_FLAGS, ACL, SECURITY_DESCRIPTOR,
+        Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
+        PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
     };
     unsafe {
-        let everyone_w: Vec<u16> = "Everyone".encode_utf16().chain(Some(0)).collect();
-        let mut ea = EXPLICIT_ACCESS_W::default();
-        BuildExplicitAccessWithNameW(
-            &mut ea,
-            PCWSTR(everyone_w.as_ptr()),
-            GENERIC_READ.0 | GENERIC_WRITE.0,
-            SET_ACCESS,
-            ACE_FLAGS(0),
+        let sddl: Vec<u16> = "D:(A;;GA;;;WD)"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut psd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+
+        let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut psd,
+            None,
         );
-        let entries = [ea];
-        let mut new_acl: *mut ACL = std::ptr::null_mut();
-        if SetEntriesInAclW(Some(&entries), None, &mut new_acl).is_err() || new_acl.is_null() {
+        let psd_ptr = psd.0;
+        if result.is_err() || psd_ptr.is_null() {
             return None;
         }
-        let mut sd = SECURITY_DESCRIPTOR::default();
-        let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
-            (&mut sd as *mut SECURITY_DESCRIPTOR).cast(),
-        );
-        if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
-            return None;
-        }
-        let sd_leaked = Box::leak(Box::new(sd)) as *mut SECURITY_DESCRIPTOR;
-        Some(windows::Win32::Security::SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: sd_leaked.cast(),
+
+        // psd is a heap allocation owned by the caller; intentionally leaked
+        // (lives for the whole test process).
+        Some(SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: psd_ptr,
             bInheritHandle: false.into(),
         })
     }

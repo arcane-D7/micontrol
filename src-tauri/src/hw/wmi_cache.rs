@@ -355,10 +355,7 @@ mod tests {
         // WmiQuery is a transient query error, NOT a connection error
         let err: anyhow::Error = anyhow::Error::from(HardwareError::WmiQuery {
             query: "SELECT * FROM Win32_Processor".to_string(),
-            source: Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "query failed",
-            )),
+            source: Box::new(std::io::Error::other("query failed")),
         });
         assert!(!is_connection_error(&err));
     }

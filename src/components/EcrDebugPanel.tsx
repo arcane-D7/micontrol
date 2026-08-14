@@ -130,22 +130,16 @@ export default function EcrDebugPanel() {
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <input
+            className="text-input"
             type="text"
             placeholder={t('ecrDebug.addressPlaceholder')}
             aria-label={t('ecrDebug.addressPlaceholder')}
             value={address}
             onChange={(e) => setAddress(e.target.value)}
-            style={{
-              flex: 1,
-              minWidth: 120,
-              padding: '6px 8px',
-              borderRadius: 'var(--r-xs)',
-              border: '1px solid var(--border)',
-              background: 'var(--bg)',
-              color: 'var(--text)',
-            }}
+            style={{ flex: 1, minWidth: 120 }}
           />
           <input
+            className="text-input"
             type="number"
             placeholder={t('ecrDebug.countPlaceholder')}
             aria-label={t('ecrDebug.countPlaceholder')}
@@ -153,14 +147,7 @@ export default function EcrDebugPanel() {
             onChange={(e) => setCount(e.target.value)}
             min={1}
             max={256}
-            style={{
-              width: 80,
-              padding: '6px 8px',
-              borderRadius: 'var(--r-xs)',
-              border: '1px solid var(--border)',
-              background: 'var(--bg)',
-              color: 'var(--text)',
-            }}
+            style={{ width: 80 }}
           />
           <button
             className="btn btn-primary"
@@ -180,36 +167,22 @@ export default function EcrDebugPanel() {
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <input
+            className="text-input"
             type="text"
             placeholder={t('ecrDebug.addressPlaceholder')}
             aria-label={t('ecrDebug.addressPlaceholder')}
             value={address}
             onChange={(e) => setAddress(e.target.value)}
-            style={{
-              flex: 1,
-              minWidth: 120,
-              padding: '6px 8px',
-              borderRadius: 'var(--r-xs)',
-              border: '1px solid var(--border)',
-              background: 'var(--bg)',
-              color: 'var(--text)',
-            }}
+            style={{ flex: 1, minWidth: 120 }}
           />
           <input
+            className="text-input"
             type="text"
             placeholder={t('ecrDebug.hexDataPlaceholder')}
             aria-label={t('ecrDebug.hexDataPlaceholder')}
             value={hexData}
             onChange={(e) => setHexData(e.target.value)}
-            style={{
-              flex: 2,
-              minWidth: 160,
-              padding: '6px 8px',
-              borderRadius: 'var(--r-xs)',
-              border: '1px solid var(--border)',
-              background: 'var(--bg)',
-              color: 'var(--text)',
-            }}
+            style={{ flex: 2, minWidth: 160 }}
           />
           <button
             className="btn btn-primary"

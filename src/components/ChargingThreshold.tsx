@@ -1,7 +1,12 @@
 import { useState } from 'react';
 import { t } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
+import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
 import InfoModal, { InfoRow, InfoSection } from './InfoModal';
+
+// `t` from useI18n types keys as a literal union; error.ts' TranslateFn takes
+// any string — wrap it (matches the pattern used across the codebase).
+const translate: TranslateFn = (key) => t(key as never);
 
 interface Props {
   threshold: number;
@@ -30,7 +35,7 @@ export default function ChargingThreshold({ threshold, onThresholdChange }: Prop
       addToast({ message: t('charging.applied'), type: 'success' });
     } catch (e) {
       addToast({
-        message: `${t('charging.error')}: ${String(e)}`,
+        message: `${t('charging.error')}: ${getUserFriendlyMessage(parseErrorResponse(e), translate)}`,
         type: 'error',
         onRetry: () => handleChange(level),
       });
@@ -51,7 +56,7 @@ export default function ChargingThreshold({ threshold, onThresholdChange }: Prop
       });
     } catch (e) {
       addToast({
-        message: `${t('charging.error')}: ${String(e)}`,
+        message: `${t('charging.error')}: ${getUserFriendlyMessage(parseErrorResponse(e), translate)}`,
         type: 'error',
         onRetry: () => handleToggle(!checked),
       });

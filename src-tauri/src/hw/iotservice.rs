@@ -1993,8 +1993,8 @@ mod tests {
         // We need a valid File handle; use the test binary itself.
         let exe = std::env::current_exe().expect("get current exe path in test");
         let mut file = std::fs::File::open(&exe).expect("open test binary in test");
-        let mut buf: &mut [u8] = &mut [];
-        let result = read_exact_timeout(&mut file, &mut buf, std::time::Duration::from_secs(1));
+        let buf: &mut [u8] = &mut [];
+        let result = read_exact_timeout(&mut file, buf, std::time::Duration::from_secs(1));
         assert!(result.is_ok(), "zero-length read should succeed");
     }
 

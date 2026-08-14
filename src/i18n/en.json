@@ -666,7 +666,13 @@
     "errorLoggingDesc": "Automatically logs errors to a local file for troubleshooting. Logs are retained for 7 days and automatically deleted thereafter.",
     "errorLoggingEnable": "Enable error logging",
     "errorLogView": "View error log",
-    "errorLogClear": "Clear log"
+    "errorLogClear": "Clear log",
+    "mcpIntegration": "MCP Integration",
+    "mcpIntegrationDesc": "Enables the MCP socket server (localhost:4000) allowing AI agents and debug tools to inspect and control the app (read content, click, type, navigate). Requires an app restart to take effect.",
+    "mcpIntegrationEnable": "Enable MCP integration",
+    "mcpIntegrationNote": "Security note: when enabled, any local process can control the app. Keep it off unless you are actively using an MCP client.",
+    "mcpIntegrationRestartHint": "Restart the app to start the MCP socket server on localhost:4000.",
+    "mcpIntegrationOffHint": "The MCP socket server will shut down on the next app restart."
   },
   "onboarding": {
     "welcome": {

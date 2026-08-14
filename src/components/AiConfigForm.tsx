@@ -121,6 +121,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
         <div style={{ display: 'flex', gap: 8 }}>
           <input
             id="settings-api-key"
+            className="text-input"
             type={showKey ? 'text' : 'password'}
             value={draft.openai_api_key}
             onChange={(e) => update('openai_api_key', e.target.value)}
@@ -163,6 +164,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
       >
         <input
           id="settings-base-url"
+          className="text-input"
           type="text"
           value={draft.openai_base_url}
           onChange={(e) => update('openai_base_url', e.target.value)}
@@ -204,6 +206,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
         {selectedPreset === 'custom' && (
           <input
             id="settings-custom-model"
+            className="text-input"
             type="text"
             value={customModel}
             onChange={(e) => handleCustomModelChange(e.target.value)}

@@ -36,6 +36,8 @@ export interface AppSettings {
   ai_poll_interval_sec: number;
   /** How many times per day to automatically send logs to AI for analysis. */
   ai_daily_analyses: number;
+  /** MCP integration (DOM control for AI agents / debug tools) — opt-in. */
+  mcp_integration_enabled: boolean;
 }
 
 /** Context for AI analysis — snapshot of current hardware state. */

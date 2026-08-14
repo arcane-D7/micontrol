@@ -29,6 +29,30 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
         use crate::hw::wmi_cache;
         use crate::util::wmi_extract;
         use std::collections::HashMap;
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        use std::sync::OnceLock;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // S37-005: Mirror of fan.rs — the MSAcpi_ThermalZoneTemperature WMI
+        // class is also denied to unprivileged callers (0x80041003). Cache the
+        // failure for 60 s so the 2 s fan poll doesn't spam WMI + the log.
+        static LAST_FAILURE: OnceLock<AtomicU64> = OnceLock::new();
+        const FAILURE_CACHE_SECS: u64 = 60;
+        let last_fail = LAST_FAILURE.get_or_init(|| AtomicU64::new(0));
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if last_fail
+            .load(AtomicOrdering::Relaxed)
+            .saturating_add(FAILURE_CACHE_SECS)
+            > now_epoch
+        {
+            log::debug!(target: "hw::thermal", "ACPI thermal WMI query in failure cache — skipping");
+            return Err(HardwareError::Wmi(
+                "MSAcpi_ThermalZoneTemperature denied (cached)".into(),
+            ));
+        }
 
         let query_result = wmi_cache::with_wmi(|wmi| {
             match wmi.raw_query(
@@ -37,9 +61,8 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
             ) {
                 Ok(r) => Ok(r),
                 Err(e) => {
-                    log::warn!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature raw_query error: {e}");
-                    // Use anyhow::Error::from to preserve the WMIError type
-                    // so ShouldRetry can classify permanent HRESULTs.
+                    // No WARN here — single log on the outer error path below.
+                    last_fail.store(now_epoch, AtomicOrdering::Relaxed);
                     Err(anyhow::Error::from(e))
                 }
             }
@@ -47,7 +70,8 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
         let results: Vec<HashMap<String, wmi::Variant>> = match query_result {
             Ok(r) => r,
             Err(e) => {
-                log::debug!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed: {e}");
+                last_fail.store(now_epoch, AtomicOrdering::Relaxed);
+                log::warn!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
                 return Err(e);
             }
         };

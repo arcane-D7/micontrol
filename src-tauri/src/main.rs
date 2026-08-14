@@ -8,10 +8,11 @@
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // If launched as the privileged helper by the scheduled task, execute the
-    // requested hardware command and exit — no Tauri window is opened.
+    // If launched as the privileged helper by the scheduled task, execute all
+    // requested hardware commands and exit — no Tauri window is opened.
     if args.iter().any(|a| a == "--elevated") {
-        micontrol_lib::elevated::run(); // -> !
+        micontrol_lib::elevated::run();
+        return;
     }
 
     // S26-004: Manual key rotation CLI handler.

@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "micontrol"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 default-run = "micontrol"
 
@@ -36,8 +36,8 @@ diag = []
 # (ort) + windows-service — no C++ toolchain required. OpenCV is optional
 # and only pulled in via the `face-opencv` feature (requires libclang).
 face = ["dep:windows-service"]
-# Opt-in OpenCV camera backend (needs C++ toolchain / libclang).
-face-opencv = ["face", "dep:opencv"]
+# Camera backend uses nokhwa (pure-Rust Media Foundation) — no C++/libclang.
+face-opencv = ["face"]
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
@@ -46,6 +46,11 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-mcp-bridge = "0.12"
+# P3GLEG tauri-plugin-mcp — dev-only MCP server that lets AI agents inspect
+# & drive the app (screenshots, DOM, input simulation, IPC, logs). Kept behind
+# a git dependency per official docs (not yet on crates.io). Registered only in
+# debug builds (see lib.rs).
+tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
@@ -61,7 +66,9 @@ rand = "0.8"
 fs2 = "0.4"
 libloading = "0.8"
 keyring = { version = "3", features = ["windows-native"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream", "gzip", "rustls-tls"] }
+futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 sentry = "0.34"
 url = "2"
 rayon = "1.10"
@@ -72,9 +79,8 @@ hkdf = "0.12"
 # ── Face unlock (Windows Hello-style) ────────────────────────────────────────
 # onnxruntime for face detection + recognition models.
 ort = { version = "2.0.0-rc.13", features = ["download-binaries", "tls-native", "std", "ndarray"], default-features = false }
-# OpenCV for camera capture + image preprocessing (optional: requires C++
-# toolchain to build; enabled via the `face` feature).
-opencv = { version = "0.100.1", optional = true, features = ["videoio", "imgproc"] }
+# Pure-Rust webcam capture (Media Foundation on Windows) — no C++/libclang.
+nokhwa = { version = "0.10.11", features = ["input-msmf"], default-features = false }
 windows-service = { version = "0.7", optional = true }
 base64 = "0.22"
 
@@ -125,6 +131,9 @@ windows = { version = "0.58", features = [
   "Win32_Security_Cryptography",
   "Win32_System_SystemInformation",
   "Win32_UI_Shell_Common",
+  "Win32_System_WinRT",
+  "Security_Credentials",
+  "Security_Credentials_UI",
 ] }
 windows-core = "0.58"
 windows-targets = "0.52"

@@ -26,9 +26,7 @@ use crate::hw::touchpad::{
     set_touchpad_repress as hw_set_touchpad_repress,
     set_touchpad_sensitivity as hw_set_touchpad_sensitivity, TouchpadInfo, TouchpadSensitivity,
 };
-use crate::hw::update::{
-    get_update_status as hw_get_update_status, trigger_driver_scan as hw_trigger_scan, UpdateStatus,
-};
+use crate::hw::update::{get_update_status as hw_get_update_status, UpdateStatus};
 use crate::state::PerformanceMode;
 use crate::util::blocking::run_blocking;
 
@@ -305,11 +303,17 @@ pub async fn get_update_status() -> Result<UpdateStatus, ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
+/// Trigger a driver scan (pnputil /scan-devices).
+///
+/// `pnputil` requires administrator rights, so this runs through the
+/// elevated bridge (autonomous service → scheduled task → UAC last resort)
+/// exactly like `install_driver`. Previously it invoked the scan directly in
+/// the app process, which failed as a normal user (access denied) and
+/// surfaced the raw error in the UI.
 #[tauri::command]
 pub async fn trigger_driver_scan() -> Result<String, ErrorResponse> {
-    run_blocking(hw_trigger_scan)
-        .await
-        .map_err(ErrorResponse::from)
+    let raw = elev_bridge::run_elevated("trigger_driver_scan", serde_json::json!({})).await?;
+    Ok(raw.as_str().unwrap_or("scan triggered").to_string())
 }
 
 // ── Hardware Discovery (Phase 10) ────────────────────────────────────────────

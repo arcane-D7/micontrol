@@ -1842,6 +1842,37 @@
     "permission_sets": {},
     "global_scope_schema": null
   },
+  "mcp": {
+    "default_permission": {
+      "identifier": "default",
+      "description": "Allows the webview to forward console.* logs and observed IPC activity to the plugin's ring buffers.",
+      "permissions": ["allow-push-log", "allow-push-ipc"]
+    },
+    "permissions": {
+      "allow-push-ipc": {
+        "identifier": "allow-push-ipc",
+        "description": "Enables the push_ipc command without any pre-configured scope.",
+        "commands": { "allow": ["push_ipc"], "deny": [] }
+      },
+      "allow-push-log": {
+        "identifier": "allow-push-log",
+        "description": "Enables the push_log command without any pre-configured scope.",
+        "commands": { "allow": ["push_log"], "deny": [] }
+      },
+      "deny-push-ipc": {
+        "identifier": "deny-push-ipc",
+        "description": "Denies the push_ipc command without any pre-configured scope.",
+        "commands": { "allow": [], "deny": ["push_ipc"] }
+      },
+      "deny-push-log": {
+        "identifier": "deny-push-log",
+        "description": "Denies the push_log command without any pre-configured scope.",
+        "commands": { "allow": [], "deny": ["push_log"] }
+      }
+    },
+    "permission_sets": {},
+    "global_scope_schema": null
+  },
   "mcp-bridge": {
     "default_permission": {
       "identifier": "default",

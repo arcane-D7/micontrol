@@ -97,16 +97,13 @@ fn main() {
     // using FUN4=0 to see if write commands also succeed
     println!("\n--- Write probe (FUN1=0xFB00, FUN4=0) for hit groups ---");
     for (fun2, fun3, _) in &hits {
-        match wmi_ec::wmi_write(*fun2, *fun3, 0) {
-            Ok(resp) => {
-                if resp.is_success() {
-                    println!(
-                        "[WRITE HIT] FUN2=0x{fun2:04X} FUN3=0x{fun3:02X} → SGER=0x{:04X}",
-                        resp.sger
-                    );
-                }
+        if let Ok(resp) = wmi_ec::wmi_write(*fun2, *fun3, 0) {
+            if resp.is_success() {
+                println!(
+                    "[WRITE HIT] FUN2=0x{fun2:04X} FUN3=0x{fun3:02X} → SGER=0x{:04X}",
+                    resp.sger
+                );
             }
-            Err(_) => {} // Ignore write errors
         }
     }
 

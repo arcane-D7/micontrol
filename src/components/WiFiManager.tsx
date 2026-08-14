@@ -169,21 +169,14 @@ export default function WiFiManager() {
                 {selectedSsid === n.ssid && !n.connected && !isHidden && (
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     <input
+                      className="text-input"
                       type="password"
                       placeholder={t('wifi.password')}
                       aria-label={t('wifi.passwordLabel')}
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       onClick={(e) => e.stopPropagation()}
-                      style={{
-                        padding: '4px 8px',
-                        borderRadius: 'var(--r-xs)',
-                        border: '1px solid var(--border)',
-                        background: 'var(--bg)',
-                        color: 'var(--text)',
-                        width: 140,
-                        fontSize: 12,
-                      }}
+                      style={{ width: 140, fontSize: 12 }}
                     />
                     <button
                       className="btn btn-primary"

@@ -41,6 +41,8 @@ export default function SettingsPage({
   const [errorLogPath, setErrorLogPath] = useState('');
   const [showErrorLog, setShowErrorLog] = useState(false);
   const [errorLogContent, setErrorLogContent] = useState('');
+  const [mcpEnabled, setMcpEnabled] = useState(false);
+  const [mcpNotice, setMcpNotice] = useState<string | null>(null);
 
   // Fetch error log config on mount
   useEffect(() => {
@@ -52,6 +54,26 @@ export default function SettingsPage({
         setErrorLogPath(cfg.log_path);
       })
       .catch(() => {});
+    // Fetch persisted MCP integration flag
+    void invoke<boolean>('mcp_get_enabled')
+      .then(setMcpEnabled)
+      .catch(() => {});
+  }, []);
+
+  const handleToggleMcp = useCallback(async (enabled: boolean) => {
+    setMcpEnabled(enabled);
+    try {
+      await invoke('mcp_set_enabled', { enabled });
+      setMcpNotice(
+        enabled
+          ? t('settings.mcpIntegrationRestartHint') || 'Restart the app to apply.'
+          : t('settings.mcpIntegrationOffHint') || 'The MCP socket will close on restart.',
+      );
+    } catch (e) {
+      console.error('Failed to toggle MCP integration:', e);
+      setMcpEnabled(!enabled);
+      setMcpNotice(null);
+    }
   }, []);
 
   const handleToggleErrorLog = useCallback(async (enabled: boolean) => {
@@ -206,6 +228,47 @@ export default function SettingsPage({
             >
               {t('common.close')}
             </button>
+          </div>
+        )}
+      </div>
+
+      {/* MCP Integration (DOM control for AI agents / debug tools) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-title">{t('settings.mcpIntegration')}</div>
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
+          {t('settings.mcpIntegrationDesc')}
+        </p>
+        <div className="stat-row">
+          <span className="stat-label">{t('settings.mcpIntegrationEnable')}</span>
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={mcpEnabled}
+              onChange={(e) => void handleToggleMcp(e.target.checked)}
+            />
+            <span className="toggle-track" />
+            <span className="toggle-knob" />
+          </label>
+        </div>
+        <p
+          className="text-sm"
+          style={{
+            color: 'var(--color-warning, #d97706)',
+            marginTop: 8,
+            fontSize: 11,
+          }}
+        >
+          {t('settings.mcpIntegrationNote')}
+        </p>
+        {mcpNotice && (
+          <div
+            style={{
+              fontSize: 11,
+              color: 'var(--text-dim)',
+              marginTop: 8,
+            }}
+          >
+            {mcpNotice}
           </div>
         )}
       </div>

@@ -1652,9 +1652,11 @@ mod tests {
 
     #[test]
     fn edge_slide_still_captures_with_large_logical_range() {
-        let mut state = super::GestureState::default();
-        state.y_max = 65_535; // common PTP logical max
-        state.x_max = 65_535;
+        let mut state = super::GestureState {
+            y_max: 65_535, // common PTP logical max
+            x_max: 65_535,
+            ..Default::default()
+        };
 
         // Start in left-edge zone for this range.
         let _ = handle_edge_slide(&mut state, 1, 2_000, 32_000, true);

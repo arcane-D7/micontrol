@@ -5,6 +5,49 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Driver scan now runs elevated** — `trigger_driver_scan` previously invoked `pnputil /scan-devices` directly in the app process, which runs as a normal user → access denied → the UI showed a raw error. It now routes through the elevated bridge (`run_elevated` → MiControlBridge service → scheduled task → UAC), exactly like `install_driver`. The elevated dispatch gained a `trigger_driver_scan` branch with the slow-command timeout (90 s), so scanning from the Updates tab works on a fresh install.
+- **NSIS silent 1062 cleanup** — `KillBridgeProcess`, `KillFaceServiceProcess` (+ `un.*` variants) now guard `sc stop` behind a RUNNING check (`sc query | findstr /i RUNNING`), matching `StopIoTService`/`un.StopIoTService`. Fresh-install logs are now clean: no `[SC] ControlService FAILED 1062` lines from stops of already-stopped services.
+
+## [0.1.18] - 2026-08-09
+
+### Added
+
+- **Face Unlock module (end-to-end)** — A Windows Hello-style face sign-in using the built-in RGB webcam, fully integrated in the new **Face Unlock** tab:
+  - **Real ML pipeline (no more placeholders)** — InsightFace SCRFD `det_10g` (detection) + ArcFace `w600k_r50` (recognition), both ONNX/CPU via `ort`:
+    - SCRFD decode ports the official InsightFace stride-anchored decode (flattened per-type outputs, proper stride scaling, distance2bbox / distance2kps) + NMS.
+    - ArcFace warp-aligned 112×112 crop with L2-normalized 512-d embeddings.
+    - Detection validated against a real photo (best score 0.998, 24 faces); embeddings are unit-length (norm 1.0000); end-to-end test detect → recognize → store → match → unlock passes with similarity 1.0000.
+  - **Camera capture in pure Rust** (`nokhwa` + MediaFoundation, no OpenCV) with 3 fallback strategies (MJPEG 720p → highest resolution → any), a global camera lock, and retry/backoff.
+  - **Model download & install in the UI** — `buffalo_l` model pack (~250 MB) downloaded from the InsightFace GitHub release into a staging dir under `%ProgramData%`, verified with a real ORT session, then copied to `resources/face_models` (elevated); live progress bar via `face-model-progress` events. A **setup wizard** walks through: experimental warning (mandatory acceptance), model download, auth-service install, done.
+  - **Camera enroll modal** — live preview, name/label/frames, average N embeddings into one template; templates stored as feature vectors only (no photos), encrypted with DPAPI machine scope.
+  - **Auth service** (`micontrol_face_svc`) — LocalSystem service exposing a named pipe (`\\.\pipe\micontrol_face`) with `auth_start` / `auth_poll`; runs the full pipeline (liveness challenge → detect → recognize → best-match-with-margin). Installed by the NSIS installer hook and/or the "Install / start auth service" button (elevated helper `face_service_install`).
+  - **Credential Provider** (`micontrol_facecp.dll`) — registered at install time for lock-screen integration.
+  - Settings: match threshold, active liveness (blink/turn), passive anti-spoof (photo/video), failures-before-lockout, tile visibility, match margin, anti-spoof threshold, reject-on-multi-face, re-enrollment reminder; LSA-stored sign-in password read only by the Credential Provider.
+
+### Fixed
+
+- **SCRFD ONNX input layout** — detector now feeds NCHW `[1,3,320,320]` plane-split RGB (the export rejects NHWC with "Got invalid dimensions"); receives raw 0–255 values because normalization is embedded in the graph.
+- **SCRFD flattened decoder** — the `det_10g.onnx` export returns 9 tensors grouped _by type_ (score8/16/32, bbox8/16/32, kps8/16/32 with shapes `[N,1]`/`[N,4]`/`[N,10]`), not interleaved by head; decode now indexes `si/bi/ki` correctly and multiplies deltas by the head stride (distance2bbox / distance2kps, no half-anchor offset).
+- **ArcFace embedding normalization** — `w600k_r50` output is not L2-normalized by the graph (norm ≈ 9.86); the Rust recognize path now L2-normalizes so cosine-similarity matching is valid.
+- **Face tests under `no-default-features`** — mock-only tests now compiled only when the `face` feature is off; with `face` enabled the full 329-test suite (including real-model integration tests, SKIP if models absent) passes.
+- **Clippy `-D warnings` cleanliness** (lib, `micontrol_bridge`, `micontrol_face_svc` bins) and rustfmt — health check now passes 11/11 locally, matching CI.
+- **ESLint/TS health checks** — removed dead `ModelsStatus` interface; dev-only tauri-plugin-mcp bootstrap now awaits/voids its promise.
+- **NSIS post-install RUNNING check** — the previous check piped `sc query` through `findstr` directly in `nsExec`, which broke (sc printed its usage text → false "não está RUNNING" warning even though `sc query` showed `STATE: 4 RUNNING`). It now pipes **inside** `cmd /c` (`sc query MiControlFace | findstr /i "RUNNING" > NUL`), so nsExec receives the correct findstr exit code.
+- **NSIS IoTSvc deploy (critical)** — the old block used `FindFirst "iotdriver.inf_*\IoTService.exe"` and then tested `${If} $R0 = 0`; when the wildcard match failed, `$R0` was empty (0) so the deploy branch ran with an **empty `$R1`**, causing: `CopyFiles` "Copy failed" ×2, `sc delete IoTSvc` (deleted the real service!), then `sc create binPath= ""` → **error 87**, leaving the machine without IoTSvc. Rewritten: deterministic package-dir discovery, `taskkill /F` before copy, `FileExists` verification after copy (Abort on failure — the service is never deleted unless the binary landed), `sc create` with quoted path only, and `sc failure` auto-restart.
+- **EnrollWizard UX ("esta modal está péssima")** — redesigned with a clean card-based layout, proper step pills (done ✓ / active / pending), consistent design tokens, honest copy: PIN/fingerprint is presented as the real auth system (and used at step 2), the password step is clearly **optional** and explains Windows does not expose Hello/NGC credentials to third-party lock-screen components — so the camera needs the account credential once (sealed in LSA), while the user keeps signing in with PIN.
+- **Face Unlock — self-healed on live machine** — after the broken NSIS deploy deleted IoTSvc, the service + DriverStore binary were restored in-place via the autonomous SYSTEM bridge pipe (`ensure_ecram_service` command, HMAC-authenticated), avoiding a full reinstall.
+- **IoTSvc SCM argv bug** — `ecram_service`'s `main()` only entered SCM mode when launched with the literal argument `service`. But SCM starts a service by executing the binPath with the **service name** as `argv[1]` (`IoTService.exe IoTSvc`) — so a service created with a plain binPath died instantly with "Unknown command: IoTSvc", making `sc start` fail with error 2 while the installer falsely reported "iniciado". `main()` now treats `IoTSvc` (case-insensitive) exactly like `service` → `StartServiceCtrlDispatcherW`. Verified: `IoTService.exe IoTSvc` now reaches the service dispatcher (error 1063 outside SCM is expected).
+- **IoTSvc binPath canonicalized (empirical SCM law)** — event-7045 forensics proved the ONLY binPath that reaches RUNNING is the **quoted path + `service` token** form: `"C:\...\IoTService.exe" service`. A bare quoted form (`"C:\...\IoTService.exe"`, no token) passes `sc qc` and `Test-Path` but `sc start` fails with error 2 even though the file exists. NSIS `ExecToLog` runs the command line through `CommandLineToArgvW`, which strips outer quotes — so the installer CANNOT reliably emit the embedded `\"` quoting. Fix: `ecram_service` gained an `install-service <path>` CLI command that creates/starts IoTSvc itself via `std::process::Command` (the proven Rust quoting path): stop+delete (async-safe poll), `sc create binPath= "\"<path>\" service" start= auto obj= LocalSystem`, `sc failure`, start (1056-tolerant), and a RUNNING poll. The NSIS hooks now call `"$INSTDIR\ecram_service.exe" install-service "$R4"` and only proceed on exit 0. `ecram_service_mgmt.rs` keeps the identical quoted+`service` form, removing the Rust-vs-NSIS writer drift once and for all.
+- **NSIS async delete→create race** — `sc delete` is asynchronous: the SCM entry lingers until all handles close, so a fixed 1000 ms sleep could let the subsequent `sc create` fail with 1072/1073. The installer now polls `sc query IoTSvc` until the entry is gone (up to ~10 s) before recreating.
+- **NSIS false-RUNNING race** — `sc start` returns 0 when the start is _queued_, not _running_; a single sleep+findstr could abort a healthy slow-starting service. Now polls up to ~15 s for STATE 4 and accepts exit 0/1056 (already running) as success.
+- **NSIS SCM auto-restart re-lock** — the old IoTSvc has `sc failure restart/5000`; if SCM auto-restarted it between `sc stop` and the file copy, the process re-locked `IoTService.exe` and `CopyFiles` silently kept the stale binary. Failure auto-restart is now disabled before stop (and re-enabled by the fresh create's `sc failure`).
+- **NSIS 1062/1060 noise** — `sc stop`/`sc failure` on a stopping service printed `[SC] ControlService FAILED 1062` in the log. `StopIoTService`/`un.StopIoTService` and the hooks deploy block now guard on `sc query | findstr /i "RUNNING"` — a service that exists but is STOPPED is skipped entirely (an existence-only guard still 1062s on a stopped-but-present service).
+- **NSIS honest pnputil/task reporting** — pnputil non-zero (non-3010) codes are now flagged as needing review instead of masked as "pode já estar atualizado"; `schtasks /create` validates exit 0, else reports a warning (app self-heals on first run).
+
 ## [0.1.17] - 2026-08-08
 
 ### Fixed

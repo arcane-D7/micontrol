@@ -120,45 +120,59 @@ pub fn get_function_key() -> HardwareResult<FnKeyStatus> {
 ///
 /// Writes to EC register 0x4A to toggle Fn-lock state.
 /// Also persists to registry for fallback reads.
+///
+/// S41-001: EC write is now best-effort (mirrors `set_battery_care` S38-001).
+/// The IoTDriver security check requires the calling process to live under
+/// the IoTDriver.sys DriverStore directory — the elevated scheduled-task
+/// helper does NOT satisfy that, so the IOCTL fails with STATUS_ACCESS_DENIED
+/// even when elevated. We persist the requested state to the registry (which
+/// drives re-assertion + what the UI reports) and only surface an error when
+/// the registry write itself fails.
 pub fn set_function_key(mode: FnKeyMode) -> HardwareResult<()> {
     let ec_val = mode.to_ec_value();
 
-    // Write to EC
-    write_ecram(get_eram_base() + FN_LOCK_ERAM_OFFSET as u64, &[ec_val]).map_err(|e| {
-        log::error!(
-            target: "hw::fn_key",
-            "Failed to write Fn-lock to EC 0x{:02X}: {e}",
-            FN_LOCK_ERAM_OFFSET
-        );
-        e
-    })?;
-
-    // Read back to verify
-    match read_ecram(get_eram_base() + FN_LOCK_ERAM_OFFSET as u64, 1) {
-        Ok(data) if !data.is_empty() => {
-            let actual = FnKeyMode::from_ec_value(data[0]);
-            if actual != mode {
-                log::warn!(
-                    target: "hw::fn_key",
-                    "Fn-lock verification mismatch: wrote {:?}, read back {:?}",
-                    mode,
-                    actual
-                );
-            } else {
-                log::info!(
-                    target: "hw::fn_key",
-                    "Fn-lock set to {:?} (EC 0x{:02X} = 0x{:02X})",
-                    mode,
-                    FN_LOCK_ERAM_OFFSET,
-                    ec_val
-                );
+    // Best-effort write to EC. When running from the DriverStore the write
+    // succeeds; otherwise it is expected to fail with access denied, which we
+    // log and continue so the registry still reflects the user's intent.
+    match write_ecram(get_eram_base() + FN_LOCK_ERAM_OFFSET as u64, &[ec_val]) {
+        Ok(()) => {
+            // Read back to verify
+            match read_ecram(get_eram_base() + FN_LOCK_ERAM_OFFSET as u64, 1) {
+                Ok(data) if !data.is_empty() => {
+                    let actual = FnKeyMode::from_ec_value(data[0]);
+                    if actual != mode {
+                        log::warn!(
+                            target: "hw::fn_key",
+                            "Fn-lock verification mismatch: wrote {:?}, read back {:?}",
+                            mode,
+                            actual
+                        );
+                    } else {
+                        log::info!(
+                            target: "hw::fn_key",
+                            "Fn-lock set to {:?} (EC 0x{:02X} = 0x{:02X})",
+                            mode,
+                            FN_LOCK_ERAM_OFFSET,
+                            ec_val
+                        );
+                    }
+                }
+                _ => {
+                    log::warn!(
+                        target: "hw::fn_key",
+                        "Fn-lock write verification failed — could not read back EC 0x{:02X}",
+                        FN_LOCK_ERAM_OFFSET
+                    );
+                }
             }
         }
-        _ => {
+        Err(e) => {
+            // Expected when running as the scheduled-task helper (not in
+            // DriverStore). Persist the state anyway so the UI stays
+            // consistent and re-assertion can happen from a privileged path.
             log::warn!(
                 target: "hw::fn_key",
-                "Fn-lock write verification failed — could not read back EC 0x{:02X}",
-                FN_LOCK_ERAM_OFFSET
+                "Fn-lock EC write unavailable ({e}) — persisting registry state"
             );
         }
     }

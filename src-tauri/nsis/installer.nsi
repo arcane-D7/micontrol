@@ -211,6 +211,11 @@ Function PageReinstall
   ; Stop the IoTService Windows service so it releases locks on driver files
   Call StopIoTService
 
+  ; Stop the Face auth service (MiControlFace) and kill micontrol_face_svc.exe
+  ; — it locks $INSTDIR\micontrol_face_svc.exe, preventing the installer from
+  ; overwriting it with the new binary (causes error 1053 after install).
+  Call KillFaceServiceProcess
+
   ; Uninstall previous WiX installation if exists.
   ;
   ; A WiX installer stores the installation info in registry
@@ -686,6 +691,10 @@ Section Install
   ; IoTService.exe runs as a service and holds locks on the IoTDriver files.
   Call StopIoTService
 
+  ; Stop the Face auth service (MiControlFace) and kill micontrol_face_svc.exe
+  ; so the new binary can overwrite the locked file.
+  Call KillFaceServiceProcess
+
   ; Migrate from old currentUser installation (v0.1.12 and earlier installed
   ; to $LOCALAPPDATA\MiControl).  perMachine installs to $PROGRAMFILES64\MiControl.
   ; If the old location exists and differs from $INSTDIR, run its uninstaller
@@ -832,6 +841,10 @@ Section Uninstall
 
   ; Stop the IoTService Windows service so it releases locks on driver files.
   Call un.StopIoTService
+
+  ; Stop the Face auth service (MiControlFace) and kill micontrol_face_svc.exe
+  ; so the locked binary can be deleted.
+  Call un.KillFaceServiceProcess
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
@@ -1012,12 +1025,22 @@ FunctionEnd
 ; release it before overwriting that binary, otherwise NSIS fails with
 ; "Error opening file for writing ... micontrol_bridge.exe".
 Function KillBridgeProcess
-  ; Stop the service gracefully (sc stop). If the service is not installed,
-  ; sc returns non-zero which we ignore.
+  ; Stop the service gracefully ONLY if it is RUNNING — `sc stop` on a
+  ; service that exists but is STOPPED prints "[SC] ControlService FAILED
+  ; 1062" (ERROR_SERVICE_NOT_ACTIVE). Guard with a RUNNING check (not mere
+  ; existence) to keep the log free of 1062 noise. If the service is not
+  ; installed, findstr exits non-zero and we skip the stop (the process
+  ; kill loop below still handles a stray micontrol_bridge.exe).
+  nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlBridge | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
+  Pop $1
+  ${If} $1 <> 0
+    Goto bridge_no_stop
+  ${EndIf}
   nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlBridge'
   Pop $1
   Sleep 1000
 
+  bridge_no_stop:
   StrCpy $0 0  ; retry counter
   bridge_kill_loop:
     nsis_tauri_utils::FindProcess "micontrol_bridge.exe"
@@ -1043,6 +1066,24 @@ FunctionEnd
 ; Uses a retry loop (up to 5 attempts) because the service may take a moment
 ; to stop after sc.exe returns.
 Function StopIoTService
+  ; Only stop if the service is actually RUNNING — `sc stop` on a service that
+  ; exists but is STOPPED prints "[SC] ControlService FAILED 1062"
+  ; (ERROR_SERVICE_NOT_ACTIVE). Checking for RUNNING (not mere existence)
+  ; keeps the install log free of 1062 noise. findstr's exit code inside
+  ; cmd /c is reliable (nsExec has no pipe semantics).
+  nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query IoTSvc | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
+  Pop $1
+  ${If} $1 <> 0
+    Return  ; service not RUNNING (absent or stopped) — nothing to stop
+  ${EndIf}
+  ; Disable crash auto-restart (failure actions) BEFORE stopping. The old
+  ; service has `restart/5000` — if SCM auto-restarts it between our stop and
+  ; the `File` overwrite, the process re-locks IoTService.exe and the copy
+  ; silently keeps the old binary. A stopped service must STAY stopped until
+  ; the installer finishes overwriting it.
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" failure IoTSvc reset= 0 actions= ""'
+  Pop $1
+
   StrCpy $0 0  ; retry counter
   iot_stop_loop:
     ; Try to stop the service gracefully
@@ -1064,6 +1105,47 @@ Function StopIoTService
       Goto iot_stop_loop
     ${EndIf}
     DetailPrint "Warning: IoTService.exe could not be stopped after 5 attempts."
+FunctionEnd
+
+; ── Face auth service stopper ─────────────────────────────────────────────────
+; Stops the MiControlFace Windows service and kills micontrol_face_svc.exe.
+; The service runs as LocalSystem and holds a lock on
+; $INSTDIR\micontrol_face_svc.exe while its process is alive — without
+; stopping it, the installer cannot overwrite that binary (NSIS fails with
+; "Error opening file for writing"). It can ALSO be run in foreground from a
+; terminal (`micontrol_face_svc.exe run`) which locks the file the same way.
+Function KillFaceServiceProcess
+  ; Stop the service gracefully ONLY if it is RUNNING — `sc stop` on a
+  ; service that exists but is STOPPED prints "[SC] ControlService FAILED
+  ; 1062" (ERROR_SERVICE_NOT_ACTIVE). Guard with a RUNNING check (not mere
+  ; existence) to keep the log free of 1062 noise.
+  nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlFace | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
+  Pop $1
+  ${If} $1 <> 0
+    Goto face_no_stop
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlFace'
+  Pop $1
+  Sleep 1000
+
+  face_no_stop:
+  StrCpy $0 0  ; retry counter
+  face_stop_loop:
+    ; Verify the process is gone; force-kill a stray running instance.
+    nsis_tauri_utils::FindProcess "micontrol_face_svc.exe"
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — service stopped successfully
+    ${EndIf}
+    ; Process still running — force-kill it
+    nsis_tauri_utils::KillProcess "micontrol_face_svc.exe"
+    Pop $1
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto face_stop_loop
+    ${EndIf}
+    DetailPrint "Warning: micontrol_face_svc.exe could not be stopped after 5 attempts."
 FunctionEnd
 
 ; ── Old installation migrator ─────────────────────────────────────────────────
@@ -1120,10 +1202,19 @@ FunctionEnd
 
 Function un.KillBridgeProcess
   ; Stop the MiControlBridge service first (otherwise SCM restarts the process).
+  ; RUNNING guard: `sc stop` on a STOPPED/absent service prints "[SC]
+  ; ControlService FAILED 1062" — skip it; the process kill loop still
+  ; handles a stray micontrol_bridge.exe.
+  nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlBridge | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
+  Pop $1
+  ${If} $1 <> 0
+    Goto un_bridge_no_stop
+  ${EndIf}
   nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlBridge'
   Pop $1
   Sleep 1000
 
+  un_bridge_no_stop:
   StrCpy $0 0  ; retry counter
   un_bridge_kill_loop:
     nsis_tauri_utils::FindProcess "micontrol_bridge.exe"
@@ -1142,6 +1233,14 @@ Function un.KillBridgeProcess
 FunctionEnd
 
 Function un.StopIoTService
+  ; Only stop if the service is RUNNING — avoids "[SC] ControlService
+  ; FAILED 1062" noise when it is absent OR already stopped.
+  nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query IoTSvc | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
+  Pop $1
+  ${If} $1 <> 0
+    Return  ; service not RUNNING — nothing to stop
+  ${EndIf}
+
   StrCpy $0 0  ; retry counter
   un_iot_stop_loop:
     nsExec::ExecToLog '"$SYSDIR\sc.exe" stop IoTSvc'
@@ -1160,6 +1259,37 @@ Function un.StopIoTService
       Goto un_iot_stop_loop
     ${EndIf}
     DetailPrint "Warning: IoTService.exe could not be stopped after 5 attempts."
+FunctionEnd
+
+Function un.KillFaceServiceProcess
+  ; RUNNING guard: `sc stop` on a STOPPED/absent MiControlFace prints "[SC]
+  ; ControlService FAILED 1062" — skip it; the process kill loop still
+  ; handles a stray micontrol_face_svc.exe.
+  nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlFace | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
+  Pop $1
+  ${If} $1 <> 0
+    Goto un_face_no_stop
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlFace'
+  Pop $1
+  Sleep 1000
+
+  un_face_no_stop:
+  StrCpy $0 0  ; retry counter
+  un_face_stop_loop:
+    nsis_tauri_utils::FindProcess "micontrol_face_svc.exe"
+    Pop $1
+    ${If} $1 <> 0
+      Return  ; process not found — service stopped successfully
+    ${EndIf}
+    nsis_tauri_utils::KillProcess "micontrol_face_svc.exe"
+    Pop $1
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 5
+      Goto un_face_stop_loop
+    ${EndIf}
+    DetailPrint "Warning: micontrol_face_svc.exe could not be stopped after 5 attempts."
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
