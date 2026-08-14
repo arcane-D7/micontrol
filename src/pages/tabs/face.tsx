@@ -965,6 +965,41 @@ export default function FaceUnlockTab() {
     }
   };
 
+  const ensureService = async () => {
+    setBusy(true);
+    try {
+      const r = await invoke<{
+        service_installed: boolean;
+        service_running: boolean;
+        state?: string;
+        action?: string;
+        failure_actions_configured?: boolean;
+      }>('face_service_ensure');
+      if (!r.service_installed) {
+        show('err', 'Auth service is not installed — use "Install / start auth service" first.');
+      } else if (r.action === 'already_running') {
+        show(
+          'ok',
+          `Service already running.${
+            r.failure_actions_configured === false ? ' (failure actions not configured)' : ''
+          }`,
+        );
+      } else {
+        show(
+          'ok',
+          `Service ${r.action === 'started' ? 'started' : 'start request sent'}. State: ${
+            r.state ?? 'unknown'
+          }${r.failure_actions_configured ? ' — auto-restart configured.' : ''}`,
+        );
+      }
+      await load();
+    } catch (e) {
+      show('err', `self-heal error: ${getFriendlyErr(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveSettings = async () => {
     setBusy(true);
     try {
@@ -1156,6 +1191,15 @@ export default function FaceUnlockTab() {
             disabled={busy}
           >
             ⚙️ Install / start auth service
+          </button>
+          <button
+            className="btn btn-secondary"
+            style={{ marginLeft: 8 }}
+            onClick={() => void ensureService()}
+            disabled={busy}
+            title="Self-heal: configure auto-restart (sc failure) and start the service if it crashed — no UAC prompt"
+          >
+            🩺 Auto-corrigir serviço
           </button>
           <button
             className="btn btn-secondary"

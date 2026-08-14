@@ -171,6 +171,34 @@ pub fn camera_count() -> usize {
     }
 }
 
+/// Pin `FrameServerClient.dll` in this process so the Windows Camera Frame
+/// Server broker cannot unload it out from under MSMF/nokhwa mid-capture.
+///
+/// Background: MSMF webcam capture in a process goes through the FrameServer
+/// broker (`FrameServerClient.dll`). When that DLL is unloaded (FrameServer
+/// service restart/downtime — e.g. another app cycling the webcam) the next
+/// MSMF call dereferences freed code and the process dies with
+/// `0xc0000005` / `FrameServerClient.dll_unloaded`. This was observed in
+/// `micontrol_face_svc.exe` ~60 min after boot. Keeping one LoadLibrary
+/// reference alive pins the DLL — unloading is then deferred to process exit.
+///
+/// Returns the HMODULE, retaining the reference until process end (deliberate
+/// leak — the camera only runs in long-lived processes that must not crash).
+#[cfg(windows)]
+fn pin_frame_server_client() -> Option<isize> {
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
+
+    // SAFETY: string is a valid UTF-16 null-terminated wide string; the LLM
+    // remains loaded for the process lifetime (pinned, never FreeLibrary'd).
+    let wide: Vec<u16> = "FrameServerClient.dll\0".encode_utf16().collect();
+    unsafe {
+        match LoadLibraryW(windows::core::PCWSTR(wide.as_ptr())) {
+            Ok(h) => Some(h.0 as isize),
+            Err(_) => None,
+        }
+    }
+}
+
 /// A camera handle. Drop releases the capture lock and the device.
 pub struct Camera {
     index: u32,
@@ -210,6 +238,11 @@ impl Camera {
         if !ensure_frame_server() {
             log::warn!("[face.camera] FrameServer unavailable — capture may fail");
         }
+        // Pin FrameServerClient.dll so the FrameServer broker cannot unload it
+        // mid-capture (the 0xc0000005 / FrameServerClient.dll_unloaded crash).
+        // Retried on every open — LoadLibrary on an already-loaded DLL is a
+        // no-op refcount bump.
+        pin_frame_server_client();
         let start = std::time::Instant::now();
         let mut attempt = 0u32;
         loop {

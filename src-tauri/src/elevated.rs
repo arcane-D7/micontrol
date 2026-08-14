@@ -1679,6 +1679,21 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
+        // Post-reboot self-heal: MiControlFace crashes ~60 min after boot
+        // (0xc0000005 in FrameServerClient.dll_unloaded — MSMF camera in a
+        // Session-0 SYSTEM service) and the SCM never restarts it because the
+        // service has NO failure actions configured (unlike MiControlBridge /
+        // IoTSvc which have RESTART 5/10/30s and therefore survive). This
+        // command queries the SCM; if the service exists but is not RUNNING it
+        // (a) configures failure actions (RESTART 5/10/30s, reset 1 day) so the
+        // SCM auto-restarts it after future crashes, and (b) starts it if it is
+        // STOPPED. Runs via the autonomous MiControlBridge service or the
+        // MiControlElevated task — never a UAC prompt.
+        "ensure_face_service" => match ensure_face_service() {
+            Ok(status) => make_ok(serde_json::to_value(status).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
+
         // S43-001: Store the Windows sign-in password in an LSA Secret. Requires
         // `POLICY_CREATE_SECRET` (SYSTEM/elevated) — routed through the elevated
         // helper so the unprivileged app UI can save it once at enrollment time.
@@ -1863,6 +1878,109 @@ fn install_face_service() -> Result<Value, String> {
 
 #[cfg(not(windows))]
 fn install_face_service() -> Result<Value, String> {
+    Err("Face auth service only supported on Windows".to_string())
+}
+
+/// Post-reboot self-heal for the `MiControlFace` auth service.
+///
+/// The service crashes periodically with `0xc0000005` in
+/// `FrameServerClient.dll_unloaded` (MSMF webcam capture inside a Session-0
+/// SYSTEM service); because no `sc failure` actions were ever configured
+/// (unlike MiControlBridge / IoTSvc), the SCM leaves it STOPPED-1067 forever
+/// after the first crash — breaking Face Unlock after every reboot.
+///
+/// This performs three idempotent steps (all elevated):
+///   1. Configure `sc failure` = RESTART 5000/10000/30000 ms, reset 86400 s,
+///      so future crashes are auto-restarted by the SCM.
+///   2. If the service exists but is not RUNNING, start it (`sc start`, which
+///      tolerates ERROR_SERVICE_ALREADY_RUNNING and the SCM start races).
+///   3. Return a status object (service_installed / running / action taken).
+#[cfg(windows)]
+fn ensure_face_service() -> Result<Value, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    // ── 1. Query SCM state via `sc query` (robust parsing, no win32 structs).
+    let query = Command::new("sc.exe")
+        .args(["query", "MiControlFace"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("sc query MiControlFace failed: {e}"))?;
+    let query_text = String::from_utf8_lossy(&query.stdout).to_string();
+    let state = query_text
+        .lines()
+        .find(|l| l.contains("STATE"))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if query_text.contains("does not exist") || query_text.contains("service has not been started")
+    {
+        // Service not registered — nothing to heal. The UI installer path
+        // (`face_service_install`) handles a fresh install.
+        return Ok(json!({
+            "service_installed": false,
+            "service_running": false,
+            "state": state,
+            "action": "not_installed",
+        }));
+    }
+
+    let running = state.contains("RUNNING");
+    let stopped = state.contains("STOPPED");
+    let start_pending = state.contains("START_PENDING");
+
+    // ── 2. Configure failure actions (idempotent; `sc failure` overwrites).
+    let failure = Command::new("sc.exe")
+        .args([
+            "failure",
+            "MiControlFace",
+            "reset=",
+            "86400",
+            "actions=",
+            "restart/5000/restart/10000/restart/30000",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("sc failure MiControlFace failed: {e}"))?;
+    let failure_ok = failure.status.success();
+    if !failure_ok {
+        log::warn!(
+            "[ensure_face_service] sc failure action failed: {}",
+            String::from_utf8_lossy(&failure.stderr).trim()
+        );
+    }
+
+    // ── 3. Start if stopped (or pending — let it settle, report as started).
+    let mut action = "already_running".to_string();
+    if stopped || start_pending {
+        let start = Command::new("sc.exe")
+            .args(["start", "MiControlFace"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("sc start MiControlFace failed: {e}"))?;
+        let start_text = String::from_utf8_lossy(&start.stdout).to_string();
+        // 1056 = ERROR_SERVICE_ALREADY_RUNNING (benign), 1058 = DISABLED.
+        let started = start.status.success()
+            || start_text.contains("1056")
+            || start_text.contains("ALREADY_RUNNING");
+        action = if started {
+            "started".to_string()
+        } else {
+            "start_failed".to_string()
+        };
+    }
+
+    Ok(json!({
+        "service_installed": true,
+        "service_running": running,
+        "state": state,
+        "action": action,
+        "failure_actions_configured": failure_ok,
+    }))
+}
+
+#[cfg(not(windows))]
+fn ensure_face_service() -> Result<Value, String> {
     Err("Face auth service only supported on Windows".to_string())
 }
 

@@ -577,6 +577,12 @@ fn main() {
                     println!("MiControlFace service installed and started.");
                 }
             }
+            // Post-reboot/self-heal hardening: the service crashes with
+            // 0xc0000005 in FrameServerClient.dll_unloaded (MSMF camera in a
+            // Session-0 SYSTEM service, ~60 min after boot). Without failure
+            // actions the SCM leaves it STOPPED-1067 forever. Configure
+            // RESTART 5/10/30s (reset 1 day) so the SCM auto-restarts it.
+            configure_failure_actions();
         }
         Some("start") => {
             let manager = ServiceManager::local_computer(
@@ -630,6 +636,45 @@ fn main() {
                 std::env::current_exe().unwrap_or_default().display()
             );
             std::process::exit(2);
+        }
+    }
+}
+
+/// Configure SCM failure actions so the service is auto-restarted after a
+/// crash (instead of being left STOPPED-1067 forever).
+///
+/// Rationale: MiControlFace periodically crashes with 0xc0000005 in
+/// FrameServerClient.dll_unloaded (MSMF webcam inside a Session-0 SYSTEM
+/// service). The SCM only restarts crashed services when `sc failure` actions
+/// are configured (RESTART …), which MiControlBridge / IoTSvc already have —
+/// MiControlFace was the only one missing it, which is why it was found
+/// STOPPED after reboot while the others kept running.
+///
+/// Errors are non-fatal: the service is already started at this point; failure
+/// actions are best-effort self-heal hardening.
+fn configure_failure_actions() {
+    let output = std::process::Command::new("sc.exe")
+        .args([
+            "failure",
+            "MiControlFace",
+            "reset=",
+            "86400",
+            "actions=",
+            "restart/5000/restart/10000/restart/30000",
+        ])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            println!("MiControlFace failure actions configured (restart 5/10/30s).");
+        }
+        Ok(o) => {
+            eprintln!(
+                "warning: could not configure failure actions: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => {
+            eprintln!("warning: could not run sc failure: {e}");
         }
     }
 }

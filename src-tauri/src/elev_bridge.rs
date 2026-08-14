@@ -97,6 +97,24 @@ pub async fn ensure_bridge_service() -> Result<Value, String> {
     log::info!("MiControlBridge service not available — installing via elevated path");
     run_elevated_no_prompt("ensure_bridge_service", serde_json::json!({})).await
 }
+
+/// Post-reboot self-heal for the `MiControlFace` auth service.
+///
+/// The face service crashes ~60 min after boot (0xc0000005 in
+/// FrameServerClient.dll_unloaded) and — having no SCM failure actions — is
+/// left STOPPED-1067 forever, breaking Face Unlock after every reboot.
+///
+/// This walks the same launch-ordering ladder as `ensure_bridge_service`:
+///   0. If the MiControlBridge service pipe is already available, dispatch
+///      `ensure_face_service` through it (SYSTEM, no UAC, works even when the
+///      face service is dead).
+///   1. Otherwise fall back to the MiControlElevated scheduled task.
+///
+/// Never prompts UAC. Callers invoke this once at app startup and on the
+/// Face Unlock tab when `service_running` is false.
+pub async fn ensure_face_service() -> Result<Value, String> {
+    run_elevated_no_prompt("ensure_face_service", serde_json::json!({})).await
+}
 static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
 /// Outcome of a task-path self-healing attempt.
@@ -139,6 +157,9 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "set_voice_focus" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
 
         "clean_junk_files" => Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS),
+        // SCM query + start is quick (~1-2 s), but `sc failure` may hit a
+        // busy SCM on cold boot — give it the medium timeout.
+        "ensure_face_service" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
         _ => Duration::from_secs(ELEV_TIMEOUT_SECS),
     }
 }

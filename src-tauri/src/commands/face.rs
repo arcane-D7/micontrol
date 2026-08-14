@@ -204,6 +204,35 @@ pub async fn face_service_install() -> Result<serde_json::Value, FaceErrorRespon
     }
 }
 
+/// Post-reboot self-heal: configure SCM failure actions for MiControlFace and
+/// start it if it is stopped (it crashes with 0xc0000005 in
+/// FrameServerClient.dll_unloaded ~60 min after boot and, having no failure
+/// actions, stays STOPPED-1067 forever). Call from the Face Unlock tab instead
+/// of telling the user to reinstall.
+#[tauri::command]
+pub async fn face_service_ensure() -> Result<serde_json::Value, FaceErrorResponse> {
+    #[cfg(windows)]
+    {
+        let result = crate::elev_bridge::run_elevated_no_prompt(
+            "ensure_face_service",
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| FaceErrorResponse {
+            code: "elevated".into(),
+            message: format!("ensure face service: {e}"),
+        })?;
+        Ok(result)
+    }
+    #[cfg(not(windows))]
+    {
+        Err(FaceErrorResponse {
+            code: "not_supported".into(),
+            message: "Windows only".into(),
+        })
+    }
+}
+
 // ── Model download / install ────────────────────────────────────────────────
 // The ONNX models (InsightFace `buffalo_l`: det_10g + w600k_r50) are ~250 MB
 // and are downloaded on demand into a staging dir under ProgramData (no admin

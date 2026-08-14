@@ -18,8 +18,8 @@ use commands::face::{
     face_camera_preview_frame, face_camera_preview_start, face_camera_preview_stop,
     face_delete_template, face_diagnostics, face_download_models, face_enroll, face_get_settings,
     face_hello_verify, face_install_models, face_list_templates, face_list_users,
-    face_models_remove_all, face_models_status, face_password_configured, face_service_install,
-    face_set_password, face_set_settings, face_status,
+    face_models_remove_all, face_models_status, face_password_configured, face_service_ensure,
+    face_service_install, face_set_password, face_set_settings, face_status,
 };
 #[allow(deprecated)]
 use commands::hardware::{
@@ -519,6 +519,7 @@ pub fn run() {
             // Face Unlock (Windows Hello-style, RGB webcam)
             face_status,
             face_service_install,
+            face_service_ensure,
             face_list_templates,
             face_delete_template,
             face_get_settings,
@@ -587,6 +588,27 @@ pub fn run() {
                     Err(e) => {
                         log::warn!(
                             "[bridge] ensure_bridge_service failed (will use scheduled task): {e}"
+                        );
+                    }
+                }
+            });
+
+            // Post-reboot self-heal for the MiControlFace auth service: it
+            // crashes ~60 min after boot (0xc0000005 in
+            // FrameServerClient.dll_unloaded — MSMF camera in a Session-0
+            // SYSTEM service) and — lacking SCM failure actions — stays
+            // STOPPED-1067 forever, breaking Face Unlock after every reboot.
+            // Configure `sc failure` + start it if stopped. This runs AFTER
+            // ensure_bridge_service so the autonomous bridge (preferred
+            // channel, no UAC) is available to carry the command.
+            tauri::async_runtime::spawn(async {
+                match crate::elev_bridge::ensure_face_service().await {
+                    Ok(status) => {
+                        log::info!("[face] ensure_face_service: {status}");
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[face] ensure_face_service failed (will try again from UI): {e}"
                         );
                     }
                 }
