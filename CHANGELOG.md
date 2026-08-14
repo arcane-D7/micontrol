@@ -5,7 +5,7 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.18] - 2026-08-14
 
 ### Changed
 
@@ -15,12 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **MiControlFace service left STOPPED-1067 after reboot — root cause + self-heal.** The face auth service crashes with `0xc0000005` in `FrameServerClient.dll_unloaded` (MSMF webcam capture inside a Session-0 SYSTEM service) ~60 min after boot, and — being the only MiControl service _without_ SCM failure actions — the SCM never restarted it, breaking Face Unlock after every reboot while IoTSvc and MiControlBridge (which have RESTART 5/10/30s) kept running. Three layers are now in place:
   - **`sc failure` auto-restart** — `micontrol_face_svc.exe install` now runs `sc failure MiControlFace reset= 86400 actions= restart/5000/restart/10000/restart/30000`, so the SCM auto-restarts the service after future crashes (mirrors MiControlBridge/IoTSvc).
-  - **`ensure_face_service` elevated command** — new dispatch branch that queries the SCM, (re)configures failure actions if missing, and starts the service if STOPPED. Routed through the autonomous MiControlBridge pipe (no UAC) via `elev_bridge::ensure_face_service`; invoked automatically once at app startup (post-Bridge-ensure) and manually from the Face Unlock tab via the new **🩺 Auto-corrigir serviço** button (`face_service_ensure`).
+  - **`ensure_face_service` elevated command** — new dispatch branch that queries the SCM, (re)configures failure actions if missing, and starts the service if STOPPED. Routed through the autonomous MiControlBridge pipe (no UAC) via `elev_bridge::ensure_face_service`; invoked automatically once at app startup (post-Bridge-ensure) and manually from the Face Unlock tab via the new self-heal path (`face_service_ensure`).
   - **Crash-cause hardening** — `Camera::open` now pins `FrameServerClient.dll` (`LoadLibraryW`, never freed) so the FrameServer broker cannot unload it mid-capture; this addresses the `FrameServerClient.dll_unloaded` access violation directly.
 - **Driver scan now runs elevated** — `trigger_driver_scan` previously invoked `pnputil /scan-devices` directly in the app process, which runs as a normal user → access denied → the UI showed a raw error. It now routes through the elevated bridge (`run_elevated` → MiControlBridge service → scheduled task → UAC), exactly like `install_driver`. The elevated dispatch gained a `trigger_driver_scan` branch with the slow-command timeout (90 s), so scanning from the Updates tab works on a fresh install.
 - **NSIS silent 1062 cleanup** — `KillBridgeProcess`, `KillFaceServiceProcess` (+ `un.*` variants) now guard `sc stop` behind a RUNNING check (`sc query | findstr /i RUNNING`), matching `StopIoTService`/`un.StopIoTService`. Fresh-install logs are now clean: no `[SC] ControlService FAILED 1062` lines from stops of already-stopped services.
-
-## [0.1.18] - 2026-08-09
 
 ### Added
 
@@ -230,7 +228,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Driver management
 - Multi-language support (en, pt, es, fr)
 
-[Unreleased]: https://github.com/arcane-D7/micontrol/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/arcane-D7/micontrol/compare/v0.1.18...HEAD
+[0.1.18]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.18
 [0.1.3]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.3
 [1.0.0]: https://github.com/arcane-D7/micontrol/releases/tag/v1.0.0
 [0.1.0]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.0
