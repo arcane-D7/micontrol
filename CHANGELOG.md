@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Face Unlock tab redesigned around a single, guided journey.** The page previously crammed seven action buttons (PT/EN mixed), three modal flows, raw numeric inputs and a wall of status toggles into one screen with no clear starting point. It is now driven by a **hero status card** that computes the real setup phase (`off → models → service → enroll → ready`) and offers exactly one primary action per step, backed by a three-step journey checklist (AI models / auth service / face enrolled) that shows live state with inline download progress. Settings are grouped and human-readable (sliders with plain-language labels, "Show tile at sign-in" vs raw `face_unlock_logon_enabled`), advanced values collapse behind an accordion, maintenance/diagnostics/removal collapse behind **Maintenance**, and the redundant security notice moved into a quiet inline warning shown only while Face Unlock is off. The experimental-warning + model-download service-install modal stack was removed entirely; the enroll wizard remains the single modal in the flow, reachable from every step that needs it. All copy normalized to English with no em dashes; all side-stripe border styling removed.
+
 ### Fixed
 
 - **MiControlFace service left STOPPED-1067 after reboot — root cause + self-heal.** The face auth service crashes with `0xc0000005` in `FrameServerClient.dll_unloaded` (MSMF webcam capture inside a Session-0 SYSTEM service) ~60 min after boot, and — being the only MiControl service _without_ SCM failure actions — the SCM never restarted it, breaking Face Unlock after every reboot while IoTSvc and MiControlBridge (which have RESTART 5/10/30s) kept running. Three layers are now in place:

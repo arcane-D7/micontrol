@@ -65,222 +65,6 @@ function getFriendlyErr(e: unknown): string {
   return String(e);
 }
 
-type WizardStep = 'experimental' | 'models' | 'service' | 'done';
-
-/**
- * Setup wizard modals:
- *  1. ⚠️ experimental warning (mandatory acceptance)
- *  2. models download (progress bar via `face-model-progress` event)
- *  3. auth-service install
- *  4. done → hand-off to the camera enroll modal
- */
-function SetupWizard({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [step, setStep] = useState<WizardStep>('experimental');
-  const [accepted, setAccepted] = useState(false);
-  const [progress, setProgress] = useState<number | null>(null);
-  const [installMsg, setInstallMsg] = useState<string>('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Live download progress.
-    const un = listen<number>('face-model-progress', (e) => {
-      setProgress(e.payload);
-    });
-    return () => {
-      void un.then((f) => f());
-    };
-  }, []);
-
-  const finishError = (e: unknown): string => getFriendlyErr(e);
-
-  const startDownload = async () => {
-    setBusy(true);
-    setErr(null);
-    setProgress(0);
-    try {
-      await invoke('face_download_models');
-      // Optional copy into Program Files (needs admin; silently skips if not).
-      try {
-        await invoke('face_install_models');
-      } catch {
-        // Models are staged — the auth service can read the staging dir too.
-        // Program Files copy will be attempted by the installer on reinstall.
-      }
-      setStep('service');
-    } catch (e) {
-      setErr(finishError(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const installSvc = async () => {
-    setBusy(true);
-    setErr(null);
-    setInstallMsg('');
-    try {
-      const r = await invoke<{ ok: boolean; stdout: string; stderr: string }>(
-        'face_service_install',
-      );
-      if (!r.ok) {
-        setErr(`install failed: ${r.stderr}`);
-      } else {
-        setInstallMsg(r.stdout || 'Service installed & started.');
-        setStep('done');
-      }
-    } catch (e) {
-      setErr(finishError(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <InfoModal open onClose={onClose} title="Face Unlock — Setup wizard">
-      {/* 1. Experimental warning */}
-      {step === 'experimental' && (
-        <div style={{ display: 'grid', gap: 14 }}>
-          <div
-            style={{
-              padding: 12,
-              borderRadius: 8,
-              background: 'rgba(230,162,60,.12)',
-              borderLeft: '4px solid #e6a23c',
-            }}
-          >
-            <b style={{ color: '#e6a23c' }}>⚠️ Experimental system</b>
-          </div>
-          <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-            This is an <b>experimental</b> face-recognition system. It does <b>not</b> provide the
-            same level of security as <b>Windows Hello</b> (which uses a dedicated infrared sensor
-            and dedicated hardware).
-          </p>
-          <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-            A <b>photo or video</b> of you presented to the camera may be able to unlock the device.
-            Do not enable this on a machine storing sensitive data.
-          </p>
-          <label style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 13.5 }}>
-            <ToggleSwitch
-              checked={accepted}
-              onChange={setAccepted}
-              ariaLabel="I understand this is experimental"
-            />
-            <span>
-              I understand this is <b>experimental</b>, that it is{' '}
-              <b>not as secure as Windows Hello</b>, and that I use it at <b>my own risk</b> (“o uso
-              é por conta e risco do usuário”).
-            </span>
-          </label>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button className="btn btn-secondary" onClick={onClose}>
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary"
-              disabled={!accepted}
-              onClick={() => setStep('models')}
-            >
-              I understand — continue
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 2. Models download */}
-      {step === 'models' && (
-        <div style={{ display: 'grid', gap: 12 }}>
-          <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-            Step 1/2 — Download the AI models (~250 MB, InsightFace <code>buffalo_l</code>). This
-            happens once; they are stored locally.
-          </p>
-          {progress !== null && (
-            <div
-              style={{
-                height: 10,
-                borderRadius: 5,
-                background: 'var(--bg-soft, #eee)',
-                overflow: 'hidden',
-              }}
-            >
-              <div
-                style={{
-                  height: '100%',
-                  width: `${progress}%`,
-                  background: '#4caf50',
-                  transition: 'width .3s ease',
-                }}
-              />
-            </div>
-          )}
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>
-            {progress !== null ? `${progress}%` : 'Ready to download'}
-          </p>
-          {err && <p style={{ margin: 0, color: '#f44336', fontSize: 13 }}>{err}</p>}
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button
-              className="btn btn-secondary"
-              disabled={busy}
-              onClick={() => setStep('experimental')}
-            >
-              Back
-            </button>
-            <button
-              className="btn btn-primary"
-              disabled={busy}
-              onClick={() => void startDownload()}
-            >
-              {progress !== null && progress < 100
-                ? `⬇️ Downloading ${progress}%…`
-                : '⬇️ Download models'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 3. Service install */}
-      {step === 'service' && (
-        <div style={{ display: 'grid', gap: 12 }}>
-          <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-            Step 2/2 — Install &amp; start the MiControlFace auth service (runs as LocalSystem). You
-            may see a UAC prompt.
-          </p>
-          {installMsg && <p style={{ margin: 0, color: '#4caf50', fontSize: 13 }}>{installMsg}</p>}
-          {err && <p style={{ margin: 0, color: '#f44336', fontSize: 13 }}>{err}</p>}
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button className="btn btn-secondary" disabled={busy} onClick={onClose}>
-              Cancel
-            </button>
-            <button className="btn btn-primary" disabled={busy} onClick={() => void installSvc()}>
-              {busy ? '⏳ Installing…' : '🛠️ Install auth service'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 4. Done */}
-      {step === 'done' && (
-        <div style={{ display: 'grid', gap: 12 }}>
-          <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-            ✅ <b>Setup complete.</b> Models are ready and the auth service is running.
-          </p>
-          <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-            Next, enroll your face so unlock has a reference to match against:
-          </p>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button className="btn btn-secondary" onClick={onClose}>
-              Later
-            </button>
-            <button className="btn btn-primary" onClick={onDone}>
-              📷 Enroll my face now
-            </button>
-          </div>
-        </div>
-      )}
-    </InfoModal>
-  );
-}
-
 type EnrollStep = 'user' | 'hello' | 'password' | 'camera';
 
 /**
@@ -897,13 +681,16 @@ export default function FaceUnlockTab() {
   const [status, setStatus] = useState<FaceStatus | null>(null);
   const [settings, setSettings] = useState<FaceSettings>(DEFAULT_SETTINGS);
   const [modelsStatus, setModelsStatus] = useState<FaceModelsStatus | null>(null);
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [diagnostics, setDiagnostics] = useState<Record<string, unknown> | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
-  const [wizardOpen, setWizardOpen] = useState(false);
   const [enrollOpen, setEnrollOpen] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showMaintenance, setShowMaintenance] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -913,8 +700,6 @@ export default function FaceUnlockTab() {
       setSettings({ ...DEFAULT_SETTINGS, ...s });
     } catch (e) {
       setMsg({ type: 'err', text: `load: ${String(e)}` });
-    } finally {
-      setLoading(false);
     }
   }, []);
 
@@ -937,8 +722,12 @@ export default function FaceUnlockTab() {
     const un = listen('face-models-removed', () => {
       void loadModels();
     });
+    const unProg = listen<number>('face-model-progress', (e) => {
+      setDownloadProgress(e.payload);
+    });
     return () => {
       void un.then((f) => f());
+      void unProg.then((f) => f());
     };
   }, [load, loadModels]);
 
@@ -947,63 +736,11 @@ export default function FaceUnlockTab() {
     setTimeout(() => setMsg(null), 6000);
   };
 
-  const installService = async () => {
-    setBusy(true);
-    try {
-      const r = await invoke<{ ok: boolean; stdout: string; stderr: string }>(
-        'face_service_install',
-      );
-      show(
-        r.ok ? 'ok' : 'err',
-        r.ok ? 'Service installed & started.' : `install failed: ${r.stderr}`,
-      );
-      await load();
-    } catch (e) {
-      show('err', `install error: ${getFriendlyErr(e)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const ensureService = async () => {
-    setBusy(true);
-    try {
-      const r = await invoke<{
-        service_installed: boolean;
-        service_running: boolean;
-        state?: string;
-        action?: string;
-        failure_actions_configured?: boolean;
-      }>('face_service_ensure');
-      if (!r.service_installed) {
-        show('err', 'Auth service is not installed — use "Install / start auth service" first.');
-      } else if (r.action === 'already_running') {
-        show(
-          'ok',
-          `Service already running.${
-            r.failure_actions_configured === false ? ' (failure actions not configured)' : ''
-          }`,
-        );
-      } else {
-        show(
-          'ok',
-          `Service ${r.action === 'started' ? 'started' : 'start request sent'}. State: ${
-            r.state ?? 'unknown'
-          }${r.failure_actions_configured ? ' — auto-restart configured.' : ''}`,
-        );
-      }
-      await load();
-    } catch (e) {
-      show('err', `self-heal error: ${getFriendlyErr(e)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const saveSettings = async () => {
     setBusy(true);
     try {
       await invoke('face_set_settings', { settings });
+      setDirty(false);
       show('ok', 'Settings saved.');
     } catch (e) {
       show('err', `settings error: ${String(e)}`);
@@ -1084,6 +821,116 @@ export default function FaceUnlockTab() {
   const modelsInstalled = !!modelsStatus && (modelsStatus.installed || modelsStatus.staged);
   const modelsKnown = modelsStatus !== null;
 
+  // Setup journey phase — drives the hero card.
+  const enabled = settings.face_unlock_enabled;
+  const svcInstalled = !!status?.service_installed;
+  const svcRunning = !!status?.service_running;
+  const hasFaces = (status?.enrolled_profiles ?? 0) > 0;
+  const phase: 'off' | 'models' | 'service' | 'enroll' | 'ready' = !enabled
+    ? 'off'
+    : !modelsInstalled
+      ? 'models'
+      : !svcRunning
+        ? 'service'
+        : !hasFaces
+          ? 'enroll'
+          : 'ready';
+
+  const phaseMeta: Record<string, { dot: string; title: string; subtitle: string }> = {
+    off: {
+      dot: 'var(--text-dim)',
+      title: 'Face Unlock is off',
+      subtitle: 'Turn it on to unlock this PC with your webcam.',
+    },
+    models: {
+      dot: 'var(--warning)',
+      title: 'Step 1 of 3 · Download the AI models',
+      subtitle: 'The recognition models (~250 MB) download once and run fully on this machine.',
+    },
+    service: {
+      dot: 'var(--warning)',
+      title: 'Step 2 of 3 · Start the auth service',
+      subtitle:
+        'A local service watches the lock screen and matches your face. No data leaves the PC.',
+    },
+    enroll: {
+      dot: 'var(--accent)',
+      title: 'Step 3 of 3 · Enroll your face',
+      subtitle:
+        'Add a reference face. Only a mathematical feature vector is stored, never a photo.',
+    },
+    ready: {
+      dot: 'var(--success)',
+      title: `Face Unlock is ready · ${status?.enrolled_profiles ?? 0} face${(status?.enrolled_profiles ?? 0) !== 1 ? 's' : ''} enrolled`,
+      subtitle: 'Everything is healthy. Lock the PC (Win+L) and look at the camera to sign in.',
+    },
+  };
+  const meta = phaseMeta[phase];
+
+  const set = (patch: Partial<FaceSettings>) => {
+    setSettings((s) => ({ ...s, ...patch }));
+    setDirty(true);
+  };
+
+  // Step 1 — download the ONNX models inline (no modal), with progress.
+  const downloadModels = async () => {
+    setDownloading(true);
+    setDownloadProgress(0);
+    setMsg(null);
+    try {
+      await invoke('face_download_models');
+      try {
+        await invoke('face_install_models');
+      } catch {
+        // staged copy is enough; the installer copies it on reinstall
+      }
+      await loadModels();
+      show('ok', 'AI models are ready.');
+    } catch (e) {
+      show('err', `download error: ${getFriendlyErr(e)}`);
+    } finally {
+      setDownloading(false);
+      setDownloadProgress(null);
+    }
+  };
+
+  // Step 2 — install the service if missing, otherwise self-heal (sc failure +
+  // restart) after a crash. No UAC prompt through the bridge.
+  const doServiceAction = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      if (!svcInstalled) {
+        const r = await invoke<{ ok: boolean; stdout: string; stderr: string }>(
+          'face_service_install',
+        );
+        show(
+          r.ok ? 'ok' : 'err',
+          r.ok ? 'Service installed & started.' : `install failed: ${r.stderr}`,
+        );
+      } else {
+        const r = await invoke<{
+          service_installed: boolean;
+          service_running: boolean;
+          state?: string;
+          action?: string;
+          failure_actions_configured?: boolean;
+        }>('face_service_ensure');
+        show(
+          'ok',
+          r.action === 'already_running'
+            ? 'The auth service is already running.'
+            : `Service ${r.action === 'started' ? 'started' : 'start request sent'}.`,
+        );
+      }
+      await load();
+    } catch (e) {
+      show('err', `service error: ${getFriendlyErr(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleMaster = async (enabled: boolean) => {
     setBusy(true);
     try {
@@ -1103,131 +950,277 @@ export default function FaceUnlockTab() {
     <div className="page">
       <PageHeader
         title="Face Unlock"
-        subtitle="Windows Hello-style face sign-in using the built-in RGB webcam"
+        subtitle="Unlock this PC with a look at your webcam. The whole pipeline runs locally, offline."
       />
 
-      {/* ⚠️ Security notice */}
-      <div className="card" style={{ borderLeft: '4px solid #e6a23c' }}>
-        <div className="card-title">⚠️ Security notice</div>
-        <p className="page-subtitle" style={{ margin: 0 }}>
-          Face unlock here uses a <b>single RGB camera</b> — it is far less secure than the infrared
-          Windows Hello sensor. A high-quality photo or video may bypass it. Do not enable this on a
-          machine storing sensitive data. A <b>restore point</b> is recommended before enabling the
-          lock-screen provider.
-        </p>
-      </div>
-
-      {/* Status */}
-      <div className="card">
-        <div className="card-title">Status</div>
-        {loading ? (
-          <p className="page-subtitle">Loading…</p>
-        ) : (
-          <div
+      {/* Hero — single source of truth for where the user is in the journey */}
+      <div className="card" style={{ padding: '24px 26px' }}>
+        <div style={{ display: 'flex', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <span
+            aria-hidden
             style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))',
-              gap: 12,
+              width: 12,
+              height: 12,
+              borderRadius: 999,
+              background: meta.dot,
+              marginTop: 7,
+              flexShrink: 0,
+              boxShadow: `0 0 0 4px ${meta.dot.replace(')', ' / 0.18)')}`,
             }}
-          >
-            <div className="stat">
-              <span className="stat-value">{status?.service_running ? '✅' : '❌'}</span>
-              <span className="stat-label">Auth service</span>
+          />
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <div
+              style={{
+                fontSize: '1.125rem',
+                fontWeight: 700,
+                letterSpacing: '-0.3px',
+                color: 'var(--text)',
+              }}
+            >
+              {meta.title}
             </div>
-            <div className="stat">
-              <span className="stat-value">{status?.pipe_available ? '✅' : '❌'}</span>
-              <span className="stat-label">Service pipe</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{status?.camera_available ? '✅' : '❌'}</span>
-              <span className="stat-label">Webcam</span>
-            </div>
-            <div className="stat">
-              <span className="stat-value">{status?.enrolled_profiles ?? 0}</span>
-              <span className="stat-label">Enrolled profiles</span>
-            </div>
+            <p className="page-subtitle" style={{ maxWidth: '68ch', marginBottom: 16 }}>
+              {meta.subtitle}
+            </p>
+            {phase === 'ready' ? (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {['AI models', 'Auth service', 'Face enrolled'].map((label) => (
+                  <span
+                    key={label}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: 'var(--success)',
+                      background: 'var(--surface-2)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 999,
+                      padding: '4px 12px',
+                    }}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                      <circle cx="6" cy="6" r="5" fill="currentColor" opacity="0.22" />
+                      <path
+                        d="M3.6 6.2l1.8 1.8 3-3.6"
+                        stroke="currentColor"
+                        strokeWidth="1.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    {label}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 10, flexDirection: 'column', maxWidth: 480 }}>
+                {phase === 'off' && (
+                  <>
+                    <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>
+                      Enabling shows the Face Unlock tile at the sign-in screen. You can set it up
+                      step by step right after.
+                    </div>
+                    <button
+                      className="btn btn-primary"
+                      style={{ alignSelf: 'flex-start' }}
+                      onClick={() => void toggleMaster(true)}
+                      disabled={busy}
+                    >
+                      Enable Face Unlock
+                    </button>
+                  </>
+                )}
+                {phase === 'models' && (
+                  <button
+                    className="btn btn-primary"
+                    style={{ alignSelf: 'flex-start', minWidth: 240 }}
+                    onClick={() => void downloadModels()}
+                    disabled={busy || downloading || modelsInstalled}
+                  >
+                    {downloading
+                      ? `Downloading${downloadProgress !== null ? ` ${Math.round(downloadProgress)}%` : ''}…`
+                      : 'Download AI models (~250 MB)'}
+                  </button>
+                )}
+                {phase === 'service' && (
+                  <button
+                    className="btn btn-primary"
+                    style={{ alignSelf: 'flex-start' }}
+                    onClick={() => void doServiceAction()}
+                    disabled={busy}
+                  >
+                    {svcInstalled ? 'Restart the auth service' : 'Install the auth service'}
+                  </button>
+                )}
+                {phase === 'enroll' && (
+                  <button
+                    className="btn btn-primary"
+                    style={{ alignSelf: 'flex-start' }}
+                    onClick={() => setEnrollOpen(true)}
+                    disabled={busy}
+                  >
+                    Add my face
+                  </button>
+                )}
+                {(downloading || downloadProgress !== null) && (
+                  <div style={{ width: '100%', maxWidth: 360 }}>
+                    <div
+                      style={{
+                        height: 6,
+                        borderRadius: 999,
+                        background: 'var(--surface-2)',
+                        border: '1px solid var(--border)',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: '100%',
+                          width: `${downloadProgress ?? 0}%`,
+                          background: 'var(--accent)',
+                          borderRadius: 999,
+                          transition: 'width 220ms var(--ease)',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        )}
-        <div style={{ marginTop: 12 }}>
-          <button
-            className="btn btn-primary"
-            onClick={() => setWizardOpen(true)}
-            disabled={busy || modelsInstalled}
-            title={
-              modelsInstalled
-                ? 'Module already installed — use "Remove all modules" to re-download it.'
-                : undefined
-            }
-            style={{ marginRight: 8, opacity: modelsInstalled ? 0.55 : 1 }}
-          >
-            ⬇️ Baixar e instalar módulo
-          </button>
-          {modelsInstalled && (
-            <span style={{ fontSize: 11.5, color: 'var(--success)', marginRight: 8 }}>
-              ✅ Module installed
-            </span>
-          )}
-          <button
-            className="btn btn-secondary"
-            onClick={() => void rescanModels()}
-            disabled={busy}
-            title="Re-scan for downloaded/installed modules"
-            style={{ marginRight: 8 }}
-          >
-            🔍 Re-scan modules
-          </button>
-          <button
-            className="btn btn-secondary"
-            onClick={() => void removeAllModels()}
-            disabled={busy}
-            title="Delete downloaded models (frees ~250 MB)"
-            style={{ marginRight: 8 }}
-          >
-            🗑️ Remove all modules
-          </button>
-          <button
-            className="btn btn-secondary"
-            onClick={() => void installService()}
-            disabled={busy}
-          >
-            ⚙️ Install / start auth service
-          </button>
-          <button
-            className="btn btn-secondary"
-            style={{ marginLeft: 8 }}
-            onClick={() => void ensureService()}
-            disabled={busy}
-            title="Self-heal: configure auto-restart (sc failure) and start the service if it crashed — no UAC prompt"
-          >
-            🩺 Auto-corrigir serviço
-          </button>
-          <button
-            className="btn btn-secondary"
-            style={{ marginLeft: 8 }}
-            onClick={() => void runDiagnostics()}
-            disabled={busy}
-          >
-            🔍 Diagnostics
-          </button>
-          <button
-            className="btn btn-secondary"
-            style={{ marginLeft: 8 }}
-            onClick={() => setEnrollOpen(true)}
-            disabled={busy || (modelsKnown && !modelsInstalled)}
-            title={
-              modelsKnown && !modelsInstalled
-                ? 'Download the module first — no recognition models are present.'
-                : undefined
-            }
-          >
-            📷 Camera preview / enroll
-          </button>
         </div>
       </div>
 
+      {/* Journey checklist — 3 compact steps with current state */}
+      <div
+        className="card"
+        style={{
+          display: 'grid',
+          gap: 14,
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+          padding: '16px 22px',
+        }}
+      >
+        {[
+          {
+            label: 'AI models',
+            done: modelsInstalled,
+            active: phase === 'models',
+            note: modelsInstalled
+              ? 'Downloaded once, run on-device'
+              : downloading
+                ? 'Downloading…'
+                : '~250 MB download',
+          },
+          {
+            label: 'Auth service',
+            done: svcRunning,
+            active: phase === 'service',
+            note: svcRunning
+              ? 'Running with auto-restart'
+              : svcInstalled
+                ? 'Installed, needs start'
+                : 'Local background service',
+          },
+          {
+            label: 'Face enrolled',
+            done: hasFaces,
+            active: phase === 'enroll',
+            note: hasFaces
+              ? `${status?.enrolled_profiles ?? 0} face${(status?.enrolled_profiles ?? 0) !== 1 ? 's' : ''}`
+              : 'Reference face required',
+          },
+        ].map((step) => (
+          <div
+            key={step.label}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '10px 12px',
+              borderRadius: 'var(--r-sm)',
+              background: step.active ? 'var(--accent-soft)' : 'var(--surface-2)',
+              border: `1px solid ${step.active ? 'var(--accent)' : 'var(--border)'}`,
+              transition: 'background 190ms var(--ease), border-color 190ms var(--ease)',
+            }}
+          >
+            <span style={{ flexShrink: 0 }}>
+              {step.done ? (
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+                  <circle cx="9" cy="9" r="8" fill="var(--success)" opacity="0.18" />
+                  <path
+                    d="M5.5 9.3l2.3 2.3 4.7-5"
+                    stroke="var(--success)"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              ) : step.active ? (
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+                  <circle cx="9" cy="9" r="8" fill="var(--accent)" opacity="0.2" />
+                  <circle
+                    cx="9"
+                    cy="9"
+                    r="8"
+                    stroke="var(--accent)"
+                    strokeWidth="1.6"
+                    strokeDasharray="3 4"
+                  />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden>
+                  <circle cx="9" cy="9" r="8" stroke="var(--text-dim)" strokeWidth="1.4" />
+                </svg>
+              )}
+            </span>
+            <span style={{ minWidth: 0 }}>
+              <span
+                style={{
+                  display: 'block',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: step.done ? 'var(--text-muted)' : 'var(--text)',
+                }}
+              >
+                {step.label}
+              </span>
+              <span style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)' }}>
+                {step.note}
+              </span>
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {phase === 'off' && (
+        <div className="card" style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            style={{ marginTop: 2, flexShrink: 0 }}
+            aria-hidden
+          >
+            <circle cx="8" cy="8" r="7" stroke="var(--warning)" strokeWidth="1.3" />
+            <path d="M8 4.6v4" stroke="var(--warning)" strokeWidth="1.3" strokeLinecap="round" />
+            <circle cx="8" cy="11.1" r="0.9" fill="var(--warning)" />
+          </svg>
+          <p className="page-subtitle" style={{ margin: 0, maxWidth: '78ch' }}>
+            Face Unlock here uses a <b>single RGB camera</b>, which is far less secure than the
+            infrared sensor of Windows Hello. A high-quality photo or video may bypass it, so avoid
+            enabling it on machines storing sensitive data. A restore point is recommended before
+            using the lock-screen provider.
+          </p>
+        </div>
+      )}
+
       {diagnostics && (
         <div className="card">
-          <div className="card-title">🔍 Diagnostics</div>
+          <div className="card-title">Diagnostics</div>
           <div
             style={{
               display: 'grid',
@@ -1272,7 +1265,7 @@ export default function FaceUnlockTab() {
                         fontFamily: isBool ? undefined : 'var(--font-mono)',
                       }}
                     >
-                      {isBool ? (okState ? '✅ OK' : '❌ Failed') : String(value)}
+                      {isBool ? (okState ? 'OK' : 'Failed') : String(value)}
                     </div>
                   </div>
                 );
@@ -1289,231 +1282,493 @@ export default function FaceUnlockTab() {
         </div>
       )}
       {diagnosticsError && (
-        <div className="card" style={{ borderLeft: '4px solid var(--error)' }}>
+        <div className="card">
           <div className="card-title">Diagnostics error</div>
           <p style={{ margin: 0, fontSize: 13, color: 'var(--error)' }}>{diagnosticsError}</p>
         </div>
       )}
 
-      {/* Master toggle */}
+      {/* Settings — grouped, ready-first */}
+      <div className="card">
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+          }}
+        >
+          <div>
+            <div className="card-title" style={{ marginBottom: 4 }}>
+              Settings
+            </div>
+            <p className="page-subtitle" style={{ margin: 0 }}>
+              Tune how strictly the camera matches your face. Defaults work well for most people.
+            </p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {dirty && (
+              <span style={{ fontSize: 12, color: 'var(--warning)' }}>Unsaved changes</span>
+            )}
+            <button
+              className="btn btn-primary"
+              onClick={() => void saveSettings()}
+              disabled={busy || !dirty}
+              style={{ minWidth: 96 }}
+            >
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: 'grid',
+            gap: 18,
+            marginTop: 14,
+            gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+          }}
+        >
+          {/* Matching */}
+          <div>
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--text-dim)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                marginBottom: 10,
+              }}
+            >
+              Matching strictness
+            </div>
+            <div style={{ display: 'grid', gap: 12 }}>
+              <label style={{ display: 'grid', gap: 5 }}>
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>Similarity threshold</span>
+                <input
+                  type="range"
+                  min={0.4}
+                  max={0.8}
+                  step={0.01}
+                  value={settings.match_threshold}
+                  onChange={(e) => set({ match_threshold: Number(e.target.value) })}
+                  style={{ width: '100%', accentColor: 'var(--accent)' }}
+                />
+                <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
+                  {settings.match_threshold < 0.55
+                    ? 'Loose — unlock nearly always works'
+                    : settings.match_threshold > 0.7
+                      ? 'Strict — only confident matches'
+                      : 'Balanced'}
+                  {' · '}
+                  {settings.match_threshold.toFixed(2)}
+                </span>
+              </label>
+              <label
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 12,
+                }}
+              >
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  Reject if 2+ faces in frame
+                </span>
+                <ToggleSwitch
+                  checked={settings.multi_face_protection_enabled}
+                  onChange={(v) => set({ multi_face_protection_enabled: v })}
+                  ariaLabel="Reject if 2+ faces in frame"
+                />
+              </label>
+              <label
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 12,
+                }}
+              >
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  Require liveness (blink / turn)
+                </span>
+                <ToggleSwitch
+                  checked={settings.liveness_enabled}
+                  onChange={(v) => set({ liveness_enabled: v })}
+                  ariaLabel="Require liveness"
+                />
+              </label>
+              <label
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 12,
+                }}
+              >
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  Reject photos / videos (anti-spoof)
+                </span>
+                <ToggleSwitch
+                  checked={settings.antispoof_enabled}
+                  onChange={(v) => set({ antispoof_enabled: v })}
+                  ariaLabel="Reject photos and videos"
+                />
+              </label>
+            </div>
+          </div>
+
+          {/* Where it appears */}
+          <div>
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--text-dim)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.06em',
+                marginBottom: 10,
+              }}
+            >
+              Sign-in screens
+            </div>
+            <div style={{ display: 'grid', gap: 12 }}>
+              <label
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 12,
+                }}
+              >
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>Show tile at sign-in</span>
+                <ToggleSwitch
+                  checked={settings.face_unlock_logon_enabled}
+                  onChange={(v) => set({ face_unlock_logon_enabled: v })}
+                  ariaLabel="Show tile at sign-in"
+                />
+              </label>
+              <label
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 12,
+                }}
+              >
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  Show tile at lock (Win+L)
+                </span>
+                <ToggleSwitch
+                  checked={settings.face_unlock_workstation_enabled}
+                  onChange={(v) => set({ face_unlock_workstation_enabled: v })}
+                  ariaLabel="Show tile at workstation unlock"
+                />
+              </label>
+              <label style={{ display: 'grid', gap: 5 }}>
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>Re-enrollment reminder</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={365}
+                  step={7}
+                  value={Math.min(settings.renew_days, 365)}
+                  onChange={(e) => set({ renew_days: Number(e.target.value) })}
+                  style={{ width: '100%', accentColor: 'var(--accent)' }}
+                />
+                <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
+                  {settings.renew_days === 0
+                    ? 'Off — never remind'
+                    : `Every ${settings.renew_days} day${settings.renew_days !== 1 ? 's' : ''}`}
+                </span>
+              </label>
+              <label style={{ display: 'grid', gap: 5 }}>
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  Failed attempts before lockout
+                </span>
+                <input
+                  type="range"
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={Math.min(Math.max(settings.lockout_max_fails, 1), 10)}
+                  onChange={(e) => set({ lockout_max_fails: Number(e.target.value) })}
+                  style={{ width: '100%', accentColor: 'var(--accent)' }}
+                />
+                <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
+                  {settings.lockout_max_fails} attempt{settings.lockout_max_fails !== 1 ? 's' : ''}{' '}
+                  then fall back to password
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Advanced — collapsed by default, stays out of the way */}
+        <button
+          className="btn btn-ghost"
+          onClick={() => setShowAdvanced((v) => !v)}
+          style={{ marginTop: 16, fontSize: 13 }}
+          aria-expanded={showAdvanced}
+        >
+          {showAdvanced ? 'Hide advanced options' : 'Advanced options'}
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            style={{
+              marginLeft: 6,
+              transform: showAdvanced ? 'rotate(180deg)' : 'none',
+              transition: 'transform 190ms var(--ease)',
+            }}
+            aria-hidden
+          >
+            <path
+              d="M3.5 5l3.5 3.5L10.5 5"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+        {showAdvanced && (
+          <div style={{ display: 'grid', gap: 12, marginTop: 12, maxWidth: 560 }}>
+            <label
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 12,
+              }}
+            >
+              <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                Match margin (anti-misrouting)
+              </span>
+              <input
+                className="text-input"
+                type="number"
+                min={0}
+                max={1}
+                step={0.01}
+                value={settings.match_margin}
+                onChange={(e) => set({ match_margin: Number(e.target.value) })}
+                style={{ width: 90 }}
+              />
+            </label>
+            <label
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 12,
+              }}
+            >
+              <span style={{ fontSize: 13, color: 'var(--text)' }}>Anti-spoof threshold</span>
+              <input
+                className="text-input"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.antispoof_threshold}
+                onChange={(e) => set({ antispoof_threshold: Number(e.target.value) })}
+                style={{ width: 90 }}
+              />
+            </label>
+            <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+              Advanced values tune the recognition internals. Leave them alone unless you know what
+              they do.
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Master toggle + password + templates together under "Manage" */}
       <div className="card">
         <div
           className="card-title"
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
         >
-          <span>Face Unlock enabled</span>
+          <span>Face Unlock power</span>
           <ToggleSwitch
             checked={settings.face_unlock_enabled}
             onChange={(v) => void toggleMaster(v)}
             disabled={busy}
-            ariaLabel="Face Unlock enabled"
+            ariaLabel="Face Unlock power"
           />
         </div>
-        <p className="page-subtitle" style={{ margin: 0 }}>
-          When disabled, the Face Unlock tile is hidden from the lock screen but your enrolled
-          faces, settings and stored password are kept.
-        </p>
+        {phase === 'off' ? (
+          <p className="page-subtitle" style={{ margin: 0 }}>
+            Turn it on and follow the checklist above. Your enrolled faces, settings and stored
+            password are kept while it is off.
+          </p>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gap: 18,
+              marginTop: 2,
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+            }}
+          >
+            <div>
+              <span
+                style={{
+                  display: 'block',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: 'var(--text)',
+                  marginBottom: 6,
+                }}
+              >
+                Enrolled faces
+              </span>
+              <TemplateList compact />
+              <button
+                className="btn btn-secondary"
+                style={{ marginTop: 8 }}
+                onClick={() => setEnrollOpen(true)}
+                disabled={busy || (modelsKnown && !modelsInstalled)}
+                title={
+                  modelsKnown && !modelsInstalled
+                    ? 'Download the AI models first — no recognition models are present.'
+                    : undefined
+                }
+              >
+                Add another face
+              </button>
+            </div>
+            <div>
+              <span
+                style={{
+                  display: 'block',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: 'var(--text)',
+                  marginBottom: 6,
+                }}
+              >
+                Sign-in password
+              </span>
+              <p className="page-subtitle" style={{ margin: 0 }}>
+                Stored in a Windows LSA secret and read only by the credential provider at the lock
+                screen. It never leaves this PC. Set or update it inside the enroll flow.
+              </p>
+              <button
+                className="btn btn-secondary"
+                style={{ marginTop: 8 }}
+                onClick={() => setEnrollOpen(true)}
+                disabled={busy || (modelsKnown && !modelsInstalled)}
+              >
+                Manage password
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Enrollment — single flow */}
-      <div className="card">
-        <div className="card-title">Enroll a face</div>
-        <p className="page-subtitle">
-          One guided flow: pick your <b>Windows account</b> → confirm with <b>Windows Hello</b> (PIN
-          / fingerprint / face) → store the sign-in password once → capture your face. The camera
-          stores a feature vector — no photos.
-        </p>
-        <button
-          className="btn btn-primary"
-          onClick={() => setEnrollOpen(true)}
-          disabled={busy || (modelsKnown && !modelsInstalled)}
-          title={
-            modelsKnown && !modelsInstalled
-              ? 'Download the module first — no recognition models are present.'
-              : undefined
-          }
+      {/* Maintenance — tucked away */}
+      <button
+        className="btn btn-ghost"
+        onClick={() => setShowMaintenance((v) => !v)}
+        style={{ fontSize: 13, marginBottom: showMaintenance ? 10 : 0 }}
+        aria-expanded={showMaintenance}
+      >
+        {showMaintenance ? 'Hide maintenance' : 'Maintenance'}
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 14 14"
+          fill="none"
+          style={{
+            marginLeft: 6,
+            transform: showMaintenance ? 'rotate(180deg)' : 'none',
+            transition: 'transform 190ms var(--ease)',
+          }}
+          aria-hidden
         >
-          📷 Enroll my face
-        </button>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
-          Tip: enroll 2+ templates (different angles/lighting) to improve unlock reliability.
-        </p>
-      </div>
-
-      {/* Settings */}
-      <div className="card">
-        <div className="card-title">Settings</div>
-        <div style={{ display: 'grid', gap: 10, maxWidth: 480 }}>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Match threshold (similarity)</span>
-            <input
-              className="text-input"
-              type="number"
-              min={0}
-              max={1}
-              step={0.05}
-              value={settings.match_threshold}
-              onChange={(e) =>
-                setSettings({ ...settings, match_threshold: Number(e.target.value) })
-              }
-              style={{ width: 80 }}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Active liveness (blink/turn)</span>
-            <ToggleSwitch
-              checked={settings.liveness_enabled}
-              onChange={(v) => setSettings({ ...settings, liveness_enabled: v })}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Passive anti-spoof (photo/video)</span>
-            <ToggleSwitch
-              checked={settings.antispoof_enabled}
-              onChange={(v) => setSettings({ ...settings, antispoof_enabled: v })}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Failures before lockout</span>
-            <input
-              className="text-input"
-              type="number"
-              min={1}
-              max={20}
-              value={settings.lockout_max_fails}
-              onChange={(e) =>
-                setSettings({ ...settings, lockout_max_fails: Number(e.target.value) })
-              }
-              style={{ width: 80 }}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Show tile at sign-in</span>
-            <ToggleSwitch
-              checked={settings.face_unlock_logon_enabled}
-              onChange={(v) => setSettings({ ...settings, face_unlock_logon_enabled: v })}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Show tile at workstation unlock (Win+L)</span>
-            <ToggleSwitch
-              checked={settings.face_unlock_workstation_enabled}
-              onChange={(v) => setSettings({ ...settings, face_unlock_workstation_enabled: v })}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Match margin (anti-misrouting)</span>
-            <input
-              className="text-input"
-              type="number"
-              min={0}
-              max={1}
-              step={0.01}
-              value={settings.match_margin}
-              onChange={(e) => setSettings({ ...settings, match_margin: Number(e.target.value) })}
-              style={{ width: 80 }}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Anti-spoof threshold</span>
-            <input
-              className="text-input"
-              type="number"
-              min={0}
-              max={1}
-              step={0.05}
-              value={settings.antispoof_threshold}
-              onChange={(e) =>
-                setSettings({ ...settings, antispoof_threshold: Number(e.target.value) })
-              }
-              style={{ width: 80 }}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Reject if 2+ faces in frame</span>
-            <ToggleSwitch
-              checked={settings.multi_face_protection_enabled}
-              onChange={(v) => setSettings({ ...settings, multi_face_protection_enabled: v })}
-            />
-          </label>
-          <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Re-enrollment reminder (days)</span>
-            <input
-              className="text-input"
-              type="number"
-              min={0}
-              max={3650}
-              value={settings.renew_days}
-              onChange={(e) => setSettings({ ...settings, renew_days: Number(e.target.value) })}
-              style={{ width: 80 }}
-            />
-          </label>
+          <path
+            d="M3.5 5l3.5 3.5L10.5 5"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      {showMaintenance && (
+        <div className="card" style={{ display: 'grid', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button
+              className="btn btn-secondary"
+              style={{ marginRight: 0 }}
+              onClick={() => void doServiceAction()}
+              disabled={busy}
+              title="Reinstall or self-heal the auth service if it crashed. No UAC prompt."
+            >
+              Reinstall / restart auth service
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void rescanModels()}
+              disabled={busy}
+              title="Re-scan for downloaded or installed models"
+            >
+              Re-scan models
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => void runDiagnostics()}
+              disabled={busy}
+            >
+              Run diagnostics
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button
+              className="btn btn-danger"
+              onClick={() => void removeAllModels()}
+              disabled={busy}
+              title="Delete downloaded models (frees ~250 MB)"
+            >
+              Remove all models
+            </button>
+            <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
+              Removing models frees ~250 MB but disables enrollment until you download them again.
+            </span>
+          </div>
         </div>
-        <div style={{ marginTop: 12 }}>
-          <button className="btn btn-primary" onClick={() => void saveSettings()} disabled={busy}>
-            💾 Save settings
-          </button>
-        </div>
-      </div>
-
-      {/* Sign-in password (LSA) — managed inside the enroll wizard */}
-      <div className="card">
-        <div className="card-title">Sign-in password (LSA)</div>
-        <p className="page-subtitle">
-          The password is stored in an LSA Secret and read only by the Credential Provider at the
-          lock screen — it never crosses the network or the service pipe. Use your Windows account
-          password (not a PIN). Set or update it inside the <b>enroll wizard</b> below.
-        </p>
-        <button
-          className="btn btn-secondary"
-          onClick={() => setEnrollOpen(true)}
-          disabled={busy || (modelsKnown && !modelsInstalled)}
-        >
-          🔐 Set / update password
-        </button>
-      </div>
-
-      {/* Templates */}
-      <div className="card">
-        <div className="card-title">Enrolled faces</div>
-        <p className="page-subtitle">
-          Face enrollment requires the camera + recognition pipeline (built with the{' '}
-          <code>face</code> feature). Templates store feature vectors only — no photos — encrypted
-          with DPAPI machine scope.
-        </p>
-        <TemplateList />
-      </div>
+      )}
 
       {msg && (
         <div
+          role="status"
           style={{
             marginTop: 12,
-            padding: 10,
-            borderRadius: 8,
-            background: msg.type === 'ok' ? 'rgba(76,175,80,.15)' : 'rgba(244,67,54,.15)',
-            color: msg.type === 'ok' ? '#4caf50' : '#f44336',
+            padding: '10px 14px',
+            borderRadius: 'var(--r-sm)',
+            background: msg.type === 'ok' ? 'var(--success)' : 'var(--error)',
+            color: 'var(--surface-solid)',
+            fontSize: 13,
+            fontWeight: 600,
+            opacity: 0.95,
           }}
         >
           {msg.text}
         </div>
       )}
 
-      {/* Setup wizard + enroll wizard modals */}
-      {wizardOpen && (
-        <SetupWizard
-          onClose={() => setWizardOpen(false)}
-          onDone={() => {
-            setWizardOpen(false);
-            setEnrollOpen(true);
-          }}
-        />
-      )}
+      {/* Enroll wizard modal — single modal left in the flow */}
       {enrollOpen && (
         <EnrollWizard
           onClose={() => setEnrollOpen(false)}
           onEnrolled={() => {
             setEnrollOpen(false);
             void load();
+            void loadModels();
           }}
         />
       )}
@@ -1521,7 +1776,7 @@ export default function FaceUnlockTab() {
   );
 }
 
-function TemplateList() {
+function TemplateList({ compact = false }: { compact?: boolean }) {
   const [profiles, setProfiles] = useState<{ name: string; templates: number; labels: string[] }[]>(
     [],
   );
@@ -1577,11 +1832,12 @@ function TemplateList() {
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            padding: 8,
-            borderBottom: '1px solid var(--border, #eee)',
+            gap: 10,
+            padding: compact ? '6px 0' : 8,
+            borderBottom: '1px solid var(--border)',
           }}
         >
-          <div>
+          <div style={{ minWidth: 0 }}>
             <b>{p.name}</b>{' '}
             <span style={{ color: 'var(--text-dim)' }}>
               ({p.templates} template{p.templates !== 1 ? 's' : ''})
@@ -1594,9 +1850,9 @@ function TemplateList() {
             className="btn btn-secondary btn-sm"
             onClick={() => void deleteAll(p.name)}
             disabled={busy}
-            style={{ fontSize: 12, padding: '4px 10px' }}
+            style={{ fontSize: 12, padding: '4px 10px', flexShrink: 0 }}
           >
-            🗑 Delete
+            Delete
           </button>
         </li>
       ))}
