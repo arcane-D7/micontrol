@@ -46,8 +46,7 @@ pub fn pack_kerb_logon(user: &str, password: &str, _domain: &str) -> (*mut u8, u
             &mut filled,
         );
         if ok.is_err() {
-            let _ =
-                windows::Win32::System::Com::CoTaskMemFree(Some(buffer as *mut core::ffi::c_void));
+            windows::Win32::System::Com::CoTaskMemFree(Some(buffer as *mut core::ffi::c_void));
             return (std::ptr::null_mut(), 0);
         }
         (buffer, filled)

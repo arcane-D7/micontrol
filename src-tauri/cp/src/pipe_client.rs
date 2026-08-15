@@ -72,7 +72,7 @@ fn server_is_localsystem(h: HANDLE) -> bool {
             return false;
         }
         let is_ls = EqualSid(sid, local_system).is_ok();
-        let _ = LocalFree(HLOCAL(local_system.0 as *mut core::ffi::c_void));
+        let _ = LocalFree(HLOCAL(local_system.0));
         is_ls
     }
 }

@@ -99,6 +99,12 @@ impl windows::Win32::System::Com::IClassFactory_Impl for FaceClassFactory_Impl {
 }
 
 /// COM export: get the class factory for our CLSID.
+///
+/// # Safety
+///
+/// `rclsid`, `riid` and `ppv` must be valid pointers for the duration of the
+/// call, as mandated by COM's `DllGetClassObject` ABI. `ppv` must point to
+/// writable storage that receives the interface pointer on success.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllGetClassObject(
     rclsid: *const GUID,
@@ -124,6 +130,11 @@ pub unsafe extern "system" fn DllGetClassObject(
 }
 
 /// COM export: can the DLL be unloaded?
+///
+/// # Safety
+///
+/// Safe when called as specified by COM's `DllCanUnloadNow` contract: it
+/// reads only the process-global refcount and returns a status code.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
     if G_REF_COUNT.load(Ordering::SeqCst) == 0 {

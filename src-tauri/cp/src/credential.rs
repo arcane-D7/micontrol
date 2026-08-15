@@ -106,7 +106,7 @@ impl ICredentialProviderCredential_Impl for FaceCredential_Impl {
         &self,
         pcpce: Option<&ICredentialProviderCredentialEvents>,
     ) -> windows_core::Result<()> {
-        *self.events.lock().unwrap() = pcpce.map(|e| e.clone());
+        *self.events.lock().unwrap() = pcpce.cloned();
         Ok(())
     }
 
@@ -126,6 +126,9 @@ impl ICredentialProviderCredential_Impl for FaceCredential_Impl {
         Ok(())
     }
 
+    // COM ABI: the `*mut` out-params are mandated by the ICredentialProvider
+    // interface and cannot be marked unsafe; deref is intentional and bounded.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn GetFieldState(
         &self,
         dwfieldid: u32,
@@ -213,6 +216,9 @@ impl ICredentialProviderCredential_Impl for FaceCredential_Impl {
     }
 
     /// Called when the system needs the actual credential to unlock.
+    // COM ABI: the `*mut` out-params cannot be marked unsafe; deref is
+    // intentional (LSA/COM memory protocol), bounded by the CP contract.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn GetSerialization(
         &self,
         pcpgsr: *mut CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE,

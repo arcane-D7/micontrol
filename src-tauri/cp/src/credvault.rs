@@ -28,16 +28,10 @@ pub fn read_password(user: &str) -> Result<String, String> {
     let secret_name = format!("{LSA_SECRET_PREFIX}{user}");
     let name = to_lsa_string(&secret_name);
 
-    let mut attrs = LSA_OBJECT_ATTRIBUTES::default();
+    let attrs = LSA_OBJECT_ATTRIBUTES::default();
     let mut policy = LSA_HANDLE::default();
-    let status = unsafe {
-        LsaOpenPolicy(
-            None,
-            &mut attrs,
-            POLICY_GET_PRIVATE_INFORMATION,
-            &mut policy,
-        )
-    };
+    let status =
+        unsafe { LsaOpenPolicy(None, &attrs, POLICY_GET_PRIVATE_INFORMATION, &mut policy) };
     if status != NTSTATUS(0) {
         return Err(format!("LsaOpenPolicy 0x{:08X}", status.0));
     }
@@ -56,12 +50,7 @@ pub fn read_password(user: &str) -> Result<String, String> {
 
     let data = unsafe { &*data_ptr };
     let len = (data.Length as usize) / 2;
-    let password = unsafe {
-        std::slice::from_raw_parts(data.Buffer.0 as *const u16, len)
-            .iter()
-            .map(|&c| c)
-            .collect::<Vec<u16>>()
-    };
+    let password = unsafe { std::slice::from_raw_parts(data.Buffer.0 as *const u16, len).to_vec() };
     let password = String::from_utf16_lossy(&password);
     unsafe {
         let _ = LocalFree(windows::Win32::Foundation::HLOCAL(data_ptr as *mut _));

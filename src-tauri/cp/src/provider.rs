@@ -66,7 +66,7 @@ impl ICredentialProvider_Impl for FaceProvider_Impl {
         pcpe: Option<&ICredentialProviderEvents>,
         _upadvisecontext: usize,
     ) -> windows_core::Result<()> {
-        *self.events.lock().unwrap() = pcpe.map(|e| e.clone());
+        *self.events.lock().unwrap() = pcpe.cloned();
         Ok(())
     }
 
@@ -112,6 +112,9 @@ impl ICredentialProvider_Impl for FaceProvider_Impl {
         }
     }
 
+    // COM ABI: the `*mut` out-params are required by the COM interface and
+    // cannot be marked unsafe; deref is intentional (null-checked below).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn GetCredentialCount(
         &self,
         pdwcount: *mut u32,
