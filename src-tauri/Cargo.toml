@@ -158,8 +158,12 @@ tauri-build = { version = "2", features = [] }
 # A poisoned mutex (from a panic while holding the lock) can be recovered
 # via lock_or_recover() instead of killing the entire process.
 panic = "unwind"
-codegen-units = 1
-lto = true
+# CI timeout fix (v0.1.18): fat LTO + codegen-units=1 serialized the codegen of
+# ~500 crates (ort, nokhwa, windows...), exceeding the 120 min GitHub runner
+# limit. "thin" LTO + parallel codegen-units keeps most optimization while
+# compiling in parallel — the release build now fits inside the budget.
+codegen-units = 16
+lto = "thin"
 opt-level = 3
 strip = true
 

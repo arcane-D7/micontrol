@@ -7,6 +7,7 @@ mod commands;
 mod debug_log;
 pub mod elev_bridge;
 pub mod elevated;
+mod health_supervisor;
 pub mod hw;
 mod state;
 pub mod util;
@@ -144,6 +145,11 @@ fn mcp_set_enabled(enabled: bool) -> Result<(), String> {
         log::info!("[mcp] MCP integration disabled — socket server will stop on next restart");
     }
     Ok(())
+}
+
+#[tauri::command]
+fn get_health_status() -> health_supervisor::HealthSnapshot {
+    health_supervisor::snapshot()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -325,6 +331,7 @@ pub fn run() {
             iot_pipe_available,
             ensure_iot_service,
             ensure_bridge_service,
+            get_health_status,
             get_iot_device_info,
             get_iot_wifi_list,
             iot_notify_event,
@@ -580,6 +587,16 @@ pub fn run() {
             // installed and running (installed at install time; self-heal here
             // for dev builds / upgrades). This runs BEFORE any elevated
             // command so the app never falls back to repeated UAC prompts.
+            //
+            // Post-reboot self-heal for the MiControlFace auth service runs
+            // AFTER the bridge: it crashes ~60 min after boot (0xc0000005 in
+            // FrameServerClient.dll_unloaded — MSMF camera in a Session-0
+            // SYSTEM service) and — lacking SCM failure actions — stays
+            // STOPPED-1067 forever, breaking Face Unlock after every reboot.
+            // Serializing the two ensures the autonomous bridge (preferred
+            // channel, no UAC) is up to carry the face command instead of the
+            // UI process racing ahead via UAC. Both remain best-effort: the
+            // health supervisor re-probes and heals them in the background.
             tauri::async_runtime::spawn(async {
                 match crate::elev_bridge::ensure_bridge_service().await {
                     Ok(status) => {
@@ -591,17 +608,6 @@ pub fn run() {
                         );
                     }
                 }
-            });
-
-            // Post-reboot self-heal for the MiControlFace auth service: it
-            // crashes ~60 min after boot (0xc0000005 in
-            // FrameServerClient.dll_unloaded — MSMF camera in a Session-0
-            // SYSTEM service) and — lacking SCM failure actions — stays
-            // STOPPED-1067 forever, breaking Face Unlock after every reboot.
-            // Configure `sc failure` + start it if stopped. This runs AFTER
-            // ensure_bridge_service so the autonomous bridge (preferred
-            // channel, no UAC) is available to carry the command.
-            tauri::async_runtime::spawn(async {
                 match crate::elev_bridge::ensure_face_service().await {
                     Ok(status) => {
                         log::info!("[face] ensure_face_service: {status}");
@@ -613,6 +619,11 @@ pub fn run() {
                     }
                 }
             });
+
+            // Keep recoverable services and hardware probes healthy after boot.
+            // The supervisor uses bounded recovery cooldowns and never force-kills
+            // processes from the unprivileged UI process.
+            crate::health_supervisor::start();
 
             // Apply Copilot key interception fixes (disables Windows Shell
             // interception + writes Scancode Map for permanent remap).

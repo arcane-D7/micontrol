@@ -378,6 +378,13 @@ fn get_ambient_lux_com() -> Option<f32> {
 static COM_LUX_HISTORY: std::sync::OnceLock<std::sync::Mutex<Vec<Option<f32>>>> =
     std::sync::OnceLock::new();
 
+/// A sensor reading is only trustworthy when it is a plausible, finite
+/// illuminance value. Values at or below this floor are physically impossible
+/// with the panel on and mean either a placeholder sensor, an uninitialised
+/// driver value, or a stale/unresponsive sensor (e.g. stuck at 1 lux after the
+/// app was closed and reopened). The adaptive loop uses the same threshold.
+const MIN_PLAUSIBLE_LUX: f32 = 1.5;
+
 /// Choose the most responsive ambient-light sensor from a set of simultaneous
 /// readings, using cached previous readings to measure variability.
 ///
@@ -431,9 +438,12 @@ fn select_responsive_sensor_impl(readings: &[Option<f32>]) -> Option<f32> {
         guard[i] = *reading;
     }
 
-    // 3. Return the most responsive sensor's current reading.
+    // 3. Return the most responsive sensor's current reading — but only when
+    //    it is a plausible lux value. A "responsive" placeholder that wanders
+    //    between 0.1 and 1 lux is not a light reading; treat it as unavailable
+    //    so the loop idles instead of driving brightness to the floor.
     if let Some(idx) = best_index {
-        if let Some(v) = readings[idx] {
+        if let Some(v) = readings[idx].filter(|v| *v >= MIN_PLAUSIBLE_LUX) {
             return Some(v);
         }
     }
@@ -443,10 +453,12 @@ fn select_responsive_sensor_impl(readings: &[Option<f32>]) -> Option<f32> {
     //    robust enough: prefer the sensor whose history is non-empty and whose
     //    value differs from the very first reading ever stored for it. We
     //    approximate "responsive ever" by preferring the LAST finite sensor,
-    //    since the placeholder is typically index 0.
+    //    since the placeholder is typically index 0. Reject implausible values
+    //    here too — a stuck "1 lux" must never be trusted just because it is
+    //    the last finite reading.
     let last_finite = readings.iter().rposition(|r| r.is_some());
     if let Some(idx) = last_finite {
-        return readings[idx];
+        return readings[idx].filter(|v| *v >= MIN_PLAUSIBLE_LUX);
     }
 
     None
@@ -507,6 +519,11 @@ pub async fn adaptive_brightness_loop() {
     // current "enabled session".  Reset when adaptive brightness is turned off
     // so we re-disable it if the user re-enables.
     let mut adaptbright_suppressed = false;
+    // Counter of consecutive invalid/stuck sensor reads. When a sensor gets
+    // stuck (e.g. returning 1 lux forever after the app was closed and
+    // reopened), we request a sensor reset instead of fighting the backlight.
+    let mut consecutive_invalid_reads: u32 = 0;
+    const STUCK_SENSOR_RESET_AFTER: u32 = 5; // ~10 s of invalid reads
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -548,6 +565,7 @@ pub async fn adaptive_brightness_loop() {
             smoothed = None;
             last_set = None;
             adaptbright_suppressed = false;
+            consecutive_invalid_reads = 0;
             log::debug!("[adaptive_brightness] disabled — skipping iteration");
             continue;
         }
@@ -590,13 +608,36 @@ pub async fn adaptive_brightness_loop() {
         }
 
         let lux = match tokio::task::spawn_blocking(get_ambient_lux).await {
-            // A reading ≤ 0 lux is physically impossible with the screen on; it
-            // means the sensor returned an invalid/uninitialised value (common at
-            // process startup on this hardware).  Treat it the same as "no sensor"
-            // so we never drive brightness to the floor from a bad initial read.
-            Ok(Some(v)) if v > 0.5 => v,
-            Ok(Some(_)) => continue,
+            // A reading ≤ MIN_PLAUSIBLE_LUX lux with the screen on is physically
+            // impossible; it means a placeholder sensor, an uninitialised value
+            // (common at process startup on this hardware), or a stuck sensor
+            // (e.g. fixed 1 lux after app close/reopen). Track consecutive bad
+            // reads so we can reset a wedged sensor instead of trusting it.
+            Ok(Some(v)) if v > MIN_PLAUSIBLE_LUX => v,
+            Ok(Some(_)) => {
+                consecutive_invalid_reads = consecutive_invalid_reads.saturating_add(1);
+                if consecutive_invalid_reads >= STUCK_SENSOR_RESET_AFTER {
+                    log::warn!(
+                        "[adaptive_brightness] sensor stuck ({} consecutive invalid \
+                         readings) — requesting sensor reset",
+                        consecutive_invalid_reads
+                    );
+                    request_sensor_reset();
+                    consecutive_invalid_reads = 0;
+                }
+                continue;
+            }
             Ok(None) => {
+                consecutive_invalid_reads = consecutive_invalid_reads.saturating_add(1);
+                if consecutive_invalid_reads >= STUCK_SENSOR_RESET_AFTER {
+                    log::warn!(
+                        "[adaptive_brightness] no valid sensor reading for {} cycles — \
+                         requesting sensor reset",
+                        consecutive_invalid_reads
+                    );
+                    request_sensor_reset();
+                    consecutive_invalid_reads = 0;
+                }
                 if !no_sensor_warned {
                     log::warn!(
                         "adaptive_brightness: no ambient light sensor found — loop idle. \
@@ -614,6 +655,7 @@ pub async fn adaptive_brightness_loop() {
             }
         };
         no_sensor_warned = false;
+        consecutive_invalid_reads = 0;
         // sensitivity=100 → reaches ceiling at 2000 lux
         // sensitivity=200 → reaches ceiling at 1000 lux  (more reactive)
         // sensitivity=50  → reaches ceiling at 4000 lux  (less reactive)
@@ -1369,4 +1411,58 @@ fn persist_ai_brightness_registry(enabled: bool) -> HardwareResult<()> {
             .map_err(|e| HardwareError::Registry(format!("Write AI brightness: {e}")))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes tests that share the `COM_LUX_HISTORY` global so parallel
+    /// test execution cannot interleave `clear()` with dependent polls.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(windows)]
+    #[test]
+    fn responsive_sensor_prefers_largest_delta() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Clear any cached history from previous tests so the first poll has no
+        // previous values to diff against.
+        if let Some(history) = COM_LUX_HISTORY.get() {
+            if let Ok(mut guard) = history.lock() {
+                guard.clear();
+            }
+        }
+        // First poll with empty history: no deltas, so the last finite
+        // plausible reading wins (sensor[1] = 420 lux).
+        let first = test_select_responsive(vec![Some(1000.0), Some(420.0)]);
+        assert_eq!(first, Some(420.0), "empty history → last finite fallback");
+        // Second poll: sensor[1] moved 420→120 (delta 300) — the real one,
+        // while the placeholder stayed at 1000. Must win via largest delta.
+        let second = test_select_responsive(vec![Some(1000.0), Some(120.0)]);
+        assert_eq!(second, Some(120.0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn implausible_values_are_rejected() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A stuck sensor reporting 1 lux (or a placeholder wandering near 0)
+        // must never pass the plausibility floor, even when it is the only
+        // finite reading available.
+        if let Some(history) = COM_LUX_HISTORY.get() {
+            if let Ok(mut guard) = history.lock() {
+                guard.clear();
+            }
+        }
+        // Stuck at 1 lux — physically impossible, must be rejected.
+        assert_eq!(test_select_responsive(vec![Some(1.0)]), None);
+        // Below the floor.
+        assert_eq!(test_select_responsive(vec![Some(0.4)]), None);
+        // A plausible reading wins over the stuck sensor.
+        assert_eq!(
+            test_select_responsive(vec![Some(1.0), Some(2.5)]),
+            Some(2.5),
+            "a plausible reading wins over the stuck sensor"
+        );
+    }
 }

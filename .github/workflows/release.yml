@@ -16,6 +16,13 @@ env:
 permissions:
   contents: write
 
+# Only one release build at a time. A new tag push (or re-push of the same tag)
+# cancels a still-running build instead of starting a second one and doubling
+# the 2-hour budget on parallel Windows runners.
+concurrency:
+  group: release-build
+  cancel-in-progress: true
+
 jobs:
   health-check:
     name: Health checks
