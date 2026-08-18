@@ -12,6 +12,12 @@ pub mod hw;
 mod state;
 pub mod util;
 
+/// Tray popup geometry constants (logical px). Shared by the resizer and both
+/// positioners so the clipping caps stay consistent.
+const POPUP_W: f64 = 300.0; // matches .tray-popup CSS width
+const POPUP_H_DEFAULT: f64 = 460.0; // fallback before the first dynamic resize
+const POPUP_GAP: f64 = 8.0; // gap above the taskbar / below the top edge
+
 use commands::ai::{analyze_system, get_ai_usage, reset_ai_usage, test_connection};
 use commands::ai_logs::{open_ai_logs_dir, read_ai_perf_logs, write_ai_perf_log};
 #[cfg(windows)]
@@ -816,6 +822,45 @@ async fn resize_tray_popup(app: tauri::AppHandle, height: f64) -> Result<(), Str
         let scale = window.scale_factor().map_err(|e| e.to_string())?;
         let pos = window.outer_position().map_err(|e| e.to_string())?;
         let cur = window.inner_size().map_err(|e| e.to_string())?;
+
+        // S28-0xx (tray clipping): cap the popup height to the work area of the
+        // monitor that currently contains the window, minus the taskbar gap.
+        // A fixed MAX_H of 780 px overflows shorter work areas (e.g. 720p
+        // screens with a taskbar), clipping the bottom of the popup.
+        let max_h_logical = {
+            #[cfg(windows)]
+            {
+                use windows::Win32::Foundation::POINT;
+                use windows::Win32::Graphics::Gdi::{
+                    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+                };
+                unsafe {
+                    // SAFETY: read-only Win32 monitor query on a stack-local,
+                    // zeroed MONITORINFO with cbSize set (POD).
+                    let pt = POINT {
+                        x: pos.x + cur.width as i32 / 2,
+                        y: pos.y + cur.height as i32 / 2,
+                    };
+                    let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                    let mut info = MONITORINFO {
+                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                        ..std::mem::zeroed()
+                    };
+                    if GetMonitorInfoW(hmon, &mut info).as_bool() {
+                        let work_h = info.rcWork.bottom - info.rcWork.top;
+                        ((work_h as f64 / scale) - POPUP_GAP).max(MIN_H).floor()
+                    } else {
+                        MAX_H
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                MAX_H
+            }
+        };
+        let height = height.min(max_h_logical);
+
         // Anchor: physical y of the bottom edge
         let bottom_phys = pos.y + cur.height as i32;
         let new_h_phys = (height * scale).round() as u32;
@@ -954,9 +999,6 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
 /// just above the taskbar regardless of taskbar height, size, or DPI.
 /// Uses the window's CURRENT height so that a previous dynamic resize is honoured.
 fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosition<f64>) {
-    const POPUP_W: f64 = 300.0; // logical px — matches .tray-popup CSS width
-    const POPUP_H_DEFAULT: f64 = 460.0; // fallback before first dynamic resize
-    const GAP: f64 = 8.0; // logical px gap above taskbar
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
     // Guard: a hidden window may report height=0 before first render; fall back to default.
@@ -970,7 +1012,7 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
             }
         })
         .unwrap_or(POPUP_H_DEFAULT * scale);
-    let gap = GAP * scale;
+    let gap = POPUP_GAP * scale;
 
     // Get the work area (screen minus taskbar) in physical pixels for the
     // monitor that contains the tray icon click.
@@ -1018,8 +1060,6 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
 /// Position the tray popup at the bottom-right of the work area (near system tray).
 /// Used when toggling via hotkey where there is no tray-icon click position.
 fn position_popup_at_tray(window: &tauri::WebviewWindow) {
-    const POPUP_W: f64 = 300.0;
-    const GAP: f64 = 8.0;
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
     // Guard: a hidden window may report height=0 before first render; fall back to default.
@@ -1029,11 +1069,11 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
             if s.height > 0 {
                 s.height as f64
             } else {
-                460.0 * scale
+                POPUP_H_DEFAULT * scale
             }
         })
-        .unwrap_or(460.0 * scale);
-    let gap = GAP * scale;
+        .unwrap_or(POPUP_H_DEFAULT * scale);
+    let gap = POPUP_GAP * scale;
 
     #[cfg(windows)]
     let (work_right, work_bottom) = {
