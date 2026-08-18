@@ -158,13 +158,19 @@ tauri-build = { version = "2", features = [] }
 # A poisoned mutex (from a panic while holding the lock) can be recovered
 # via lock_or_recover() instead of killing the entire process.
 panic = "unwind"
-# CI timeout fix (v0.1.18): fat LTO + codegen-units=1 serialized the codegen of
-# ~500 crates (ort, nokhwa, windows...), exceeding the 120 min GitHub runner
-# limit. "thin" LTO + parallel codegen-units keeps most optimization while
-# compiling in parallel — the release build now fits inside the budget.
+# CI timeout diagnosis (v0.1.18, run 32139723515):
+#   - BOTH fat LTO (cgu=1) and thin LTO (cgu=16) exceeded the 120 min GitHub
+#     runner budget. Logs proved the ~550-crate tree compiles in <5 min; the
+#     stall is the FINAL LTO pass + link of the binaries (micontrol, bridge,
+#     ecram_service, face_svc), which re-optimizes every crate at link time.
+#     On a 2-vCPU / 7 GB runner this single step took >1h49m.
+#   - Fix: LTO OFF + opt-level=2. The heavy compute (ONNX inference) runs in
+#     the prebuilt native `ort` runtime, so Rust-side optimization loss is
+#     negligible for this utility app. The whole release build now fits in
+#     the CI budget, and the saved target/ cache makes later releases fast.
 codegen-units = 16
-lto = "thin"
-opt-level = 3
+lto = false
+opt-level = 2
 strip = true
 
 
