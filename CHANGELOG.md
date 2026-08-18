@@ -5,7 +5,12 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.18] - 2026-08-14
+## [0.1.18] - 2026-08-17
+
+### Added
+
+- **Central runtime health supervisor.** A background loop (every 30 s) now probes the health of the four recoverable modules — MiControlBridge pipe, IoT service pipe, MiControlFace service (+ pipe), and the ambient light sensor — and keeps a shared `HealthSnapshot` (state: unknown/healthy/degraded/recovering/failed, consecutive failures, last check/recovery). When a bridge/face/iot module degrades, the supervisor self-heals using the existing idempotent elevated paths (`ensure_bridge_service` / `ensure_face_service` / `ensure_ecram_service`) with a 60 s recovery cooldown per module and bounded backoff — it never force-kills or restarts processes from the unprivileged UI process. The snapshot is exposed to the UI via the new `get_health_status` command.
+- **Serialized post-boot self-heal.** The startup face-service repair now runs strictly after the bridge is ensured (previously both raced in parallel), so the autonomous bridge channel is reliably up to carry the elevated face command without a UAC fallback.
 
 ### Changed
 
@@ -13,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Ambient light sensor stuck after app close/reopen.** On several Xiaomi models the COM sensor stack enumerates a placeholder that reports a fixed value (e.g. 69 lux) next to the real HID ALS. Under steady light the selector fell back to the last finite reading — which could be the placeholder or a sensor stuck at `1 lux` — and the adaptive-brightness loop accepted anything `> 0.5`, driving brightness to the floor and then resisting manual recovery via the external-change offset. The sensor pipeline now (1) rejects implausible readings below `1.5 lux` in both the responsive-sensor selector and the adaptive loop, and (2) after 5 consecutive invalid reads (≈10 s) requests a sensor re-initialization instead of trusting the stale value. Unit tests added for sensor selection and plausibility.
+- **Release build exceeding CI timeouts.** The `release` profile used fat LTO (`lto = true`) with `codegen-units = 1`, serializing codegen of the ~500-crate dependency graph (ort, nokhwa, windows…) past the 120-minute runner budget. Switched to `lto = "thin"` + `codegen-units = 16` — keeps most optimization while compiling in parallel. The workflow also gained a `concurrency` guard so re-pushed tags cancel in-flight builds instead of doubling runner time.
 - **MiControlFace service left STOPPED-1067 after reboot — root cause + self-heal.** The face auth service crashes with `0xc0000005` in `FrameServerClient.dll_unloaded` (MSMF webcam capture inside a Session-0 SYSTEM service) ~60 min after boot, and — being the only MiControl service _without_ SCM failure actions — the SCM never restarted it, breaking Face Unlock after every reboot while IoTSvc and MiControlBridge (which have RESTART 5/10/30s) kept running. Three layers are now in place:
   - **`sc failure` auto-restart** — `micontrol_face_svc.exe install` now runs `sc failure MiControlFace reset= 86400 actions= restart/5000/restart/10000/restart/30000`, so the SCM auto-restarts the service after future crashes (mirrors MiControlBridge/IoTSvc).
   - **`ensure_face_service` elevated command** — new dispatch branch that queries the SCM, (re)configures failure actions if missing, and starts the service if STOPPED. Routed through the autonomous MiControlBridge pipe (no UAC) via `elev_bridge::ensure_face_service`; invoked automatically once at app startup (post-Bridge-ensure) and manually from the Face Unlock tab via the new self-heal path (`face_service_ensure`).
