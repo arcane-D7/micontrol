@@ -46,6 +46,26 @@ pub struct BatteryInfo {
     pub is_hyper_charging: bool,
 }
 
+/// Normalize the two WMI rate fields into the public signed representation.
+/// `ChargeRate` can remain stale after unplugging, so `PowerOnline` decides
+/// whether a positive value is a charge; on battery, use `DischargeRate`.
+fn effective_battery_rate(
+    is_plugged: bool,
+    charge_rate_mw: i32,
+    discharge_rate_mw: i32,
+) -> (bool, i32) {
+    if is_plugged {
+        return (charge_rate_mw > 0, charge_rate_mw.max(0));
+    }
+
+    let discharge = if discharge_rate_mw > 0 {
+        -discharge_rate_mw
+    } else {
+        charge_rate_mw.min(0)
+    };
+    (false, discharge)
+}
+
 /// Cached static battery data that never changes at runtime.
 /// Populated once via `BATTERY_STATIC_DATA` and reused on all subsequent calls.
 #[cfg(windows)]
@@ -184,20 +204,24 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
 
         let remaining_capacity = wmi_extract::extract_u32_or(&status, "RemainingCapacity", 0);
         let charging_rate = wmi_extract::extract_i32(&status, "ChargeRate").unwrap_or(0);
+        let discharge_rate = wmi_extract::extract_i32(&status, "DischargeRate").unwrap_or(0);
         let voltage = wmi_extract::extract_u32(&status, "Voltage")
             .map(|v| v as f64 / 1000.0)
             .unwrap_or(0.0);
         let voltage_mv = wmi_extract::extract_u32_or(&status, "Voltage", 0);
 
-        let is_charging = charging_rate > 0;
         let is_plugged = wmi_extract::extract_bool(&status, "PowerOnline").unwrap_or(false);
+        let (is_charging, effective_rate_mw) =
+            effective_battery_rate(is_plugged, charging_rate, discharge_rate);
         log::debug!(
             target: "hw::battery",
-            "wmi snapshot: plugged={} charging={} remaining_capacity={} charge_rate_mw={} voltage_v={:.3}",
+            "wmi snapshot: plugged={} charging={} remaining_capacity={} charge_rate_mw={} discharge_rate_mw={} effective_rate_mw={} voltage_v={:.3}",
             is_plugged,
             is_charging,
             remaining_capacity,
             charging_rate,
+            discharge_rate,
+            effective_rate_mw,
             voltage
         );
 
@@ -233,7 +257,7 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
 
         let time_remaining_minutes = if !is_charging && voltage > 0.0 {
             // Estimate: remaining capacity (mWh) / discharge_rate (mW) * 60
-            let discharge_rate_mw = charging_rate.unsigned_abs();
+            let discharge_rate_mw = effective_rate_mw.unsigned_abs();
             if discharge_rate_mw > 0 {
                 Some((remaining_capacity as f64 / discharge_rate_mw as f64 * 60.0) as i32)
             } else {
@@ -267,7 +291,7 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
         // TM2424 ships with 100W GaN adapter; hyper charging is active
         // when the charge rate exceeds 65W while plugged in.
         // We use charging_rate (ChargeRate from WMI BatteryStatus) as a proxy.
-        let is_hyper_charging = is_plugged && charging_rate > 65000;
+        let is_hyper_charging = is_plugged && effective_rate_mw > 65000;
 
         Ok(BatterySnapshot {
             level,
@@ -284,7 +308,7 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
             temperature_celsius,
             time_remaining_minutes,
             time_to_full_minutes,
-            charge_rate_mw: charging_rate,
+            charge_rate_mw: effective_rate_mw,
             voltage_mv,
             health_label,
             is_hyper_charging,
@@ -452,6 +476,24 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unplugged_battery_uses_discharge_rate() {
+        assert_eq!(
+            effective_battery_rate(false, 10_000, 21_728),
+            (false, -21_728)
+        );
+    }
+
+    #[test]
+    fn unplugged_battery_cannot_be_reported_as_charging() {
+        assert_eq!(effective_battery_rate(false, 10_000, 0), (false, 0));
+    }
+
+    #[test]
+    fn plugged_battery_uses_positive_charge_rate() {
+        assert_eq!(effective_battery_rate(true, 10_000, 0), (true, 10_000));
+    }
 
     #[test]
     #[ignore = "requires real battery hardware (WMI BatteryStaticData)"]

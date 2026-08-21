@@ -1,12 +1,15 @@
 //! Runtime health supervision and bounded self-healing for recoverable modules.
 
 use serde::Serialize;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const RECOVERY_COOLDOWN_MS: u64 = 60_000;
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const HEALTH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: OnceLock<Mutex<HealthSnapshot>> = OnceLock::new();
@@ -113,19 +116,34 @@ fn mark_recovering(component: &mut ComponentHealth, at: u64) {
 }
 
 async fn run_cycle() {
-    check_bridge().await;
-    check_iot().await;
-    check_face().await;
-    check_ambient_sensor().await;
+    // Keep one unavailable provider from delaying health state for every
+    // other module after a sleep/resume cycle.
+    let _ = tokio::join!(
+        check_bridge(),
+        check_iot(),
+        check_face(),
+        check_ambient_sensor()
+    );
     if let Ok(mut snapshot) = state().lock() {
         snapshot.last_cycle_ms = now_ms();
     }
 }
 
-async fn check_bridge() {
-    let available = tokio::task::spawn_blocking(crate::elev_bridge::is_bridge_service_available)
+async fn bounded_recovery<T>(
+    operation: impl Future<Output = Result<T, String>>,
+    name: &str,
+) -> Result<T, String> {
+    tokio::time::timeout(HEALTH_RECOVERY_TIMEOUT, operation)
         .await
-        .unwrap_or(false);
+        .map_err(|_| format!("{name} recovery timed out"))?
+}
+
+async fn check_bridge() {
+    let available = crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
+        Ok(crate::elev_bridge::is_bridge_service_available())
+    })
+    .await
+    .unwrap_or(false);
     let at = now_ms();
     let should_recover = state()
         .lock()
@@ -144,7 +162,7 @@ async fn check_bridge() {
         if let Ok(mut snapshot) = state().lock() {
             mark_recovering(&mut snapshot.bridge, at);
         }
-        match crate::elev_bridge::ensure_bridge_service().await {
+        match bounded_recovery(crate::elev_bridge::ensure_bridge_service(), "bridge").await {
             Ok(_) => {
                 if let Ok(mut snapshot) = state().lock() {
                     mark_healthy(&mut snapshot.bridge, now_ms());
@@ -161,9 +179,11 @@ async fn check_bridge() {
 }
 
 async fn check_iot() {
-    let available = tokio::task::spawn_blocking(crate::hw::iotservice::is_pipe_available)
-        .await
-        .unwrap_or(false);
+    let available = crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
+        Ok(crate::hw::iotservice::is_pipe_available())
+    })
+    .await
+    .unwrap_or(false);
     let at = now_ms();
     let should_recover = state()
         .lock()
@@ -182,9 +202,12 @@ async fn check_iot() {
         if let Ok(mut snapshot) = state().lock() {
             mark_recovering(&mut snapshot.iot, at);
         }
-        match crate::elev_bridge::run_elevated_no_prompt(
-            "ensure_ecram_service",
-            serde_json::Value::Null,
+        match bounded_recovery(
+            crate::elev_bridge::run_elevated_no_prompt(
+                "ensure_ecram_service",
+                serde_json::Value::Null,
+            ),
+            "IoT service",
         )
         .await
         {
@@ -228,7 +251,7 @@ async fn check_face() {
         if let Ok(mut snapshot) = state().lock() {
             mark_recovering(&mut snapshot.face, at);
         }
-        match crate::elev_bridge::ensure_face_service().await {
+        match bounded_recovery(crate::elev_bridge::ensure_face_service(), "Face service").await {
             Ok(_) => {
                 if let Ok(mut snapshot) = state().lock() {
                     mark_healthy(&mut snapshot.face, now_ms());
@@ -254,10 +277,12 @@ async fn check_face() {
 }
 
 async fn check_ambient_sensor() {
-    let result = tokio::task::spawn_blocking(crate::hw::display::get_display_info)
-        .await
-        .ok()
-        .and_then(Result::ok);
+    let result = crate::util::blocking::run_blocking_timeout(
+        HEALTH_CHECK_TIMEOUT,
+        crate::hw::display::get_display_info,
+    )
+    .await
+    .ok();
     let at = now_ms();
     let healthy = result
         .as_ref()

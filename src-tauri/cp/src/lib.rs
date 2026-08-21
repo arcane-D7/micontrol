@@ -28,6 +28,7 @@ pub mod credvault;
 pub mod kerb;
 pub mod pipe_client;
 pub mod provider;
+pub mod settings;
 
 /// CLSID for the face unlock credential provider.
 /// {E071A7CE-5D7F-4063-9A10-AE39AEC64EE8} (from the reference; regenerate for

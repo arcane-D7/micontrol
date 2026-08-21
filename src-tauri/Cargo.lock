@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "micontrol"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3289,6 +3289,7 @@ version = "0.1.0"
 dependencies = [
  "fern",
  "log",
+ "serde",
  "serde_json",
  "windows 0.58.0",
  "windows-core 0.58.0",

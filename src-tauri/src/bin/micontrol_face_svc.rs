@@ -590,9 +590,12 @@ fn main() {
                     // auto-restarted the service (failure actions) or the stop
                     // raced. If it is already running, the new config is live.
                     match service.start(&Vec::<std::ffi::OsString>::new()) {
-                        Ok(()) => println!("MiControlFace service updated to new binary and started."),
-                        Err(e) if e.to_string().contains("1056")
-                            || e.to_string().contains("ALREADY_RUNNING") =>
+                        Ok(()) => {
+                            println!("MiControlFace service updated to new binary and started.")
+                        }
+                        Err(e)
+                            if e.to_string().contains("1056")
+                                || e.to_string().contains("ALREADY_RUNNING") =>
                         {
                             println!("MiControlFace service is already running (1056) — new binary live.");
                         }

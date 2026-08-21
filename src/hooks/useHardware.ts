@@ -99,6 +99,9 @@ export function useHardware() {
   const performanceModeRef = useRef<PerformanceMode>('balance');
   const chargingThresholdRef = useRef<number>(80);
   const audioStateRef = useRef<AudioVolumeResult | null>(null);
+  const fastPollInFlightRef = useRef(false);
+  const slowPollInFlightRef = useRef(false);
+  const initialLoadInFlightRef = useRef(false);
 
   // ── Tiered polling (S11-002) ─────────────────────────────────────────────
   // Fast tier: 2 s — fan speed, CPU temp, GPU temp, CPU usage, GPU usage
@@ -125,38 +128,50 @@ export function useHardware() {
   );
 
   const fastPoll = useCallback(async () => {
-    const [fanResult, systemResult, audioResult] = await Promise.all([
-      safe(invoke<FanInfo>('get_fan_info'), null, 'get_fan_info'),
-      safe(invoke<SystemInfo>('get_system_info'), null, 'get_system_info'),
-      safe(invoke<AudioVolumeResult>('get_audio_volume'), null, 'get_audio_volume'),
-    ]);
-    if (fanResult) setFan(fanResult);
-    if (systemResult) setSystemInfo(systemResult);
-    if (audioResult) setAudioState(audioResult);
-    // Do NOT clear the error here. Polls run independently; a successful fast
-    // poll must not erase an error surfaced by another reading's failure.
-    // Errors are cleared by an all-success initial load or clearError().
+    if (fastPollInFlightRef.current || initialLoadInFlightRef.current) return;
+    fastPollInFlightRef.current = true;
+    try {
+      const [fanResult, systemResult, audioResult] = await Promise.all([
+        safe(invoke<FanInfo>('get_fan_info'), null, 'get_fan_info'),
+        safe(invoke<SystemInfo>('get_system_info'), null, 'get_system_info'),
+        safe(invoke<AudioVolumeResult>('get_audio_volume'), null, 'get_audio_volume'),
+      ]);
+      if (fanResult) setFan(fanResult);
+      if (systemResult) setSystemInfo(systemResult);
+      if (audioResult) setAudioState(audioResult);
+      // Do NOT clear the error here. Polls run independently; a successful fast
+      // poll must not erase an error surfaced by another reading's failure.
+      // Errors are cleared by an all-success initial load or clearError().
+    } finally {
+      fastPollInFlightRef.current = false;
+    }
   }, [safe]);
 
   const slowPoll = useCallback(async () => {
-    const [batteryResult, displayResult, touchpadResult, perfMode, chargeThreshold] =
-      await Promise.all([
-        safe(invoke<BatteryInfo>('get_battery_info'), null, 'get_battery_info'),
-        safe(invoke<DisplayInfo>('get_display_info'), null, 'get_display_info'),
-        safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'get_touchpad_info'),
-        safe(invoke<PerformanceMode>('get_performance_mode'), null, 'get_performance_mode'),
-        safe(invoke<number>('get_charging_threshold'), 80, 'get_charging_threshold'),
-      ]);
-    if (batteryResult !== null) setBattery(batteryResult);
-    if (displayResult !== null) setDisplay(displayResult);
-    // Only update touchpad from poll when no user write is in flight.
-    if (touchpadResult !== null && Date.now() >= touchpadDirtyUntil.current) {
-      setTouchpad(touchpadResult);
+    if (slowPollInFlightRef.current || initialLoadInFlightRef.current) return;
+    slowPollInFlightRef.current = true;
+    try {
+      const [batteryResult, displayResult, touchpadResult, perfMode, chargeThreshold] =
+        await Promise.all([
+          safe(invoke<BatteryInfo>('get_battery_info'), null, 'get_battery_info'),
+          safe(invoke<DisplayInfo>('get_display_info'), null, 'get_display_info'),
+          safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'get_touchpad_info'),
+          safe(invoke<PerformanceMode>('get_performance_mode'), null, 'get_performance_mode'),
+          safe(invoke<number>('get_charging_threshold'), 80, 'get_charging_threshold'),
+        ]);
+      if (batteryResult !== null) setBattery(batteryResult);
+      if (displayResult !== null) setDisplay(displayResult);
+      // Only update touchpad from poll when no user write is in flight.
+      if (touchpadResult !== null && Date.now() >= touchpadDirtyUntil.current) {
+        setTouchpad(touchpadResult);
+      }
+      if (perfMode) setPerformanceModeState(perfMode);
+      setChargingThresholdState(chargeThreshold);
+      // Do NOT clear the error here (see fastPoll). Only the initial load with
+      // full success or clearError() clears the error state.
+    } finally {
+      slowPollInFlightRef.current = false;
     }
-    if (perfMode) setPerformanceModeState(perfMode);
-    setChargingThresholdState(chargeThreshold);
-    // Do NOT clear the error here (see fastPoll). Only the initial load with
-    // full success or clearError() clears the error state.
   }, [safe]);
 
   const initialLoadRef = useRef(false);
@@ -174,6 +189,7 @@ export function useHardware() {
     // Initial load: fetch everything once + system info (poll-once)
     if (!initialLoadRef.current) {
       initialLoadRef.current = true;
+      initialLoadInFlightRef.current = true;
       setLoading(true);
       const doInitialLoad = async () => {
         try {
@@ -232,6 +248,7 @@ export function useHardware() {
           console.error('Initial hardware load failed:', e);
           setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
         } finally {
+          initialLoadInFlightRef.current = false;
           setLoading(false);
         }
       };
@@ -250,10 +267,16 @@ export function useHardware() {
         void slowPoll();
       }
     };
+    const onWindowFocus = () => {
+      void fastPoll();
+      void slowPoll();
+    };
     document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('focus', onWindowFocus);
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('focus', onWindowFocus);
       clearInterval(fastInterval);
       clearInterval(slowInterval);
     };

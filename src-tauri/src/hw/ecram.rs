@@ -1157,6 +1157,11 @@ struct PipeResponse {
 #[cfg(windows)]
 pub fn send_pipe_request(request: &str) -> Result<String, String> {
     use std::os::windows::ffi::OsStrExt;
+    use std::time::{Duration, Instant};
+    use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_LISTENING};
+    use windows::Win32::System::Pipes::{
+        SetNamedPipeHandleState, PIPE_NOWAIT, PIPE_READMODE_MESSAGE,
+    };
 
     let path_w: Vec<u16> = std::ffi::OsStr::new(ECRAM_PIPE_NAME)
         .encode_wide()
@@ -1182,6 +1187,18 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
         return Err("INVALID_HANDLE_VALUE opening pipe".to_string());
     }
 
+    // The service pipe can remain open but stop servicing requests after
+    // resume. Non-wait mode lets us enforce a deadline instead of blocking
+    // forever in ReadFile.
+    let mode = PIPE_READMODE_MESSAGE | PIPE_NOWAIT;
+    if let Err(e) = unsafe { SetNamedPipeHandleState(handle, Some(&mode as *const _), None, None) }
+    {
+        unsafe {
+            windows::Win32::Foundation::CloseHandle(handle).ok();
+        }
+        return Err(format!("SetNamedPipeHandleState: {e}"));
+    }
+
     // Write request
     let req_bytes = request.as_bytes();
     let mut written = 0u32;
@@ -1195,9 +1212,11 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
         .map_err(|e| format!("WriteFile: {e}"))?;
     }
 
-    // Read response
+    // Read response with a bounded wait. Partial reads are handled until the
+    // JSON object is complete.
     let mut response_buf = [0u8; 4096];
     let mut total_read = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if total_read >= response_buf.len() {
             break;
@@ -1211,7 +1230,23 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
                 None,
             )
         };
-        if result.is_err() || bytes_read == 0 {
+        if let Err(e) = result {
+            let no_data = e.code() == ERROR_NO_DATA.to_hresult()
+                || e.code() == ERROR_PIPE_LISTENING.to_hresult();
+            if no_data && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(handle).ok();
+            }
+            return Err(if no_data {
+                "ReadFile timeout waiting for ecram_service response".to_string()
+            } else {
+                format!("ReadFile: {e}")
+            });
+        }
+        if bytes_read == 0 {
             break;
         }
         total_read += bytes_read as usize;

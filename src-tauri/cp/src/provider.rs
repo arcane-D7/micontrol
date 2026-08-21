@@ -15,6 +15,7 @@ use windows_core::{implement, PWSTR};
 pub const FIELD_TILE: u32 = 0;
 pub const FIELD_LABEL: u32 = 1;
 pub const FIELD_COUNT: u32 = 2;
+pub const CREDENTIAL_COUNT: u32 = 1;
 
 /// Provider that exposes one face-unlock credential tile.
 #[implement(ICredentialProvider)]
@@ -123,7 +124,12 @@ impl ICredentialProvider_Impl for FaceProvider_Impl {
     ) -> windows_core::Result<()> {
         unsafe {
             if !pdwcount.is_null() {
-                *pdwcount = FIELD_COUNT;
+                let scenario = *self.usage_scenario.lock().unwrap();
+                *pdwcount = if crate::settings::enabled_for_scenario(scenario) {
+                    CREDENTIAL_COUNT
+                } else {
+                    0
+                };
             }
             if !pdwdefault.is_null() {
                 *pdwdefault = 0;
@@ -136,7 +142,7 @@ impl ICredentialProvider_Impl for FaceProvider_Impl {
     }
 
     fn GetCredentialAt(&self, dwindex: u32) -> windows_core::Result<ICredentialProviderCredential> {
-        if dwindex >= FIELD_COUNT {
+        if dwindex >= CREDENTIAL_COUNT {
             return Err(E_INVALIDARG.into());
         }
         let cred: ICredentialProviderCredential = crate::credential::FaceCredential::new().into();

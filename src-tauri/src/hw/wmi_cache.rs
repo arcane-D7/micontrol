@@ -8,7 +8,8 @@
 //! - `ROOT\WMI` — battery, brightness
 
 use crate::hw::errors::{HardwareError, HardwareResult};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 use wmi::{COMLibrary, WMIConnection};
 
 /// Namespace for system-level WMI queries (Win32_* classes).
@@ -23,7 +24,10 @@ thread_local! {
     /// Each `WMIConnection` internally owns its `COMLibrary`, so COM stays
     /// initialised for the lifetime of the cache entry.
     static WMI_CACHE: RefCell<Option<WmiThreadCache>> = const { RefCell::new(None) };
+    static WMI_CACHE_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
+
+static WMI_INVALIDATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 struct WmiThreadCache {
     cimv2: WMIConnection,
@@ -79,6 +83,7 @@ where
     F: Fn(&WMIConnection) -> anyhow::Result<T>,
 {
     let result: anyhow::Result<T> = crate::util::retry::with_retry("WMI cimv2 query", || {
+        reset_if_invalidated();
         WMI_CACHE.with(|cell| {
             let mut cache_ref = cell.borrow_mut();
             if cache_ref.is_none() {
@@ -134,6 +139,7 @@ where
     F: Fn(&WMIConnection) -> anyhow::Result<T>,
 {
     let result: anyhow::Result<T> = crate::util::retry::with_retry("WMI wmi query", || {
+        reset_if_invalidated();
         WMI_CACHE.with(|cell| {
             let mut cache_ref = cell.borrow_mut();
             if cache_ref.is_none() {
@@ -334,8 +340,22 @@ fn is_connection_error(e: &anyhow::Error) -> bool {
 /// Call this from error-recovery paths when a WMI query fails with a
 /// connection-level error.
 pub fn invalidate() {
-    WMI_CACHE.with(|cell| {
-        *cell.borrow_mut() = None;
+    WMI_INVALIDATION_GENERATION.fetch_add(1, Ordering::AcqRel);
+    reset_if_invalidated();
+}
+
+/// Drop the current thread's COM connections when another thread invalidated
+/// the cache, such as the power listener after resume from sleep.
+fn reset_if_invalidated() {
+    let generation = WMI_INVALIDATION_GENERATION.load(Ordering::Acquire);
+    WMI_CACHE_GENERATION.with(|local_generation| {
+        if local_generation.get() == generation {
+            return;
+        }
+        WMI_CACHE.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+        local_generation.set(generation);
     });
 }
 
