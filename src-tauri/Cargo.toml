@@ -141,7 +141,7 @@ windows = { version = "0.58", features = [
   "Security_Credentials_UI",
 ] }
 windows-core = "0.58"
-windows-targets = "0.52"
+windows-targets = "0.53"
 wmi = "0.13"
 winreg = "0.52"
 
