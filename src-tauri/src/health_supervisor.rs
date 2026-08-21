@@ -205,12 +205,11 @@ async fn check_iot() {
 
 #[cfg(windows)]
 async fn check_face() {
-    let result = crate::commands::face::face_status().await;
+    // Lightweight probe — must NOT open the webcam (that would blink the
+    // camera LED every 30 s). `face_health()` only checks the SCM service
+    // state and the auth pipe, which is what "is the module alive" means.
+    let healthy = crate::commands::face::face_health().await;
     let at = now_ms();
-    let healthy = result
-        .as_ref()
-        .map(|status| status.service_running && status.pipe_available)
-        .unwrap_or(false);
     let should_recover = state()
         .lock()
         .map(|mut snapshot| {
@@ -219,10 +218,7 @@ async fn check_face() {
                 mark_healthy(&mut snapshot.face, at);
                 false
             } else {
-                let error = result
-                    .err()
-                    .map(|value| value.message)
-                    .unwrap_or_else(|| "Face service or pipe unavailable".into());
+                let error = "Face service or pipe unavailable".into();
                 mark_failure(&mut snapshot.face, at, error)
             }
         })

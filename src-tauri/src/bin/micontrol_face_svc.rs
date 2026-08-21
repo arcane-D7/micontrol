@@ -511,7 +511,9 @@ fn run_main_loop(shutdown: &AtomicBool) {
 // ── CLI (install/remove/run) ────────────────────────────────────────────────
 
 fn main() {
-    use windows_service::service::{ServiceAccess, ServiceInfo, ServiceStartType, ServiceType};
+    use windows_service::service::{
+        ServiceAccess, ServiceInfo, ServiceStartType, ServiceState, ServiceType,
+    };
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -556,16 +558,46 @@ fn main() {
             );
             match existing {
                 Ok(service) => {
-                    // Stop if running (ignore errors — it may already be stopped).
+                    // Stop if running — but service stop is ASYNC: the SCM
+                    // returns once the stop is accepted, not once the process
+                    // exited. A subsequent start() within that window fails
+                    // with 1056 (ERROR_SERVICE_ALREADY_RUNNING) and panics.
+                    // Poll until the service actually reaches STOPPED (bounded)
+                    // so the subsequent change_config + start can succeed.
                     let _ = service.stop();
+                    let mut stopped = false;
+                    for _ in 0..40 {
+                        let st = service.query_status().ok();
+                        match st.as_ref().map(|s| s.current_state) {
+                            Some(ServiceState::Stopped) => {
+                                stopped = true;
+                                break;
+                            }
+                            // Already transitioning (STOP_PENDING): keep waiting.
+                            _ => std::thread::sleep(std::time::Duration::from_millis(250)),
+                        }
+                    }
+                    if !stopped {
+                        eprintln!("MiControlFace did not stop within 10 s — proceeding anyway");
+                    }
+
                     // Point the existing service at the new executable.
                     service
                         .change_config(&info)
                         .expect("update MiControlFace service config");
-                    service
-                        .start(&Vec::<std::ffi::OsString>::new())
-                        .expect("restart MiControlFace service");
-                    println!("MiControlFace service updated to new binary and started.");
+
+                    // Start — tolerate 1056 (already running): the SCM may have
+                    // auto-restarted the service (failure actions) or the stop
+                    // raced. If it is already running, the new config is live.
+                    match service.start(&Vec::<std::ffi::OsString>::new()) {
+                        Ok(()) => println!("MiControlFace service updated to new binary and started."),
+                        Err(e) if e.to_string().contains("1056")
+                            || e.to_string().contains("ALREADY_RUNNING") =>
+                        {
+                            println!("MiControlFace service is already running (1056) — new binary live.");
+                        }
+                        Err(e) => Err(e).expect("restart MiControlFace service"),
+                    }
                 }
                 Err(_) => {
                     let service = manager

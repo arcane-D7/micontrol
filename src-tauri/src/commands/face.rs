@@ -136,6 +136,16 @@ fn pipe_available() -> bool {
     }
 }
 
+/// Lightweight health probe for the MiControlFace auth service (service
+/// running + auth pipe present). This deliberately does NOT touch the camera —
+/// opening the webcam here on every health-supervisor cycle (~30 s) caused the
+/// camera light to blink on/off repeatedly, and the `Camera::open(0, …)` probe
+/// can even race the real auth capture. Callers that need the full UI status
+/// (including camera availability) should use [`face_status`].
+pub async fn face_health() -> bool {
+    service_running() && pipe_available()
+}
+
 /// Current Face Unlock status for the UI.
 #[tauri::command]
 pub async fn face_status() -> Result<FaceStatus, FaceErrorResponse> {
