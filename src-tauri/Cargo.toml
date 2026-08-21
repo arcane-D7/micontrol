@@ -87,7 +87,7 @@ ort = { version = "2.0.0-rc.13", features = ["download-binaries", "tls-native", 
 # Pure-Rust webcam capture (Media Foundation on Windows) — no C++/libclang.
 nokhwa = { version = "0.10.11", features = ["input-msmf"], default-features = false }
 windows-service = { version = "0.7", optional = true }
-base64 = "0.22"
+base64 = "0.23"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
