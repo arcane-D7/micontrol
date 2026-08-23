@@ -73,7 +73,11 @@ jobs:
     name: Build & publish
     runs-on: windows-latest
     needs: health-check
-    timeout-minutes: 120
+    # The release compile (codegen-units=1, opt-level=2) on a 2-vCPU runner
+    # takes up to ~3.5h on a cold cache. 240min covers the cache-founding
+    # run; later runs restore the release cache and finish in minutes
+    # (same reasoning as ci.yml's Build smoke test).
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,17 +89,21 @@ jobs:
           toolchain: '1.95.0'
           components: clippy, rustfmt
 
-      - name: Cache Rust build artifacts
+      # Same release-profile cache as ci.yml (identical key shape so both
+      # workflows share warm artifacts). `save-always: true` ensures a
+      # cancelled/failed publish still saves what it compiled.
+      - name: Cache Rust release build artifacts
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
-          key: ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+            src-tauri/target/release
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-
-            ${{ runner.os }}-rust-
+            ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ${{ runner.os }}-rust-release-
+          save-always: true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
