@@ -78,16 +78,27 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Run a single serve_one iteration on a background thread and connect as a
 /// client, returning the client's response.
+///
+/// Uses a dedicated test-only pipe name + a permissive DACL (Everyone) so the
+/// tests are deterministic regardless of whether the real MiControlFace
+/// service is running on the machine and whether the test process is
+/// elevated: the production pipe `\\.\pipe\micontrol_face` is owned by that
+/// service when active (SYSTEM + Admins only → non-elevated processes cannot
+/// re-create or open it).
+const TEST_PIPE: &str = r"\\.\pipe\micontrol_face_test";
+const TEST_SDDL: &str = "D:(A;;GA;;;WD)";
+
 fn roundtrip(handler: &'static MockHandler, request: &str) -> String {
     let _guard = TEST_LOCK.lock().unwrap();
     let shutdown = AtomicBool::new(false);
 
     let server = std::thread::spawn(move || {
-        // serve_one takes a concrete F: Fn — wrap the handler method in a
-        // concrete closure capturing the &MockHandler.
+        // serve_one_named takes a concrete F: Fn — wrap the handler method in
+        // a concrete closure capturing the &MockHandler.
         let h: &MockHandler = handler;
         let handler_fn = move |req: &serde_json::Value| h.call(req);
-        let _ = pipe_server::serve_one(&handler_fn, &shutdown);
+        let _ =
+            pipe_server::serve_one_named(&handler_fn, &shutdown, Some(TEST_PIPE), Some(TEST_SDDL));
     });
 
     // Give the server a moment to create the pipe instance.
@@ -96,7 +107,7 @@ fn roundtrip(handler: &'static MockHandler, request: &str) -> String {
     let client = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(micontrol_lib::hw::face::config::PIPE_NAME)
+        .open(TEST_PIPE)
         .expect("open pipe");
 
     use std::io::{Read, Write};

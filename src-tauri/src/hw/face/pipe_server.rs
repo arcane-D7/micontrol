@@ -59,12 +59,9 @@ mod winpipe {
     /// SDDL parsing avoids all of that. The returned SECURITY_DESCRIPTOR is
     /// heap-allocated by Windows and intentionally leaked (must outlive the
     /// SECURITY_ATTRIBUTES usages).
-    fn build_security() -> Option<SECURITY_ATTRIBUTES> {
+    fn build_security(sddl: &str) -> Option<SECURITY_ATTRIBUTES> {
         unsafe {
-            let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
             let mut psd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
 
             let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -98,8 +95,34 @@ mod winpipe {
     where
         F: Fn(&Value) -> Value,
     {
-        let pipe_name_w: Vec<u16> = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect();
-        let security = build_security();
+        serve_one_named(handle, shutdown, None, None)
+    }
+
+    /// Accept one client on a custom pipe:
+    /// - `pipe_name` defaults to `PIPE_NAME`.
+    /// - `sddl` overrides the security descriptor; `None` uses the production
+    ///   DACL (SYSTEM + Administrators only).
+    ///
+    /// Tests pass a unique name AND a permissive DACL (`D:(A;;GA;;;WD)` =
+    /// Everyone) so they stay deterministic regardless of whether the real
+    /// MiControlFace service is running (the production pipe is then owned by
+    /// that service and cannot be re-created, and its SYSTEM-only DACL blocks
+    /// non-elevated test processes).
+    pub fn serve_one_named<F>(
+        handle: &F,
+        shutdown: &std::sync::atomic::AtomicBool,
+        pipe_name: Option<&str>,
+        sddl: Option<&str>,
+    ) -> FaceResult<bool>
+    where
+        F: Fn(&Value) -> Value,
+    {
+        let name = pipe_name.unwrap_or(PIPE_NAME);
+        let pipe_name_w: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+        // Production DACL: SYSTEM + Administrators only. Tests override with a
+        // permissive DACL (Everyone) so an unprivileged test process can open
+        // the pipe as a client.
+        let security = build_security(sddl.unwrap_or("D:(A;;GA;;;SY)(A;;GA;;;BA)"));
 
         let handle_win = unsafe {
             CreateNamedPipeW(
@@ -199,12 +222,24 @@ mod winpipe {
     where
         F: Fn(&Value) -> Value,
     {
+        serve_one_named(_handle, shutdown, None, None)
+    }
+
+    pub fn serve_one_named<F>(
+        _handle: &F,
+        shutdown: &AtomicBool,
+        _pipe_name: Option<&str>,
+        _sddl: Option<&str>,
+    ) -> FaceResult<bool>
+    where
+        F: Fn(&Value) -> Value,
+    {
         let _ = shutdown;
         Ok(false)
     }
 }
 
-pub use winpipe::serve_one;
+pub use winpipe::{serve_one, serve_one_named};
 
 /// Build the standard error response.
 pub fn err_response(reason: impl Into<String>) -> PipeResponse {

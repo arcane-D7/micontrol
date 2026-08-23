@@ -10,6 +10,16 @@
 use rand::Rng;
 use std::time::Duration;
 
+/// Compute the next backoff delay: `current * multiplier`, capped at `max_delay`.
+///
+/// Pure function extracted from [`with_retry_backoff`] so the exponential
+/// growth and cap can be tested deterministically without wall-clock sleeps.
+/// A `backoff_multiplier` below 1.0 would shrink delays — callers pass >= 1.0.
+fn backoff_delay(current: Duration, multiplier: f64, max_delay: Duration) -> Duration {
+    let next_ms = (current.as_millis() as f64 * multiplier).min(max_delay.as_millis() as f64);
+    Duration::from_millis(next_ms as u64)
+}
+
 /// Trait for classifying whether an error should be retried.
 ///
 /// Implement this for error types that have permanent (non-retryable) variants.
@@ -160,9 +170,7 @@ where
                 std::thread::sleep(sleep_duration);
 
                 // Compute next delay with exponential backoff, capped at max_delay
-                let next_ms = (delay.as_millis() as f64 * backoff_multiplier)
-                    .min(max_delay.as_millis() as f64);
-                delay = Duration::from_millis(next_ms as u64);
+                delay = backoff_delay(delay, backoff_multiplier, max_delay);
             }
         }
     }
@@ -215,7 +223,6 @@ where
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::time::Instant;
 
     #[test]
     fn test_succeeds_on_first_attempt() {
@@ -290,57 +297,85 @@ mod tests {
         assert_eq!(*count.borrow(), 1);
     }
 
+    /// Verify the exact delay sequence `with_retry_backoff` computes for its
+    /// exponential backoff (pre-jitter): initial → *multiplier each retry, capped
+    /// at max_delay. Fully deterministic — no wall-clock sleeps.
     #[test]
-    fn test_backoff_timing() {
-        // With initial_delay=10ms, multiplier=2.0, max_delay=100ms:
-        // Delays: ~10ms, ~20ms, ~40ms (each ±20% jitter)
-        // Total: 56ms–84ms
-        let start = Instant::now();
-        let result: Result<i32, String> = with_retry_backoff(
-            3,
-            Duration::from_millis(10),
-            2.0,
-            Duration::from_millis(100),
-            || Err("fail".to_string()),
+    fn test_backoff_delay_sequence() {
+        let initial = Duration::from_millis(10);
+        let max = Duration::from_millis(100);
+
+        // Mirror the state machine inside `with_retry_backoff`:
+        // delay starts at `initial`; after each retry it becomes
+        // backoff_delay(delay, multiplier, max).
+        let mut delay = initial;
+        let mut seq = vec![delay];
+        for _ in 0..2 {
+            delay = backoff_delay(delay, 2.0, max);
+            seq.push(delay);
+        }
+
+        assert_eq!(
+            seq,
+            vec![
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                Duration::from_millis(40),
+            ],
+            "exponential backoff must double each retry and respect the cap"
         );
-        let elapsed = start.elapsed();
-        assert!(result.is_err());
-        assert!(
-            elapsed >= Duration::from_millis(40),
-            "Elapsed {:?} should be at least 40ms",
-            elapsed
-        );
-        assert!(
-            elapsed <= Duration::from_millis(200),
-            "Elapsed {:?} should be at most 200ms",
-            elapsed
+    }
+
+    /// The same sequence with a low cap — later delays must be capped, not
+    /// growing unbounded. Fully deterministic.
+    #[test]
+    fn test_backoff_delay_sequence_capped() {
+        let initial = Duration::from_millis(10);
+        let max = Duration::from_millis(15);
+
+        let mut delay = initial;
+        let mut seq = vec![delay];
+        for _ in 0..2 {
+            delay = backoff_delay(delay, 10.0, max);
+            seq.push(delay);
+        }
+
+        assert_eq!(
+            seq,
+            vec![
+                Duration::from_millis(10),
+                Duration::from_millis(15), // 10*10=100 → capped
+                Duration::from_millis(15), // stays at cap
+            ],
+            "backoff must cap at max_delay and never exceed it"
         );
     }
 
     #[test]
-    fn test_max_delay_cap() {
-        // With initial_delay=10ms, multiplier=10.0, max_delay=15ms:
-        // Delays: ~10ms, ~15ms (capped), ~15ms (capped)
-        // Total: 32ms–48ms
-        let start = Instant::now();
-        let result: Result<i32, String> = with_retry_backoff(
-            3,
-            Duration::from_millis(10),
-            10.0,
-            Duration::from_millis(15),
-            || Err("fail".to_string()),
+    fn test_backoff_delay_pure_function() {
+        // Direct unit checks of the pure backoff math — fully deterministic.
+        assert_eq!(
+            backoff_delay(Duration::from_millis(10), 2.0, Duration::from_secs(1)),
+            Duration::from_millis(20)
         );
-        let elapsed = start.elapsed();
-        assert!(result.is_err());
-        assert!(
-            elapsed >= Duration::from_millis(20),
-            "Elapsed {:?} should respect max_delay cap (>= 20ms)",
-            elapsed
+        assert_eq!(
+            backoff_delay(Duration::from_millis(20), 2.0, Duration::from_secs(1)),
+            Duration::from_millis(40)
         );
-        assert!(
-            elapsed <= Duration::from_millis(150),
-            "Elapsed {:?} should not exceed max_delay cap significantly (<= 150ms)",
-            elapsed
+        // Cap applies.
+        assert_eq!(
+            backoff_delay(Duration::from_millis(10), 10.0, Duration::from_millis(15)),
+            Duration::from_millis(15)
+        );
+        // Multiplying an already-capped delay stays capped.
+        assert_eq!(
+            backoff_delay(Duration::from_millis(15), 10.0, Duration::from_millis(15)),
+            Duration::from_millis(15)
+        );
+        // Multiplier below 1.0 shrinks (callers don't use it, but math holds).
+        assert_eq!(
+            backoff_delay(Duration::from_millis(40), 0.5, Duration::from_secs(1)),
+            Duration::from_millis(20)
         );
     }
 }

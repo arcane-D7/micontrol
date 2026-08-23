@@ -22,8 +22,25 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const STEPS = [
   { id: 'version', name: 'Version consistency check', cmd: 'pnpm', args: ['run', 'version:check'] },
   { id: 'fmt', name: 'Rust formatting check', cmd: 'cargo', args: ['fmt', '--check'], cwd: 'src-tauri' },
-  { id: 'clippy', name: 'Rust clippy (warnings denied)', cmd: 'cargo', args: ['clippy', '--', '-D', 'warnings'], cwd: 'src-tauri' },
-  { id: 'test-rust', name: 'Rust tests', cmd: 'cargo', args: ['test', '--', '--test-threads=1'], cwd: 'src-tauri', env: { RUST_TEST_THREADS: '1' } },
+  // NOTE: `--features face` mirrors the release build exactly (`pnpm run
+  // tauri build -f face`). Without it, `micontrol_face_svc` (and the whole
+  // face pipeline) would never be compiled/verified locally or in CI — a
+  // silent parity gap with the packaged app.
+  {
+    id: 'clippy',
+    name: 'Rust clippy (warnings denied)',
+    cmd: 'cargo',
+    args: ['clippy', '--all-targets', '--features', 'face', '--', '-D', 'warnings'],
+    cwd: 'src-tauri',
+  },
+  {
+    id: 'test-rust',
+    name: 'Rust tests',
+    cmd: 'cargo',
+    args: ['test', '--features', 'face', '--', '--test-threads=1'],
+    cwd: 'src-tauri',
+    env: { RUST_TEST_THREADS: '1' },
+  },
   { id: 'tsc', name: 'TypeScript type check', cmd: 'npx', args: ['tsc', '--noEmit'] },
   { id: 'lint', name: 'ESLint', cmd: 'pnpm', args: ['run', 'lint'] },
   { id: 'format', name: 'Prettier check', cmd: 'pnpm', args: ['run', 'format:check'] },

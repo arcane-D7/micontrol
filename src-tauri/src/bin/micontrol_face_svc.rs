@@ -599,7 +599,10 @@ fn main() {
                         {
                             println!("MiControlFace service is already running (1056) — new binary live.");
                         }
-                        Err(e) => Err(e).expect("restart MiControlFace service"),
+                        Err(e) => {
+                            eprintln!("restart MiControlFace service: {e}");
+                            std::process::exit(1);
+                        }
                     }
                 }
                 Err(_) => {

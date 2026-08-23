@@ -55,6 +55,18 @@ jobs:
           }
           exit $last
 
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ${{ runner.os }}-rust-
+
       # Exactly the same checks as the local health check (single source of
       # truth: scripts/health-check.mjs — no drift allowed between local & CI).
       - name: Health check (static)
@@ -99,6 +111,18 @@ jobs:
           }
           exit $last
 
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ${{ runner.os }}-rust-
+
       # Same script as the local health check; split across jobs for
       # parallelism (slow Rust tests + coverage live here).
       - name: Health check (tests)
@@ -117,7 +141,7 @@ jobs:
   build:
     name: Build smoke test
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -152,11 +176,26 @@ jobs:
           }
           exit $last
 
-      - name: Frontend build
-        run: pnpm run build
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ${{ runner.os }}-rust-
 
       # Bundle/signing happens in release.yml (has TAURI_SIGNING_PRIVATE_KEY
-      # secrets). Here we only smoke-test compilation; --no-bundle keeps fork
+      # secrets). Here we smoke-test compilation only; --no-bundle keeps fork
       # PRs working since they cannot access repository secrets.
+      #
+      # IMPORTANT — parity with release.yml: use the same feature set
+      # (`-f face`) and the same Tauri invocation so the CI smoke test always
+      # compiles exactly the same code paths as the packaged release build.
+      # `pnpm run tauri build` runs beforeBuildCommand (tsc && vite build)
+      # automatically, so there is no separate frontend step needed.
       - name: Tauri compile smoke test
-        run: pnpm run tauri build --no-bundle
+        run: pnpm run tauri build --no-bundle -f face

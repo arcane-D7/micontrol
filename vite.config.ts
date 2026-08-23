@@ -28,6 +28,11 @@ export default defineConfig(async () => ({
   test: {
     globals: true,
     environment: 'jsdom',
+    // Stale transform cache caused a flaky `Cannot read properties of null
+    // (reading 'useState')` failure in jsdom tests after Rust edits invalidated
+    // cached modules. Disable cache so local runs and CI are identical every
+    // time — no stale-transform class of failure (parity requirement).
+    cache: false,
     setupFiles: ['./src/test-setup.ts'],
     exclude: [
       '**/node_modules/**',
