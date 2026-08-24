@@ -216,13 +216,14 @@ jobs:
       # bundling, no code signing) — bundling/signing only matter in
       # release.yml. `-j 2` keeps the 2-vCPU runner alive without OOM or
       # idle-silence (see the `warm-cache` job below for how the release
-      # cache stays hot so this completes in minutes).
+      # cache stays hot so this completes in minutes). The workspace
+      # Cargo.toml lives under src-tauri/, so pass --manifest-path.
       #
       # IMPORTANT — parity with release.yml: same Rust feature set (the
       # front-end is compiled by beforeBuildCommand in `tauri build`; the
       # Rust compile below exercises exactly the same `-f face` code paths).
       - name: Rust release compile smoke test
-        run: cargo build --release --features face -j 2
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --features face -j 2
 
   # Weekly warm-cache refresh (also triggered on demand via workflow_dispatch
   # or by any push with the `warm-cache` marker in the commit subject).
@@ -293,5 +294,6 @@ jobs:
 
       # Full release compile to COMPLETION. `-j 2` caps parallelism for the
       # 2-vCPU runner (matches the smoke test, avoids OOM/swap stalls).
+      # --manifest-path because the workspace Cargo.toml is under src-tauri/.
       - name: Compile release (warm cache)
-        run: cargo build --release --features face -j 2
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --features face -j 2
