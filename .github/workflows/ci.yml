@@ -249,6 +249,14 @@ jobs:
   # restore it and finish in minutes instead of hours.
   warm-cache:
     name: Warm release cache (weekly)
+    # Runs on schedule or dispatch (with warm_cache=true). NEVER in the same
+    # concurrency group as the rest: pushes/PRs would cancel it mid-compile
+    # (and a cancelled job skips the cache post-step = cache never saved).
+    # Group `warm-cache-main` + cancel-in-progress:false guarantees the
+    # weekly compile runs to completion even if new pushes arrive.
+    concurrency:
+      group: warm-cache-${{ github.ref }}
+      cancel-in-progress: false
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.warm_cache == 'true')
     runs-on: windows-latest
     timeout-minutes: 300
