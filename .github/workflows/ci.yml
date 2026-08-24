@@ -14,6 +14,12 @@ on:
   schedule:
     - cron: '0 4 * * 1'
   workflow_dispatch:
+    inputs:
+      warm_cache:
+        description: 'Also run the Warm release cache job (slow full release compile)'
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
 
 env:
   CARGO_TERM_COLOR: always
@@ -148,6 +154,11 @@ jobs:
 
   build:
     name: Build smoke test
+    # Only gates pushes and PRs. On schedule/dispatch the `warm-cache` job
+    # already performs the exact same release compile, so running this too
+    # would burn a second 2-vCPU runner on a duplicated cold compile (no
+    # incremental benefit — separate runners, separate target dirs).
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: windows-latest
     # The Tauri smoke build compiles the full Rust release profile
     # (codegen-units=1, opt-level=2) on a 2-vCPU runner. On the FIRST run
@@ -238,7 +249,7 @@ jobs:
   # restore it and finish in minutes instead of hours.
   warm-cache:
     name: Warm release cache (weekly)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.warm_cache == 'true')
     runs-on: windows-latest
     timeout-minutes: 300
     steps:
