@@ -5,6 +5,14 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Weekly warm-cache refresh. Without it the Build smoke test is a ~4h
+  # cold release compile that always dies on the 240min timeout (the kill
+  # skips the cache post-step, so the cold cost is paid on EVERY push —
+  # a death loop). This job runs `cargo build --release` to completion once
+  # a week; its post-step saves the warm release cache so the regular smoke
+  # test restores it and finishes in minutes.
+  schedule:
+    - cron: '0 4 * * 1'
   workflow_dispatch:
 
 env:
@@ -143,10 +151,12 @@ jobs:
     runs-on: windows-latest
     # The Tauri smoke build compiles the full Rust release profile
     # (codegen-units=1, opt-level=2) on a 2-vCPU runner. On the FIRST run
-    # (cache-founding) that can take up to ~3.5h, so keep the timeout well
+    # (cache-founding) that can take up to ~4h, so keep the timeout well
     # above the cold-compile cost; subsequent runs restore the release
-    # cache and complete in minutes.
-    timeout-minutes: 240
+    # cache (warmed weekly by the `warm-cache` job) and complete in
+    # minutes. 300min also guarantees the cache post-step runs before any
+    # timeout fires (a killed job skips the save — death loop).
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -202,14 +212,86 @@ jobs:
             ${{ runner.os }}-rust-release-
           save-always: true
 
-      # Bundle/signing happens in release.yml (has TAURI_SIGNING_PRIVATE_KEY
-      # secrets). Here we smoke-test compilation only; --no-bundle keeps fork
-      # PRs working since they cannot access repository secrets.
+      # The smoke test is intentionally a `cargo build --release` (no Tauri
+      # bundling, no code signing) — bundling/signing only matter in
+      # release.yml. `-j 2` keeps the 2-vCPU runner alive without OOM or
+      # idle-silence (see the `warm-cache` job below for how the release
+      # cache stays hot so this completes in minutes).
       #
-      # IMPORTANT — parity with release.yml: use the same feature set
-      # (`-f face`) and the same Tauri invocation so the CI smoke test always
-      # compiles exactly the same code paths as the packaged release build.
-      # `pnpm run tauri build` runs beforeBuildCommand (tsc && vite build)
-      # automatically, so there is no separate frontend step needed.
-      - name: Tauri compile smoke test
-        run: pnpm run tauri build --no-bundle -f face
+      # IMPORTANT — parity with release.yml: same Rust feature set (the
+      # front-end is compiled by beforeBuildCommand in `tauri build`; the
+      # Rust compile below exercises exactly the same `-f face` code paths).
+      - name: Rust release compile smoke test
+        run: cargo build --release --features face -j 2
+
+  # Weekly warm-cache refresh (also triggered on demand via workflow_dispatch
+  # or by any push with the `warm-cache` marker in the commit subject).
+  # Purpose: the FIRST release compile on the shared `windows-latest`
+  # 2-vCPU runner takes up to ~4h (550+ crates, codegen-units=1, opt-level=2)
+  # and the 240min job timeout KILLS it mid-flight — and a killed job skips
+  # the actions/cache post-step, so `save-always: true` never saves. Net
+  # effect: every push pays the full cold compile and dies → death loop.
+  # This job lets the compile run to COMPLETION (triggered weekly), then the
+  # normal post-step saves the release cache. Once the cache exists, the
+  # Build smoke test in this file (and release.yml's build-and-publish)
+  # restore it and finish in minutes instead of hours.
+  warm-cache:
+    name: Warm release cache (weekly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+          components: clippy, rustfmt
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          $attempts = 3
+          $last = 1
+          for ($i = 1; $i -le $attempts; $i++) {
+            Write-Host "pnpm install attempt $i/$attempts"
+            pnpm install --frozen-lockfile
+            $last = $LASTEXITCODE
+            if ($last -eq 0) { break }
+            if ($i -lt $attempts) { Start-Sleep -Seconds 15 }
+          }
+          exit $last
+
+      # Same release cache (identical key shape) as the Build smoke test and
+      # release.yml — so the weekly run warms what all release compiles use.
+      # save-always: true guarantees the full compile output is persisted
+      # even if this job is later cancelled mid-post-step.
+      - name: Cache Rust release build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target/release
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ${{ runner.os }}-rust-release-
+          save-always: true
+
+      # Full release compile to COMPLETION. `-j 2` caps parallelism for the
+      # 2-vCPU runner (matches the smoke test, avoids OOM/swap stalls).
+      - name: Compile release (warm cache)
+        run: cargo build --release --features face -j 2

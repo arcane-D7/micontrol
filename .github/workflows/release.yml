@@ -74,10 +74,12 @@ jobs:
     runs-on: windows-latest
     needs: health-check
     # The release compile (codegen-units=1, opt-level=2) on a 2-vCPU runner
-    # takes up to ~3.5h on a cold cache. 240min covers the cache-founding
-    # run; later runs restore the release cache and finish in minutes
-    # (same reasoning as ci.yml's Build smoke test).
-    timeout-minutes: 240
+    # takes up to ~3.5h on a cold cache. 300min covers the cache-founding
+    # run AND guarantees the post-step (which saves the release cache)
+    # executes before any timeout fires; later runs restore the release
+    # cache (warmed weekly by ci.yml's warm-cache job) and finish in
+    # minutes (same reasoning as ci.yml's Build smoke test).
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
         with:
@@ -133,6 +135,10 @@ jobs:
       - name: Build Tauri app
         run: pnpm run tauri build -f face
         env:
+          # Same job parallelism as ci.yml's smoke test / warm-cache job so
+          # the compile characteristics (memory pressure, artifact layout)
+          # match exactly — builds stay environment-agnostic.
+          CARGO_BUILD_JOBS: '2'
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
