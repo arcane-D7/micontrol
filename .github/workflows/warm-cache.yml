@@ -1,0 +1,95 @@
+name: Warm Release Cache
+
+on:
+  schedule:
+    # Weekly warm-cache refresh: keeps the Rust release cache hot so
+    # ci.yml's Build smoke test and release.yml's build-and-publish restore
+    # it and finish in minutes instead of paying a ~4h cold compile.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      warm_cache:
+        description: 'Run the warm-cache release compile'
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions: read-all
+
+# Deliberately NO shared concurrency group with ci.yml. A push/PR to main
+# must never cancel this job mid-compile: a cancelled job skips the
+# actions/cache post-step, so the release cache would never be saved (the
+# exact death loop we fixed). This workflow is standalone; its own group
+# (warm-cache-refs/heads/main) + cancel-in-progress:false means repeated
+# dispatches/schedules queue instead of killing each other.
+concurrency:
+  group: warm-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  warm-cache:
+    name: Warm release cache (weekly)
+    runs-on: windows-latest
+    # Full release-profile compile (codegen-units=1, opt-level=2, ~550
+    # crates incl. ort/onnxruntime/tauri) on the shared 2-vCPU runner takes
+    # up to ~4h on a cold cache. 300min covers it AND guarantees the
+    # post-step (which saves the cache) runs before any timeout fires.
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+          components: clippy, rustfmt
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.5.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          $attempts = 3
+          $last = 1
+          for ($i = 1; $i -le $attempts; $i++) {
+            Write-Host "pnpm install attempt $i/$attempts"
+            pnpm install --frozen-lockfile
+            $last = $LASTEXITCODE
+            if ($last -eq 0) { break }
+            if ($i -lt $attempts) { Start-Sleep -Seconds 15 }
+          }
+          exit $last
+
+      # Same release cache key shape as ci.yml's Build smoke test and
+      # release.yml, so this weekly job warms exactly what they restore.
+      # save-always: true keeps the compiled artifacts cached even if a
+      # later job in the same run fails.
+      - name: Cache Rust release build artifacts
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target/release
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ${{ runner.os }}-rust-release-
+          save-always: true
+
+      # Full release compile to COMPLETION. `-j 2` caps parallelism for the
+      # 2-vCPU runner (matches the smoke test, avoids OOM/swap stalls).
+      # --manifest-path because the workspace Cargo.toml is under src-tauri/.
+      - name: Compile release (warm cache)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --features face -j 2
