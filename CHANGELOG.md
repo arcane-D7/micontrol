@@ -5,6 +5,20 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.19] - 2026-08-25
+
+### Security
+
+- **CVE fixes across the dependency tree (pnpm + cargo).** Frontend (`pnpm audit`): 0 known vulnerabilities (was 11) — patched `nanoid`, `postcss`, `fast-uri`, `brace-expansion`, `js-yaml` via overrides in `pnpm-workspace.yaml`; bumped `vite`/`vitest`. Overrides moved there because pnpm ≥ 11 no longer reads the `pnpm.overrides` field in `package.json`. Rust (`cargo audit`): fixed `h2` (RUSTSEC-2026-0258), `crossbeam-epoch` (RUSTSEC-2026-0204), and removed `quick-xml 0.39` (RUSTSEC-2026-0194/0195) by upgrading the Tauri ecosystem to 2.11.5 (`tauri`, `tauri-utils`, `plist`, `tray-icon`). Remaining advisories are Linux-target-only dependencies that do not compile on Windows.
+
+### Fixed
+
+- **CI release build hang caused by `humantime 2.3`.** Release codegen stalled indefinitely on the 2-vCPU GitHub runner right after compiling `humantime` — five CI runs timed out at the exact same crate across three different release profiles, and the stall reproduced deterministically. Bumping to `humantime 2.4` fixed the hang: the local release build now completes in ~10 minutes and the CI build smoke test runs clean.
+- **ESLint crash after dependency overrides.** The `brace-expansion` CVE override resolved `minimatch@3` (used by ESLint's `@eslint/config-array`) to v5, whose export shape broke ESLint (`TypeError: expand is not a function`). Pinned `brace-expansion@<2` to `1.1.18` (same major line) so the legacy minimatch keeps its compatible API.
+- **Hardware profile not recovered after system sleep.** The app now re-probes and restores the hardware profile when the machine wakes from sleep instead of staying on the stale pre-sleep state.
+- **Webcam LED blinking every 30 s while idle.** The health supervisor's face check no longer opens the webcam just to probe availability; it relies on the service state and named pipe presence, leaving camera access to the UI path.
+- **CI pipeline stabilized for release parity.** Upgraded all GitHub Actions to the latest majors (Node 24 runtime), isolated the weekly warm-cache refresh into a standalone workflow (immune to push/PR concurrency cancellation), restored multithreaded release codegen (`codegen-units = 8` + thin LTO), and aligned the local and remote build/test/check flow (same features, same `-j 2` release build).
+
 ## [0.1.18] - 2026-08-17
 
 ### Added
@@ -235,7 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Driver management
 - Multi-language support (en, pt, es, fr)
 
-[Unreleased]: https://github.com/arcane-D7/micontrol/compare/v0.1.18...HEAD
+[Unreleased]: https://github.com/arcane-D7/micontrol/compare/v0.1.19...HEAD
+[0.1.19]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.19
 [0.1.18]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.18
 [0.1.3]: https://github.com/arcane-D7/micontrol/releases/tag/v0.1.3
 [1.0.0]: https://github.com/arcane-D7/micontrol/releases/tag/v1.0.0
