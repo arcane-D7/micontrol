@@ -62,7 +62,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 anyhow = "1"
 log = "0.4"
 fern = "0.7"
-humantime = "2"
+humantime = "2.4"
 thiserror = "1"
 hmac = "0.12"
 sha2 = "0.10"
@@ -186,5 +186,3 @@ codegen-units = 8
 lto = "thin"
 opt-level = 2
 strip = true
-
-

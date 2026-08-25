@@ -21,7 +21,13 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 
 const STEPS = [
   { id: 'version', name: 'Version consistency check', cmd: 'pnpm', args: ['run', 'version:check'] },
-  { id: 'fmt', name: 'Rust formatting check', cmd: 'cargo', args: ['fmt', '--check'], cwd: 'src-tauri' },
+  {
+    id: 'fmt',
+    name: 'Rust formatting check',
+    cmd: 'cargo',
+    args: ['fmt', '--check'],
+    cwd: 'src-tauri',
+  },
   // NOTE: `--features face` mirrors the release build exactly (`pnpm run
   // tauri build -f face`). Without it, `micontrol_face_svc` (and the whole
   // face pipeline) would never be compiled/verified locally or in CI — a
@@ -44,7 +50,12 @@ const STEPS = [
   { id: 'tsc', name: 'TypeScript type check', cmd: 'npx', args: ['tsc', '--noEmit'] },
   { id: 'lint', name: 'ESLint', cmd: 'pnpm', args: ['run', 'lint'] },
   { id: 'format', name: 'Prettier check', cmd: 'pnpm', args: ['run', 'format:check'] },
-  { id: 'test-front', name: 'Frontend tests + coverage', cmd: 'npx', args: ['vitest', 'run', '--coverage'] },
+  {
+    id: 'test-front',
+    name: 'Frontend tests + coverage',
+    cmd: 'npx',
+    args: ['vitest', 'run', '--coverage'],
+  },
   { id: 'build', name: 'Frontend build', cmd: 'pnpm', args: ['run', 'build'] },
   { id: 'i18n', name: 'i18n completeness check', cmd: 'node', args: ['scripts/check-i18n.mjs'] },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
@@ -76,7 +87,9 @@ function checkToolchain() {
   const rtPath = path.join(ROOT, 'src-tauri', 'rust-toolchain.toml');
   const rt = readFileSync(rtPath, 'utf8');
   if (!/channel\s*=\s*["']\d+\.\d+\.\d+["']/.test(rt)) {
-    problems.push('src-tauri/rust-toolchain.toml must pin an exact channel (e.g. channel = "1.95.0")');
+    problems.push(
+      'src-tauri/rust-toolchain.toml must pin an exact channel (e.g. channel = "1.95.0")',
+    );
   }
 
   const wfDir = path.join(ROOT, '.github', 'workflows');
@@ -93,9 +106,16 @@ function checkToolchain() {
     while ((m = actionRe.exec(content)) !== null) {
       const tail = content.slice(m.index, m.index + 400);
       if (m[1] === 'stable') {
-        problems.push(`${f}: rust-toolchain@stable is a floating revision — pin an exact toolchain via src-tauri/rust-toolchain.toml + toolchain: input`);
-      } else if (!/\btoolchain:\s*['"]?\d+\.\d+\.\d+/.test(tail) || /\btoolchain:\s*['"]?stable/.test(tail)) {
-        problems.push(`${f}: rust-toolchain@master must specify an exact toolchain: '1.95.0' input`);
+        problems.push(
+          `${f}: rust-toolchain@stable is a floating revision — pin an exact toolchain via src-tauri/rust-toolchain.toml + toolchain: input`,
+        );
+      } else if (
+        !/\btoolchain:\s*['"]?\d+\.\d+\.\d+/.test(tail) ||
+        /\btoolchain:\s*['"]?stable/.test(tail)
+      ) {
+        problems.push(
+          `${f}: rust-toolchain@master must specify an exact toolchain: '1.95.0' input`,
+        );
       }
     }
   }
@@ -120,7 +140,10 @@ if (process.argv.includes('--list')) {
 
 let steps = STEPS;
 if (only) {
-  const ids = only.split(',').map((s) => s.trim()).filter(Boolean);
+  const ids = only
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const missing = ids.filter((id) => !STEPS.some((s) => s.id === id));
   if (missing.length) {
     console.error(`Unknown step(s): ${missing.join(', ')}`);
@@ -129,7 +152,10 @@ if (only) {
   steps = STEPS.filter((s) => ids.includes(s.id));
 }
 if (skipList) {
-  const ids = skipList.split(',').map((s) => s.trim()).filter(Boolean);
+  const ids = skipList
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   steps = steps.filter((s) => !ids.includes(s.id));
 }
 if (steps.length === 0) {
@@ -185,8 +211,12 @@ for (const [i, step] of steps.entries()) {
 }
 
 if (failed) {
-  console.error(`\n❌ Health check FAILED at "${failed.step.name}" [${failed.step.id}] (exit ${failed.code}).`);
-  console.error(`   Reproduce locally with: node scripts/health-check.mjs --step=${failed.step.id}`);
+  console.error(
+    `\n❌ Health check FAILED at "${failed.step.name}" [${failed.step.id}] (exit ${failed.code}).`,
+  );
+  console.error(
+    `   Reproduce locally with: node scripts/health-check.mjs --step=${failed.step.id}`,
+  );
   process.exit(failed.code || 1);
 }
 
