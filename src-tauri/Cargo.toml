@@ -163,19 +163,27 @@ tauri-build = { version = "2", features = [] }
 # A poisoned mutex (from a panic while holding the lock) can be recovered
 # via lock_or_recover() instead of killing the entire process.
 panic = "unwind"
-# CI timeout diagnosis (v0.1.18, runs 32139723515 / 32157591952):
-#   - fat LTO (cgu=1), thin LTO (cgu=16) AND lto=false all stalled ~1h49m with
-#     zero output after the last `Compiling` at the SAME point. Logs prove the
-#     ~550-crate dep tree compiles in <5 min; the stall is the ROOT crate
-#     codegen: 16 codegen-units per rustc × many parallel rustc on a 2-vCPU /
-#     7 GB runner = memory thrash (two profiles spent identical 1h49m).
-#   - Fix: codegen-units = 1 (one codegen thread per rustc, tiny per-process
-#     memory) WITHOUT LTO (link is single-threaded but cheap vs thrash), and
-#     the lib was switched to `rlib` only (3 passes → 1, see [lib] above).
+# CI time/memory diagnosis (v0.1.18, runs 32139723515 / 32157591952):
+#   - fat LTO (cgu=1), thin LTO (cgu=16) AND lto=false all stalled ~1h49m
+#     with zero output after the last `Compiling` at the SAME point. Logs
+#     prove the ~550-crate dep tree compiles in <5 min; the stall was the
+#     ROOT crate codegen: high cgu × many parallel rustc on a 2-vCPU / 7 GB
+#     runner = memory thrash (all three profiles spent identical 1h49m).
+#   - The previous fix (codegen-units=1, lto=false) removed the thrash but
+#     serialized codegen → cold compile jumped from ~30-40min (v0.1.8-0.1.13)
+#     to hours, and CI still occasionally hung at `humantime` because a
+#     single-thread codegen + 2-vCPU runner starves progress checks.
+#   - Balanced profile (fastest that stays stable): codegen-units=8 restores
+#     multi-threaded codegen (8 LLVM threads per rustc) while keeping the
+#     per-process memory peak ~half of the default 16 + thin LTO gives a
+#     parallel multi-threaded link without fat-LTO's memory blowup. The
+#     standalone warm-cache workflow (warm-cache.yml, -j 2) then completes
+#     the cold compile in ~40-90min and saves the shared release cache, so
+#     every subsequent CI/release run restores it and finishes in minutes.
 #   - opt-level = 2: ONNX inference runs in the prebuilt native `ort` runtime,
 #     so Rust-side optimization loss is negligible for this utility app.
-codegen-units = 1
-lto = false
+codegen-units = 8
+lto = "thin"
 opt-level = 2
 strip = true
 
