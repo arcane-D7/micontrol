@@ -577,14 +577,54 @@ fn main() {
                             _ => std::thread::sleep(std::time::Duration::from_millis(250)),
                         }
                     }
+                    // If the service is still alive after the bounded poll (e.g.
+                    // slow MSMF camera teardown in Session-0), kill any
+                    // stragglers so the SCM doesn't hold the exe path open.
+                    // This mirrors what the installer's KillFaceServiceProcess
+                    // does BEFORE invoking us — but re-armed AFTER the stop,
+                    // catching processes that respawned in between.
                     if !stopped {
                         eprintln!("MiControlFace did not stop within 10 s — proceeding anyway");
+                        let _ = std::process::Command::new("taskkill.exe")
+                            .args(["/IM", "micontrol_face_svc.exe", "/T", "/F"])
+                            .output();
+                        // Give taskkill a beat to reap the process.
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
                     }
 
-                    // Point the existing service at the new executable.
-                    service
-                        .change_config(&info)
-                        .expect("update MiControlFace service config");
+                    // Point the existing service at the new executable. This
+                    // can fail with ERROR_SERVICE_MARKED_FOR_DELETE / 1056 if a
+                    // stale handle raced the stop — retry a few times before
+                    // giving up so installer upgrades (which the hook now also
+                    // deletes-then-recreates) stay robust.
+                    let mut configured = false;
+                    for attempt in 0..5 {
+                        match service.change_config(&info) {
+                            Ok(()) => {
+                                configured = true;
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("config retry {attempt}: change_config failed: {e}");
+                                std::thread::sleep(std::time::Duration::from_millis(750));
+                            }
+                        }
+                    }
+                    if !configured {
+                        eprintln!("MiControlFace change_config failed after retries — removing and recreating");
+                        let _ = manager
+                            .open_service(svc::SERVICE_NAME, ServiceAccess::DELETE)
+                            .and_then(|s| s.delete());
+                        let service = manager
+                            .create_service(&info, ServiceAccess::START)
+                            .expect("recreate MiControlFace service");
+                        service
+                            .start(&Vec::<std::ffi::OsString>::new())
+                            .expect("start recreated service");
+                        println!("MiControlFace service recreated and started.");
+                        configure_failure_actions();
+                        return;
+                    }
 
                     // Start — tolerate 1056 (already running): the SCM may have
                     // auto-restarted the service (failure actions) or the stop
@@ -601,7 +641,11 @@ fn main() {
                         }
                         Err(e) => {
                             eprintln!("restart MiControlFace service: {e}");
-                            std::process::exit(1);
+                            // Service exists and config is updated — the start
+                            // failure alone must not abort an installer run.
+                            // The post-install verification step reports the
+                            // real state; log and continue.
+                            println!("MiControlFace install: service configured but start failed ({e}) — will retry on reboot");
                         }
                     }
                 }

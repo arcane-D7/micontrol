@@ -244,14 +244,27 @@
   ; Unlock tab will show the service as not installed).
   DetailPrint "Configurando Face Unlock..."
   ${If} ${FileExists} "$INSTDIR\micontrol_face_svc.exe"
-    ; Install the LocalSystem auth service (auto-start).
+    ; Cleanup the OLD service entry first (idempotent). The previous
+    ; `install` path UPDATEs the existing service in place — if the old
+    ; process is mid-shutdown (slow camera teardown) the SCM refuses the
+    ; change_config with ERROR_SERVICE_MARKED_FOR_DELETE / ACCESS_DENIED,
+    ; which previously Aborted the whole installer. Deleting the entry first
+    ; (delete is async-safe — the SCM completes it once the handle closes)
+    ; and then creating fresh avoids that class of failure entirely.
+    DetailPrint "  Removendo entrada antiga do serviço MiControlFace (se existir)..."
+    nsExec::ExecToLog '"$SYSDIR\sc.exe" delete MiControlFace'
+    Pop $1
+    ; Install the LocalSystem auth service (auto-start) as a FRESH service.
     nsExec::ExecToLog '"$INSTDIR\micontrol_face_svc.exe" install'
     Pop $0
     ${If} $0 = 0
       DetailPrint "  MiControlFace service install: $0 (OK)"
     ${Else}
-      DetailPrint "  ERRO: MiControlFace service install falhou com código $0"
-      Abort "Falha ao instalar o serviço MiControlFace (código $0). Verifique se o instalador foi executado como Administrador e tente novamente."
+      ; Face Unlock is OPTIONAL: a failed auth service must never block the
+      ; core app installer (the app runs fine without it; the Face tab shows
+      ; the service as unavailable). Log the failure, continue the install,
+      ; and let the post-install verification report the real state.
+      DetailPrint "  AVISO: MiControlFace service install retornou $0 (Face Unlock continuará indisponível neste upgrade)."
     ${EndIf}
   ${Else}
     DetailPrint "  Nota: micontrol_face_svc.exe não encontrado no bundle — Face Unlock desabilitado."

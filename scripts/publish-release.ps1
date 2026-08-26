@@ -9,8 +9,13 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/publish-release.ps1 -Version 0.1.19
 #
 # The signing key password is NEVER read from arguments or the command line.
-# If TAURI_SIGNING_PRIVATE_KEY_PASSWORD is unset, `tauri build` will prompt
-# interactively — type the passphrase into the terminal there.
+# Password source order:
+#   1) $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -- if set (e.g. via a one-time
+#      user-level `setx TAURI_SIGNING_PRIVATE_KEY_PASSWORD "SuaSenha"` run by
+#      the owner), `tauri build` signs without prompting.
+#   2) interactive prompt from `tauri build` (type the passphrase in the terminal).
+# NOTE: run `setx ...` yourself in your own terminal -- never share the secret
+# through chat or tooling. A one-time setx removes the prompt for every future release.
 param(
   [string]$Version = '0.1.19',
   [string]$Repo = 'arcane-D7/micontrol'
