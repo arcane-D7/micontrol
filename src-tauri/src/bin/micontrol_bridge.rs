@@ -105,6 +105,49 @@ fn current_exe() -> String {
         .unwrap_or_else(|_| "micontrol_bridge.exe".to_string())
 }
 
+/// Stop + delete a possibly-running service, waiting until the SCM entry is
+/// actually gone. `sc delete` is ASYNC: the entry lingers (marked for deletion)
+/// until all handles close. Creating a new service before that completes fails
+/// with 1072 (marked for delete). We poll `sc query` until it reports
+/// "service does not exist" instead of trusting a fixed sleep.
+fn remove_service_wait(name: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    let _ = Command::new("sc")
+        .args(["stop", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    // Brief pause so the stop reaches the SCM before the delete.
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let _ = Command::new("sc")
+        .args(["delete", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    // Poll until the entry is gone (exit != 0 → 1060 does not exist) or ~15 s.
+    for _ in 0..30 {
+        let q = Command::new("sc")
+            .args(["query", name])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("sc query failed to spawn: {e}"))?;
+        if !q.status.success() {
+            let text = String::from_utf8_lossy(&q.stdout).to_lowercase();
+            if text.contains("does not exist") || text.contains("1060") {
+                return Ok(());
+            }
+            // Some non-zero exit with an unexpected body — treat as gone enough
+            // to proceed (sc query failed = SCM has no usable entry).
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(format!(
+        "service {name} did not disappear from SCM within 15s (stale handle / delete pending)"
+    ))
+}
+
 /// Install the MiControlBridge Windows service (requires admin).
 fn install_service() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -113,20 +156,18 @@ fn install_service() -> Result<(), String> {
     let exe = current_exe();
     let bin_path = format!("\"{exe}\" service");
 
-    // Stop + delete any existing service first.
-    let _ = Command::new("sc")
-        .args(["stop", SERVICE_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    let _ = Command::new("sc")
-        .args(["delete", SERVICE_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    // Stop + delete any existing service first, waiting for the SCM entry to
+    // actually go away (avoiding ERROR_SERVICE_MARKED_FOR_DELETE 1072 when
+    // sc create races the async delete).
+    if let Err(e) = remove_service_wait(SERVICE_NAME) {
+        // If we cannot remove an existing stale entry, fail loudly — a create
+        // against a marked-for-delete entry would fail anyway.
+        eprintln!("[install_service] {e}");
+        return Err(e);
+    }
 
-    // Create the service.
-    let out = Command::new("sc")
+    // Create the service. Retry on transient 1072/1073 (delete/create race).
+    let mut out = Command::new("sc")
         .args([
             "create",
             SERVICE_NAME,
@@ -140,12 +181,36 @@ fn install_service() -> Result<(), String> {
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("sc create failed to spawn: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "sc create failed: {} {}",
+    for attempt in 0..5 {
+        if out.status.success() {
+            break;
+        }
+        let text = format!(
+            "{} {}",
             String::from_utf8_lossy(&out.stderr),
             String::from_utf8_lossy(&out.stdout)
-        ));
+        );
+        // 1072 = ERROR_SERVICE_MARKED_FOR_DELETE, 1073 = ERROR_SERVICE_EXISTS.
+        // Both are transient during an upgrade; wait and retry the create.
+        if (text.contains("1072") || text.contains("1073")) && attempt < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            out = Command::new("sc")
+                .args([
+                    "create",
+                    SERVICE_NAME,
+                    "binPath=",
+                    &bin_path,
+                    "start=",
+                    "auto",
+                    "DisplayName=",
+                    SERVICE_DISPLAY,
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .map_err(|e| format!("sc create failed to spawn: {e}"))?;
+        } else {
+            return Err(format!("sc create failed: {text}"));
+        }
     }
 
     // Run as LocalSystem with failure auto-restart.
@@ -204,7 +269,7 @@ fn uninstall_service() -> Result<(), String> {
         .args(["stop", SERVICE_NAME])
         .creation_flags(CREATE_NO_WINDOW)
         .output();
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    std::thread::sleep(std::time::Duration::from_millis(700));
     let out = Command::new("sc")
         .args(["delete", SERVICE_NAME])
         .creation_flags(CREATE_NO_WINDOW)
@@ -217,6 +282,8 @@ fn uninstall_service() -> Result<(), String> {
             return Err(format!("sc delete failed: {text}"));
         }
     }
+    // Wait for the entry to actually disappear (handles may linger).
+    let _ = remove_service_wait(SERVICE_NAME);
     Ok(())
 }
 

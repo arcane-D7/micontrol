@@ -22,23 +22,23 @@
   ;    the installer.nsi template's finish page) ─────────────────────────────
   WriteRegStr SHCTX "Software\Microsoft\Windows\CurrentVersion\Run" \
     "MiControl" '"$INSTDIR\micontrol.exe"'
-  DetailPrint "MiControl configurado para iniciar com o Windows."
+  DetailPrint "MiControl set to start with Windows."
 
   ; ── Hardware drivers ──────────────────────────────────────────────────────
-  DetailPrint "Instalando drivers de hardware MiControl..."
+  DetailPrint "Installing MiControl hardware drivers..."
 
   ; VirtualControlHID.sys — required for performance mode switching
   DetailPrint "  > VirtualControlHID.inf"
   nsExec::ExecToLog '"$SYSDIR\pnputil.exe" /add-driver "$INSTDIR\drivers\VirtualControlHID\virtualcontrolhid.inf" /install'
   Pop $0
   ${If} $0 = 0
-    DetailPrint "  VirtualControlHID: instalado com sucesso."
+    DetailPrint "  VirtualControlHID: installed successfully."
   ${ElseIf} $0 = 3010
-    DetailPrint "  VirtualControlHID: instalado — reinicialização necessária para ativar."
+    DetailPrint "  VirtualControlHID: installed — reboot required to activate."
   ${ElseIf} $0 = 2
-    DetailPrint "  VirtualControlHID: pnputil não executado (código $0) — verificar se o instalador correu como Administrador."
+    DetailPrint "  VirtualControlHID: pnputil did not run (code $0) — check that the installer ran as Administrator."
   ${Else}
-    DetailPrint "  VirtualControlHID: pnputil retornou $0 — NECESSÁRIO revisar (reboot pode ser preciso)."
+    DetailPrint "  VirtualControlHID: pnputil returned $0 — review required (reboot may be needed)."
   ${EndIf}
 
   ; IoTDriver.sys + IoTService.exe — required for charging threshold control
@@ -46,13 +46,13 @@
   nsExec::ExecToLog '"$SYSDIR\pnputil.exe" /add-driver "$INSTDIR\drivers\IoTDriver\iotdriver.inf" /install'
   Pop $0
   ${If} $0 = 0
-    DetailPrint "  IoTDriver: instalado com sucesso."
+    DetailPrint "  IoTDriver: installed successfully."
   ${ElseIf} $0 = 3010
-    DetailPrint "  IoTDriver: instalado — reinicialização necessária para ativar."
+    DetailPrint "  IoTDriver: installed — reboot required to activate."
   ${ElseIf} $0 = 2
-    DetailPrint "  IoTDriver: pnputil não executado (código $0) — verificar se o instalador correu como Administrador."
+    DetailPrint "  IoTDriver: pnputil did not run (code $0) — check that the installer ran as Administrator."
   ${Else}
-    DetailPrint "  IoTDriver: pnputil retornou $0 — NECESSÁRIO revisar (reboot pode ser preciso)."
+    DetailPrint "  IoTDriver: pnputil returned $0 — review required (reboot may be needed)."
   ${EndIf}
 
   ; Start IoTSvc if present (fails silently if already running; 1056 benign)
@@ -75,15 +75,15 @@
   ; proceeded with an EMPTY $R1 → CopyFiles failed + `sc create binPath=` failed
   ; with error 87 → IoTSvc was DELETED and never recreated. This rewrites the
   ; whole block with deterministic exe discovery + status-aware handling.
-  DetailPrint "Configurando ecram_service no DriverStore..."
+  DetailPrint "Deploying ecram_service into the DriverStore..."
   ; Locate the IoTDriver package dir deterministically.
   StrCpy $R0 ""
   FindFirst $R1 $R2 "$SYSDIR\DriverStore\FileRepository\iotdriver.inf_*"
   ${If} $R1 = ""
-    DetailPrint "  Aviso: pacote iotdriver.inf_* não encontrado no DriverStore — ecram_service não deployado."
+    DetailPrint "  Warning: iotdriver.inf_* package not found in DriverStore — ecram_service not deployed."
   ${Else}
     StrCpy $R0 "$SYSDIR\DriverStore\FileRepository\$R2"
-    DetailPrint "  Pacote IoTDriver no DriverStore: $R0"
+    DetailPrint "  IoTDriver package in DriverStore: $R0"
     ; Stop the RUNNING IoTSvc (if any) BEFORE touching files. Guarded by a
     ; RUNNING check (not mere existence) to avoid "[SC] ControlService
     ; FAILED 1062" noise when the service is already stopped.
@@ -121,10 +121,10 @@
     ; CopyFiles never returns an error code — verify the file landed AND that
     ; it is the file we just copied (not the locked old binary CopyFiles kept).
     ${IfNot} ${FileExists} "$R4"
-      DetailPrint "  ERRO: falha ao copiar ecram_service.exe para $R4 (arquivo de destino ainda não existe)."
-      Abort "Não foi possível substituir IoTService.exe no DriverStore. O serviço IoTSvc NÃO foi modificado."
+      DetailPrint "  ERROR: failed to copy ecram_service.exe to $R4 (destination file still absent)."
+      Abort "Could not replace IoTService.exe in the DriverStore. The IoTSvc service was NOT modified."
     ${EndIf}
-    DetailPrint "  ecram_service deployado -> $R4"
+    DetailPrint "  ecram_service deployed -> $R4"
     ; Now recreate the service pointing to the deployed binary (idempotent:
     ; the old service may have a stale binPath or be missing entirely).
     ; SCM DeleteService is ASYNC: the entry lingers until all open handles
@@ -146,10 +146,10 @@
       ${If} $R5 < 20      ; up to ~10 s
         Goto iot_delete_wait
       ${EndIf}
-      DetailPrint "  ERRO: IoTSvc não foi removido do SCM (handle aberto / delete pendente)."
-      Abort "Falha ao recriar o serviço IoTSvc: a antiga entrada não foi removida do SCM."
+      DetailPrint "  ERROR: IoTSvc was not removed from SCM (open handle / pending delete)."
+      Abort "Failed to recreate the IoTSvc service: the old entry was not removed from SCM."
     iot_deleted:
-    DetailPrint "  IoTSvc removido do SCM (confirmado)."
+    DetailPrint "  IoTSvc removed from SCM (confirmed)."
     ; CRITICAL: the IoTSvc service is created by the Rust binary
     ; (`ecram_service.exe install-service <path>`), NOT by `sc create` here.
     ; The SCM requires the binPath to be `"C:\...\IoTService.exe" service`
@@ -177,15 +177,15 @@
         ${If} $R5 < 30
           Goto iot_run_wait
         ${EndIf}
-        DetailPrint "  ERRO: IoTSvc não alcançou RUNNING após install-service. Verificando binPath..."
+        DetailPrint "  ERROR: IoTSvc did not reach RUNNING after install-service. Checking binPath..."
         nsExec::ExecToLog '"$SYSDIR\sc.exe" qc IoTSvc'
         Pop $R3
-        Abort "Falha ao iniciar o serviço IoTSvc: não está em estado RUNNING. EC RAM desabilitado."
+        Abort "Failed to start the IoTSvc service: not in RUNNING state. EC RAM access disabled."
       iot_running:
-        DetailPrint "  IoTSvc recriado e RODANDO com ecram_service (verificado)."
+        DetailPrint "  IoTSvc recreated and RUNNING with ecram_service (verified)."
     ${Else}
-      DetailPrint "  ERRO: ecram_service install-service retornou $R3 — serviço NÃO recriado."
-      Abort "Falha ao criar o serviço IoTSvc (código $R3). Não foi possível configurar o acesso EC RAM."
+      DetailPrint "  ERROR: ecram_service install-service returned $R3 — service NOT recreated."
+      Abort "Failed to create the IoTSvc service (code $R3). EC RAM access could not be configured."
     ${EndIf}
   ${EndIf}
   FindClose $R1
@@ -197,7 +197,7 @@
   ; Uses nsExec directly — works when installer is run elevated.
   ; If installer is not elevated, schtasks /create fails silently and the app's
   ; self-healing (ensure_task_correct_path) will fix it on first run via UAC.
-  DetailPrint "Registando tarefa MiControlElevated..."
+  DetailPrint "Registering MiControlElevated scheduled task..."
   ; Write the task XML with native NSIS file commands (FileOpen/FileWrite/FileClose).
   ; NOTE: this installer template is built with `Unicode true`, so FileWrite
   ; emits UTF-16 LE with BOM. The previous `<?xml version="1.0" encoding="UTF-8"?>`
@@ -218,7 +218,7 @@
   ${If} $0 = 0
     DetailPrint "  MiControlElevated task registered: OK"
   ${Else}
-    DetailPrint "  AVISO: schtasks /create MiControlElevated retornou $0 — a app vai auto-corrigir no primeiro arranque (ensure_task_correct_path)."
+    DetailPrint "  WARNING: schtasks /create MiControlElevated returned $0 — the app will self-heal on first run (ensure_task_correct_path)."
   ${EndIf}
 
   ; ── Autonomous elevated bridge service (MiControlBridge) ────────────────────
@@ -226,23 +226,23 @@
   ; named pipe (\\.\pipe\micontrol_bridge) for privileged commands WITHOUT any
   ; UAC prompt after installation. The main app prefers this path; the
   ; scheduled task above remains only as a fallback.
-  DetailPrint "Instalando serviço MiControlBridge (bridge elevada autónoma)..."
+  DetailPrint "Installing MiControlBridge service (autonomous elevated bridge)..."
   nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" install'
   Pop $0
   ${If} $0 = 0
     DetailPrint "  MiControlBridge service installed: $0 (OK)"
   ${Else}
-    DetailPrint "  ERRO: MiControlBridge service install falhou com código $0"
-    ; AbortInstall cancela o install com mensagem — o usuário vê porquê em vez
-    ; de um install "bem sucedido" com serviços desaparecidos.
-    Abort "Falha ao instalar o serviço MiControlBridge (código $0). Verifique se o instalador foi executado como Administrador e tente novamente."
+    DetailPrint "  ERROR: MiControlBridge service install failed with code $0"
+    ; Abort cancels the install with a message — the user sees why instead
+    ; of a "successful" install with services missing.
+    Abort "Failed to install the MiControlBridge service (code $0). Make sure the installer was run as Administrator and try again."
   ${EndIf}
 
   ; ── Face Unlock (Windows Hello-style, RGB webcam) ──────────────────────────
   ; Optional: the auth service + Credential Provider + models. All guarded —
   ; if the files are missing from the bundle, the app still works (the Face
   ; Unlock tab will show the service as not installed).
-  DetailPrint "Configurando Face Unlock..."
+  DetailPrint "Setting up Face Unlock..."
   ${If} ${FileExists} "$INSTDIR\micontrol_face_svc.exe"
     ; Cleanup the OLD service entry first (idempotent). The previous
     ; `install` path UPDATEs the existing service in place — if the old
@@ -251,7 +251,7 @@
     ; which previously Aborted the whole installer. Deleting the entry first
     ; (delete is async-safe — the SCM completes it once the handle closes)
     ; and then creating fresh avoids that class of failure entirely.
-    DetailPrint "  Removendo entrada antiga do serviço MiControlFace (se existir)..."
+    DetailPrint "  Removing old MiControlFace service entry (if present)..."
     nsExec::ExecToLog '"$SYSDIR\sc.exe" delete MiControlFace'
     Pop $1
     ; Install the LocalSystem auth service (auto-start) as a FRESH service.
@@ -264,10 +264,10 @@
       ; core app installer (the app runs fine without it; the Face tab shows
       ; the service as unavailable). Log the failure, continue the install,
       ; and let the post-install verification report the real state.
-      DetailPrint "  AVISO: MiControlFace service install retornou $0 (Face Unlock continuará indisponível neste upgrade)."
+      DetailPrint "  WARNING: MiControlFace service install returned $0 (Face Unlock will remain unavailable on this upgrade)."
     ${EndIf}
   ${Else}
-    DetailPrint "  Nota: micontrol_face_svc.exe não encontrado no bundle — Face Unlock desabilitado."
+    DetailPrint "  Note: micontrol_face_svc.exe not found in bundle — Face Unlock disabled."
   ${EndIf}
   ${If} ${FileExists} "$INSTDIR\micontrol_facecp.dll"
     ; Register the Face Unlock Credential Provider. This DLL is a COM
@@ -282,7 +282,7 @@
     ;   HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\
     ;       Credential Providers\{E071A7CE-5D7F-4063-9A10-AE39AEC64EE8}
     ;     (default) = "MiControl Face Unlock"
-    DetailPrint "  Registando micontrol_facecp.dll como Credential Provider (registry)..."
+    DetailPrint "  Registering micontrol_facecp.dll as Credential Provider (registry)..."
     WriteRegStr HKLM "SOFTWARE\Classes\CLSID\{E071A7CE-5D7F-4063-9A10-AE39AEC64EE8}" "" "MiControl Face Unlock"
     WriteRegStr HKLM "SOFTWARE\Classes\CLSID\{E071A7CE-5D7F-4063-9A10-AE39AEC64EE8}\InprocServer32" "" "$INSTDIR\micontrol_facecp.dll"
     WriteRegStr HKLM "SOFTWARE\Classes\CLSID\{E071A7CE-5D7F-4063-9A10-AE39AEC64EE8}\InprocServer32" "ThreadingModel" "Apartment"
@@ -291,7 +291,7 @@
   ${EndIf}
   ; Ensure the face data directory exists (SYSTEM-writable).
   CreateDirectory "$PROGRAMDATA\MiControl\face"
-  DetailPrint "Face Unlock configurado."
+  DetailPrint "Face Unlock configured."
 
   ; ── Post-install service verification ───────────────────────────────────────
   ; `micontrol_face_svc.exe install` exits 0 as soon as SCM accepts the create
@@ -303,14 +303,14 @@
   ;   • run INSIDE `cmd /c`, the pipe is handled by cmd and the exit code of
   ;     the last command (findstr) is propagated to nsExec reliably.
   ; findstr returns 0 when it finds "RUNNING", 1 when it does not.
-  DetailPrint "Verificando serviços instalados..."
+  DetailPrint "Verifying installed services..."
   ; Bridge check: sc query must return 0 (service exists).
   nsExec::ExecToLog '"$SYSDIR\sc.exe" query MiControlBridge'
   Pop $0
   ${If} $0 <> 0
-    DetailPrint "  ATENÇÃO: MiControlBridge com sc não respondeu (código $0)."
+    DetailPrint "  WARNING: MiControlBridge did not respond to sc (code $0)."
   ${Else}
-    DetailPrint "  MiControlBridge presente (sc query OK)."
+    DetailPrint "  MiControlBridge present (sc query OK)."
   ${EndIf}
   ${If} ${FileExists} "$INSTDIR\micontrol_face_svc.exe"
     ; Give the service a moment to finish starting (models load at boot).
@@ -318,14 +318,14 @@
     nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlFace | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
     Pop $0
     ${If} $0 = 0
-      DetailPrint "  MiControlFace está RUNNING."
+      DetailPrint "  MiControlFace is RUNNING."
     ${Else}
-      DetailPrint "  AVISO: MiControlFace não está RUNNING após instalação. Ver logs em C:\ProgramData\MiControl\face\face_svc.log"
+      DetailPrint "  WARNING: MiControlFace is not RUNNING after installation. Check logs at C:\ProgramData\MiControl\face\face_svc.log"
     ${EndIf}
   ${EndIf}
-  DetailPrint "Verificação de serviços concluída."
+  DetailPrint "Service verification complete."
 
-  DetailPrint "Configuração de hardware concluída."
+  DetailPrint "Hardware configuration complete."
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
@@ -346,7 +346,7 @@
   ${If} $0 = 0
     DetailPrint "MiControlBridge service removed: $0 (OK)"
   ${Else}
-    DetailPrint "AVISO: MiControlBridge uninstall retornou $0 (ignorado se já removido)."
+    DetailPrint "WARNING: MiControlBridge uninstall returned $0 (ignored if already removed)."
   ${EndIf}
 
   ; Remove the Face Unlock auth service + Credential Provider
@@ -356,7 +356,7 @@
     ${If} $0 = 0
       DetailPrint "MiControlFace service removed: $0 (OK)"
     ${Else}
-      DetailPrint "AVISO: MiControlFace remove retornou $0 (ignorado se já removido)."
+      DetailPrint "WARNING: MiControlFace remove returned $0 (ignored if already removed)."
     ${EndIf}
   ${EndIf}
   ${If} ${FileExists} "$INSTDIR\micontrol_facecp.dll"

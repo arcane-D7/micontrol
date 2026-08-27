@@ -14,7 +14,13 @@ use tokio::sync::Semaphore;
 /// underlying blocking task cannot be cancelled safely, but the Tauri command
 /// must still complete so the frontend can recover and show a real error.
 pub const DEFAULT_BLOCKING_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_IN_FLIGHT_BLOCKING_TASKS: usize = 8;
+// Cap on concurrent synchronous hardware queries. Generous enough that the
+// startup burst of parallel IPC commands (battery/charge/perf/fan/display/
+// audio...) never hits it, small enough that a WMI/vendor-pipe hang after
+// sleep cannot pile up arbitrary blocking threads. Slots are released when
+// the timeout fires (see run_blocking_timeout), so this limit can never be
+// permanently exhausted by hung tasks.
+const MAX_IN_FLIGHT_BLOCKING_TASKS: usize = 64;
 
 fn blocking_slots() -> Arc<Semaphore> {
     static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -55,17 +61,24 @@ where
             "too many hardware operations are still blocked; retry after recovery".into(),
         )
     })?;
-    let task = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        f()
-    });
+    let task = tokio::task::spawn_blocking(f);
     match tokio::time::timeout(timeout, task).await {
         Ok(result) => {
+            // The blocking task finished — release the slot with the response.
+            drop(permit);
             result.map_err(|e| HardwareError::TaskJoin(format!("Blocking task join error: {e}")))?
         }
-        Err(_) => Err(HardwareError::Timeout(format!(
-            "blocking hardware operation exceeded {} seconds",
-            timeout.as_secs()
-        ))),
+        Err(_) => {
+            // The underlying blocking task may still be running (WMI/vendor
+            // pipe hung after sleep — it cannot be cancelled safely). Drop the
+            // permit NOW so this slot is usable again: the "too many hardware
+            // operations" failure must not become permanent because a few
+            // hung tasks hold every slot forever.
+            drop(permit);
+            Err(HardwareError::Timeout(format!(
+                "blocking hardware operation exceeded {} seconds",
+                timeout.as_secs()
+            )))
+        }
     }
 }
