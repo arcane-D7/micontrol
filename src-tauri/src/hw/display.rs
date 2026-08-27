@@ -6,7 +6,7 @@
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicU8, Ordering};
 
 /// Set to `false` after the first `set_brightness_igcl` failure so we never
 /// retry a DLL that cannot load — avoids a WARN log on every brightness change.
@@ -89,16 +89,46 @@ static AUTO_OFFSET: AtomicI16 = AtomicI16::new(0);
 /// Whether the offset was explicitly set by the user (false = use 0).
 static AUTO_OFFSET_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+// ── Manual-override grace period ─────────────────────────────────────────────
+//
+// S32-005: When the user manually changes brightness (MiControl slider, OSD,
+// hotkey, Windows slider, Fn key) and a crash/relaunch happens shortly after,
+// the relaunched process must NOT immediately revert the user's brightness.
+// Before the last manual change is older than MANUAL_OVERRIDE_GRACE_MS, the
+// adaptive loop is frozen at the user's value. This also protects against the
+// "app recovers brightness instantly after I adjusted it" complaint.
+
+/// Milliseconds the adaptive loop must stay hands-off after a manual change.
+const MANUAL_OVERRIDE_GRACE_MS: u64 = 120_000; // 2 minutes
+/// Wall-clock (ms since UNIX epoch) of the last manual brightness change.
+static AUTO_LAST_MANUAL_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// True while the user's last manual brightness change is still within the
+/// grace window — the adaptive loop must not touch the backlight.
+pub fn user_override_in_grace() -> bool {
+    let last = AUTO_LAST_MANUAL_MS.load(Ordering::Relaxed);
+    last != 0 && now_ms().saturating_sub(last) < MANUAL_OVERRIDE_GRACE_MS
+}
+
 /// Called by the `set_brightness` Tauri command when auto-brightness is on.
-/// Records the delta so future loop iterations honour the user's preference.
+/// Records the delta so future loop iterations honour the user's preference,
+/// and stamps the manual-change time to enter the grace window.
 pub fn record_user_brightness_override(user_value: u8) {
     let last_target = AUTO_LAST_TARGET.load(Ordering::Relaxed);
     let offset = user_value as i16 - last_target as i16;
     AUTO_OFFSET.store(offset, Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
+    AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
     log::debug!(
         "auto_brightness: user override {user_value}% \
-         (last_target={last_target}%, offset={offset:+})"
+         (last_target={last_target}%, offset={offset:+}) — grace {MANUAL_OVERRIDE_GRACE_MS}ms"
     );
 }
 
@@ -106,6 +136,7 @@ pub fn record_user_brightness_override(user_value: u8) {
 pub fn clear_user_brightness_override() {
     AUTO_OFFSET.store(0, Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+    AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
 }
 
 /// Read the current display brightness from WMI (ground truth) or IGCL.
@@ -670,6 +701,8 @@ pub async fn adaptive_brightness_loop() {
         // If the actual brightness differs from what we last set by ≥ 2 pp,
         // someone else changed it.  Treat it as a user preference shift:
         // compute a new offset so the loop keeps the adjusted baseline.
+        // S32-005: Also enter the manual-override grace window so the loop
+        // stays hands-off while the user finishes adjusting.
         if let (Some(prev), Some(actual)) = (last_set, brightness_actual) {
             let diff = (actual as i16 - prev as i16).abs();
             if diff >= 2 {
@@ -677,13 +710,35 @@ pub async fn adaptive_brightness_loop() {
                 let new_offset = actual as i16 - raw as i16;
                 AUTO_OFFSET.store(new_offset, Ordering::Relaxed);
                 AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
+                AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
                 // Snap smoothed to actual so we don't animate back.
                 smoothed = Some(actual as f32);
                 log::debug!(
                     "auto_brightness: external change detected \
-                     prev={prev}% actual={actual}% → offset={new_offset:+}"
+                     prev={prev}% actual={actual}% → offset={new_offset:+}, grace armed"
                 );
             }
+        }
+        // After a crash/relaunch (or first run), seed last_set from the actual
+        // current brightness so the FIRST iteration does not immediately treat
+        // the real user value as an "external change" and move the backlight.
+        if last_set.is_none() {
+            if let Some(actual) = brightness_actual {
+                last_set = Some(actual);
+                smoothed = Some(actual as f32);
+            }
+        }
+
+        // S32-005: While the user is still within the manual-override grace
+        // window, do NOT touch the backlight at all — the user just set it and
+        // may still be tweaking. This is the guarantee the user asked for:
+        // "if I adjust brightness manually, it must not snap back".
+        if user_override_in_grace() {
+            log::debug!(
+                "[adaptive_brightness] in manual-override grace window \
+                 (last manual change < {MANUAL_OVERRIDE_GRACE_MS}ms) — skipping write"
+            );
+            continue;
         }
 
         let lux = match tokio::task::spawn_blocking(get_ambient_lux).await {
@@ -1543,5 +1598,41 @@ mod tests {
             Some(2.5),
             "a plausible reading wins over the stuck sensor"
         );
+    }
+
+    #[test]
+    fn manual_override_grace_window() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Clean slate.
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        // No manual change yet → no grace active.
+        assert!(!user_override_in_grace());
+
+        // Record an override → grace becomes active.
+        AUTO_LAST_TARGET.store(50, Ordering::Relaxed);
+        record_user_brightness_override(80);
+        assert!(
+            user_override_in_grace(),
+            "grace must be armed right after a manual change"
+        );
+
+        // After the clock moves past the grace window, grace expires.
+        let expired = now_ms().saturating_sub(MANUAL_OVERRIDE_GRACE_MS + 1);
+        AUTO_LAST_MANUAL_MS.store(expired, Ordering::Relaxed);
+        assert!(
+            !user_override_in_grace(),
+            "grace must expire after the window"
+        );
+
+        // clear resets both offset and grace.
+        record_user_brightness_override(60);
+        assert!(user_override_in_grace());
+        clear_user_brightness_override();
+        assert!(!user_override_in_grace());
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), 0);
+        assert!(!AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
     }
 }

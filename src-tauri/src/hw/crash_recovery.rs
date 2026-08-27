@@ -33,6 +33,19 @@ const ABNORMAL_RESTART_VALUE: &str = "AbnormalRestartDetected";
 #[cfg(windows)]
 const USER_QUIT_SENTINEL_REL: &str = r"MiControl\watchdog_user_quit";
 
+/// Heartbeat file (under `%ProgramData%\MiControl`) written by the app once
+/// its UI/WebView2 setup has finished, then refreshed periodically.
+///
+/// S32-005: The SYSTEM bridge watchdog uses this to distinguish a HEALTHY
+/// process from a "zombie" that is alive in the process table but never
+/// completed (or lost) its UI — the exact symptom the user reported on the
+/// watchdog-relaunched instance ("volta travada, não consigo abrir a UI").
+/// If the process exists but the heartbeat is stale, the watchdog force-kills
+/// it and relaunches a fresh one (bounded retries) instead of leaving a dead
+/// UI running forever.
+#[cfg(windows)]
+const HEARTBEAT_REL: &str = r"MiControl\heartbeat";
+
 /// Crash recovery status information.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CrashRecoveryStatus {
@@ -390,5 +403,57 @@ pub fn user_quit_pending() -> bool {
     #[cfg(not(windows))]
     {
         false
+    }
+}
+
+/// Machine-wide heartbeat path.
+#[cfg(windows)]
+fn heartbeat_path() -> Option<std::path::PathBuf> {
+    let pd = std::env::var_os("ProgramData")?;
+    Some(std::path::PathBuf::from(pd).join(HEARTBEAT_REL))
+}
+
+/// Mark the app as UI-healthy. Called AFTER WebView2 setup completes and the
+/// tray/main window exist (not just after the process spawns).
+///
+/// Format: "<unix_ms>\n<pid>\n". The bridge watchdog reads the first line; if
+/// the timestamp is stale while a micontrol.exe process is alive, that
+/// instance is a zombie (UI dead) and gets force-restarted.
+pub fn write_heartbeat() {
+    #[cfg(windows)]
+    if let Some(path) = heartbeat_path() {
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let pid = std::process::id();
+        let contents = format!("{ts_ms}\n{pid}\n");
+        let ok = std::fs::write(&path, contents).is_ok();
+        if !ok {
+            log::warn!(
+                target: "hw::crash_recovery",
+                "Failed to write heartbeat to {}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Periodically refresh the heartbeat from the adaptive-brightness loop's
+/// existing tokio runtime (a cheap, already-running 2 s ticker).
+/// The write itself is tiny; we only do it every HEARTBEAT_INTERVAL_MS.
+pub fn start_heartbeat_ticker() {
+    #[cfg(windows)]
+    {
+        use std::time::Duration;
+        tauri::async_runtime::spawn(async move {
+            loop {
+                write_heartbeat();
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
     }
 }

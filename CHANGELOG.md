@@ -5,6 +5,18 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.24] - 2026-08-27
+
+### Fixed
+
+- **App "volta travada" (frozen on relaunch) after a crash — root-caused.** Live crash evidence (`Event Name: BEX64`, `P4: ControlLib.dll_unloaded`, micontrol.exe 0.1.23) confirms the fatal fault is an upstream WebView2/ETW race: `ControlLib.dll` (Intel graphics runtime) registers an ETW callback, is unloaded during browser-process teardown, and the ntdll ETW thread later executes the unloaded code → ACCESS_VIOLATION. MiControl code cannot prevent it, so the durable fix is watchdog self-healing:
+  - The bridge watchdog no longer treats "a `micontrol.exe` process exists" as healthy. The app now writes a **heartbeat file** (`%ProgramData%\MiControl\heartbeat`, refreshed every 10 s) once its UI/WebView2 setup has completed. If a process is alive but its heartbeat is stale (>45 s), the watchdog force-kills the frozen process and relaunches a fresh one **with a visible window** (not `--minimized`), so the user immediately sees the UI is back instead of a dead tray icon. The force-restart is bounded (max 3 rapid resets) to avoid hammering a machine where another cause is in play.
+  - The old behavior left a frozen zombie holding the Tauri single-instance mutex: any manual "Open" (or the relaunched instance) silently deferred to the dead UI — which is exactly the "não consigo abrir a UI" symptom. Killing the zombie first restores a healthy instance every time.
+- **Adaptive brightness fighting the user after a crash (user freedom restored).** Previously, when the user manually adjusted brightness, the adaptive loop could snap the backlight straight back to the program's computed value — and after a crash/relaunch it reverted the user's choice instantly because the loop's "last set" baseline was lost. Now:
+  - Manual brightness changes (MiControl slider, OSD, hotkey, Windows slider, Fn key) arm a **120 s hands-off grace window** during which the adaptive loop does not touch the backlight at all.
+  - After a crash/relaunch (or first run), the loop **seeds its baseline from the actual current brightness** instead of assuming a stale one, so it never immediately overrides the user's value.
+  - The offset-shift behavior (curve follows user preference) is preserved after the grace window expires.
+
 ## [0.1.23] - 2026-08-27
 
 ### Fixed

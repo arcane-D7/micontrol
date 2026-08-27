@@ -733,6 +733,13 @@ pub fn run() {
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
 
+            // S32-005: Heartbeat — the SYSTEM bridge watchdog uses this to
+            // distinguish a healthy UI from a frozen zombie. Write the first
+            // one NOW (setup has finished, tray+main window exist) and keep
+            // refreshing it on a ticker.
+            crate::hw::crash_recovery::write_heartbeat();
+            crate::hw::crash_recovery::start_heartbeat_ticker();
+
             // Build system tray menu
             let quit = MenuItem::with_id(app, "quit", "Quit MiControl", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open MiControl", true, None::<&str>)?;

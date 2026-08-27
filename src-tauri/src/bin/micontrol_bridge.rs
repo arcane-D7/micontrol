@@ -866,6 +866,11 @@ mod watchdog {
     const MARKER_DIR: &str = r"MiControl";
     const ENABLED_MARKER: &str = "watchdog_enabled";
     const QUIT_MARKER: &str = "watchdog_user_quit";
+    const HEARTBEAT_FILE: &str = "heartbeat";
+    /// A heartbeat older than this (without the app refreshing it) means the
+    /// process exists but its UI is dead (frozen zombie after a WebView2
+    /// crash/relaunch). The watchdog force-restarts such instances.
+    const HEARTBEAT_STALE_MS: u64 = 45_000;
     /// Default install location fallback.
     const DEFAULT_EXE: &str = r"C:\Program Files\MiControl\micontrol.exe";
     /// Uninstall registry keys (DisplayIcon / InstallLocation) to find a
@@ -958,6 +963,87 @@ mod watchdog {
         found
     }
 
+    /// Returns the PID of a running `micontrol.exe`, if any.
+    fn app_pid() -> Option<u32> {
+        let target: Vec<u16> = "micontrol.exe".encode_utf16().collect();
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return None;
+        };
+        let snapshot_ok = snapshot != INVALID_HANDLE_VALUE;
+        if !snapshot_ok {
+            return None;
+        }
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut result = None;
+        let mut has = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+        while has {
+            let mut name: Vec<u16> = entry.szExeFile[..].to_vec();
+            while let Some(&0) = name.last() {
+                name.pop();
+            }
+            if name.len() == target.len() && name == target {
+                result = Some(entry.th32ProcessID);
+                break;
+            }
+            has = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+        }
+        unsafe {
+            CloseHandle(snapshot).ok();
+        }
+        result
+    }
+
+    /// Read millisecond timestamp (`<unix_ms>` first line) from the app's
+    /// heartbeat file. `None` if missing/unreadable.
+    fn read_heartbeat_ms() -> Option<u64> {
+        let path = marker_path(HEARTBEAT_FILE);
+        let content = std::fs::read_to_string(path).ok()?;
+        let first = content.lines().next()?.trim();
+        first.parse::<u64>().ok().filter(|&v| v > 0)
+    }
+
+    /// A "healthy" app refreshes its heartbeat every 10 s. If the file is
+    /// missing or older than HEARTBEAT_STALE_MS while the process is alive,
+    /// the process is a frozen zombie (UI dead) → force-restart it.
+    fn app_heartbeat_fresh() -> bool {
+        let Some(hb) = read_heartbeat_ms() else {
+            return false;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now_ms.saturating_sub(hb) < HEARTBEAT_STALE_MS
+    }
+
+    /// Force-terminate the running micontrol.exe instance(s). Returns true if
+    /// at least one process was killed.
+    fn kill_app() -> bool {
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        let mut killed_any = false;
+        while let Some(pid) = app_pid() {
+            let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) }.ok();
+            if let Some(h) = handle {
+                let ok = unsafe { TerminateProcess(h, 1) }.is_ok();
+                unsafe {
+                    CloseHandle(h).ok();
+                }
+                if ok {
+                    write_log(&format!("killed frozen micontrol.exe (pid {pid})"));
+                    killed_any = true;
+                } else {
+                    break; // avoid infinite loop if we cannot kill it
+                }
+            } else {
+                break;
+            }
+            // Give the process a moment to die.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        killed_any
+    }
+
     /// Locate `micontrol.exe`: Uninstall-registry first, then the default
     /// install path.
     fn find_app_exe() -> Option<std::path::PathBuf> {
@@ -1027,12 +1113,16 @@ mod watchdog {
         None
     }
 
-    /// Launch `micontrol.exe --minimized` into the interactive user session.
+    /// Launch `micontrol.exe` into the interactive user session.
     ///
     /// The service runs as LOCAL SYSTEM (session 0); to show GUI in the
     /// console session we must query that session's user token and create the
     /// process with it via `CreateProcessAsUserW`.
-    fn launch_app(exe: &std::path::Path) -> bool {
+    ///
+    /// `minimized`: when true (normal crash relaunch) start to tray with
+    /// `--minimized`; when false (zombie force-restart) start with a VISIBLE
+    /// window so the user can immediately see the UI is back.
+    fn launch_app(exe: &std::path::Path, minimized: bool) -> bool {
         let session_id = unsafe { WTSGetActiveConsoleSessionId() };
         if session_id == 0xFFFFFFFF || session_id == 0 {
             write_log(&format!(
@@ -1061,7 +1151,11 @@ mod watchdog {
             .encode_wide()
             .chain(Some(0))
             .collect();
-        let cmdline = OsString::from(format!("\"{exe_str}\" --minimized"));
+        let cmdline = if minimized {
+            OsString::from(format!("\"{exe_str}\" --minimized"))
+        } else {
+            OsString::from(format!("\"{exe_str}\""))
+        };
         let mut cmd_w: Vec<u16> = cmdline.encode_wide().chain(Some(0)).collect();
         let cur_dir = exe.parent().and_then(|p| p.to_str()).map(|s| {
             let v: Vec<u16> = OsString::from(s).encode_wide().chain(Some(0)).collect();
@@ -1132,29 +1226,63 @@ mod watchdog {
             std::thread::sleep(std::time::Duration::from_millis(delay_start_ms));
         }
         let mut consecutive_dead = 0u32;
+        // Consecutive "running but zombie (stale heartbeat)" detections.
+        // Bounded: after MAX_ZOMBIE_RESETS force-restarts in a row we stop
+        // hammering the machine and wait for the app or user to act.
+        let mut consecutive_zombie = 0u32;
+        const MAX_ZOMBIE_RESETS: u32 = 3;
         while !shutdown.load(Ordering::SeqCst) {
             if user_quit_pending() {
                 consecutive_dead = 0;
+                consecutive_zombie = 0;
             } else if !watchdog_armed() {
                 write_log("watchdog disabled (autostart off) — sleeping");
                 consecutive_dead = 0;
-            } else if app_is_running() {
-                consecutive_dead = 0;
-            } else {
+                consecutive_zombie = 0;
+            } else if !app_is_running() {
                 consecutive_dead += 1;
                 write_log(&format!(
                     "micontrol.exe NOT running (miss #{consecutive_dead})"
                 ));
+                consecutive_zombie = 0;
                 // Require 4 consecutive misses (~2 min) before relaunching.
                 // Gives Windows Restart Manager (RegisterApplicationRestart)
                 // and any in-flight user launch time to bring the process up,
                 // avoiding a redundant launch racing the WER restart dialog.
                 if consecutive_dead >= 4 {
                     if let Some(exe) = find_app_exe() {
-                        launch_app(&exe);
+                        launch_app(&exe, true);
                     }
                     consecutive_dead = 0;
                 }
+            } else if !app_heartbeat_fresh() {
+                // S32-005: Process alive but the UI heartbeat is stale →
+                // frozen zombie (the exact "volta travada" the user reported).
+                // Force-kill and fresh-relaunch instead of leaving a dead UI.
+                consecutive_dead = 0;
+                consecutive_zombie += 1;
+                write_log(&format!(
+                    "micontrol.exe running but heartbeat STALE (zombie #{consecutive_zombie})"
+                ));
+                if consecutive_zombie <= MAX_ZOMBIE_RESETS {
+                    if kill_app() {
+                        if let Some(exe) = find_app_exe() {
+                            // Zombie: relaunch with a VISIBLE window so the
+                            // user sees the UI is back and can confirm it.
+                            launch_app(&exe, false);
+                        }
+                    } else {
+                        write_log("could not kill zombie — waiting for next poll");
+                    }
+                } else {
+                    write_log(&format!(
+                        "zombie detected {consecutive_zombie}x in a row — giving up until \
+                         next user launch (bounded)"
+                    ));
+                }
+            } else {
+                consecutive_dead = 0;
+                consecutive_zombie = 0;
             }
             // Sleep in small steps so shutdown is prompt.
             let step = std::time::Duration::from_millis(250);
