@@ -5,6 +5,15 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.22] - 2026-08-27
+
+### Fixed
+
+- **Installer still failing when SCM deletion takes longer than 15 s (3rd report).** The v0.1.21 fix added `remove_service_wait` which polls `sc query` for up to 15 s — but a slow async SCM delete (stale service handles during upgrade) could exceed that, and the bridge treated the timeout as **fatal**, aborting the entire install even though the entry vanished seconds later. Now:
+  - The SCM-removal wait is **best-effort**: on timeout it warns and continues — the `sc create` retry loop is the real wait mechanism (up to 30 attempts × 1 s = 30 s window for 1072/1073 transient).
+  - Only 1072/1073 errors are retried; any other code (5 access denied, 87 invalid param) fails **fast** with a clear error instead of hanging ~30 s.
+  - The NSIS installer now deletes the MiControlBridge entry and polls until confirmed gone (up to 20 s, IoTSvc pattern) **before** the Rust `install` runs, so `sc create` finds a clean SCM; the uninstaller does the same for idempotency.
+
 ## [0.1.21] - 2026-08-27
 
 ### Fixed
