@@ -5,6 +5,23 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.20] - 2026-08-27
+
+### Added
+
+- **External watchdog — MiControl auto-restarts after unexpected death.** The MiControlBridge SYSTEM service now hosts a watchdog thread that polls for `micontrol.exe` every 30 s and, after 4 consecutive misses (~2 min, leaving room for the WER restart), relaunches it `--minimized` into the active interactive session via `WTSQueryUserToken` + `CreateProcessAsUserW`. Two `%ProgramData%\MiControl` markers gate it: `watchdog_enabled` (mirrors the autostart preference) and `watchdog_user_quit` (written on intentional quit, removed at next app startup) — a manual quit stays closed until the user reopens the app.
+
+### Fixed
+
+- **MiControl dying silently and never coming back.** Root cause is an upstream WebView2/ETW race: `ControlLib.dll` unloads while its ETW provider callback stays registered; ntdll's ETW notification thread later executes the unloaded DLL → `0xc0000005` NX fault that kills the whole process with no Rust panic and no log flush (also present in 0.1.18 — not a MiControl regression). Two layers now restore the app automatically:
+  - **`RegisterApplicationRestart` fixed** — it was passing a NULL command line (which _removes_ the registration) plus `RESTART_NO_CRASH|RESTART_NO_HANG` (opting out of crash restarts); now registers `--minimized` with flags 0 so WER can restart the app on crash.
+  - **External watchdog** (see Added) restores the app even when WER does not act.
+- **`--minimized` now honored at startup** — starts tray-only without flashing a window (used by autostart and watchdog relaunches; previously the window was briefly shown).
+
+### Changed
+
+- **Ambient-light sensor: cached COM sensor stack.** `get_ambient_lux_com()` no longer re-creates the `ISensorManager` and re-enumerates sensors every 2 s; the COM stack is cached per-thread (thread-local, `wmi_cache` pattern) and only invalidated on failure.
+
 ## [0.1.19] - 2026-08-25
 
 ### Security
