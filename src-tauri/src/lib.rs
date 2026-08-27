@@ -552,6 +552,15 @@ pub fn run() {
             face_camera_preview_frame,
         ])
         .setup(|app| {
+            // S26-006: `--minimized` start (autostart / watchdog relaunch):
+            // begin tray-only — hide the main window right away.
+            if std::env::args().any(|a| a == "--minimized") {
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let _ = main_win.hide();
+                    log::info!("Started with --minimized — started to tray");
+                }
+            }
+
             // Hardware discovery — load cached profile or scan on first run
             let data_dir = app
                 .path()
@@ -566,6 +575,22 @@ pub fn run() {
             if let Err(e) = crate::hw::crash_recovery::init_crash_recovery() {
                 log::warn!("Crash recovery init failed (non-fatal): {e}");
             }
+
+            // S26-005b: Re-arm the interactive watchdog after an intentional
+            // quit. The app is starting now (any reason), so clear the
+            // user-quit sentinel: from this moment the bridge watchdog is
+            // armed again for this new session. We only observe whether the
+            // sentinel was present for diagnostics.
+            if crate::hw::crash_recovery::user_quit_pending() {
+                log::info!("App restarted after a user quit — watchdog re-armed for this session");
+            }
+            crate::hw::crash_recovery::clear_user_quit_marker();
+
+            // Mirror the autostart preference to the SYSTEM bridge watchdog so
+            // it only auto-relaunches the app when the user wants it on boot.
+            let autostart_enabled = crate::hw::startup::get_autostart()
+                .unwrap_or(false);
+            crate::hw::crash_recovery::set_watchdog_enabled(autostart_enabled);
 
             // Initialize error logging system (7-day retention, on by default)
             crate::util::error_log::init();
@@ -723,8 +748,11 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
-                        // S26-005: Mark clean exit before quitting from tray.
+                        // S26-005: Mark clean exit AND the user-quit sentinel
+                        // before quitting from tray, so the bridge watchdog
+                        // knows this exit was intentional and does NOT relaunch.
                         crate::hw::crash_recovery::mark_clean_exit();
+                        crate::hw::crash_recovery::mark_user_quit();
                         app.exit(0);
                     }
                     "open" => {
@@ -778,8 +806,9 @@ pub fn run() {
                         // allowing close can still leave the process alive. Force full
                         // app shutdown when the main window is closed.
                         if window.label() == "main" {
-                            // S26-005: Mark clean exit before shutting down.
+                            // S26-005: Mark clean exit + user-quit before shutting down.
                             crate::hw::crash_recovery::mark_clean_exit();
+                            crate::hw::crash_recovery::mark_user_quit();
                             window.app_handle().exit(0);
                         }
                     } else {

@@ -23,6 +23,16 @@ const LAST_CLEAN_EXIT_LO_VALUE: &str = "LastCleanExitLo";
 /// Registry value name for the "abnormal restart detected" flag.
 const ABNORMAL_RESTART_VALUE: &str = "AbnormalRestartDetected";
 
+/// Path (under `%ProgramData%\MiControl`) of the user-quit sentinel file.
+///
+/// The bridge service runs as LOCAL SYSTEM and cannot reliably read the
+/// interactive user's HKCU hive. Instead of registry, the app writes this
+/// machine-wide sentinel on intentional quit; the watchdog treats its mere
+/// presence as "user quit — do NOT restart" (indefinitely). The app removes
+/// the sentinel at its own startup, re-arming the watchdog for that session.
+#[cfg(windows)]
+const USER_QUIT_SENTINEL_REL: &str = r"MiControl\watchdog_user_quit";
+
 /// Crash recovery status information.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CrashRecoveryStatus {
@@ -172,25 +182,43 @@ fn read_last_clean_exit() -> Option<u64> {
 ///
 /// This tells Windows to automatically restart the application if it
 /// crashes or is terminated unexpectedly. The restart command is
-/// `micontrol.exe` with no arguments.
+/// `micontrol.exe --minimized`.
+///
+/// Fixed in v0.1.20:
+/// - Flags are now `0` (restart on crash AND hang). The previous code passed
+///   `RESTART_NO_CRASH | RESTART_NO_HANG`, which told Windows to NOT restart
+///   on the exact failure modes we care about (a crash) — and, per MS docs,
+///   passing `PCWSTR::null()` as the command line *removes* any previously
+///   registered restart command. So before this fix the registration was
+///   effectively a no-op for crash recovery.
+/// - The command line is a real `"--minimized"` argument so a Windows-initiated
+///   restart boots straight into the tray (no window popping onto the user's
+///   screen), matching the autostart behavior.
+///
+/// NOTE: `RegisterApplicationRestart` alone is a *best-effort* mechanism —
+/// Windows shows a WER-style dialog and asks the user for consent in some
+/// configurations. The durable "never stop unless the user quit" guarantee is
+/// provided by the MiControlBridge watchdog, which relaunches the app even if
+/// WER's restart dialog is dismissed or suppressed.
 fn register_restart_manager() -> bool {
     #[cfg(windows)]
     {
         use windows::Win32::System::Recovery::RegisterApplicationRestart;
 
-        // Register for restart with no command-line arguments.
-        // RESTART_NO_CRASH | RESTART_NO_HANG — only restart on crash/hang,
-        // not on system reboot (we handle that via autostart).
-        let flags = windows::Win32::System::Recovery::RESTART_NO_CRASH
-            | windows::Win32::System::Recovery::RESTART_NO_HANG;
+        // Command line for the restarted instance: start minimized (tray-only).
+        // Empty command line would unregister — we must pass a real value.
+        let cmdline = windows::core::w!("--minimized");
+        // flags = 0 → restart on crash, hang, or unexpected termination.
+        // (RESTART_NO_CRASH would opt OUT of restarting after a crash.)
+        let flags = windows::Win32::System::Recovery::REGISTER_APPLICATION_RESTART_FLAGS(0);
 
-        let result = unsafe { RegisterApplicationRestart(windows::core::PCWSTR::null(), flags) };
+        let result = unsafe { RegisterApplicationRestart(cmdline, flags) };
 
         match result {
             Ok(()) => {
                 log::info!(
                     target: "hw::crash_recovery",
-                    "Restart Manager registered successfully"
+                    "Restart Manager registered (cmdline=--minimized, flags=0 → auto-restart on crash)"
                 );
                 true
             }
@@ -259,6 +287,105 @@ fn register_wer() -> bool {
             dump_dir.display()
         );
         true
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Machine-wide sentinel path used to signal an intentional user quit to the
+/// watchdog service (which runs as LOCAL SYSTEM and cannot read HKCU).
+#[cfg(windows)]
+fn user_quit_sentinel_path() -> Option<std::path::PathBuf> {
+    let pd = std::env::var_os("ProgramData")?;
+    let base = std::path::PathBuf::from(pd).join(USER_QUIT_SENTINEL_REL);
+    Some(base)
+}
+
+/// Machine-wide marker path reflecting the user's autostart (and therefore
+/// watchdog) preference. The SYSTEM bridge service cannot read HKCU, so the
+/// app mirrors its autostart choice here: file present ⇒ watchdog armed.
+#[cfg(windows)]
+pub fn watchdog_enabled_path() -> Option<std::path::PathBuf> {
+    let pd = std::env::var_os("ProgramData")?;
+    Some(std::path::PathBuf::from(pd).join(r"MiControl\watchdog_enabled"))
+}
+
+/// Enable or disable the MiControlBridge watchdog.
+///
+/// Called at every startup (mirroring the current autostart state) and by the
+/// autostart toggle so the SYSTEM bridge service can decide whether to
+/// auto-relaunch `micontrol.exe` after an unexpected death. A missing file
+/// means "do not auto-relaunch".
+pub fn set_watchdog_enabled(enabled: bool) {
+    #[cfg(windows)]
+    if let Some(path) = watchdog_enabled_path() {
+        let parent = path.parent();
+        let res = if enabled {
+            if let Some(p) = parent {
+                let _ = std::fs::create_dir_all(p);
+            }
+            std::fs::write(&path, b"1")
+        } else {
+            std::fs::remove_file(&path).or(Ok(()))
+        };
+        log::info!(
+            target: "hw::crash_recovery",
+            "Watchdog enabled marker {enabled} written ({}): {res:?}",
+            path.display()
+        );
+    }
+}
+
+/// Mark an intentional quit so the MiControlBridge watchdog does NOT relaunch
+/// the app.
+///
+/// Called by the tray Quit handler (and main-window close in dev builds) right
+/// before the process exits. Writes a timestamp sentinel under `ProgramData`
+/// (readable by the SYSTEM bridge service); the watchdog skips auto-restart for
+/// a grace period (default 2 minutes) after a fresh sentinel.
+pub fn mark_user_quit() {
+    #[cfg(windows)]
+    if let Some(path) = user_quit_sentinel_path() {
+        let parent = path.parent();
+        if let Some(p) = parent {
+            let _ = std::fs::create_dir_all(p);
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let ok = std::fs::write(&path, format!("{ts}")).is_ok();
+        log::info!(
+            target: "hw::crash_recovery",
+            "User quit marked (sentinel={}, ok={ok}) — watchdog will not auto-restart",
+            path.display()
+        );
+    }
+}
+
+/// Clear the user-quit sentinel. Called after a successful (non-restarted)
+/// startup so the watchdog is armed again for the current session.
+pub fn clear_user_quit_marker() {
+    #[cfg(windows)]
+    if let Some(path) = user_quit_sentinel_path() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Was the app intentionally quit (user-quit sentinel present)?
+///
+/// Used by the app at startup for diagnostics only; the app ALWAYS clears the
+/// sentinel on startup (a running MiControl means the user wants it running,
+/// so the watchdog must be armed).
+pub fn user_quit_pending() -> bool {
+    #[cfg(windows)]
+    {
+        let Some(path) = user_quit_sentinel_path() else {
+            return false;
+        };
+        path.exists()
     }
     #[cfg(not(windows))]
     {

@@ -308,29 +308,119 @@ fn get_ambient_lux_winrt() -> Option<f32> {
     Some(lux)
 }
 
+// Per-thread cache of the classic COM light sensor stack.
+//
+// `ISensorManager` (COM) is not `Send`/`Sync`, so we cannot put it in a
+// `static`. This mirrors `wmi_cache.rs`'s thread_local pattern: each worker
+// thread lazily creates the manager + sensor collection once, then reuses it
+// for every 2-second poll. The entry is left as `None` (a) before first use,
+// (b) when a poll fails — the next poll retries from scratch (re-enumerating
+// hot-plugged sensors) — and (c) forever on machines without the sensor.
+#[cfg(windows)]
+thread_local! {
+    static COM_SENSOR_MANAGER: std::cell::RefCell<Option<ComSensorStack>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Lazily-created COM sensor manager + ambient-light collection.
+#[cfg(windows)]
+struct ComSensorStack {
+    /// Sensor collection (owns the enumeration). Manager is kept only for its
+    /// lifetime semantics; both are released together when the thread exits.
+    collection: windows::Win32::Devices::Sensors::ISensorCollection,
+}
+
+#[cfg(windows)]
+impl ComSensorStack {
+    /// (Re)create the sensor stack. Returns None on any failure path so the
+    /// caller falls back to WinRT / sensor-off.
+    fn new() -> Option<Self> {
+        use windows::Win32::Devices::Sensors::{
+            ISensorManager, SensorManager as CLSID_SensorManager, SENSOR_TYPE_AMBIENT_LIGHT,
+        };
+        use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+        // SAFETY: COM objects released on drop; pointers remain valid within the call.
+        unsafe {
+            let manager: ISensorManager = CoCreateInstance(&CLSID_SensorManager, None, CLSCTX_ALL)
+                .map_err(|e| {
+                    log::debug!("[display] COM SensorManager not available: {e}");
+                    e
+                })
+                .ok()?;
+            let collection = manager.GetSensorsByType(&SENSOR_TYPE_AMBIENT_LIGHT).ok()?;
+            let count = collection.GetCount().ok()?;
+            if count == 0 {
+                log::debug!("[display] COM SensorManager: no ambient light sensors found");
+                return None;
+            }
+            log::debug!("[display] COM SensorManager cached ({count} sensors)");
+            Some(Self { collection })
+        }
+    }
+
+    /// Read every sensor's current lux value. Returns None if the whole stack
+    /// must be recreated (the caller invalidates the cache).
+    fn read_all(&self) -> Option<Vec<Option<f32>>> {
+        use windows::Win32::Devices::Sensors::SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX;
+        use windows::Win32::Foundation::{E_FAIL, S_OK};
+
+        // SAFETY: sensor/report/VARIANT pointers valid within the call; released
+        // by their wrappers on drop.
+        unsafe {
+            let count = self.collection.GetCount().ok()?;
+            let mut readings: Vec<Option<f32>> = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let Ok(sensor) = self.collection.GetAt(i) else {
+                    // A sensor appeared/disappeared → invalidate cache.
+                    return None;
+                };
+                let Ok(report) = sensor.GetData() else {
+                    // Sensor momentarily unresponsive: report as None this poll,
+                    // but don't tear down the whole stack for one glitch.
+                    readings.push(None);
+                    continue;
+                };
+                let pv = report.GetSensorValue(&SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX);
+                match pv {
+                    Ok(v) => {
+                        let lux = f64::try_from(&v).ok()? as f32;
+                        log::debug!("[display] COM sensor[{i}] ambient lux: {lux}");
+                        readings.push(if lux.is_finite() { Some(lux) } else { None });
+                    }
+                    Err(e) => {
+                        let hr = e.code();
+                        if hr == E_FAIL || hr == S_OK {
+                            readings.push(None);
+                        } else {
+                            // Unusual HRESULT → invalidate the whole stack.
+                            return None;
+                        }
+                    }
+                }
+            }
+            Some(readings)
+        }
+    }
+}
+
 /// Primary ambient-light reader using the classic COM Sensor API (`ISensorManager`).
 /// This is the API that Windows itself uses for the "Adaptive brightness" power-plan
 /// setting and it works for unpackaged desktop applications, unlike the WinRT API.
 #[cfg(windows)]
 fn get_ambient_lux_com() -> Option<f32> {
-    use windows::Win32::Devices::Sensors::{
-        ISensorManager, SensorManager as CLSID_SensorManager, SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX,
-        SENSOR_TYPE_AMBIENT_LIGHT,
-    };
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
-    };
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
-    // S32-003: On this laptop (and several Xiaomi models) the sensor stack
-    // enumerates TWO ambient-light sensors:
-    //   sensor[0]: a placeholder that always reports a fixed value (69 lux here)
-    //   sensor[1]: the real HID ALS sensor that responds to light changes
-    // Both report SENSOR_STATE_READY and the same category/type, so the only
-    // reliable way to tell them apart is to observe which one VARIES between
-    // consecutive reads. We cache the last reading per sensor index and pick
-    // the sensor with the largest delta (most responsive). If nothing varies
-    // (e.g. steady light), we keep the most recently responsive sensor, and
-    // fall back to the first finite reading.
+    // S32-003 rationale (sensor selection) lives in `select_responsive_sensor`.
+    //
+    // S26-006: The manager+enumerator are cached per-thread (this runs on the
+    // tokio blocking pool, whose threads are long-lived). The previous
+    // implementation called `CoCreateInstance` + `GetSensorsByType` + `GetAt`
+    // on EVERY 2-second poll, churning COM allocations and MTA registrations
+    // for the whole app lifetime — an unnecessary leak/stress vector. Caching
+    // mirrors the `wmi_cache` thread_local pattern; the cache is invalidated
+    // when a poll fails so hot-plugged sensors are re-enumerated.
 
     // SAFETY: `CoInitializeEx` is idempotent for the same apartment model and is safe
     // to call from each thread. If the thread is already in a different apartment model
@@ -338,38 +428,27 @@ fn get_ambient_lux_com() -> Option<f32> {
     // already initialized COM for us.
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
 
-    // SAFETY: we keep all COM objects alive in this scope and release them when they drop.
-    unsafe {
-        let manager: ISensorManager = CoCreateInstance(&CLSID_SensorManager, None, CLSCTX_ALL)
-            .map_err(|e| {
-                log::debug!("[display] COM SensorManager not available: {e}");
-                e
-            })
-            .ok()?;
-        let collection = manager.GetSensorsByType(&SENSOR_TYPE_AMBIENT_LIGHT).ok()?;
-        let count = collection.GetCount().ok()?;
-        if count == 0 {
-            log::debug!("[display] COM SensorManager: no ambient light sensors found");
-            return None;
+    let readings = COM_SENSOR_MANAGER.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let stack = match borrow.as_ref() {
+            Some(s) => s,
+            None => {
+                let s = ComSensorStack::new()?;
+                *borrow = Some(s);
+                borrow.as_ref()?
+            }
+        };
+        let r = stack.read_all();
+        if r.is_none() {
+            // Invalidate on failure so the next poll re-enumerates.
+            *borrow = None;
         }
-
-        // Read every sensor's current lux value.
-        let mut readings: Vec<Option<f32>> = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            let sensor = collection.GetAt(i).ok()?;
-            let report = sensor.GetData().ok()?;
-            let pv = report
-                .GetSensorValue(&SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX)
-                .ok()?;
-            let lux = f64::try_from(&pv).ok()? as f32;
-            log::debug!("[display] COM sensor[{i}] ambient lux: {lux}");
-            readings.push(if lux.is_finite() { Some(lux) } else { None });
-        }
-
-        let lux = select_responsive_sensor(&readings);
-        log::debug!("[display] COM selected lux: {lux:?}");
-        lux
-    }
+        r
+    });
+    let readings = readings?;
+    let lux = select_responsive_sensor(&readings);
+    log::debug!("[display] COM selected lux: {lux:?}");
+    lux
 }
 
 /// Per-sensor last-read cache used to detect which ALS sensor actually responds

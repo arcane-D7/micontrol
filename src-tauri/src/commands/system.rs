@@ -293,7 +293,11 @@ pub async fn get_autostart() -> Result<bool, ErrorResponse> {
 pub async fn set_autostart(enabled: bool) -> Result<(), ErrorResponse> {
     run_blocking(move || hw_set_autostart(enabled))
         .await
-        .map_err(ErrorResponse::from)
+        .map_err(ErrorResponse::from)?;
+    // S26-005b: Keep the SYSTEM bridge watchdog in sync with the user's
+    // autostart preference — no autostart ⇒ no watchdog auto-relaunch.
+    crate::hw::crash_recovery::set_watchdog_enabled(enabled);
+    Ok(())
 }
 
 #[tauri::command]

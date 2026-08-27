@@ -279,6 +279,13 @@ mod service {
                     pipe_server::run(shutdown_clone);
                 });
 
+                // S26-006: Watchdog — relaunch micontrol.exe if it dies
+                // unexpectedly. Runs for the service lifetime; joins below.
+                let wd_shutdown = shutdown.clone();
+                let watchdog_thread = std::thread::spawn(move || {
+                    watchdog::run(wd_shutdown, 30_000);
+                });
+
                 set_service_state(h, SERVICE_RUNNING);
                 eprintln!("[micontrol_bridge] Service running — pipe: {BRIDGE_PIPE_NAME}");
 
@@ -288,6 +295,7 @@ mod service {
 
                 shutdown.store(true, Ordering::SeqCst);
                 let _ = pipe_thread.join();
+                let _ = watchdog_thread.join();
                 set_service_state(h, SERVICE_STOPPED);
                 eprintln!("[micontrol_bridge] Service stopped");
             }
@@ -707,5 +715,353 @@ mod pipe_server {
             }
             1
         }
+    }
+}
+
+// ── Watchdog ─────────────────────────────────────────────────────────────────
+//
+// S26-006: "MiControl must NEVER stop unless the user quits it manually."
+//
+// Root cause of spontaneous termination (proven via live crash dump):
+//   WebView2's `ControlLib.dll` registers an ETW provider; when the DLL is
+//   unloaded (WebView2 browser-process recycling / window teardown) the ETW
+//   callback is left registered. ntdll's ETW notification thread later calls
+//   into the unloaded DLL → executes non-executable memory → ACCESS_VIOLATION
+//   (0xc0000005, Execute type) → the whole process dies with no Rust panic and
+//   no chance to flush logs. This can also be observed as
+//   `combase.dll`-based `0xc0000005` buckets in WER.
+//
+//   Nothing in MiControl application code can prevent this (it's an upstream
+//   WebView2/ETW race), so the durable fix is external: the MiControlBridge
+//   Windows service (runs 24/7 as LOCAL SYSTEM, started at boot) supervises
+//   `micontrol.exe` and relaunches it into the interactive user session
+//   whenever it disappears unexpectedly.
+//
+// Relaunch is gated on TWO machine-wide markers in `%ProgramData%\MiControl`:
+//   - `watchdog_enabled`   — present iff the user has autostart enabled
+//                            (mirrored by the app at every startup/toggle).
+//   - `watchdog_user_quit` — sentinel written by the app on INTENTIONAL quit
+//                            (tray Quit, dev window close). Its presence keeps
+//                            the watchdog silent indefinitely; the app REMOVES
+//                            it on its own startup, re-arming the watchdog for
+//                            that session. This honors the requirement exactly:
+//                            a manual quit stops MiControl for good (until the
+//                            user starts it again), while any other death is
+//                            auto-relaunched.
+mod watchdog {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::System::Threading::{
+        CreateProcessAsUserW, STARTF_USESHOWWINDOW, STARTUPINFOW,
+    };
+
+    /// Poll interval (ms) — 30 s. Crashes recurred in clusters every few
+    /// minutes; 30 s keeps worst-case downtime well under a minute while
+    /// being cheap for a SYSTEM service.
+    const POLL_MS: u64 = 30_000;
+    /// ProgramData base for markers.
+    const MARKER_DIR: &str = r"MiControl";
+    const ENABLED_MARKER: &str = "watchdog_enabled";
+    const QUIT_MARKER: &str = "watchdog_user_quit";
+    /// Default install location fallback.
+    const DEFAULT_EXE: &str = r"C:\Program Files\MiControl\micontrol.exe";
+    /// Uninstall registry keys (DisplayIcon / InstallLocation) to find a
+    /// relocated install.
+    const UNINSTALL_KEYS: &[&str] = &[
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ];
+
+    fn marker_dir() -> std::path::PathBuf {
+        std::env::var_os("ProgramData")
+            .map(|pd| std::path::PathBuf::from(pd).join(MARKER_DIR))
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData").join(MARKER_DIR))
+    }
+
+    fn marker_path(name: &str) -> std::path::PathBuf {
+        marker_dir().join(name)
+    }
+
+    fn write_log(msg: &str) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        eprintln!("[{ts}] [watchdog] {msg}");
+        // Optional: persist to a rotating log under ProgramData.
+        let dir = marker_dir().join("logs");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("watchdog.log"))
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(format!("{ts} {msg}\n").as_bytes())
+            });
+    }
+
+    /// True if the user has explicitly quit the app since it last started.
+    ///
+    /// The sentinel is written by the app's tray Quit handler and REMOVED by
+    /// the app's own startup (setup). While it exists, the watchdog must NOT
+    /// relaunch — "MiControl never stops unless the user quits it manually"
+    /// means exactly that: a manual quit is armed forever, until the user
+    /// starts the app again themselves.
+    fn user_quit_pending() -> bool {
+        let path = marker_path(QUIT_MARKER);
+        if path.exists() {
+            write_log("user quit sentinel present — watchdog stays silent");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// True if the watchdog should be armed (autostart mirror present).
+    fn watchdog_armed() -> bool {
+        marker_path(ENABLED_MARKER).exists()
+    }
+
+    /// True if a process named `micontrol.exe` is currently running anywhere.
+    fn app_is_running() -> bool {
+        let target: Vec<u16> = "micontrol.exe".encode_utf16().collect();
+        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+            return false;
+        };
+        let snapshot_ok = snapshot != INVALID_HANDLE_VALUE;
+        if !snapshot_ok {
+            return false;
+        }
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut found = false;
+        let mut has = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
+        while has {
+            let mut name: Vec<u16> = entry.szExeFile[..].to_vec();
+            while let Some(&0) = name.last() {
+                name.pop();
+            }
+            if name.len() == target.len() && name == target {
+                found = true;
+                break;
+            }
+            has = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+        }
+        unsafe {
+            CloseHandle(snapshot).ok();
+        }
+        found
+    }
+
+    /// Locate `micontrol.exe`: Uninstall-registry first, then the default
+    /// install path.
+    fn find_app_exe() -> Option<std::path::PathBuf> {
+        // 1) Uninstall registry entries — DisplayIcon / InstallLocation.
+        for root in [
+            winreg::enums::HKEY_LOCAL_MACHINE,
+            winreg::enums::HKEY_CURRENT_USER,
+        ] {
+            for sub in UNINSTALL_KEYS {
+                if let Ok(key) = winreg::RegKey::predef(root).open_subkey(sub) {
+                    // Enumerate subkeys (each app has its own GUID key).
+                    for name in key.enum_keys().filter_map(|r| r.ok()) {
+                        if let Ok(app) = key.open_subkey(&name) {
+                            let di: Option<String> = app.get_value("DisplayIcon").ok();
+                            let il: Option<String> = app.get_value("InstallLocation").ok();
+                            let dn: Option<String> = app.get_value("DisplayName").ok();
+                            let is_mic = dn
+                                .as_deref()
+                                .map(|s| s.to_lowercase().contains("micontrol"))
+                                .unwrap_or(false)
+                                || di
+                                    .as_deref()
+                                    .map(|s| s.to_lowercase().contains("micontrol"))
+                                    .unwrap_or(false);
+                            if is_mic {
+                                if let Some(iloc) = il {
+                                    let exe = std::path::PathBuf::from(&iloc).join("micontrol.exe");
+                                    if exe.exists() {
+                                        write_log(&format!(
+                                            "found micontrol at {} (uninstall)",
+                                            exe.display()
+                                        ));
+                                        return Some(exe);
+                                    }
+                                }
+                                if let Some(icon) = di {
+                                    // DisplayIcon may be "path,0" — strip index.
+                                    let icon = icon.split(',').next().unwrap_or(&icon);
+                                    let p = std::path::PathBuf::from(icon);
+                                    // Icon path is the exe itself in our installer.
+                                    if p.exists()
+                                        && p.file_name()
+                                            .map(|n| n == "micontrol.exe")
+                                            .unwrap_or(false)
+                                    {
+                                        write_log(&format!(
+                                            "found micontrol at {} (display icon)",
+                                            p.display()
+                                        ));
+                                        return Some(p);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 2) Default install path.
+        let fallback = std::path::PathBuf::from(DEFAULT_EXE);
+        if fallback.exists() {
+            return Some(fallback);
+        }
+        write_log(&format!(
+            "micontrol.exe not found (checked uninstall keys + {DEFAULT_EXE})"
+        ));
+        None
+    }
+
+    /// Launch `micontrol.exe --minimized` into the interactive user session.
+    ///
+    /// The service runs as LOCAL SYSTEM (session 0); to show GUI in the
+    /// console session we must query that session's user token and create the
+    /// process with it via `CreateProcessAsUserW`.
+    fn launch_app(exe: &std::path::Path) -> bool {
+        let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+        if session_id == 0xFFFFFFFF || session_id == 0 {
+            write_log(&format!(
+                "no active console session (id={session_id}) — skip relaunch"
+            ));
+            return false;
+        }
+        let mut token = windows::Win32::Foundation::HANDLE(std::ptr::null_mut());
+        let q = unsafe { WTSQueryUserToken(session_id, &mut token) };
+        if q.is_err() || token.is_invalid() {
+            write_log("WTSQueryUserToken failed — skip relaunch");
+            return false;
+        }
+
+        // Use the absolute exe path as lpApplicationName (unambiguous, no
+        // PATH/search-order surprises) and quote the same path as the first
+        // token of the command line ("argv[0]") for correct argument parsing.
+        let Some(exe_str) = exe.to_str() else {
+            write_log("micontrol path is not valid UTF-16 — skip relaunch");
+            unsafe {
+                CloseHandle(token).ok();
+            }
+            return false;
+        };
+        let app_w: Vec<u16> = OsString::from(exe_str)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let cmdline = OsString::from(format!("\"{exe_str}\" --minimized"));
+        let mut cmd_w: Vec<u16> = cmdline.encode_wide().chain(Some(0)).collect();
+        let cur_dir = exe.parent().and_then(|p| p.to_str()).map(|s| {
+            let v: Vec<u16> = OsString::from(s).encode_wide().chain(Some(0)).collect();
+            v
+        });
+        let cur_dir_ptr = cur_dir
+            .as_ref()
+            .map(|v| PCWSTR(v.as_ptr()))
+            .unwrap_or(PCWSTR::null());
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = 0; // SW_HIDE
+        let mut pi = windows::Win32::System::Threading::PROCESS_INFORMATION::default();
+
+        let ok = unsafe {
+            CreateProcessAsUserW(
+                token,
+                PCWSTR(app_w.as_ptr()),
+                windows::core::PWSTR(cmd_w.as_mut_ptr()),
+                None,
+                None,
+                false,
+                windows::Win32::System::Threading::CREATE_NO_WINDOW,
+                None,
+                cur_dir_ptr,
+                &si,
+                &mut pi,
+            )
+        };
+
+        unsafe {
+            CloseHandle(token).ok();
+            if ok.is_ok() {
+                CloseHandle(pi.hProcess).ok();
+                CloseHandle(pi.hThread).ok();
+            }
+        }
+
+        match ok {
+            Ok(()) => {
+                write_log(&format!(
+                    "relaunched {} into session {}",
+                    exe.display(),
+                    session_id
+                ));
+                true
+            }
+            Err(e) => {
+                write_log(&format!("CreateProcessAsUserW failed: {e}"));
+                false
+            }
+        }
+    }
+
+    /// Watchdog main loop.
+    pub fn run(shutdown: Arc<AtomicBool>, delay_start_ms: u64) {
+        write_log("watchdog thread started");
+        // Give the app time to have (re)started before first probe.
+        if delay_start_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_start_ms));
+        }
+        let mut consecutive_dead = 0u32;
+        while !shutdown.load(Ordering::SeqCst) {
+            if user_quit_pending() {
+                consecutive_dead = 0;
+            } else if !watchdog_armed() {
+                write_log("watchdog disabled (autostart off) — sleeping");
+                consecutive_dead = 0;
+            } else if app_is_running() {
+                consecutive_dead = 0;
+            } else {
+                consecutive_dead += 1;
+                write_log(&format!(
+                    "micontrol.exe NOT running (miss #{consecutive_dead})"
+                ));
+                // Require 4 consecutive misses (~2 min) before relaunching.
+                // Gives Windows Restart Manager (RegisterApplicationRestart)
+                // and any in-flight user launch time to bring the process up,
+                // avoiding a redundant launch racing the WER restart dialog.
+                if consecutive_dead >= 4 {
+                    if let Some(exe) = find_app_exe() {
+                        launch_app(&exe);
+                    }
+                    consecutive_dead = 0;
+                }
+            }
+            // Sleep in small steps so shutdown is prompt.
+            let step = std::time::Duration::from_millis(250);
+            let mut left = POLL_MS;
+            while left > 0 && !shutdown.load(Ordering::SeqCst) {
+                std::thread::sleep(step);
+                left = left.saturating_sub(step.as_millis() as u64);
+            }
+        }
+        write_log("watchdog thread stopped");
     }
 }
