@@ -5,6 +5,17 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.21] - 2026-08-27
+
+### Fixed
+
+- **Installer failing with `sc create` ERROR 1072 ("marked for deletion") on upgrade.** `DeleteService` in the SCM is asynchronous: the old service entry lingers until every handle closes (the new watchdog thread in the MiControlBridge service holds a handle, making the window longer). The old code waited a fixed 1.5 s before `sc create`, which raced the async delete → install aborted. The bridge's `install` now polls `sc query` until the entry is confirmed gone (up to 15 s) and retries `sc create` on transient 1072/1073. Uninstall also waits for the entry to disappear.
+- **"Timeout: too many hardware operations…" errors persisting after a hang.** A blocking hardware query whose WMI/vendor pipe never returns (post-sleep) kept its semaphore slot forever — 8 hung tasks exhausted all 8 slots permanently, so every subsequent hardware call (hotkeys, UI polls) failed with this message. The slot is now released as soon as the timeout fires (the task may keep running in the background, but no longer counts), and the cap was raised 8 → 64 so the parallel startup burst never trips it.
+
+### Changed
+
+- **Installer messages now in English.** All `DetailPrint`/`Abort` strings in `installer-hooks.nsi` were Portuguese; they are now English (driver install, ecram DriverStore deploy, scheduled task, MiControlBridge service, Face Unlock, post-install verification, uninstall).
+
 ## [0.1.20] - 2026-08-27
 
 ### Added
