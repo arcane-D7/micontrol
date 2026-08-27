@@ -856,9 +856,7 @@ mod watchdog {
         TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-    use windows::Win32::System::Threading::{
-        CreateProcessAsUserW, STARTF_USESHOWWINDOW, STARTUPINFOW,
-    };
+    use windows::Win32::System::Threading::{CreateProcessAsUserW, STARTUPINFOW};
 
     /// Poll interval (ms) — 30 s. Crashes recurred in clusters every few
     /// minutes; 30 s keeps worst-case downtime well under a minute while
@@ -1073,10 +1071,17 @@ mod watchdog {
             .as_ref()
             .map(|v| PCWSTR(v.as_ptr()))
             .unwrap_or(PCWSTR::null());
+        // IMPORTANT: do NOT set STARTF_USESHOWWINDOW + SW_HIDE and do NOT pass
+        // CREATE_NO_WINDOW. A Tauri GUI app must be created with the default
+        // startup info and flags (same as launching from Explorer / Run key,
+        // which works — autostart uses Run key with `--minimized`). Forcing
+        // SW_HIDE/CREATE_NO_WINDOW from a SYSTEM service was observed to leave
+        // the relaunched micontrol.exe in a half-initialized state (process +
+        // hidden window handle alive, but Tauri setup never completes — no log
+        // output, no hotkeys registered, tray-only broken). The app hides its
+        // own main window when `--minimized` is present (lib.rs setup).
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = 0; // SW_HIDE
         let mut pi = windows::Win32::System::Threading::PROCESS_INFORMATION::default();
 
         let ok = unsafe {
@@ -1087,7 +1092,7 @@ mod watchdog {
                 None,
                 None,
                 false,
-                windows::Win32::System::Threading::CREATE_NO_WINDOW,
+                windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0), // no CREATE_NO_WINDOW — normal GUI launch
                 None,
                 cur_dir_ptr,
                 &si,

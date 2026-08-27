@@ -5,6 +5,13 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.23] - 2026-08-27
+
+### Fixed
+
+- **Hotkeys dead after a watchdog auto-relaunch.** After an unexpected app death, the MiControlBridge watchdog relaunched `micontrol.exe --minimized` via `WTSQueryUserToken` + `CreateProcessAsUserW` with `CREATE_NO_WINDOW` and `STARTF_USESHOWWINDOW|SW_HIDE`. On a Tauri GUI app that combination left the new process in a half-initialized state — the process and a hidden window handle existed, but the Tauri setup never completed: no log output, no single-instance/hotkey registration, tray broken → the user experienced "keyboard shortcuts not responding" until a manual app restart. The watchdog relaunch now uses the default startup info and flags (same as launching from the Run key / Explorer — which works), leaving the `--minimized` argument to hide the window the same way autostart does.
+- **Win+Shift+F23 (`id=104`) never registered** — pre-existing and unrelated: the combination was already taken by another process in every start (Run-key init and manual start alike). The other hotkeys are unaffected.
+
 ## [0.1.22] - 2026-08-27
 
 ### Fixed
