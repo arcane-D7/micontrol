@@ -105,11 +105,14 @@ fn current_exe() -> String {
         .unwrap_or_else(|_| "micontrol_bridge.exe".to_string())
 }
 
-/// Stop + delete a possibly-running service, waiting until the SCM entry is
-/// actually gone. `sc delete` is ASYNC: the entry lingers (marked for deletion)
-/// until all handles close. Creating a new service before that completes fails
-/// with 1072 (marked for delete). We poll `sc query` until it reports
-/// "service does not exist" instead of trusting a fixed sleep.
+/// Stop + delete a possibly-running service, then attempt to wait for the SCM
+/// entry to actually disappear. `sc delete` is ASYNC: the entry lingers
+/// (marked for deletion, 1072) until every open service handle closes — which
+/// may take much longer than 15 s on an upgrade (the old bridge process /
+/// installer service-control race). This is BEST-EFFORT: it never aborts the
+/// install. The long `sc create` retry loop below is the actual wait mechanism
+/// (1072 is transient and retried), so failing to observe deletion here must
+/// not be fatal — aborting guarantees a broken install, retrying usually wins.
 fn remove_service_wait(name: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
@@ -125,8 +128,10 @@ fn remove_service_wait(name: &str) -> Result<(), String> {
         .creation_flags(CREATE_NO_WINDOW)
         .output();
 
-    // Poll until the entry is gone (exit != 0 → 1060 does not exist) or ~15 s.
-    for _ in 0..30 {
+    // Poll until the entry is gone (exit != 0 → 1060 does not exist) or ~30 s.
+    // NOTE: while marked-for-delete the entry STILL queries successfully
+    // (exit 0), so we keep polling. Best effort — see the doc comment above.
+    for _ in 0..60 {
         let q = Command::new("sc")
             .args(["query", name])
             .creation_flags(CREATE_NO_WINDOW)
@@ -143,9 +148,23 @@ fn remove_service_wait(name: &str) -> Result<(), String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    Err(format!(
-        "service {name} did not disappear from SCM within 15s (stale handle / delete pending)"
-    ))
+    // Never fatal: the retry loop in install_service() absorbs the remaining
+    // time a marked-for-delete entry needs to vanish (1072 is retried).
+    eprintln!(
+        "[install_service] service {name} still visible after 30s (delete pending) — \
+         continuing; sc create will retry 1072"
+    );
+    Ok(())
+}
+
+/// Normalize a sc.exe command's combined output for parsing (sc writes its
+/// error text to stdout; join with any stderr to be safe).
+fn sc_text(out: &std::process::Output) -> String {
+    format!(
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
 }
 
 /// Install the MiControlBridge Windows service (requires admin).
@@ -156,17 +175,20 @@ fn install_service() -> Result<(), String> {
     let exe = current_exe();
     let bin_path = format!("\"{exe}\" service");
 
-    // Stop + delete any existing service first, waiting for the SCM entry to
-    // actually go away (avoiding ERROR_SERVICE_MARKED_FOR_DELETE 1072 when
-    // sc create races the async delete).
+    // Stop + delete any existing service first (best-effort; see doc comment
+    // above — a 1072-marked-for-delete entry must NOT abort the install, the
+    // retry loop below absorbs it).
     if let Err(e) = remove_service_wait(SERVICE_NAME) {
-        // If we cannot remove an existing stale entry, fail loudly — a create
-        // against a marked-for-delete entry would fail anyway.
         eprintln!("[install_service] {e}");
-        return Err(e);
     }
 
-    // Create the service. Retry on transient 1072/1073 (delete/create race).
+    // Create the service with a LONG retry window. `sc delete` is async: the
+    // old entry can stay marked-for-delete (1072) well past a fixed sleep,
+    // especially when service-control handles linger. 1072/1073 are
+    // transient upgrade states — keep retrying; only fail on a definite error
+    // (e.g. access denied 5, invalid param 87).
+    const MAX_CREATE_ATTEMPTS: usize = 30; // ~30 s window
+    const RETRY_DELAY_MS: u64 = 1000;
     let mut out = Command::new("sc")
         .args([
             "create",
@@ -181,36 +203,44 @@ fn install_service() -> Result<(), String> {
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("sc create failed to spawn: {e}"))?;
-    for attempt in 0..5 {
+
+    let mut attempt: usize = 0;
+    loop {
         if out.status.success() {
             break;
         }
-        let text = format!(
-            "{} {}",
-            String::from_utf8_lossy(&out.stderr),
-            String::from_utf8_lossy(&out.stdout)
-        );
-        // 1072 = ERROR_SERVICE_MARKED_FOR_DELETE, 1073 = ERROR_SERVICE_EXISTS.
-        // Both are transient during an upgrade; wait and retry the create.
-        if (text.contains("1072") || text.contains("1073")) && attempt < 4 {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-            out = Command::new("sc")
-                .args([
-                    "create",
-                    SERVICE_NAME,
-                    "binPath=",
-                    &bin_path,
-                    "start=",
-                    "auto",
-                    "DisplayName=",
-                    SERVICE_DISPLAY,
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .map_err(|e| format!("sc create failed to spawn: {e}"))?;
+        let text = sc_text(&out);
+        let lower = text.to_lowercase();
+        // 1072 (marked-for-delete) and 1073 (already exists) are the ONLY
+        // transient upgrade states — the async delete is still settling.
+        // Any other code (5 access denied, 87 invalid param, ...) is a definite
+        // failure that retrying will never fix: fail fast with a clear error.
+        let transient = lower.contains("1072") || lower.contains("1073");
+        attempt += 1;
+        if transient && attempt < MAX_CREATE_ATTEMPTS {
+            eprintln!(
+                "[install_service] sc create attempt {attempt} retrying \
+                 (delete of old entry still settling): {}",
+                text.trim()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
         } else {
             return Err(format!("sc create failed: {text}"));
         }
+        out = Command::new("sc")
+            .args([
+                "create",
+                SERVICE_NAME,
+                "binPath=",
+                &bin_path,
+                "start=",
+                "auto",
+                "DisplayName=",
+                SERVICE_DISPLAY,
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("sc create failed to spawn: {e}"))?;
     }
 
     // Run as LocalSystem with failure auto-restart.

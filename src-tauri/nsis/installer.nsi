@@ -1041,6 +1041,32 @@ Function KillBridgeProcess
   Sleep 1000
 
   bridge_no_stop:
+  ; Delete the service entry from the SCM and WAIT until it is actually gone.
+  ; Mirror of the IoTSvc pattern: SCM DeleteService is ASYNC — the entry
+  ; lingers (marked for deletion, error 1072) until every service-control
+  ; handle closes. If we leave it here, the Rust `install` right after
+  ; (`remove_service_wait` + `sc create`) can still race the async delete and
+  ; fail with 1072 mid-upgrade. Removing it NOW with a confirmed 1060 makes
+  ; the subsequent `sc create` find a clean SCM.
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" delete MiControlBridge'
+  Pop $1
+  StrCpy $0 0  ; delete-confirm retry counter
+  bridge_delete_wait:
+    nsExec::ExecToStack '"$SYSDIR\sc.exe" query MiControlBridge'
+    Pop $1
+    Pop $7      ; drain output register (avoid polluting kill-loop $1)
+    ${If} $1 <> 0
+      Goto bridge_deleted  ; 1060 = service does not exist → gone
+    ${EndIf}
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 40          ; up to ~20 s for stale handles to close
+      Goto bridge_delete_wait
+    ${EndIf}
+    DetailPrint "Warning: MiControlBridge entry still visible in SCM (delete pending). Continuing — the Rust install retries sc create on 1072."
+    Goto bridge_kill_loop_exit
+  bridge_deleted:
+
   StrCpy $0 0  ; retry counter
   bridge_kill_loop:
     nsis_tauri_utils::FindProcess "micontrol_bridge.exe"
@@ -1056,6 +1082,7 @@ Function KillBridgeProcess
       Goto bridge_kill_loop
     ${EndIf}
     DetailPrint "Warning: micontrol_bridge.exe could not be killed after 5 attempts."
+  bridge_kill_loop_exit:
 FunctionEnd
 
 ; ── IoTService stopper ────────────────────────────────────────────────────────
@@ -1215,6 +1242,29 @@ Function un.KillBridgeProcess
   Sleep 1000
 
   un_bridge_no_stop:
+  ; Also delete the entry and wait for it to disappear (SCM async delete —
+  ; the same 1072 race we guard against during install). The uninstaller runs
+  ; `micontrol_bridge.exe uninstall` later, but deleting here with a confirmed
+  ; 1060 makes the uninstall idempotent.
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" delete MiControlBridge'
+  Pop $1
+  StrCpy $0 0  ; delete-confirm retry counter
+  un_bridge_delete_wait:
+    nsExec::ExecToStack '"$SYSDIR\sc.exe" query MiControlBridge'
+    Pop $1
+    Pop $7      ; drain output register
+    ${If} $1 <> 0
+      Goto un_bridge_deleted  ; 1060 = gone
+    ${EndIf}
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 40             ; up to ~20 s
+      Goto un_bridge_delete_wait
+    ${EndIf}
+    DetailPrint "Warning: MiControlBridge entry still visible in SCM (delete pending). Continuing."
+    Goto un_bridge_kill_loop_exit
+  un_bridge_deleted:
+
   StrCpy $0 0  ; retry counter
   un_bridge_kill_loop:
     nsis_tauri_utils::FindProcess "micontrol_bridge.exe"
@@ -1230,6 +1280,7 @@ Function un.KillBridgeProcess
       Goto un_bridge_kill_loop
     ${EndIf}
     DetailPrint "Warning: micontrol_bridge.exe could not be killed after 5 attempts."
+  un_bridge_kill_loop_exit:
 FunctionEnd
 
 Function un.StopIoTService
