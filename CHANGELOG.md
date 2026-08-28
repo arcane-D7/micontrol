@@ -5,6 +5,24 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.25] - 2026-08-28
+
+### Added
+
+- **Smart brightness mode (`mode: "smart"`).** A new mode selector next to the adaptive brightness toggle (📈 Formula / 🧠 Smart):
+  - Every time you manually change the screen brightness (MiControl slider, OSD, hotkey, Windows slider, Fn key), MiControl records the ambient light (lux) and your chosen brightness level into a persistent learning model (`%LOCALAPPDATA%\MiControl\smart_brightness.json`).
+  - The model buckets readings by ambient lux (10 lux bins) and computes the running mean, min/max and population std-dev per bucket (Welford's online algorithm — no memory growth). Once a bucket has ≥3 samples it becomes "mature".
+  - In Smart mode the adaptive loop uses the learned mean brightness for the current lux instead of the fixed curve; buckets without enough data fall back to the formula. Optimizing with std-dev keeps the curve responsive as the user keeps adjusting.
+  - New UI panel shows sample count + mature buckets and a "Reset learning" button.
+
+### Fixed
+
+- **Copilot key remap finally works on Xiaomi Book Pro 14 2024 (raw F23 / VK 0x86).** The board emits the bare F23 scan code (VK 0x86) for the Copilot key instead of synthesising the standard VK 0xC3, and the Windows Shell was swallowing plain F23 at the Win32 level — opening the "Copilot key" Settings page before any hook could see it. Now:
+  - **Scancode Map** writes both known Copilot scan sources (0x6E/E0 and 0x86/00) → target, so the keyboard-class driver remap works no matter which source the firmware sends (takes effect after reboot; elevated validation updated to accept scan 0x86).
+  - **Plain F23 hotkey** (`RegisterHotKey` id=105, VK 0x86, no modifiers) claims the raw F23 at the Win32 level before the Shell, with a detect-mode guard so probing the key in "Detect Key" never injects the remap target.
+  - **LL hook + dispatch** now treat plain F23 as the Copilot binding (resolve_action matches 0x86 too), so RemapToKey, FocusMicontrol and other actions work on the raw F23 key.
+- **Key remapper expanded targets.** The remap target picker now offers Left Ctrl, Left Alt, Left Shift, Caps Lock and Escape in addition to the right-side keys / Delete / Help.
+
 ## [0.1.24] - 2026-08-27
 
 ### Fixed

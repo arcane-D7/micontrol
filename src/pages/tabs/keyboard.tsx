@@ -59,9 +59,14 @@ function KeyBindingRow({
   const scriptPath = binding.action.type === 'script' ? binding.action.path : '';
 
   const REMAP_TARGETS: { vk: number; extended: boolean; label: string }[] = [
+    { vk: 0xa2, extended: false, label: t('keyboard.remapLCtrl') },
     { vk: 0xa3, extended: true, label: t('keyboard.remapRCtrl') },
+    { vk: 0xa4, extended: false, label: t('keyboard.remapLAlt') },
     { vk: 0xa5, extended: true, label: t('keyboard.remapRAlt') },
+    { vk: 0xa0, extended: false, label: t('keyboard.remapLShift') },
     { vk: 0xa1, extended: false, label: t('keyboard.remapRShift') },
+    { vk: 0x14, extended: false, label: t('keyboard.remapCapsLock') },
+    { vk: 0x1b, extended: false, label: t('keyboard.remapEsc') },
     { vk: 0x2e, extended: true, label: t('keyboard.remapDelete') },
     { vk: 0x2f, extended: false, label: t('keyboard.remapHelp') },
   ];

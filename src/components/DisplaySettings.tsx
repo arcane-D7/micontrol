@@ -8,7 +8,6 @@ import {
 } from '../lib/brightnessPresets';
 import { useToast } from '../contexts/ToastContext';
 import ToggleRow from './ToggleRow';
-
 interface Props {
   display: DisplayInfo | null;
   capabilities?: HardwareCapabilities;
@@ -153,6 +152,40 @@ export default function DisplaySettings({
                 </span>
               </div>
 
+              {/* Mode: curve vs smart */}
+              <div style={{ marginBottom: 14 }}>
+                <div className="tray-section-label" style={{ marginBottom: 6 }}>
+                  {t('display.modeLabel')}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    className={`chip-btn${editCfg.mode === 'curve' ? ' active' : ''}`}
+                    onClick={() => setLocalCfg({ ...editCfg, mode: 'curve' })}
+                  >
+                    📈 {t('display.modeCurve')}
+                  </button>
+                  <button
+                    className={`chip-btn${editCfg.mode === 'smart' ? ' active' : ''}`}
+                    onClick={() => setLocalCfg({ ...editCfg, mode: 'smart' })}
+                  >
+                    🧠 {t('display.modeSmart')}
+                  </button>
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--color-text-dim)',
+                    marginTop: 6,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {editCfg.mode === 'smart'
+                    ? t('display.modeSmartDesc')
+                    : t('display.modeCurveDesc')}
+                </div>
+                {editCfg.mode === 'smart' && <SmartModelInfo />}
+              </div>
+
               {/* Preset chips */}
               <div style={{ marginBottom: 14 }}>
                 <div className="tray-section-label" style={{ marginBottom: 6 }}>
@@ -166,7 +199,7 @@ export default function DisplaySettings({
                         key={p.key}
                         className={`chip-btn${isActive ? ' active' : ''}`}
                         title={p.hint}
-                        onClick={() => setLocalCfg({ ...editCfg, ...p.config })}
+                        onClick={() => setLocalCfg({ ...editCfg, ...p.config, mode: editCfg.mode })}
                       >
                         {p.icon} {p.label}
                       </button>
@@ -429,6 +462,77 @@ export default function DisplaySettings({
           {display.refresh_rate_hz} Hz), even when PSR2 is active.
         </div>
       )}{' '}
+    </div>
+  );
+}
+
+// ── Smart model info panel ──────────────────────────────────────────────────
+
+/** Fetches + displays the learned smart-brightness model stats and a
+ *  "Reset learning" button. Shown only when Smart mode is selected. */
+function SmartModelInfo() {
+  const { addToast } = useToast();
+  const [stats, setStats] = useState<{ total: number; buckets: number } | null>(null);
+  const [resetting, setResetting] = useState(false);
+
+  const load = async () => {
+    try {
+      const { invoke: invokeFn } = await import('@tauri-apps/api/core');
+      const res = (await invokeFn('get_smart_brightness_model')) as {
+        total_samples: number;
+        mature_buckets: number;
+      };
+      setStats({ total: res.total_samples ?? 0, buckets: res.mature_buckets ?? 0 });
+    } catch (e) {
+      console.error('[display] get_smart_brightness_model failed:', e);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const handleReset = async () => {
+    setResetting(true);
+    try {
+      const { invoke: invokeFn } = await import('@tauri-apps/api/core');
+      await invokeFn('reset_smart_brightness_model');
+      setStats({ total: 0, buckets: 0 });
+      addToast({ message: t('display.smartResetDone'), type: 'success' });
+    } catch (e) {
+      addToast({ message: `Reset smart model: ${String(e)}`, type: 'error' });
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        padding: '8px 10px',
+        background: 'var(--color-surface-sunken, rgba(0,0,0,0.15))',
+        borderRadius: 6,
+        fontSize: 11,
+        color: 'var(--color-text-dim)',
+        lineHeight: 1.5,
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>🧠 {t('display.smartModelTitle')}</div>
+      <div>
+        {t('display.smartSamples', {
+          count: stats?.total ?? 0,
+          buckets: String(stats?.buckets ?? 0),
+        })}
+      </div>
+      <button
+        className="link-btn"
+        style={{ fontSize: 11, color: 'var(--color-warning)', marginTop: 6, padding: 0 }}
+        onClick={handleReset}
+        disabled={resetting}
+      >
+        {resetting ? '…' : `🗑 ${t('display.smartReset')}`}
+      </button>
     </div>
   );
 }

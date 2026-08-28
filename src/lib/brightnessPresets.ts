@@ -15,21 +15,39 @@ export const BRIGHTNESS_PRESETS: BrightnessPreset[] = [
     label: 'Eco',
     icon: '🌿',
     hint: 'Gentle transitions, capped brightness — saves battery',
-    config: { min_brightness: 15, max_brightness: 75, sensitivity: 50, smoothing: 70 },
+    config: {
+      min_brightness: 15,
+      max_brightness: 75,
+      sensitivity: 50,
+      smoothing: 70,
+      mode: 'curve',
+    },
   },
   {
     key: 'padrao',
     label: 'Standard',
     icon: '🏙️',
     hint: 'Balanced reactivity and smooth transitions',
-    config: { min_brightness: 10, max_brightness: 100, sensitivity: 100, smoothing: 30 },
+    config: {
+      min_brightness: 10,
+      max_brightness: 100,
+      sensitivity: 100,
+      smoothing: 30,
+      mode: 'curve',
+    },
   },
   {
     key: 'vivido',
     label: 'Vivid',
     icon: '⚡',
     hint: 'Fast, aggressive adaptation across full brightness range',
-    config: { min_brightness: 5, max_brightness: 100, sensitivity: 170, smoothing: 10 },
+    config: {
+      min_brightness: 5,
+      max_brightness: 100,
+      sensitivity: 170,
+      smoothing: 10,
+      mode: 'curve',
+    },
   },
 ];
 
@@ -46,7 +64,8 @@ export function getActivePreset(
       p.config.min_brightness === cfg.min_brightness &&
       p.config.max_brightness === cfg.max_brightness &&
       p.config.sensitivity === cfg.sensitivity &&
-      p.config.smoothing === cfg.smoothing
+      p.config.smoothing === cfg.smoothing &&
+      p.config.mode === cfg.mode
     ) {
       return p.key;
     }

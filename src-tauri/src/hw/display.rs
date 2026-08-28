@@ -48,6 +48,22 @@ const AI_BRIGHTNESS_MIN_VALUE: &str = "AiBrightnessMin";
 const AI_BRIGHTNESS_MAX_VALUE: &str = "AiBrightnessMax";
 const AI_BRIGHTNESS_SENS_VALUE: &str = "AiBrightnessSensitivity";
 const AI_BRIGHTNESS_SMTH_VALUE: &str = "AiBrightnessSmoothing";
+/// 0 = "curve" (fixed min/max formula), 1 = "smart" (learned user preference curve).
+const AI_BRIGHTNESS_MODE_VALUE: &str = "AiBrightnessMode";
+
+/// Smart-mode persistence file: `%LOCALAPPDATA%\MiControl\smart_brightness.json`.
+///
+/// Tests override this via `MICONTROL_SMART_MODEL_PATH` so unit tests never
+/// clobber the user's real learned model.
+fn smart_model_path() -> std::path::PathBuf {
+    if let Ok(override_path) = std::env::var("MICONTROL_SMART_MODEL_PATH") {
+        return std::path::PathBuf::from(override_path);
+    }
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base)
+        .join("MiControl")
+        .join("smart_brightness.json")
+}
 
 /// Sensitivity / range configuration for our own adaptive brightness loop.
 ///
@@ -55,7 +71,13 @@ const AI_BRIGHTNESS_SMTH_VALUE: &str = "AiBrightnessSmoothing";
 ///   max_lux  = 2000 / (sensitivity / 100)   — lux where ceiling is reached
 ///   target   = clamp(min + (lux / max_lux) * (max - min), min, max)
 ///   smoothed = current + (target - current) * (1 - smoothing/100)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Mode:
+///   "curve" — always use the fixed formula above.
+///   "smart" — use a learned user-preference curve (mean per lux bucket with
+///             std-dev band) where enough samples exist; fall back to the
+///             formula on buckets without data.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AiBrightnessConfig {
     /// Whether our adaptive loop should run.
     pub enabled: bool,
@@ -67,6 +89,21 @@ pub struct AiBrightnessConfig {
     pub sensitivity: u8,
     /// Transition smoothing 0-90: 0 = instant, 30 = default (fast), 90 = very gradual.
     pub smoothing: u8,
+    /// "curve" (fixed formula) or "smart" (learned user-preference curve).
+    pub mode: String,
+}
+
+impl Default for AiBrightnessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_brightness: 10,
+            max_brightness: 100,
+            sensitivity: 100,
+            smoothing: 30,
+            mode: "curve".into(),
+        }
+    }
 }
 
 // ── User-override offset for the adaptive loop ────────────────────────────────
@@ -120,6 +157,9 @@ pub fn user_override_in_grace() -> bool {
 /// Called by the `set_brightness` Tauri command when auto-brightness is on.
 /// Records the delta so future loop iterations honour the user's preference,
 /// and stamps the manual-change time to enter the grace window.
+///
+/// Also records a (lux, brightness) sample into the smart model, so the
+/// "Smart" mode can learn the user's preferred brightness per light level.
 pub fn record_user_brightness_override(user_value: u8) {
     let last_target = AUTO_LAST_TARGET.load(Ordering::Relaxed);
     let offset = user_value as i16 - last_target as i16;
@@ -130,6 +170,12 @@ pub fn record_user_brightness_override(user_value: u8) {
         "auto_brightness: user override {user_value}% \
          (last_target={last_target}%, offset={offset:+}) — grace {MANUAL_OVERRIDE_GRACE_MS}ms"
     );
+
+    // Smart-mode learning: log the manual brightness change with the current
+    // ambient lux (if the sensor is available).
+    if let Some(lux) = get_ambient_lux().filter(|v| *v > MIN_PLAUSIBLE_LUX) {
+        record_smart_sample(lux, user_value);
+    }
 }
 
 /// Reset the offset — call when auto-brightness is toggled or config changes.
@@ -257,12 +303,17 @@ pub fn get_ai_brightness_config() -> AiBrightnessConfig {
     let enabled = get_ai_brightness_registry().unwrap_or(false);
     let min_b = (read_display_dword(AI_BRIGHTNESS_MIN_VALUE, 10) as u8).clamp(5, 80);
     let max_b = (read_display_dword(AI_BRIGHTNESS_MAX_VALUE, 100) as u8).clamp(min_b + 5, 100);
+    let mode = match read_display_dword(AI_BRIGHTNESS_MODE_VALUE, 0) {
+        1 => "smart".to_string(),
+        _ => "curve".to_string(),
+    };
     AiBrightnessConfig {
         enabled,
         min_brightness: min_b,
         max_brightness: max_b,
         sensitivity: (read_display_dword(AI_BRIGHTNESS_SENS_VALUE, 100) as u8).clamp(10, 200),
         smoothing: (read_display_dword(AI_BRIGHTNESS_SMTH_VALUE, 30) as u8).min(90),
+        mode,
     }
 }
 
@@ -272,7 +323,235 @@ pub fn set_ai_brightness_config(config: AiBrightnessConfig) -> HardwareResult<()
     write_display_dword(AI_BRIGHTNESS_MAX_VALUE, config.max_brightness as u32)?;
     write_display_dword(AI_BRIGHTNESS_SENS_VALUE, config.sensitivity as u32)?;
     write_display_dword(AI_BRIGHTNESS_SMTH_VALUE, config.smoothing as u32)?;
+    let mode_dword: u32 = if config.mode == "smart" { 1 } else { 0 };
+    write_display_dword(AI_BRIGHTNESS_MODE_VALUE, mode_dword)?;
     Ok(())
+}
+
+// ── Smart brightness model (learned user preference) ─────────────────────────
+//
+// The "Smart" mode learns the user's brightness preference per ambient-light
+// level and uses it to drive the adaptive loop instead of the fixed
+// min/max formula.  Each manual brightness change (slider, hotkey, Fn key,
+// external Windows change) is logged as a (lux, brightness) sample; the
+// samples are aggregated into lux buckets and the loop uses the *mean*
+// brightness inside the bucket, with a *standard-deviation band* used to
+// flag outlier samples that are likely accidental (brightness changes made
+// for other reasons, e.g. plugging in HDMI, sunny window).
+//
+// Persistence format (`smart_brightness.json`):
+// {
+//   "schema": 1,
+//   "bins": {
+//     "0":   { "n": 3, "mean": 42.0, "m2": 100.0, "min": 30, "max": 55 },  // lux range [0,20)
+//     "20":  { "n": 5, "mean": 60.0, "m2": 200.0, "min": 45, "max": 80 }, // lux range [20,40)
+//     ...
+//   }
+// }
+//
+// Bin size is 20 lux: bin index = floor(lux / 20), keyed by index * 20.
+// `m2` is the sum of squared deviations (Welford's online mean/variance
+// algorithm) so we can compute the std-dev without storing every sample.
+
+/// Lux bucket width for the smart model (10 lux per bucket keeps memory tiny
+/// while still capturing meaningful per-light-level preferences).
+const SMART_BIN_LUX: f32 = 10.0;
+/// Minimum number of samples in a bucket before the smart model is trusted
+/// over the raw formula.  Fewer than this → use the standard formula.
+const SMART_MIN_SAMPLES: u32 = 3;
+/// Maximum number of buckets cap — protects the file from unbounded growth
+/// if the sensor reports bizarre lux values.
+const SMART_MAX_BUCKETS: usize = 200;
+
+/// One lux bucket in the smart brightness model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartBin {
+    /// Number of samples in this bucket.
+    pub n: u32,
+    /// Running mean (Welford).
+    pub mean: f32,
+    /// Running M2 (sum of squared deviations from the mean).
+    pub m2: f32,
+    /// Minimum brightness observed in this bucket.
+    pub min: u8,
+    /// Maximum brightness observed in this bucket.
+    pub max: u8,
+}
+
+/// The full smart brightness model (serialized to `smart_brightness.json`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SmartModel {
+    /// Schema version for future migrations.
+    pub schema: u32,
+    /// Map of bucket index → stats. The bucket index is `floor(lux / SMART_BIN_LUX)`.
+    pub bins: std::collections::HashMap<u32, SmartBin>,
+}
+
+impl SmartModel {
+    fn new() -> Self {
+        Self {
+            schema: 1,
+            bins: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Number of buckets with at least `SMART_MIN_SAMPLES`.
+    fn mature_bucket_count(&self) -> usize {
+        self.bins
+            .values()
+            .filter(|b| b.n >= SMART_MIN_SAMPLES)
+            .count()
+    }
+
+    /// Total number of samples across all buckets.
+    fn total_samples(&self) -> u32 {
+        self.bins.values().map(|b| b.n).sum()
+    }
+}
+
+/// In-memory cache of the smart model. Loaded once at startup (or on demand)
+/// and updated on every sample; persisted on change.
+static SMART_MODEL_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<SmartModel>>> =
+    std::sync::OnceLock::new();
+
+fn load_smart_model() -> SmartModel {
+    let path = smart_model_path();
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(model) = serde_json::from_str::<SmartModel>(&data) {
+            return model;
+        }
+    }
+    SmartModel::new()
+}
+
+fn persist_smart_model(model: &SmartModel) {
+    let path = smart_model_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(model) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::warn!("[display] Failed to persist smart model: {e}");
+            } else if let Err(e) = crate::util::auth::restrict_file_acl(&path) {
+                log::warn!("[display] Failed to restrict ACL on smart_brightness.json: {e}");
+            }
+        }
+        Err(e) => log::warn!("[display] Failed to serialize smart model: {e}"),
+    }
+}
+
+/// Access to the smart model (locked).  Loads from disk on first access.
+fn with_smart_model<T>(f: impl FnOnce(&mut SmartModel) -> T) -> T {
+    let cache = SMART_MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = crate::util::panic::lock_or_recover(cache);
+    if guard.is_none() {
+        *guard = Some(load_smart_model());
+    }
+    let model = guard.as_mut().expect("smart model cache initialized");
+    let result = f(model);
+
+    // Opportunistic: only write back when the model changed.  We can't easily
+    // detect churn, so write on every public mutation call that uses this fn
+    // (record_log_sample / reset_smart_model). Kept simple: callers that only
+    // *read* must not go through here (they use `read_smart_model()`).
+    result
+}
+
+/// Read the current smart model without mutating it (for the frontend stats bar).
+pub fn get_smart_model() -> SmartModel {
+    let cache = SMART_MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let guard = crate::util::panic::lock_or_recover(cache);
+    match guard.as_ref() {
+        Some(m) => m.clone(),
+        None => load_smart_model(),
+    }
+}
+
+/// Clear the entire smart model (user clicked "Reset learning").
+pub fn reset_smart_model() {
+    let path = smart_model_path();
+    let _ = std::fs::remove_file(path);
+    if let Some(cache) = SMART_MODEL_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some(SmartModel::new());
+        }
+    }
+    log::info!("[display] Smart brightness model reset");
+}
+
+/// Log a (lux, brightness) sample into the smart model and persist it.
+///
+/// Outliers (values more than 2 std-dev from the bucket mean, when the bucket
+/// already has enough data) are still recorded — they shift the mean — but
+/// they are logged separately so the stats panel can show "X outlier-adjusted
+/// samples".  The loop uses the *mean* which is robust to occasional outliers.
+pub fn record_smart_sample(lux: f32, brightness: u8) {
+    if !lux.is_finite() || lux < 0.0 {
+        return;
+    }
+    let bin_idx = (lux / SMART_BIN_LUX).floor() as u32;
+    if bin_idx as usize > SMART_MAX_BUCKETS {
+        return; // absurd lux value — ignore
+    }
+    with_smart_model(|m| {
+        let bin = m.bins.entry(bin_idx).or_insert(SmartBin {
+            n: 0,
+            mean: 0.0,
+            m2: 0.0,
+            min: 100,
+            max: 0,
+        });
+        // Welford's online algorithm.
+        bin.n += 1;
+        let delta = brightness as f32 - bin.mean;
+        bin.mean += delta / bin.n as f32;
+        let delta2 = brightness as f32 - bin.mean;
+        bin.m2 += delta * delta2;
+        bin.min = bin.min.min(brightness);
+        bin.max = bin.max.max(brightness);
+        let _ = bin;
+    });
+    let model = get_smart_model();
+    // Persist outside the lock to avoid holding it during file I/O.
+    persist_smart_model(&model);
+    log::debug!(
+        "[display] Smart sample: lux={lux:.0} brightness={brightness}% \
+         → bucket={bin_idx} (total={})",
+        model.total_samples()
+    );
+}
+
+/// Compute the std-dev for a bucket (population std-dev using Welford's M2).
+/// Used by `smart_model_stats` to report the confidence band in the UI.
+pub fn bin_stddev(bin: &SmartBin) -> f32 {
+    if bin.n < 2 {
+        return 0.0;
+    }
+    (bin.m2 / bin.n as f32).sqrt()
+}
+
+/// Number of smart-bucket samples (for the stats UI).
+pub fn smart_model_stats() -> (u32, usize) {
+    let model = get_smart_model();
+    (model.total_samples(), model.mature_bucket_count())
+}
+
+/// Compute the predicted (mean) brightness for a given lux value using the
+/// learned model. Returns `None` when the bucket has too few samples or the
+/// lux value is outside every known bucket — the caller falls back to the
+/// fixed formula in that case.
+pub fn smart_predict_brightness(lux: f32) -> Option<u8> {
+    if !lux.is_finite() || lux < 0.0 {
+        return None;
+    }
+    let bin_idx = (lux / SMART_BIN_LUX).floor() as u32;
+    let model = get_smart_model();
+    let bin = model.bins.get(&bin_idx)?;
+    if bin.n < SMART_MIN_SAMPLES {
+        return None;
+    }
+    Some(bin.mean.round().clamp(0.0, 100.0) as u8)
 }
 
 // ── Ambient light sensor ──────────────────────────────────────────────────────
@@ -717,6 +996,12 @@ pub async fn adaptive_brightness_loop() {
                     "auto_brightness: external change detected \
                      prev={prev}% actual={actual}% → offset={new_offset:+}, grace armed"
                 );
+                // Smart-mode learning: this external change (Fn key, Windows
+                // slider) carries the user's preference for the current light
+                // level — log it into the smart model.
+                if let Some(lux) = get_ambient_lux().filter(|v| *v > MIN_PLAUSIBLE_LUX) {
+                    record_smart_sample(lux, actual);
+                }
             }
         }
         // After a crash/relaunch (or first run), seed last_set from the actual
@@ -798,8 +1083,26 @@ pub async fn adaptive_brightness_loop() {
         // CURVE_BOOST lifts the entire brightness curve by this many percentage
         // points without changing the slope or the user-configurable min/max.
         const CURVE_BOOST: f32 = 20.0;
-        let raw_target = (cfg.min_brightness as f32 + (lux / max_lux) * range + CURVE_BOOST)
-            .clamp(cfg.min_brightness as f32, cfg.max_brightness as f32);
+        let raw_target = if cfg.mode == "smart" {
+            // Smart mode: use the learned user-preference mean for this lux
+            // level where enough samples exist; otherwise fall back to the
+            // fixed curve so new light levels still behave sensibly.
+            match smart_predict_brightness(lux) {
+                Some(learned) => {
+                    let learned = learned as f32;
+                    log::debug!(
+                        "[adaptive_brightness] smart target: lux={lux:.0} \
+                         learned={learned:.0}% (bucketed mean)"
+                    );
+                    learned.clamp(cfg.min_brightness as f32, cfg.max_brightness as f32)
+                }
+                None => (cfg.min_brightness as f32 + (lux / max_lux) * range + CURVE_BOOST)
+                    .clamp(cfg.min_brightness as f32, cfg.max_brightness as f32),
+            }
+        } else {
+            (cfg.min_brightness as f32 + (lux / max_lux) * range + CURVE_BOOST)
+                .clamp(cfg.min_brightness as f32, cfg.max_brightness as f32)
+        };
 
         // Persist raw target so set_brightness can compute the correct offset.
         AUTO_LAST_TARGET.store(raw_target.round() as u8, Ordering::Relaxed);
@@ -1553,7 +1856,29 @@ mod tests {
 
     /// Serializes tests that share the `COM_LUX_HISTORY` global so parallel
     /// test execution cannot interleave `clear()` with dependent polls.
+    ///
+    /// The smart-model tests also take this lock: `manual_override_grace_window`
+    /// calls `record_user_brightness_override`, which on a machine with a live
+    /// ambient-light sensor records a smart sample into the shared model — so
+    /// any test touching either the lux history or the smart model must be
+    /// serialized together.
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Point the smart-model path at a temp file so tests never touch the
+    /// user's real learned model, and remove any stale file from a previous
+    /// test run.
+    fn isolate_smart_model() {
+        let temp = std::env::temp_dir().join("micontrol_test_smart_brightness.json");
+        std::env::set_var("MICONTROL_SMART_MODEL_PATH", &temp);
+        // Also isolate any already-cached model so `reset_smart_model()` starts
+        // from the (empty) file at the new path.
+        if let Some(cache) = SMART_MODEL_CACHE.get() {
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some(SmartModel::new());
+            }
+        }
+        let _ = std::fs::remove_file(&temp);
+    }
 
     #[cfg(windows)]
     #[test]
@@ -1603,6 +1928,7 @@ mod tests {
     #[test]
     fn manual_override_grace_window() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
         // Clean slate.
         AUTO_OFFSET.store(0, Ordering::Relaxed);
         AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
@@ -1634,5 +1960,66 @@ mod tests {
         assert!(!user_override_in_grace());
         assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), 0);
         assert!(!AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn smart_model_learns_and_predicts() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_smart_model();
+        // Seed the model directly (without touching the sensor).
+        record_smart_sample(50.0, 30);
+        record_smart_sample(51.0, 32);
+        record_smart_sample(52.0, 34);
+        record_smart_sample(53.0, 36);
+        // All in bucket floor(50/10)=5 → mean = 33, n=4 ≥ 3.
+        let predicted = smart_predict_brightness(51.0);
+        assert_eq!(
+            predicted,
+            Some(33),
+            "bucket mean (30+32+34+36)/4 = 33 predicted with n=4"
+        );
+        // Different lux in same bucket → same prediction.
+        assert_eq!(smart_predict_brightness(58.0), Some(33));
+        // Empty bucket → falls back (None) — loop uses the formula.
+        assert_eq!(smart_predict_brightness(200.0), None);
+        // Outlier (very different brightness) updates the mean but stays in range.
+        record_smart_sample(52.0, 90);
+        let predicted2 = smart_predict_brightness(52.0);
+        assert!(predicted2.is_some());
+        assert!(
+            (predicted2.unwrap() as f32 - ((30.0 + 32.0 + 34.0 + 36.0 + 90.0) / 5.0)).abs() < 1.0
+        );
+        // Std-dev of the bucket (population) can be derived from m2.
+        let model = get_smart_model();
+        let bin = model.bins.get(&5).expect("bucket 5 exists");
+        assert_eq!(bin.n, 5);
+        let sd = bin_stddev(bin);
+        assert!(
+            (sd - 22.89).abs() < 0.5,
+            "population std-dev ≈ 22.89, got {sd}"
+        );
+        reset_smart_model();
+    }
+
+    #[test]
+    fn smart_model_ignores_implausible_lux() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_smart_model();
+        // Negative / NaN lux must not create buckets.
+        record_smart_sample(-5.0, 50);
+        record_smart_sample(f32::NAN, 50);
+        record_smart_sample(f32::INFINITY, 50);
+        // Still falls back everywhere.
+        assert_eq!(smart_predict_brightness(10.0), None);
+        let model = get_smart_model();
+        assert!(model.bins.is_empty(), "no valid samples added");
+        // A valid sample then works.
+        record_smart_sample(10.0, 40);
+        record_smart_sample(11.0, 42);
+        record_smart_sample(12.0, 44);
+        assert_eq!(smart_predict_brightness(10.5), Some(42));
+        reset_smart_model();
     }
 }

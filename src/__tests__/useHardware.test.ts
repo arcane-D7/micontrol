@@ -60,6 +60,7 @@ const mockDisplayInfo = {
     max_brightness: 100,
     sensitivity: 100,
     smoothing: 50,
+    mode: 'curve',
   },
   ambient_lux: null,
 };

@@ -29,6 +29,7 @@ let _aiBrightnessConfig: AiBrightnessConfig = {
   max_brightness: 100,
   sensitivity: 100,
   smoothing: 30,
+  mode: 'curve',
 };
 let _fanMode: 'auto' | 'fixed' | 'off' = 'auto';
 let _fanSpeedPercent = 0;
@@ -231,6 +232,16 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       }
       return undefined as T;
     }
+
+    case 'get_smart_brightness_model':
+      return {
+        model: { schema: 1, bins: {} },
+        total_samples: 12,
+        mature_buckets: 3,
+      } as T;
+
+    case 'reset_smart_brightness_model':
+      return undefined as T;
 
     // ── Fan ────────────────────────────────────────────────────────────────
     case 'get_fan_info':

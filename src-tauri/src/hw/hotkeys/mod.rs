@@ -468,7 +468,7 @@ pub fn is_hook_active() -> bool {
 
 /// Apply Copilot key interception fixes at startup.
 ///
-/// Windows 11 24H2+ intercepts the Copilot key (VK 0xC3) at the Shell level
+/// Windows 11 24H2+ intercepts the Copilot key at the Shell level
 /// before any user-mode hook can see it. This function applies two fixes:
 ///
 /// 1. **Disable Windows Copilot interception** via registry policies — this
@@ -479,6 +479,9 @@ pub fn is_hook_active() -> bool {
 ///    Scancode Map registry entry that remaps the Copilot key's scan code
 ///    to the target key at the keyboard class driver level. This is the most
 ///    robust approach because it works even before Windows processes the key.
+///    We remap BOTH known Copilot scan sources: 0x6E/E0 (standard, VK 0xC3)
+///    and 0x86/00 (raw F23, VK 0x86 — emitted by Xiaomi Book Pro 14 2024 and
+///    other OEM boards).
 ///
 /// This function is async because it dispatches through the elevated bridge.
 /// It should be called once during app startup (from an async context).
@@ -552,13 +555,20 @@ pub async fn apply_copilot_fix() {
 
     if let Some((target_lo, target_hi)) = target_scan {
         log::info!(
-            "[hotkeys] Writing Scancode Map: Copilot (0x6E/E0) → ({:#04X}/{:#04X})",
+            "[hotkeys] Writing Scancode Map: Copilot (0x6E/E0 + 0x86/00) → ({:#04X}/{:#04X})",
             target_lo,
             target_hi
         );
         // Scancode Map entry format: [target_lo, target_hi, source_lo, source_hi]
-        // Copilot key source: scan 0x6E, extended (0xE0)
-        let mappings = serde_json::json!([[target_lo, target_hi, 0x6E, 0xE0]]);
+        // Standard Win11 Copilot key source: scan 0x6E, extended (0xE0) — VK 0xC3.
+        // Xiaomi Book Pro 14 2024 (and some OEM boards) emit the raw F23 scan
+        // 0x86, non-extended (0x00), which surfaces as VK 0x86.  We remap BOTH
+        // sources so the Scancode Map works regardless of which the firmware
+        // actually sends.
+        let mappings = serde_json::json!([
+            [target_lo, target_hi, 0x6E, 0xE0],
+            [target_lo, target_hi, 0x86, 0x00]
+        ]);
         match crate::elev_bridge::run_elevated_no_prompt(
             "set_scancode_map",
             serde_json::json!({ "mappings": mappings, "clear": false }),
@@ -897,6 +907,21 @@ fn hook_thread_main() {
             Ok(()) => log::info!("[hotkeys] RegisterHotKey Win+Shift+F23 id=104 OK"),
             Err(e) => log::warn!("[hotkeys] RegisterHotKey Win+Shift+F23 id=104 failed: {e}"),
         }
+
+        // Also register the PLAIN F23 (VK 0x86) hotkey with no modifiers.
+        // Xiaomi Book Pro 14 2024 and other OEM boards emit the raw F23 scan
+        // code (VK 0x86) for the Copilot key instead of synthesising VK 0xC3.
+        // RegisterHotKey claims the plain VK at the Win32 level BEFORE the
+        // Windows Shell can intercept it and open the "Copilot key" Settings
+        // page.  Best-effort: if the Shell or another app already claimed it
+        // (ERROR_HOTKEY_ALREADY_REGISTERED) we log and continue — the
+        // WH_KEYBOARD_LL hook path still covers the plain F23.
+        let _ = unsafe { UnregisterHotKey(hwnd, 105i32) };
+        let plain_f23_mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
+        match unsafe { RegisterHotKey(hwnd, 105i32, plain_f23_mods, 0x86) } {
+            Ok(()) => log::info!("[hotkeys] RegisterHotKey plain F23 (0x86) id=105 OK"),
+            Err(e) => log::warn!("[hotkeys] RegisterHotKey plain F23 (0x86) id=105 failed: {e}"),
+        }
     }
 
     // ── Install WH_KEYBOARD_LL for key suppression (best-effort) ─────────────
@@ -936,7 +961,7 @@ fn hook_thread_main() {
     // ── Cleanup ───────────────────────────────────────────────────────────────
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
-        for id in [101i32, 102i32, 103i32] {
+        for id in [101i32, 102i32, 103i32, 104i32, 105i32] {
             // SAFETY: UnregisterHotKey takes the same HWND and ID that were registered above; the HWND is still valid.
             unsafe {
                 let _ = UnregisterHotKey(hwnd, id);
@@ -1174,13 +1199,28 @@ unsafe fn handle_keyboard_raw_input(lparam: isize) {
 /// Both detect-mode recording and action dispatch happen here.
 fn handle_hotkey_message(id: i32) {
     // id=104 is the Win+Shift+F23 alternate Copilot key path — treat as Copilot.
+    // id=105 is the plain F23 (VK 0x86) path — treat as Copilot.  This catches
+    // boards (Xiaomi Book Pro 14 2024) that emit the raw F23 scan code for the
+    // Copilot key without synthesising VK 0xC3.
     let vk = match id {
         101 => VK_AI_KEY,
         102 => VK_XIAOMI_KEY,
-        103 | 104 => VK_COPILOT,
+        103 | 104 | 105 => VK_COPILOT,
         _ => return,
     };
     log::info!("[hotkeys] WM_HOTKEY id={id} VK={:#04X}", vk);
+
+    // During key-detect mode we must NOT inject the remap target — the user is
+    // probing the physical key, and RegisterHotKey fires in parallel with the
+    // LL hook (which passed the key through for detection).  Record the VK and
+    // return early so detect mode stays clean.
+    {
+        let state = lock_or_recover(&REMAP_STATE);
+        if matches!(&*state, RemapState::AwaitingKey { .. }) {
+            capture_key(vk);
+            return;
+        }
+    }
 
     capture_key(vk);
 
@@ -1383,22 +1423,34 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
     }
 
-    // ── RemapToKey handling: Win+Shift+F23 path ───────────────────────────────
-    // Some hardware / firmware revisions fire the raw Win+Shift+F23 sequence
-    // instead of synthesising VK 0xC3.  Intercept F23 when it arrives while
-    // LWin and LShift are physically held.
+    // ── RemapToKey handling: F23 (0x86) path ─────────────────────────────────
+    // Some hardware / firmware revisions fire the raw F23 scan code for the
+    // Copilot key instead of synthesising VK 0xC3.  Two sub-cases:
+    //
+    //   a) Win+Shift+F23 — early firmware revisions emit this sequence.
+    //      Intercept F23 when it arrives while LWin and LShift are held.
+    //
+    //   b) Plain F23 — Xiaomi Book Pro 14 2024 and other OEM boards emit the
+    //      bare F23 (VK 0x86) scan code for the Copilot key.  The Windows Shell
+    //      intercepts it at the Win32 level and opens the "Copilot key"
+    //      Settings page — but if our RegisterHotKey (id=105) or this LL hook
+    //      claims it first, we can remap/suppress it like VK 0xC3.
     if vk == 0x86
     /* VK_F23 */
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
         let lwin_down = (GetAsyncKeyState(0x5B) as u16) & 0x8000 != 0; // VK_LWIN
         let lshift_down = (GetAsyncKeyState(0xA0) as u16) & 0x8000 != 0; // VK_LSHIFT
-        if lwin_down && lshift_down {
+        let plain_f23 = !lwin_down && !lshift_down;
+        if (lwin_down && lshift_down) || plain_f23 {
             if let Some(HotkeyAction::RemapToKey {
                 vk: target,
                 extended,
             }) = resolve_action(VK_COPILOT)
             {
+                if plain_f23 {
+                    log::debug!("[hotkeys] F23 pressed plain → remap as Copilot key");
+                }
                 REMAP_SOURCE_VK.store(0x86, Ordering::Relaxed);
                 REMAP_TARGET_VK.store(target, Ordering::Relaxed);
                 REMAP_TARGET_EXTENDED.store(extended, Ordering::Relaxed);
@@ -1429,9 +1481,11 @@ fn resolve_action(vk: u32) -> Option<HotkeyAction> {
     let binding = match vk {
         v if v == VK_AI_KEY => &map.ai_key,
         v if v == VK_XIAOMI_KEY => &map.xiaomi_key,
-        // Copilot key: accept both the Win11 24H2 VK (0xC3) and the older VK_LAUNCH_APP2
-        // on boards that emit 0xB7 for the Copilot key instead of the PCManager key.
-        v if v == VK_COPILOT => &map.copilot_key,
+        // Copilot key: accept the standard Win11 24H2 VK (0xC3) AND the raw
+        // F23 VK (0x86) emitted by Xiaomi Book Pro 14 2024 and other OEM
+        // boards for the Copilot key.  Mapping 0x86 to the Copilot binding
+        // makes plain F23 dispatch AND suppress through the same code paths.
+        v if v == VK_COPILOT || v == 0x86 => &map.copilot_key,
         _ => return None,
     };
 

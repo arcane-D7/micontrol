@@ -950,16 +950,23 @@ fn dispatch(cmd: ElevCmd) -> Value {
                                             e[i] = v.as_u64().unwrap_or(0) as u8;
                                         }
                                         // S32-002: Only accept mappings whose source
-                                        // scan code is the Copilot key (0x6E/E0) and
-                                        // whose target is a known remap key. Reject
+                                        // scan code is the Copilot key and whose
+                                        // target is a known remap key. Reject
                                         // arbitrary bytes to prevent a compromised
                                         // webview from writing junk into HKLM.
+                                        //
+                                        // Accepted Copilot sources:
+                                        //   - scan 0x6E extended (VK 0xC3, standard Win11 Copilot key)
+                                        //   - scan 0x86 non-extended (VK_F23 = raw Copilot scan on
+                                        //     Xiaomi Book Pro 14 2024 and some OEM boards that
+                                        //     emit VK 0x86 instead of synthesising VK 0xC3)
                                         let src_lo = e[2];
                                         let src_hi = e[3];
                                         let tgt_lo = e[0];
                                         let tgt_hi = e[1];
-                                        let src_is_copilot =
-                                            src_lo == 0x6E && (src_hi == 0x00 || src_hi == 0xE0);
+                                        let src_is_copilot = (src_lo == 0x6E
+                                            && (src_hi == 0x00 || src_hi == 0xE0))
+                                            || (src_lo == 0x86 && src_hi == 0x00);
                                         let tgt_known = matches!(
                                             (tgt_lo, tgt_hi),
                                             (0x1D, 0x00) | (0x1D, 0xE0) // Ctrl

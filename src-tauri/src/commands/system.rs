@@ -127,6 +127,25 @@ pub async fn set_ai_brightness_config(config: AiBrightnessConfig) -> Result<(), 
     .map_err(ErrorResponse::from)
 }
 
+/// Get the smart-brightness learned model (for the Display settings stats bar).
+#[tauri::command]
+pub async fn get_smart_brightness_model() -> Result<serde_json::Value, ErrorResponse> {
+    let model = crate::hw::display::get_smart_model();
+    let (total, mature) = crate::hw::display::smart_model_stats();
+    Ok(serde_json::json!({
+        "model": model,
+        "total_samples": total,
+        "mature_buckets": mature,
+    }))
+}
+
+/// Clear the smart-brightness learned model ("Reset learning" button).
+#[tauri::command]
+pub async fn reset_smart_brightness_model() -> Result<(), ErrorResponse> {
+    crate::hw::display::reset_smart_model();
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn get_fan_info() -> Result<FanInfo, ErrorResponse> {
     // S36-038: The unprivileged process is DENIED access to the thermal WMI

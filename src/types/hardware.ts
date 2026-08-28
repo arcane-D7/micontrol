@@ -75,6 +75,8 @@ export interface AiBrightnessConfig {
   max_brightness: number; // 20-100
   sensitivity: number; // 10-200
   smoothing: number; // 0-90
+  /** "curve" (fixed formula) or "smart" (learned user-preference curve). */
+  mode: 'curve' | 'smart';
 }
 
 export interface DisplayInfo {
