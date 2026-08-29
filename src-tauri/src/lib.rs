@@ -460,6 +460,7 @@ pub fn run() {
             reveal_in_explorer,
             // Cross-device (MIOT-04+) — BLE presence
             commands::crossdevice::get_presence_status,
+            commands::crossdevice::get_presence_config,
             commands::crossdevice::set_presence_config,
             commands::crossdevice::scan_presence_now,
             // WMAA / WMI MiInterface (elevated bridge)

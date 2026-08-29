@@ -12,6 +12,12 @@ pub async fn get_presence_status() -> Result<PresenceStatus, String> {
     Ok(crate::hw::ble_presence::get_presence_status())
 }
 
+/// Load the persisted presence configuration for the UI to pre-fill.
+#[tauri::command]
+pub async fn get_presence_config() -> Result<PresenceConfig, String> {
+    Ok(PresenceConfig::load())
+}
+
 /// Persist presence config (enable toggle, phone MAC/name, RSSI threshold,
 /// auto-lock). If enabled and the monitor is not running yet, starts it.
 #[tauri::command]
