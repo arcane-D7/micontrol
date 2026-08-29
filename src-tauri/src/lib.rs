@@ -477,6 +477,11 @@ pub fn run() {
             commands::crossdevice::transcription_status,
             commands::crossdevice::transcription_download_model,
             commands::crossdevice::transcribe_audio,
+            // Cross-device (MIOT-10) — KDE Connect discovery + ping MVP
+            commands::crossdevice::kde_discover,
+            commands::crossdevice::kde_ping,
+            commands::crossdevice::kde_status,
+            commands::crossdevice::kde_identity,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,

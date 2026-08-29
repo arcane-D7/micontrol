@@ -27,6 +27,7 @@ pub mod hq_wmi;
 pub mod iot_events;
 pub mod iot_watchdog;
 pub mod iotservice;
+pub mod kde_connect;
 pub mod localsend;
 pub mod mic;
 pub mod os_turbo;

@@ -5,6 +5,7 @@
 //! their commands here so the cross-device tab has one command surface.
 
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
+use crate::hw::kde_connect::{KdeDevice, KdeMessage};
 use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
 use crate::hw::scrcpy_bridge::ScrcpyStatus;
 use crate::hw::transcription::TranscriptionStatus;
@@ -117,4 +118,32 @@ pub async fn transcription_download_model() -> Result<String, String> {
 #[tauri::command]
 pub async fn transcribe_audio(wav_path: String) -> Result<String, String> {
     crate::hw::transcription::transcribe(&wav_path)
+}
+
+/// Discover KDE Connect devices on the LAN (UDP 1716 broadcast identity).
+/// Returns the devices found during the sweep.
+#[tauri::command]
+pub async fn kde_discover(seconds: Option<u32>) -> Result<Vec<KdeDevice>, String> {
+    let secs = seconds.unwrap_or(3).clamp(1, 15);
+    let devs = crate::hw::kde_connect::discover_devices(Duration::from_secs(secs as u64)).await;
+    Ok(devs)
+}
+
+/// Send a `kdeconnect.ping` to a discovered device (non-TLS MVP).
+#[tauri::command]
+pub async fn kde_ping(device: KdeDevice) -> Result<bool, String> {
+    crate::hw::kde_connect::send_ping(&device, Duration::from_secs(5)).await
+}
+
+/// Refresh the shared KDE Connect cache and return the current device list.
+#[tauri::command]
+pub async fn kde_status() -> Result<Vec<KdeDevice>, String> {
+    let devs = crate::hw::kde_connect::refresh_cache(Duration::from_millis(800)).await;
+    Ok(devs)
+}
+
+/// Build the local KDE Connect identity message (used by tests/debug UI).
+#[tauri::command]
+pub fn kde_identity() -> Result<KdeMessage, String> {
+    Ok(crate::hw::kde_connect::build_identity())
 }
