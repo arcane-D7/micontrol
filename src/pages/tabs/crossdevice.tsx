@@ -31,6 +31,49 @@ interface PresenceConfig {
   lock_enabled: boolean;
 }
 
+// ── MIOT-06 LocalSend ───────────────────────────────────────────────────────
+interface LocalSendPeer {
+  alias: string;
+  fingerprint: string;
+  protocol: 'http' | 'https';
+  port: number;
+  addr: string;
+  deviceType?: string | null;
+  download: boolean;
+}
+
+interface SendReport {
+  sessionId: string;
+  files: string[];
+  total_bytes: number;
+}
+
+interface ReceiverStatus {
+  running: boolean;
+  port: number;
+  received_count: number;
+}
+
+// ── MIOT-07 scrcpy camera ───────────────────────────────────────────────────
+interface ScrcpyStatus {
+  binary: string;
+  version: string | null;
+  state: 'not-installed' | 'running' | 'stopped' | 'error';
+  pid: number | null;
+  error: string | null;
+  install_hint: string;
+}
+
+// ── MIOT-08 transcription ───────────────────────────────────────────────────
+interface TranscriptionStatus {
+  binary_installed: boolean;
+  binary_path: string | null;
+  model_ready: boolean;
+  model_dir: string | null;
+  install_hint: string;
+  missing: string[];
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function CrossDeviceTab() {
@@ -49,6 +92,25 @@ export default function CrossDeviceTab() {
   });
   const [scanning, setScanning] = useState(false);
   const [presenceSaved, setPresenceSaved] = useState(false);
+
+  // LocalSend (MIOT-06)
+  const [peers, setPeers] = useState<LocalSendPeer[]>([]);
+  const [discovering, setDiscovering] = useState(false);
+  const [sendPath, setSendPath] = useState('');
+  const [sendingTo, setSendingTo] = useState<string | null>(null);
+  const [sendResult, setSendResult] = useState<string | null>(null);
+  const [receiver, setReceiver] = useState<ReceiverStatus | null>(null);
+
+  // scrcpy camera (MIOT-07)
+  const [camera, setCamera] = useState<ScrcpyStatus | null>(null);
+  const [cameraBusy, setCameraBusy] = useState(false);
+
+  // Transcription (MIOT-08)
+  const [transc, setTransc] = useState<TranscriptionStatus | null>(null);
+  const [wavPath, setWavPath] = useState('');
+  const [transcribing, setTranscribing] = useState(false);
+  const [downloadingModel, setDownloadingModel] = useState(false);
+  const [transcript, setTranscript] = useState<string | null>(null);
   const fetchStatus = useCallback(async () => {
     try {
       const s = await invoke<PhoneLinkStatus>('get_phone_link_status');
@@ -81,10 +143,133 @@ export default function CrossDeviceTab() {
     }
   }, []);
 
+  const fetchReceiver = useCallback(async () => {
+    try {
+      const r = await invoke<ReceiverStatus>('localsend_receiver_status');
+      setReceiver(r);
+    } catch {
+      setReceiver(null);
+    }
+  }, []);
+
+  const fetchCamera = useCallback(async () => {
+    try {
+      const s = await invoke<ScrcpyStatus>('scrcpy_status');
+      setCamera(s);
+    } catch {
+      setCamera(null);
+    }
+  }, []);
+
+  const fetchTranscription = useCallback(async () => {
+    try {
+      const s = await invoke<TranscriptionStatus>('transcription_status');
+      setTransc(s);
+    } catch {
+      setTransc(null);
+    }
+  }, []);
+
   useEffect(() => {
     void fetchStatus();
     void fetchPresence();
-  }, [fetchStatus, fetchPresence]);
+    void fetchReceiver();
+    void fetchCamera();
+    void fetchTranscription();
+  }, [fetchStatus, fetchPresence, fetchReceiver, fetchCamera, fetchTranscription]);
+
+  const handleDiscover = async () => {
+    setDiscovering(true);
+    setSendResult(null);
+    try {
+      const found = await invoke<LocalSendPeer[]>('localsend_discover', { seconds: 3 });
+      setPeers(found);
+      if (found.length === 0) setSendResult(t('crossDevice.lsNoPeers'));
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const handleSend = async (peer: LocalSendPeer) => {
+    if (!sendPath.trim()) {
+      setSendResult(t('crossDevice.lsFilePath'));
+      return;
+    }
+    setSendingTo(peer.alias);
+    try {
+      const report = await invoke<SendReport>('localsend_send_files', {
+        peer,
+        paths: [sendPath],
+      });
+      setSendResult(
+        t('crossDevice.lsSent', { count: report.files.length, bytes: report.total_bytes }),
+      );
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setSendingTo(null);
+    }
+  };
+
+  const handleReceiverToggle = async () => {
+    try {
+      if (receiver?.running) {
+        const r = await invoke<ReceiverStatus>('localsend_receiver_stop');
+        setReceiver(r);
+      } else {
+        const r = await invoke<ReceiverStatus>('localsend_receiver_start');
+        setReceiver(r);
+      }
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleCameraToggle = async () => {
+    setCameraBusy(true);
+    try {
+      if (camera?.state === 'running') {
+        await invoke('scrcpy_stop');
+      } else {
+        await invoke('scrcpy_start');
+      }
+      const s = await invoke<ScrcpyStatus>('scrcpy_status');
+      setCamera(s);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setCameraBusy(false);
+    }
+  };
+
+  const handleDownloadModel = async () => {
+    setDownloadingModel(true);
+    try {
+      await invoke('transcription_download_model');
+      const s = await invoke<TranscriptionStatus>('transcription_status');
+      setTransc(s);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setDownloadingModel(false);
+    }
+  };
+
+  const handleTranscribe = async () => {
+    if (!wavPath.trim()) return;
+    setTranscribing(true);
+    setTranscript(null);
+    try {
+      const text = await invoke<string>('transcribe_audio', { wavPath });
+      setTranscript(text);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setTranscribing(false);
+    }
+  };
 
   const handleSavePresence = async () => {
     try {
@@ -426,6 +611,220 @@ export default function CrossDeviceTab() {
                 {t('crossDevice.presenceNoPhone')}
               </p>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* LocalSend — LAN file transfer (MIOT-06) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>📡 {t('crossDevice.lsTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.lsDesc')}
+        </p>
+
+        {/* Receiver (this PC) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+          <span style={{ fontSize: 13 }}>{t('crossDevice.lsReceiverTitle')}</span>
+          <button
+            className={`btn ${receiver?.running ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={handleReceiverToggle}
+          >
+            {receiver?.running ? t('crossDevice.lsReceiverStop') : t('crossDevice.lsReceiverStart')}
+          </button>
+          {receiver?.running && (
+            <span className="status-ok" style={{ fontSize: 13 }}>
+              {t('crossDevice.lsReceiverRunning', { port: receiver.port })}
+            </span>
+          )}
+          {receiver && !receiver.running && (
+            <span className="text-muted" style={{ fontSize: 13 }}>
+              {t('crossDevice.lsReceiverStopped')}
+            </span>
+          )}
+        </div>
+        {receiver && receiver.received_count > 0 && (
+          <p className="text-muted" style={{ fontSize: 12, marginBottom: 8 }}>
+            {t('crossDevice.lsReceived')}: {receiver.received_count}
+          </p>
+        )}
+
+        {/* Discover + send */}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+          <button className="btn btn-secondary" onClick={handleDiscover} disabled={discovering}>
+            {discovering ? t('crossDevice.lsDiscovering') : `🔎 ${t('crossDevice.lsDiscover')}`}
+          </button>
+          {peers.length > 0 && (
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              {peers.length} {peers.length === 1 ? 'device' : 'devices'}
+            </span>
+          )}
+        </div>
+
+        {peers.map((peer) => (
+          <div
+            key={peer.fingerprint}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              marginBottom: 8,
+              padding: 10,
+              borderRadius: 8,
+              border: '1px solid var(--border)',
+            }}
+          >
+            <span style={{ fontSize: 22 }}>📱</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600 }}>{peer.alias}</div>
+              <div className="text-muted" style={{ fontSize: 12 }}>
+                {peer.deviceType ?? t('crossDevice.lsPeerType')} · {peer.protocol} · {peer.addr}:
+                {peer.port}
+              </div>
+            </div>
+            <input
+              type="text"
+              className="text-input"
+              placeholder={t('crossDevice.lsFilePathPlaceholder')}
+              value={sendPath}
+              onChange={(e) => setSendPath(e.target.value)}
+              style={{ width: 260, fontSize: 12 }}
+            />
+            <button
+              className="btn btn-primary"
+              onClick={() => void handleSend(peer)}
+              disabled={sendingTo !== null}
+            >
+              {sendingTo === peer.alias ? t('crossDevice.lsSending') : t('crossDevice.lsSend')}
+            </button>
+          </div>
+        ))}
+
+        {sendResult && (
+          <p className="status-ok" style={{ fontSize: 13 }}>
+            ✓ {sendResult}
+          </p>
+        )}
+      </div>
+
+      {/* scrcpy — phone camera (MIOT-07) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>📷 {t('crossDevice.cameraTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.cameraDesc')}
+        </p>
+
+        {camera?.state === 'not-installed' ? (
+          <div className="alert alert-warn" style={{ marginBottom: 8 }}>
+            {t('crossDevice.cameraNotInstalled')}{' '}
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              {t('crossDevice.cameraInstallHint')}
+            </span>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <button
+                className={`btn ${camera?.state === 'running' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={handleCameraToggle}
+                disabled={cameraBusy}
+              >
+                {camera?.state === 'running'
+                  ? t('crossDevice.cameraStop')
+                  : t('crossDevice.cameraStart')}
+              </button>
+              {camera?.state === 'running' && camera.pid != null && (
+                <span className="status-ok" style={{ fontSize: 13 }}>
+                  {t('crossDevice.cameraRunning', { pid: camera.pid })}
+                </span>
+              )}
+              {camera?.state === 'stopped' && (
+                <span className="text-muted" style={{ fontSize: 13 }}>
+                  {t('crossDevice.cameraStopped')}
+                </span>
+              )}
+            </div>
+            {camera?.state === 'error' && camera.error && (
+              <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
+                {camera.error}
+              </p>
+            )}
+            {camera?.version && (
+              <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
+                {t('crossDevice.cameraVersion')}: {camera.version}
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* On-device transcription (MIOT-08) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>🎙️ {t('crossDevice.transcribeTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.transcribeDesc')}
+        </p>
+
+        {transc && !transc.binary_installed && (
+          <div className="alert alert-warn" style={{ marginBottom: 8 }}>
+            {t('crossDevice.transcribeNotInstalled')}{' '}
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              {t('crossDevice.transcribeInstallHint')}
+            </span>
+          </div>
+        )}
+
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            flexWrap: 'wrap',
+            marginBottom: 10,
+          }}
+        >
+          <span style={{ fontSize: 13 }}>{t('crossDevice.transcribePath')}</span>
+          <input
+            type="text"
+            className="text-input"
+            placeholder={t('crossDevice.transcribePathPlaceholder')}
+            value={wavPath}
+            onChange={(e) => setWavPath(e.target.value)}
+            style={{ flex: 1, minWidth: 200, fontSize: 12 }}
+          />
+          <button
+            className="btn btn-primary"
+            onClick={handleTranscribe}
+            disabled={transcribing || !wavPath.trim() || !transc?.model_ready}
+          >
+            {transcribing
+              ? t('crossDevice.transcribeTranscribing')
+              : t('crossDevice.transcribeBtn')}
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={handleDownloadModel}
+            disabled={downloadingModel || transc?.model_ready}
+          >
+            {downloadingModel
+              ? t('crossDevice.transcribeDownloading')
+              : transc?.model_ready
+                ? `✓ ${t('crossDevice.transcribeModelReady')}`
+                : t('crossDevice.transcribeDownloadModel')}
+          </button>
+        </div>
+        {transc && !transc.model_ready && (
+          <p className="text-muted" style={{ fontSize: 12 }}>
+            {t('crossDevice.transcribeModelMissing')}
+          </p>
+        )}
+
+        {transcript !== null && (
+          <div
+            className="alert alert-success"
+            style={{ marginTop: 10, whiteSpace: 'pre-wrap', fontSize: 13 }}
+          >
+            <strong>{t('crossDevice.transcribeResult')}:</strong>{' '}
+            {transcript || t('crossDevice.transcribeNoResult')}
           </div>
         )}
       </div>
