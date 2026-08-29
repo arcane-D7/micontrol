@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::hw::errors::HardwareResult;
+use tauri::Manager;
 
 /// Registry key for tracking clean vs abnormal shutdowns.
 #[cfg(windows)]
@@ -413,12 +414,36 @@ fn heartbeat_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(pd).join(HEARTBEAT_REL))
 }
 
-/// Mark the app as UI-healthy. Called AFTER WebView2 setup completes and the
-/// tray/main window exist (not just after the process spawns).
+/// App handle used by the UI-probe for heartbeat liveness.
+static APP_HANDLE: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// Store the app handle so `write_heartbeat` can probe whether the UI
+/// (main window + WebView2) is actually alive, not just the process.
+#[cfg(windows)]
+pub fn set_app_handle(app: tauri::AppHandle) {
+    let _ = APP_HANDLE.set(app);
+}
+
+/// Is the UI (main window) currently alive? Probing the WebviewWindow is
+/// cheap (a handle + visibility check) and fails fast when the window was
+/// destroyed by a WebView2 runtime crash — the exact "zombie" state that
+/// previously kept the process alive with a fresh heartbeat but no UI.
+#[cfg(windows)]
+fn ui_is_alive() -> bool {
+    let Some(app) = APP_HANDLE.get() else {
+        return false;
+    };
+    app.get_webview_window("main").is_some()
+}
+
+/// Mark the app's liveness for the watchdog. Called AFTER WebView2 setup
+/// completes and on a 10 s ticker.
 ///
-/// Format: "<unix_ms>\n<pid>\n". The bridge watchdog reads the first line; if
-/// the timestamp is stale while a micontrol.exe process is alive, that
-/// instance is a zombie (UI dead) and gets force-restarted.
+/// Format: "<unix_ms>\n<pid>\n<ui_ok>\n". The bridge watchdog reads the first
+/// line (heartbeat freshness) AND the third line (UI liveness). A process
+/// whose UI died (WebView2 crash) keeps refreshing line 1 via the tokio
+/// ticker but reports `ui_ok=0` on line 3, so the watchdog can force-restart
+/// it instead of leaving a dead-window zombie (the 0.1.23-style regression).
 pub fn write_heartbeat() {
     #[cfg(windows)]
     if let Some(path) = heartbeat_path() {
@@ -430,7 +455,11 @@ pub fn write_heartbeat() {
             .unwrap_or_default()
             .as_millis() as u64;
         let pid = std::process::id();
-        let contents = format!("{ts_ms}\n{pid}\n");
+        // ui_ok=1 only while the main window (WebView2) exists; 0 once the
+        // webview was destroyed (crash / unload) even though the process and
+        // its tokio ticker are still running.
+        let ui_ok = if ui_is_alive() { 1 } else { 0 };
+        let contents = format!("{ts_ms}\n{pid}\n{ui_ok}\n");
         let ok = std::fs::write(&path, contents).is_ok();
         if !ok {
             log::warn!(

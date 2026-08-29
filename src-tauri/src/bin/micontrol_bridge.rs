@@ -855,6 +855,7 @@ mod watchdog {
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
+    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
     use windows::Win32::System::Threading::{CreateProcessAsUserW, STARTUPINFOW};
 
@@ -1003,9 +1004,22 @@ mod watchdog {
         first.parse::<u64>().ok().filter(|&v| v > 0)
     }
 
-    /// A "healthy" app refreshes its heartbeat every 10 s. If the file is
-    /// missing or older than HEARTBEAT_STALE_MS while the process is alive,
-    /// the process is a frozen zombie (UI dead) → force-restart it.
+    /// Read the third heartbeat line: `ui_ok` flag written by the app.
+    /// `1` = main window (WebView2) exists; `0` = process alive but UI dead
+    /// (WebView2 crashed / window destroyed) — a zombie that keeps its
+    /// timestamp fresh via the tokio ticker but cannot show UI.
+    fn read_ui_ok() -> Option<u8> {
+        let path = marker_path(HEARTBEAT_FILE);
+        let content = std::fs::read_to_string(path).ok()?;
+        content.lines().nth(2)?.trim().parse::<u8>().ok()
+    }
+
+    /// A "healthy" app refreshes its heartbeat every 10 s AND reports
+    /// `ui_ok=1` (main window alive). Missing/stale heartbeat, or a fresh
+    /// heartbeat with `ui_ok=0`, means the process is a zombie (UI dead) →
+    /// force-restart it. `ui_ok` needs consecutive confirmation so a transient
+    /// hiccup during the app's own startup (before the first write includes
+    /// the window) doesn't cause a kill loop.
     fn app_heartbeat_fresh() -> bool {
         let Some(hb) = read_heartbeat_ms() else {
             return false;
@@ -1014,7 +1028,18 @@ mod watchdog {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        now_ms.saturating_sub(hb) < HEARTBEAT_STALE_MS
+        let fresh = now_ms.saturating_sub(hb) < HEARTBEAT_STALE_MS;
+        if !fresh {
+            return false;
+        }
+        // Timestamp fresh — now verify UI liveness (third line). Missing
+        // third line (older heartbeat format) is treated as alive for
+        // backward compatibility.
+        match read_ui_ok() {
+            Some(1) => true,
+            Some(0) => false,
+            _ => true, // old format or unparseable — fall back to timestamp only
+        }
     }
 
     /// Force-terminate the running micontrol.exe instance(s). Returns true if
@@ -1178,6 +1203,24 @@ mod watchdog {
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         let mut pi = windows::Win32::System::Threading::PROCESS_INFORMATION::default();
 
+        // CRITICAL: build the USER environment block for the session token and
+        // pass it as lpEnvironment. With lpEnvironment=NULL,
+        // CreateProcessAsUserW inherits the *calling process* environment block
+        // (the SYSTEM service's), so USERPROFILE / LOCALAPPDATA / APPDATA point
+        // at C:\Windows\System32\config\systemprofile instead of the real user
+        // profile. The relaunched app then cannot create its log file, its
+        // WebView2 user-data folder, or its SmartBrightness cache — it ends up
+        // as a half-initialized zombie (process + single-instance window +
+        // heartbeat ticker alive, but NO main window and NO tray popup — the
+        // exact 0.1.23-style crash regression after watchdog relaunch).
+        let mut env_block: *mut core::ffi::c_void = std::ptr::null_mut();
+        let env_ok = unsafe { CreateEnvironmentBlock(&mut env_block, token, false).is_ok() };
+        if env_ok && !env_block.is_null() {
+            write_log("launch_app: using user environment block (CreateEnvironmentBlock OK)");
+        } else {
+            write_log("launch_app: CreateEnvironmentBlock failed — falling back to NULL env (may cause zombie relaunch)");
+        }
+
         let ok = unsafe {
             CreateProcessAsUserW(
                 token,
@@ -1187,7 +1230,11 @@ mod watchdog {
                 None,
                 false,
                 windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0), // no CREATE_NO_WINDOW — normal GUI launch
-                None,
+                if env_ok && !env_block.is_null() {
+                    Some(env_block as *const core::ffi::c_void)
+                } else {
+                    None
+                },
                 cur_dir_ptr,
                 &si,
                 &mut pi,
@@ -1195,6 +1242,9 @@ mod watchdog {
         };
 
         unsafe {
+            if env_ok && !env_block.is_null() {
+                let _ = DestroyEnvironmentBlock(env_block as *const core::ffi::c_void);
+            }
             CloseHandle(token).ok();
             if ok.is_ok() {
                 CloseHandle(pi.hProcess).ok();

@@ -279,10 +279,21 @@ pub fn run() {
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // When a second instance is launched, focus the existing window instead.
+            // When a second instance is launched, focus the existing window
+            // instead. If the main window is GONE (WebView2 crashed and the
+            // window handle was destroyed — the zombie regression), rebuild it
+            // on the spot so the user's launch actually shows the UI again
+            // (previously nothing happened because the window no longer
+            // existed and nobody recreated it).
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
+            } else {
+                log::warn!(
+                    "[single-instance] main window missing (destroyed by WebView2 crash?) — \
+                     rebuilding for focus"
+                );
+                open_window_sync(app);
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -804,7 +815,11 @@ pub fn run() {
             // S32-005: Heartbeat — the SYSTEM bridge watchdog uses this to
             // distinguish a healthy UI from a frozen zombie. Write the first
             // one NOW (setup has finished, tray+main window exist) and keep
-            // refreshing it on a ticker.
+            // refreshing it on a ticker. The app handle lets the heartbeat
+            // probe real UI liveness (main window alive) — not just the
+            // process — so a WebView2 crash without a handler cannot keep a
+            // fresh heartbeat while the UI is dead.
+            crate::hw::crash_recovery::set_app_handle(app.handle().clone());
             crate::hw::crash_recovery::write_heartbeat();
             crate::hw::crash_recovery::start_heartbeat_ticker();
 
@@ -907,6 +922,27 @@ pub fn run() {
                     }
                     TRAY_HIDDEN_AT_MS.store(now_ms(), Ordering::Relaxed);
                     window.hide().ok();
+                }
+                tauri::WindowEvent::Destroyed if window.label() == "main" => {
+                    // S38: The main window (and its WebView2) was destroyed
+                    // without the process exiting — e.g. a webview/tray crash
+                    // that killed the browser process but left the Tauri
+                    // process alive. Previously this produced a zombie: the
+                    // app kept running (tray + heartbeat) but clicking "Open
+                    // MiControl" did nothing because the window was gone.
+                    //
+                    // Self-heal by rebuilding the main window. If the rebuild
+                    // itself fails (e.g. system-wide WebView2 outage), the
+                    // watchdog will still detect `ui_ok=0` in the heartbeat
+                    // and force-restart the process.
+                    log::error!(
+                        "[window] main window destroyed — rebuilding (self-heal after webview crash)"
+                    );
+                    let app = window.app_handle().clone();
+                    let app2 = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        open_window_sync(&app2);
+                    });
                 }
                 _ => {}
             }

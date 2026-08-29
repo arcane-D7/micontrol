@@ -129,6 +129,7 @@ windows = { version = "0.58", features = [
   "Foundation",
   "Foundation_Collections",
   "Win32_System_Diagnostics",
+  "Win32_System_Environment",
   "Win32_System_Recovery",
   "Win32_System_Shutdown",
   "Win32_System_ErrorReporting",

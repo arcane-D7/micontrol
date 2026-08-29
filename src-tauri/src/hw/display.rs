@@ -166,6 +166,9 @@ pub fn record_user_brightness_override(user_value: u8) {
     AUTO_OFFSET.store(offset, Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
     AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
+    // Persist so a crash/relaunch right after the manual change does not
+    // forget it (the relaunched loop would steal the brightness back).
+    persist_override_state();
     log::debug!(
         "auto_brightness: user override {user_value}% \
          (last_target={last_target}%, offset={offset:+}) — grace {MANUAL_OVERRIDE_GRACE_MS}ms"
@@ -183,6 +186,95 @@ pub fn clear_user_brightness_override() {
     AUTO_OFFSET.store(0, Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
     AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+    persist_override_state();
+}
+
+// ── Manual-override persistence (crash/relaunch survival) ────────────────────
+//
+// The adaptive loop's manual-override state (offset + last manual change) is
+// process-local. After a crash (WebView2 BEX64 → watchdog relaunch), a brand
+// new process starts with AUTO_LAST_MANUAL_MS=0 and NO offset — the loop
+// immediately sees the current brightness (which the user just set manually)
+// as its baseline via seeding, BUT it keeps recomputing the curve and writing
+// over the user's value 2 s later (the "app steals my brightness" regression).
+//
+// Fix: persist {last_manual_ms (epoch abs), offset, offset_active} to
+// `%LOCALAPPDATA%\MiControl\brightness_override.json` on every manual change
+// and restore it when the adaptive loop starts in a new process. As long as
+// the user's manual change happened < MANUAL_OVERRIDE_GRACE_MS ago, the
+// relaunched loop stays hands-off.
+
+/// Persistence file under `%LOCALAPPDATA%\MiControl`.
+fn brightness_override_path() -> std::path::PathBuf {
+    if let Ok(override_path) = std::env::var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH") {
+        return std::path::PathBuf::from(override_path);
+    }
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("MiControl").join("brightness_override.json")
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Copy)]
+struct OverrideState {
+    /// Wall-clock ms (since UNIX epoch) of the last manual brightness change.
+    last_manual_ms: u64,
+    /// Signed curve offset the user's manual value implies.
+    offset: i16,
+    /// Whether the offset is active (user has expressed a preference).
+    offset_active: bool,
+}
+
+/// Persist the current manual-override statics to disk (crash survival).
+fn persist_override_state() {
+    let state = OverrideState {
+        last_manual_ms: AUTO_LAST_MANUAL_MS.load(Ordering::Relaxed),
+        offset: AUTO_OFFSET.load(Ordering::Relaxed),
+        offset_active: AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed),
+    };
+    let path = brightness_override_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string(&state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::warn!("[display] Failed to persist brightness override: {e}");
+            }
+        }
+        Err(e) => log::warn!("[display] Failed to serialize brightness override: {e}"),
+    }
+}
+
+/// Restore the manual-override statics from disk (new process after crash).
+/// Stale entries (> grace window) restore nothing so a fresh boot never gets
+/// stuck in a perpetual hands-off state.
+pub fn restore_override_state() {
+    let path = brightness_override_path();
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(state) = serde_json::from_str::<OverrideState>(&data) else {
+        return;
+    };
+    if state.last_manual_ms == 0 {
+        return;
+    }
+    let age = now_ms().saturating_sub(state.last_manual_ms);
+    if age >= MANUAL_OVERRIDE_GRACE_MS {
+        // Manual change too old to matter — start clean.
+        log::debug!("[adaptive_brightness] persisted override too old ({age}ms) — ignoring");
+        return;
+    }
+    AUTO_LAST_MANUAL_MS.store(state.last_manual_ms, Ordering::Relaxed);
+    AUTO_OFFSET.store(state.offset, Ordering::Relaxed);
+    AUTO_OFFSET_ACTIVE.store(state.offset_active, Ordering::Relaxed);
+    log::info!(
+        "[adaptive_brightness] restored manual override from crash \
+         (age={age}ms, offset={}, active={}) — grace window until manual change",
+        state.offset,
+        state.offset_active
+    );
 }
 
 /// Read the current display brightness from WMI (ground truth) or IGCL.
@@ -900,6 +992,11 @@ fn is_display_on() -> bool {
 /// Config changes are picked up automatically on each iteration.
 pub async fn adaptive_brightness_loop() {
     log::info!("[adaptive_brightness] loop started");
+    // S38: A crash/relaunch resets all process-local statics. If the user
+    // manually adjusted brightness shortly before the crash, restore the
+    // override so the loop stays hands-off instead of immediately stealing
+    // the user's value back (the brightness regression after relaunch).
+    restore_override_state();
     let mut smoothed: Option<f32> = None;
     let mut no_sensor_warned = false;
     // Last value we applied so we can detect external changes (Fn keys, OS).
@@ -990,6 +1087,9 @@ pub async fn adaptive_brightness_loop() {
                 AUTO_OFFSET.store(new_offset, Ordering::Relaxed);
                 AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
                 AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
+                // S38: persist so a crash/relaunch within the grace window
+                // does not steal the user's brightness back.
+                persist_override_state();
                 // Snap smoothed to actual so we don't animate back.
                 smoothed = Some(actual as f32);
                 log::debug!(
@@ -1210,6 +1310,20 @@ where
 {
     use igcl::*;
     use libloading::Library;
+
+    // Serialize ALL IGCL calls: IGCL/ControlLib is NOT thread-safe. The
+    // brightness loop reads+sets on tokio blocking threads while the frontend
+    // may query brightness simultaneously. Two overlapping ctlInit/ctlClose
+    // sequences caused the BEX64 crash in ControlLib.dll_unloaded (the DLL's
+    // internal global state was torn down by one thread's ctlClose while
+    // another thread was still inside ctlGet/ctlSetBrightnessSetting).
+    // Holding this lock for the whole init→enumerate→f→close sequence makes
+    // each IGCL operation atomic.
+    static IGCL_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _igcl_guard = IGCL_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     unsafe {
         // SAFETY: IGCL DLL function pointers (ctlInit, ctlEnumerateDevices, ctlClose) are
