@@ -130,6 +130,7 @@ windows = { version = "0.58", features = [
   "Foundation_Collections",
   "Win32_System_Diagnostics",
   "Win32_System_Recovery",
+  "Win32_System_Shutdown",
   "Win32_System_ErrorReporting",
   "Win32_Security_Credentials",
   "Win32_Security_Authentication_Identity",
@@ -146,6 +147,9 @@ windows-core = "0.58"
 windows-targets = "0.52"
 wmi = "0.13"
 winreg = "0.52"
+# BLE phone presence (MIOT-04): WinRT backend automatically selected on
+# Windows (no feature flag needed in 0.11).
+btleplug = { version = "0.11", default-features = false, features = ["serde"] }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

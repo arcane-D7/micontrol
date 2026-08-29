@@ -458,6 +458,10 @@ pub fn run() {
             // Data export — GDPR Art.20 (S19-16)
             export_user_data,
             reveal_in_explorer,
+            // Cross-device (MIOT-04+) — BLE presence
+            commands::crossdevice::get_presence_status,
+            commands::crossdevice::set_presence_config,
+            commands::crossdevice::scan_presence_now,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,
@@ -755,6 +759,13 @@ pub fn run() {
             // restarts the ecram service. Runs on a 30 s cycle with cooldown.
             #[cfg(windows)]
             crate::hw::iot_watchdog::start_iot_watchdog();
+
+            // MIOT-04: BLE phone presence — starts only if the user enabled it
+            // in the registry; the monitor is a no-op otherwise.
+            #[cfg(windows)]
+            if crate::hw::ble_presence::get_presence_status().enabled {
+                crate::hw::ble_presence::start_presence_monitor();
+            }
 
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
