@@ -24,6 +24,7 @@ pub mod fn_key;
 pub mod hotkeys;
 pub mod hq_wmi;
 pub mod iot_events;
+pub mod iot_watchdog;
 pub mod iotservice;
 pub mod mic;
 pub mod os_turbo;

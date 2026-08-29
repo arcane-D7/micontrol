@@ -750,6 +750,12 @@ pub fn run() {
                 crate::hw::iot_events::start_iot_event_listener();
             }
 
+            // MIOT-03: IoT pipe watchdog — if the ecram/MCPI pipe disappears
+            // (crash, update, service stop) the recovery path reinstalls and
+            // restarts the ecram service. Runs on a 30 s cycle with cooldown.
+            #[cfg(windows)]
+            crate::hw::iot_watchdog::start_iot_watchdog();
+
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
 
