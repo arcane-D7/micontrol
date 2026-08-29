@@ -241,6 +241,14 @@ pub fn show_performance_osd(mode: crate::state::PerformanceMode) {
 }
 
 /// Internal helper — set mode+icon, post WM_OSD_NOTIF.
+/// Public notification entry point for non-keyboard notifications
+/// (e.g. IoT power events). `mode` selects the pill style; `icon_cp` is a
+/// Segoe MDL2 codepoint (e.g. 0xE7E8 = plug). Thread-safe.
+pub fn show_generic_notification(mode: u8, icon_cp: u16) {
+    log::info!("[osd] generic notification: mode={mode} icon={icon_cp:#06X}");
+    show_notification_osd(mode, icon_cp);
+}
+
 fn show_notification_osd(mode: u8, icon_cp: u16) {
     *state().mode.lock().unwrap() = mode;
     *state().notif_icon.lock().unwrap() = icon_cp as u32;
