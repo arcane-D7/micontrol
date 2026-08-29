@@ -107,6 +107,8 @@
     "hookInactive": "Hook not active!",
     "save": "Save",
     "saving": "Saving…",
+    "applying": "Applying…",
+    "remapRebootRequired": "The permanent remap is applied to the system, but only takes full effect after a reboot.",
     "saved": "Key bindings saved",
     "saveError": "Failed to save key bindings",
     "loadError": "Failed to load keyboard configuration",

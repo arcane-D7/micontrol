@@ -74,6 +74,28 @@ pub fn install_panic_hook() {
         // Also print to stderr directly in case the logger isn't initialized
         eprintln!("PANIC at {}: {}", loc_str, payload_str);
 
+        // Capture for the crash-report pipeline (no-op when disabled).
+        // The location string may contain absolute source paths on debug
+        // builds; scrubbed to the file name only here.
+        let scrubbed_loc = location
+            .map(|l| {
+                format!(
+                    "{}:{}:{}",
+                    std::path::Path::new(l.file())
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| l.file().to_string()),
+                    l.line(),
+                    l.column()
+                )
+            })
+            .unwrap_or_else(|| "<unknown>".to_string());
+        crate::util::crash_report::report_panic(
+            Some(&scrubbed_loc),
+            &payload_str,
+            None, // backtrace left to the default hook / WER
+        );
+
         // Delegate to the default hook for standard behavior (unwind/abort)
         default_hook(info);
     }));

@@ -107,6 +107,8 @@
     "hookInactive": "Hook não ativo!",
     "save": "Guardar",
     "saving": "A guardar…",
+    "applying": "A aplicar…",
+    "remapRebootRequired": "O remap permanente é aplicado ao sistema, mas só entra totalmente em vigor após reiniciar o PC.",
     "saved": "Ligações de teclas guardadas",
     "saveError": "Falha ao guardar ligações de teclas",
     "loadError": "Falha ao carregar configuração do teclado",

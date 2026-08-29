@@ -107,6 +107,8 @@
     "hookInactive": "Hook inactif !",
     "save": "Enregistrer",
     "saving": "Enregistrement…",
+    "applying": "Application…",
+    "remapRebootRequired": "Le remappage permanent est appliqué au système, mais ne prend pleinement effet qu'après un redémarrage.",
     "saved": "Configuration enregistrée",
     "saveError": "Échec de l'enregistrement",
     "loadError": "Échec du chargement de la configuration du clavier",

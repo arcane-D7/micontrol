@@ -486,7 +486,9 @@ function KeyBindingRow({
 export default function KeyboardTab() {
   const [config, setConfig] = useState<HotkeyMap | null>(null);
   const [saving, setSaving] = useState(false);
+  const [applying, setApplying] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [applyNote, setApplyNote] = useState<string>('');
   const [hookActive, setHookActive] = useState<boolean | null>(null);
   const [fnKeyMode, setFnKeyMode] = useState<'multimedia' | 'function_key' | null>(null);
   const [fnKeyToggling, setFnKeyToggling] = useState(false);
@@ -528,12 +530,25 @@ export default function KeyboardTab() {
   async function save() {
     if (!config) return;
     setSaving(true);
+    setApplying(true);
     try {
       const { invoke: invokeFn } = await import('@tauri-apps/api/core');
-      await invokeFn('set_hotkey_config', { config });
+      const result: {
+        applied: boolean;
+        reboot_required: boolean;
+        note: string;
+      } = await invokeFn('set_hotkey_config', { config });
       setSaved(true);
+      if (result.reboot_required) {
+        setApplyNote(t('keyboard.remapRebootRequired'));
+      } else {
+        setApplyNote(result.note ? result.note : '');
+      }
       addToast({ message: t('keyboard.saved'), type: 'success' });
-      const savedTimeout = window.setTimeout(() => setSaved(false), 2000);
+      const savedTimeout = window.setTimeout(() => {
+        setSaved(false);
+        setApplyNote('');
+      }, 4000);
       timeoutRefs.current.push(savedTimeout);
     } catch (e) {
       console.error('set_hotkey_config', e);
@@ -544,6 +559,7 @@ export default function KeyboardTab() {
       });
     } finally {
       setSaving(false);
+      setApplying(false);
     }
   }
 
@@ -660,9 +676,20 @@ export default function KeyboardTab() {
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-        <button className="btn-primary" onClick={save} disabled={saving} style={{ minWidth: 100 }}>
-          {saving ? t('keyboard.saving') : saved ? t('keyboard.saved') : t('keyboard.save')}
+        <button className="btn-primary" onClick={save} disabled={saving} style={{ minWidth: 140 }}>
+          {applying
+            ? t('keyboard.applying')
+            : saving
+              ? t('keyboard.saving')
+              : saved
+                ? t('keyboard.saved')
+                : t('keyboard.save')}
         </button>
+        {applyNote && (
+          <p className="text-muted" style={{ fontSize: 12, marginTop: 6 }}>
+            {applyNote}
+          </p>
+        )}
       </div>
     </>
   );

@@ -52,8 +52,8 @@ use commands::hardware::{
     wmi_ec_write, write_iot_hex,
 };
 use commands::hotkeys::{
-    get_detected_key, get_hotkey_config, grant_script_consent, is_hook_active, set_hotkey_config,
-    start_key_detect,
+    get_detected_key, get_hotkey_config, get_remap_apply_state, grant_script_consent,
+    is_hook_active, set_hotkey_config, start_key_detect,
 };
 use commands::privacy::{export_user_data, reveal_in_explorer};
 use commands::system::{
@@ -162,6 +162,10 @@ fn get_health_status() -> health_supervisor::HealthSnapshot {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(deprecated)]
 pub fn run() {
+    // ── Crash-report pipeline (agnostic; disabled by default) ─────────────
+    // Must run BEFORE install_panic_hook so the hook observes the configured
+    // (default: disabled) state. Reads `SOFTWARE\MiControl\CrashReporting`.
+    util::crash_report::init_crash_reporting();
     util::panic::install_panic_hook();
     if let Err(e) = crate::debug_log::init_logging() {
         eprintln!("failed to initialize logging: {e:#}");
@@ -419,6 +423,7 @@ pub fn run() {
             start_key_detect,
             get_detected_key,
             is_hook_active,
+            get_remap_apply_state,
             // S29-001: Script hotkey consent grant command
             grant_script_consent,
             // Display refresh rate

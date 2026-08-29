@@ -107,6 +107,8 @@
     "hookInactive": "¡Hook no activo!",
     "save": "Guardar",
     "saving": "Guardando…",
+    "applying": "Aplicando…",
+    "remapRebootRequired": "El remapeo permanente se aplica al sistema, pero solo surte efecto completo tras reiniciar el PC.",
     "saved": "Configuración guardada",
     "saveError": "Error al guardar configuración",
     "loadError": "Error al cargar configuración de teclado",

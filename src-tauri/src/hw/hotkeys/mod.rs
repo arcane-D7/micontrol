@@ -485,7 +485,45 @@ pub fn is_hook_active() -> bool {
 ///
 /// This function is async because it dispatches through the elevated bridge.
 /// It should be called once during app startup (from an async context).
-pub async fn apply_copilot_fix() {
+/// Outcome of a Copilot-key hardware apply (Scancode Map + Windows policies).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CopilotApplyOutcome {
+    /// Whether an apply actually ran (write to Scancode Map + policies).
+    pub applied: bool,
+    /// Whether the change only takes effect after a reboot.
+    pub reboot_required: bool,
+    /// Human-readable note (may be empty).
+    pub note: String,
+}
+
+/// Last apply outcome, exposed to the UI via `get_remap_apply_state`.
+static LAST_COPILOT_APPLY: OnceLock<Mutex<CopilotApplyOutcome>> = OnceLock::new();
+
+fn copilot_apply_store() -> &'static Mutex<CopilotApplyOutcome> {
+    LAST_COPILOT_APPLY.get_or_init(|| Mutex::new(CopilotApplyOutcome::default()))
+}
+
+/// Snapshot of the last Copilot-key apply outcome (for UI polling).
+pub fn copilot_apply_state() -> CopilotApplyOutcome {
+    lock_or_recover(copilot_apply_store()).clone()
+}
+
+pub async fn apply_copilot_fix() -> CopilotApplyOutcome {
+    let outcome = apply_copilot_fix_inner().await;
+    *lock_or_recover(copilot_apply_store()) = outcome.clone();
+    outcome
+}
+
+/// Run the Copilot apply if the current config needs it (bound to RemapToKey),
+/// returning the outcome. Used by `set_hotkey_config` so the frontend can show
+/// a loading state until the hardware-level apply completes.
+pub async fn run_copilot_apply_if_needed() -> CopilotApplyOutcome {
+    apply_copilot_fix().await
+}
+
+async fn apply_copilot_fix_inner() -> CopilotApplyOutcome {
+    let mut outcome = CopilotApplyOutcome::default();
     // Only apply if the Copilot key binding is enabled and set to RemapToKey
     let should_apply = {
         let arc = HOTKEY_CONFIG.get();
@@ -506,8 +544,10 @@ pub async fn apply_copilot_fix() {
 
     if !should_apply {
         log::debug!("[hotkeys] Copilot key not bound to RemapToKey — skipping Copilot fix");
-        return;
+        return outcome;
     }
+    outcome.applied = true;
+    outcome.reboot_required = true; // Scancode Map takes effect on reboot/login; cleared if write fails
 
     // ── Step 1: Disable Windows Copilot key interception via registry ──────
     // This tells Windows Shell not to consume the Copilot key, allowing it
@@ -576,18 +616,25 @@ pub async fn apply_copilot_fix() {
         .await
         {
             Ok(result) => {
-                log::info!(
-                    "[hotkeys] Scancode Map written: {:?}",
-                    result.get("note").and_then(|v| v.as_str())
-                );
+                let note = result.get("note").and_then(|v| v.as_str()).unwrap_or("");
+                log::info!("[hotkeys] Scancode Map written: {note}");
+                outcome.note =
+                    format!("Scancode Map written (reboot required to take effect): {note}");
             }
             Err(e) => {
                 log::warn!("[hotkeys] Failed to write Scancode Map: {e}");
+                outcome.applied = false;
+                outcome.reboot_required = false;
+                outcome.note = format!("Failed to write Scancode Map: {e}");
             }
         }
     } else {
         log::debug!("[hotkeys] No known scancode for remap target — skipping Scancode Map");
+        outcome.note =
+            "No known scancode for this remap target — hook-only remap (no reboot)".into();
+        outcome.reboot_required = false;
     }
+    outcome
 }
 
 /// Map a virtual key code to its scan code for use in Scancode Map entries.
@@ -1205,7 +1252,7 @@ fn handle_hotkey_message(id: i32) {
     let vk = match id {
         101 => VK_AI_KEY,
         102 => VK_XIAOMI_KEY,
-        103 | 104 | 105 => VK_COPILOT,
+        103..=105 => VK_COPILOT,
         _ => return,
     };
     log::info!("[hotkeys] WM_HOTKEY id={id} VK={:#04X}", vk);
