@@ -74,6 +74,46 @@ interface TranscriptionStatus {
   missing: string[];
 }
 
+// ── MIOT-10 KDE Connect ────────────────────────────────────────────────────
+interface KdeDevice {
+  deviceId: string;
+  deviceName: string;
+  deviceType: string;
+  tcpPort: number;
+  addr: string;
+  protocolVersion: number;
+  incomingCapabilities: string[];
+  pairingOptional: boolean;
+}
+
+// ── MIOT-12 Syncthing ───────────────────────────────────────────────────────
+interface SyncthingFolder {
+  id: string;
+  label: string;
+  path: string;
+  paused: boolean;
+  type?: string | null;
+}
+
+interface SyncthingStatus {
+  reachable: boolean;
+  address: string;
+  version: string | null;
+  deviceId: string | null;
+  uptimeSecs: number | null;
+  connectionServiceStatus: string | null;
+  error: string | null;
+  folders: SyncthingFolder[];
+}
+
+// ── MIOT-11 NFC guidance ────────────────────────────────────────────────────
+interface NfcGuidance {
+  linkAvailable: boolean;
+  linkUri: string;
+  instructions: string;
+  ndefText: string | null;
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function CrossDeviceTab() {
@@ -111,6 +151,22 @@ export default function CrossDeviceTab() {
   const [transcribing, setTranscribing] = useState(false);
   const [downloadingModel, setDownloadingModel] = useState(false);
   const [transcript, setTranscript] = useState<string | null>(null);
+
+  // KDE Connect (MIOT-10)
+  const [kdeDevices, setKdeDevices] = useState<KdeDevice[]>([]);
+  const [kdeDiscovering, setKdeDiscovering] = useState(false);
+  const [kdePinging, setKdePinging] = useState<string | null>(null);
+  const [kdePingResult, setKdePingResult] = useState<Record<string, boolean>>({});
+
+  // Syncthing (MIOT-12)
+  const [syncCfg, setSyncCfg] = useState({ address: '127.0.0.1:8384', api_key: '' });
+  const [sync, setSync] = useState<SyncthingStatus | null>(null);
+  const [syncConnecting, setSyncConnecting] = useState(false);
+  const [syncBusyFolder, setSyncBusyFolder] = useState<string | null>(null);
+
+  // NFC guidance (MIOT-11)
+  const [nfc, setNfc] = useState<NfcGuidance | null>(null);
+
   const fetchStatus = useCallback(async () => {
     try {
       const s = await invoke<PhoneLinkStatus>('get_phone_link_status');
@@ -170,13 +226,27 @@ export default function CrossDeviceTab() {
     }
   }, []);
 
+  const fetchNfc = useCallback(async () => {
+    try {
+      const g = await invoke<NfcGuidance>('nfc_guidance', {
+        displayName: 'MiControl',
+        fingerprint: null,
+        pairUri: 'https://aka.ms/phone-link',
+      });
+      setNfc(g);
+    } catch {
+      setNfc(null);
+    }
+  }, []);
+
   useEffect(() => {
     void fetchStatus();
     void fetchPresence();
     void fetchReceiver();
     void fetchCamera();
     void fetchTranscription();
-  }, [fetchStatus, fetchPresence, fetchReceiver, fetchCamera, fetchTranscription]);
+    void fetchNfc();
+  }, [fetchStatus, fetchPresence, fetchReceiver, fetchCamera, fetchTranscription, fetchNfc]);
 
   const handleDiscover = async () => {
     setDiscovering(true);
@@ -268,6 +338,74 @@ export default function CrossDeviceTab() {
       setErrorMsg(String(e));
     } finally {
       setTranscribing(false);
+    }
+  };
+
+  const handleKdeDiscover = async () => {
+    setKdeDiscovering(true);
+    setKdePingResult({});
+    try {
+      const found = await invoke<KdeDevice[]>('kde_discover', { seconds: 3 });
+      setKdeDevices(found);
+      if (found.length === 0) {
+        setKdePingResult({ _none: false });
+      }
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setKdeDiscovering(false);
+    }
+  };
+
+  const handleKdePing = async (dev: KdeDevice) => {
+    setKdePinging(dev.deviceId);
+    try {
+      const ok = await invoke<boolean>('kde_ping', { device: dev });
+      setKdePingResult((r) => ({ ...r, [dev.deviceId]: ok }));
+    } catch {
+      setKdePingResult((r) => ({ ...r, [dev.deviceId]: false }));
+    } finally {
+      setKdePinging(null);
+    }
+  };
+
+  const handleSyncConnect = async () => {
+    setSyncConnecting(true);
+    try {
+      const cfg = { address: syncCfg.address, apiKey: syncCfg.api_key };
+      const st = await invoke<SyncthingStatus>('syncthing_status', { config: cfg });
+      setSync(st);
+    } catch (e) {
+      setErrorMsg(String(e));
+      setSync(null);
+    } finally {
+      setSyncConnecting(false);
+    }
+  };
+
+  const handleSyncToggleFolder = async (f: SyncthingFolder) => {
+    setSyncBusyFolder(f.id);
+    try {
+      const cfg = { address: syncCfg.address, apiKey: syncCfg.api_key };
+      await invoke('syncthing_set_folder', {
+        config: cfg,
+        folderId: f.id,
+        paused: !f.paused,
+      });
+      const st = await invoke<SyncthingStatus>('syncthing_status', { config: cfg });
+      setSync(st);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setSyncBusyFolder(null);
+    }
+  };
+
+  const handleNfcOpenLink = async () => {
+    try {
+      await invoke('open_phone_link_settings');
+    } catch (e) {
+      setErrorMsg(String(e));
     }
   };
 
@@ -827,6 +965,237 @@ export default function CrossDeviceTab() {
             {transcript || t('crossDevice.transcribeNoResult')}
           </div>
         )}
+      </div>
+
+      {/* KDE Connect (MIOT-10) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>🔗 {t('crossDevice.kdeTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.kdeDesc')}
+        </p>
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+          <button
+            className="btn btn-secondary"
+            onClick={handleKdeDiscover}
+            disabled={kdeDiscovering}
+          >
+            {kdeDiscovering
+              ? t('crossDevice.kdeDiscovering')
+              : `🔎 ${t('crossDevice.kdeDiscover')}`}
+          </button>
+          {kdeDevices.length > 0 && (
+            <span className="text-muted" style={{ fontSize: 12 }}>
+              {kdeDevices.length} {kdeDevices.length === 1 ? 'device' : 'devices'}
+            </span>
+          )}
+        </div>
+
+        {kdePingResult._none === false && kdeDevices.length === 0 && (
+          <p className="text-muted" style={{ fontSize: 13, marginBottom: 8 }}>
+            {t('crossDevice.kdeNoDevices')}
+          </p>
+        )}
+
+        {kdeDevices.map((dev) => (
+          <div
+            key={dev.deviceId}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              marginBottom: 8,
+              padding: 10,
+              borderRadius: 8,
+              border: '1px solid var(--border)',
+            }}
+          >
+            <span style={{ fontSize: 22 }}>📱</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600 }}>{dev.deviceName}</div>
+              <div className="text-muted" style={{ fontSize: 12 }}>
+                {dev.deviceType} · {dev.addr}:{dev.tcpPort || 1716} · {t('crossDevice.kdeLinkHint')}
+              </div>
+            </div>
+            <button
+              className="btn btn-primary"
+              onClick={() => void handleKdePing(dev)}
+              disabled={kdePinging !== null}
+            >
+              {kdePinging === dev.deviceId ? t('crossDevice.kdePinging') : t('crossDevice.kdePing')}
+            </button>
+            {kdePingResult[dev.deviceId] === true && (
+              <span className="status-ok" style={{ fontSize: 12 }}>
+                {t('crossDevice.kdePingSent')}
+              </span>
+            )}
+            {kdePingResult[dev.deviceId] === false && (
+              <span className="status-warn" style={{ fontSize: 12 }}>
+                {t('crossDevice.kdePingFail')}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* NFC pairing guidance (MIOT-11) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>📶 {t('crossDevice.nfcTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.nfcDesc')}
+        </p>
+
+        {nfc ? (
+          <>
+            <p style={{ fontSize: 13, marginBottom: 8 }}>{nfc.instructions}</p>
+            {nfc.ndefText && (
+              <div className="alert alert-success" style={{ marginBottom: 8, fontSize: 13 }}>
+                ✓ {t('crossDevice.nfcTagReady')}
+              </div>
+            )}
+            <button className="btn btn-primary" onClick={handleNfcOpenLink}>
+              🔗 {t('crossDevice.nfcOpenLink')}
+            </button>
+            {nfc.linkUri && (
+              <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
+                {t('crossDevice.nfcPairUri')}: {nfc.linkUri}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-muted">{t('crossDevice.nfcNotAvailable')}</p>
+        )}
+      </div>
+
+      {/* Syncthing folder sync (MIOT-12) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>🔄 {t('crossDevice.syncTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.syncDesc')}
+        </p>
+
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexWrap: 'wrap',
+            marginBottom: 12,
+          }}
+        >
+          <input
+            type="text"
+            className="text-input"
+            placeholder={t('crossDevice.syncAddress')}
+            value={syncCfg.address}
+            onChange={(e) => setSyncCfg((c) => ({ ...c, address: e.target.value }))}
+            style={{ width: 200, fontSize: 12 }}
+          />
+          <input
+            type="password"
+            className="text-input"
+            placeholder={t('crossDevice.syncApiKey')}
+            value={syncCfg.api_key}
+            onChange={(e) => setSyncCfg((c) => ({ ...c, api_key: e.target.value }))}
+            style={{ width: 200, fontSize: 12 }}
+          />
+          <button className="btn btn-primary" onClick={handleSyncConnect} disabled={syncConnecting}>
+            {syncConnecting ? t('crossDevice.syncConnecting') : t('crossDevice.syncConnect')}
+          </button>
+        </div>
+        <p className="text-muted" style={{ fontSize: 12, marginBottom: 8 }}>
+          {t('crossDevice.syncApiKeyHint')}
+        </p>
+
+        {sync &&
+          (sync.reachable ? (
+            <>
+              <div className="info-grid">
+                <div className="info-row">
+                  <span className="info-label">{t('crossDevice.syncReachable')}</span>
+                  <span className="info-value status-ok">✓</span>
+                </div>
+                {sync.version && (
+                  <div className="info-row">
+                    <span className="info-label">{t('crossDevice.syncVersion')}</span>
+                    <span className="info-value">{sync.version}</span>
+                  </div>
+                )}
+                {sync.deviceId && (
+                  <div className="info-row">
+                    <span className="info-label">{t('crossDevice.syncDeviceId')}</span>
+                    <span className="info-value" style={{ fontSize: 11 }}>
+                      {sync.deviceId}
+                    </span>
+                  </div>
+                )}
+                {sync.uptimeSecs != null && (
+                  <div className="info-row">
+                    <span className="info-label">{t('crossDevice.syncUptime')}</span>
+                    <span className="info-value">{sync.uptimeSecs}s</span>
+                  </div>
+                )}
+              </div>
+
+              <h4 style={{ marginTop: 12, marginBottom: 8, fontSize: 14 }}>
+                {t('crossDevice.syncFolders')}
+              </h4>
+              {sync.folders.length === 0 ? (
+                <p className="text-muted" style={{ fontSize: 12 }}>
+                  {t('crossDevice.syncNoFolders')}
+                </p>
+              ) : (
+                sync.folders.map((f) => (
+                  <div
+                    key={f.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      marginBottom: 8,
+                      padding: 10,
+                      borderRadius: 8,
+                      border: '1px solid var(--border)',
+                    }}
+                  >
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600 }}>{f.label || f.id}</div>
+                      <div className="text-muted" style={{ fontSize: 12 }}>
+                        {f.path}
+                      </div>
+                    </div>
+                    <span
+                      className={f.paused ? 'text-muted' : 'status-ok'}
+                      style={{ fontSize: 12 }}
+                    >
+                      {f.paused ? '⏸' : '▶'}
+                    </span>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => void handleSyncToggleFolder(f)}
+                      disabled={syncBusyFolder !== null}
+                    >
+                      {syncBusyFolder === f.id
+                        ? '…'
+                        : f.paused
+                          ? t('crossDevice.syncResume')
+                          : t('crossDevice.syncPause')}
+                    </button>
+                  </div>
+                ))
+              )}
+            </>
+          ) : (
+            <div className="alert alert-warn" style={{ fontSize: 13 }}>
+              {t('crossDevice.syncUnreachable')}
+              {sync.error && (
+                <span className="text-muted" style={{ fontSize: 12 }}>
+                  {' '}
+                  — {sync.error}
+                </span>
+              )}
+            </div>
+          ))}
       </div>
 
       {/* Info Card */}
