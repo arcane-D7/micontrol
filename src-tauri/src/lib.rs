@@ -469,6 +469,10 @@ pub fn run() {
             commands::crossdevice::localsend_receiver_start,
             commands::crossdevice::localsend_receiver_stop,
             commands::crossdevice::localsend_receiver_status,
+            // Cross-device (MIOT-07) — scrcpy phone-camera webcam
+            commands::crossdevice::scrcpy_status,
+            commands::crossdevice::scrcpy_start,
+            commands::crossdevice::scrcpy_stop,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,

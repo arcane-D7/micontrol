@@ -38,6 +38,7 @@ pub mod phone_link;
 pub mod power_listener;
 pub mod processes;
 pub mod scenario_rules;
+pub mod scrcpy_bridge;
 pub mod screen_cast;
 pub mod security_scan;
 pub mod startup;

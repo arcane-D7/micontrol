@@ -6,6 +6,7 @@
 
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
 use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
+use crate::hw::scrcpy_bridge::ScrcpyStatus;
 use std::time::Duration;
 
 /// Current BLE presence state (phone near/far/unknown + telemetry).
@@ -76,4 +77,23 @@ pub async fn localsend_receiver_stop() -> Result<ReceiverStatus, String> {
 #[tauri::command]
 pub async fn localsend_receiver_status() -> Result<ReceiverStatus, String> {
     Ok(crate::hw::localsend::receiver_status())
+}
+
+/// scrcpy orchestration (MIOT-07): turn the phone camera into a webcam.
+/// Returns a friendly `not-installed` state when the binary is missing.
+#[tauri::command]
+pub async fn scrcpy_status() -> Result<ScrcpyStatus, String> {
+    Ok(crate::hw::scrcpy_bridge::status())
+}
+
+/// Start `scrcpy --camera-facing=front` (detached child, PID-tracked).
+#[tauri::command]
+pub async fn scrcpy_start() -> Result<u32, String> {
+    crate::hw::scrcpy_bridge::start_camera()
+}
+
+/// Stop the running scrcpy child process.
+#[tauri::command]
+pub async fn scrcpy_stop() -> Result<(), String> {
+    crate::hw::scrcpy_bridge::stop_camera()
 }
