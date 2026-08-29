@@ -5,6 +5,8 @@
 //! their commands here so the cross-device tab has one command surface.
 
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
+use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
+use std::time::Duration;
 
 /// Current BLE presence state (phone near/far/unknown + telemetry).
 #[tauri::command]
@@ -36,4 +38,42 @@ pub async fn scan_presence_now() -> Result<PresenceStatus, String> {
     // Give the one-off scanner a moment to land a result (best-effort).
     tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
     Ok(crate::hw::ble_presence::get_presence_status())
+}
+
+/// Discover LocalSend peers on the LAN for `seconds` (default 3).
+#[tauri::command]
+pub async fn localsend_discover(seconds: Option<u64>) -> Result<Vec<LocalSendPeer>, String> {
+    let secs = seconds.unwrap_or(3).min(15);
+    Ok(crate::hw::localsend::discover_peers(Duration::from_secs(secs)).await)
+}
+
+/// Send files to a discovered LocalSend peer.
+#[tauri::command]
+pub async fn localsend_send_files(
+    peer: LocalSendPeer,
+    paths: Vec<String>,
+) -> Result<SendReport, String> {
+    crate::hw::localsend::send_files(&peer, &paths).await
+}
+
+/// Start the embedded LocalSend receiver (auto-accept → Downloads).
+#[tauri::command]
+pub async fn localsend_receiver_start() -> Result<ReceiverStatus, String> {
+    let port = crate::hw::localsend::start_receiver()?;
+    let mut status = crate::hw::localsend::receiver_status();
+    status.port = port;
+    Ok(status)
+}
+
+/// Stop the embedded LocalSend receiver.
+#[tauri::command]
+pub async fn localsend_receiver_stop() -> Result<ReceiverStatus, String> {
+    crate::hw::localsend::stop_receiver();
+    Ok(crate::hw::localsend::receiver_status())
+}
+
+/// Current LocalSend receiver status.
+#[tauri::command]
+pub async fn localsend_receiver_status() -> Result<ReceiverStatus, String> {
+    Ok(crate::hw::localsend::receiver_status())
 }

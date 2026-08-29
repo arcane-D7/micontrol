@@ -463,6 +463,12 @@ pub fn run() {
             commands::crossdevice::get_presence_config,
             commands::crossdevice::set_presence_config,
             commands::crossdevice::scan_presence_now,
+            // Cross-device (MIOT-06) — LocalSend LAN file transfer
+            commands::crossdevice::localsend_discover,
+            commands::crossdevice::localsend_send_files,
+            commands::crossdevice::localsend_receiver_start,
+            commands::crossdevice::localsend_receiver_stop,
+            commands::crossdevice::localsend_receiver_status,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,
