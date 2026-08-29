@@ -153,6 +153,43 @@ pub fn open_phone_link_settings() -> HardwareResult<()> {
     ))
 }
 
+/// Launch the Phone Link pairing flow via the `ms-phone-link:` deep link.
+///
+/// The NFC handshake builds URIs like
+/// `ms-phone-link:pairing?pc=MiControl` which open the Phone Link app's
+/// pairing wizard directly (the reliable path the phone's Link-to-Windows
+/// app expects). Only `ms-phone-link:` and `ms-phone:` schemes are allowed;
+/// anything else is rejected to avoid opening arbitrary protocols.
+pub fn launch_phone_link_pairing(uri: &str) -> HardwareResult<()> {
+    if uri.is_empty() {
+        return Err(HardwareError::Other(
+            "Empty Phone Link pairing URI".to_string(),
+        ));
+    }
+    let lower = uri.to_ascii_lowercase();
+    if !lower.starts_with("ms-phone-link:") && !lower.starts_with("ms-phone:") {
+        return Err(HardwareError::Other(format!(
+            "Refusing to open non-Phone-Link URI: {uri}"
+        )));
+    }
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", uri])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| {
+                HardwareError::Other(format!("Failed to open Phone Link pairing link: {e}"))
+            })?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    Err(HardwareError::NotSupported(
+        "Phone Link only available on Windows".into(),
+    ))
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 #[cfg(windows)]
@@ -165,7 +202,7 @@ fn get_package_version() -> Option<String> {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Get-AppxPackage *YourPhone* | Select-Object -ExpandProperty Version",
+            "Get-AppxPackage -Name 'Microsoft.YourPhone','Microsoft.PhoneExperience' | Select-Object -First 1 -ExpandProperty Version",
         ])
         .creation_flags(0x0800_0000)
         .output()
@@ -179,42 +216,181 @@ fn get_package_version() -> Option<String> {
     }
 }
 
+/// Resolve the Phone Link package local-app-data directory.
+///
+/// Phone Link stores pairing metadata in
+/// `%LOCALAPPDATA%\Packages\Microsoft.YourPhone_*\LocalCache\DeviceMetadataStorage.json`
+/// (the same file the app uses). On new Windows 11 builds the package may be
+/// `Microsoft.PhoneExperience_*`.
+#[cfg(windows)]
+fn phone_link_package_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)?;
+    let packages = base.join("Packages");
+    let names = ["Microsoft.YourPhone", "Microsoft.PhoneExperience"];
+    for name in names {
+        if let Ok(entries) = std::fs::read_dir(&packages) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with(name))
+                    .unwrap_or(false)
+                {
+                    return Some(dir);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Minimal serde shapes for `DeviceMetadataStorage.json` (only the fields we
+/// need; unknown fields are ignored by serde).
+#[cfg(windows)]
+#[derive(serde::Deserialize)]
+struct PhoneMetadataEntry {
+    #[serde(rename = "IsLinked")]
+    is_linked: bool,
+    #[serde(rename = "Metadata")]
+    metadata: PhoneDeviceMetadata,
+}
+
+#[cfg(windows)]
+#[derive(serde::Deserialize)]
+struct PhoneDeviceMetadata {
+    /// The JSON nests the real device info under `Metadata` again:
+    /// `Metadata.Metadata.{ClientType,DisplayName,...}`.
+    #[serde(rename = "Metadata")]
+    #[serde(default)]
+    inner: Option<PhoneInnerMetadata>,
+}
+
+#[cfg(windows)]
+#[derive(serde::Deserialize)]
+struct PhoneInnerMetadata {
+    #[serde(rename = "ClientType")]
+    client_type: String,
+    #[serde(rename = "DisplayName")]
+    display_name: String,
+}
+
+/// Read the Phone Link pairing metadata JSON and return
+/// `(is_paired, device_display_name)`.
+///
+/// Observed shape (Windows 11, Phone Link 1.26x):
+/// ```json
+/// { "ConfigVersion":1,
+///   "DeviceMetadatas": {
+///     "<id>": [ {
+///       "Certificates": {...},
+///       "IsLinked": true,
+///       "Metadata": {
+///         "Id":"...","LastSeenTime":"...",
+///         "Metadata": { "ClientType":"LTW","DisplayName":"Xiaomi 14T",... }
+///       }
+///     } ]
+///   }
+/// }
+/// ```
+/// The phone is the entry with `ClientType == "LTW"` (Link to Windows); the
+/// PC itself is `WEA`. We only report paired when the LTW entry is linked.
+/// Pure parser for the `DeviceMetadatas` JSON payload. Testable without fs.
+#[cfg(windows)]
+fn parse_device_metadatas(json: &str) -> (bool, Option<String>) {
+    #[derive(serde::Deserialize)]
+    struct Storage {
+        #[serde(rename = "DeviceMetadatas")]
+        device_metadatas: std::collections::HashMap<String, Vec<PhoneMetadataEntry>>,
+    }
+
+    let storage = match serde_json::from_str::<Storage>(json) {
+        Ok(storage) => storage,
+        Err(_) => return (false, None),
+    };
+
+    let mut paired = false;
+    let mut name: Option<String> = None;
+    for (_id, entries) in storage.device_metadatas {
+        for entry in entries {
+            let Some(inner) = entry.metadata.inner.as_ref() else {
+                continue;
+            };
+            if inner.client_type == "LTW" {
+                // This is the phone entry.
+                if entry.is_linked {
+                    paired = true;
+                    name = Some(inner.display_name.clone());
+                }
+                // The LTW entry is authoritative for the phone — stop here.
+                return (paired, name);
+            }
+            if entry.is_linked && inner.client_type != "WEA" {
+                // Some other linked device (not the PC): remember paired.
+                paired = true;
+            }
+        }
+    }
+    (paired, name)
+}
+
+#[cfg(windows)]
+fn read_paired_metadata() -> (bool, Option<String>) {
+    let Some(dir) = phone_link_package_dir() else {
+        return (false, None);
+    };
+    let path = dir.join("LocalCache").join("DeviceMetadataStorage.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return (false, None),
+    };
+    parse_device_metadatas(&raw)
+}
+
 #[cfg(windows)]
 fn check_paired() -> bool {
+    // Primary: the pairing metadata JSON.
+    let (linked, _) = read_paired_metadata();
+    if linked {
+        return true;
+    }
+
+    // Fallback: legacy registry keys (works on some older builds).
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-
-    // Check multiple possible registry locations
     let keys = [
         r"Software\Microsoft\YourPhone",
         r"Software\Microsoft\Windows\CurrentVersion\PhoneLink",
     ];
-
     for key_path in &keys {
         if let Ok(key) = hkcu.open_subkey(key_path) {
-            // If the key exists and has any values, consider it paired
             let values: Vec<_> = key.enum_values().collect();
             if !values.is_empty() {
                 return true;
             }
         }
     }
-
     false
 }
 
 #[cfg(windows)]
 fn read_paired_device_name() -> Option<String> {
+    // Primary: from the metadata JSON.
+    let (_, name) = read_paired_metadata();
+    if let Some(n) = name {
+        if !n.is_empty() {
+            return Some(n);
+        }
+    }
+
+    // Fallback: legacy registry keys.
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-
-    // Try different possible value names
     let value_names = ["DeviceName", "PairedDeviceName", "PhoneName"];
     let key_paths = [
         r"Software\Microsoft\YourPhone",
         r"Software\Microsoft\Windows\CurrentVersion\PhoneLink",
     ];
-
     for key_path in &key_paths {
         if let Ok(key) = hkcu.open_subkey(key_path) {
             for name in &value_names {
@@ -226,18 +402,19 @@ fn read_paired_device_name() -> Option<String> {
             }
         }
     }
-
     None
 }
 
 #[cfg(windows)]
 fn check_running() -> bool {
+    // The modern Phone Link UI runs as PhoneExperienceHost; older builds
+    // use YourPhoneAppProxy. We check both, non-interactively.
     let output = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Get-Process -Name 'YourPhone' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id",
+            "Get-Process -Name 'PhoneExperienceHost','YourPhoneAppProxy' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id",
         ])
         .creation_flags(0x0800_0000)
         .output();
@@ -265,5 +442,78 @@ mod tests {
     #[test]
     fn test_get_status_does_not_panic() {
         let _ = get_phone_link_status();
+    }
+
+    /// Real observed shape (Phone Link 1.26x, Xiaomi 14T): double-nested
+    /// `Metadata.Metadata`, `IsLinked` outside the inner object, plus a
+    /// `WEA` PC entry. Only windows (uses winreg import); guard with `cfg`.
+    #[cfg(windows)]
+    #[test]
+    fn parses_real_device_metadata_shape() {
+        let json = r#"{
+          "ConfigVersion": 1,
+          "DeviceMetadatas": {
+            "0006BFFDB6667958": [{
+              "Certificates": {"SelfSigned":["skip"]},
+              "IsLinked": true,
+              "Metadata": {
+                "Id": "71caaad7-c77e-4cd7-b363-43b5db234210",
+                "LastSeenTime": "2026-08-26T16:05:30+00:00",
+                "Metadata": {
+                  "ClientType": "WEA",
+                  "ClientVersion": "1.26071.84.0",
+                  "DisplayName": "MF-PC",
+                  "OsName": "Windows",
+                  "OsVersion": "10.0.26200",
+                  "Manufacture": "Unknown",
+                  "ModelName": "Unknown"
+                }
+              }
+            }],
+            "1234567890ABCDEF": [{
+              "Certificates": {"SelfSigned":["skip"]},
+              "IsLinked": true,
+              "Metadata": {
+                "Id": "82cc6c6f-2e4a-4eeb-826d-ab1335b6cf28",
+                "LastSeenTime": "2026-08-26T08:37:00+00:00",
+                "Metadata": {
+                  "ClientType": "LTW",
+                  "ClientVersion": "1.26071.104.0",
+                  "DisplayName": "Xiaomi 14T",
+                  "OsName": "Android",
+                  "OsVersion": "16",
+                  "Manufacture": "Xiaomi",
+                  "ModelName": "2406APNFAG"
+                }
+              }
+            }]
+          }
+        }"#;
+        let (paired, name) = parse_device_metadatas(json);
+        assert!(paired);
+        assert_eq!(name.as_deref(), Some("Xiaomi 14T"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unlinked_phone_returns_not_paired() {
+        let json = r#"{
+          "DeviceMetadatas": {
+            "X": [{ "IsLinked": false, "Metadata": { "Metadata": {
+              "ClientType": "LTW", "DisplayName": "Xiaomi 14T"
+            }}}]
+          }
+        }"#;
+        let (paired, name) = parse_device_metadatas(json);
+        assert!(!paired);
+        assert_eq!(name, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn malformed_json_returns_not_paired() {
+        let (paired, name) = parse_device_metadatas("not json");
+        assert!(!paired);
+        assert_eq!(name, None);
     }
 }
