@@ -12,6 +12,130 @@ use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicU8, Ordering};
 /// retry a DLL that cannot load — avoids a WARN log on every brightness change.
 static IGCL_SET_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
+/// Persistent IGCL session (load-once, never-close).
+///
+/// Intel's ControlLib.dll (IGCL) is NOT designed for repeated
+/// load→ctlInit→…→ctlClose→free cycles: it holds driver-side global state and
+/// spawns internal threads that keep running code from the DLL. Each
+/// load/init/close/free cycle therefore risks an access violation in
+/// `ControlLib.dll_unloaded` (BEX64, fault offset 0x10180) once the DLL image
+/// is unmapped while an internal IGCL thread is still executing inside it —
+/// this is the exact crash that kept killing the app (and the watchdog kept
+/// relaunching it) whenever the adaptive-brightness loop touched the backlight.
+///
+/// Instead of re-loading per call, we initialize **once** and keep the
+/// `Library` + API/device handles alive for the whole process. `ctlClose` is
+/// deliberately never called (control reaches here at most a handful of times
+/// per session anyway) and the `Library` is never dropped — so ControlLib.dll
+/// stays mapped and its internal threads keep their runtime. This converts a
+/// per-operation crash-prone teardown into a stable shared session.
+#[cfg(windows)]
+mod igcl_session {
+    use super::igcl::*;
+    use libloading::Library;
+    use std::sync::{LazyLock, Mutex};
+
+    pub struct IgclSession {
+        /// Keep the loaded Library alive for the whole process so we NEVER
+        /// unload ControlLib.dll (its internal threads keep executing it).
+        #[allow(dead_code)]
+        lib: Library,
+        device: *mut std::ffi::c_void,
+    }
+
+    // SAFETY: the session is opened once at first use; the handles are opaque
+    // IGCL pointers managed by the DLL and only ever used under the same lock.
+    unsafe impl Send for IgclSession {}
+    // SAFETY: all access is serialized by IGCL_LOCK in with_igcl_device_pub.
+    unsafe impl Sync for IgclSession {}
+
+    pub static IGG_SESSION: LazyLock<Mutex<Option<IgclSession>>> =
+        LazyLock::new(|| Mutex::new(None));
+
+    /// Open (or reuse) a persistent IGCL session. Returns the stored handles
+    /// without ever calling `ctlClose` or unloading the library.
+    pub fn get_session() -> Result<(Library, *mut std::ffi::c_void), String> {
+        let mut guard = IGG_SESSION.lock().map_err(|e| e.to_string())?;
+        if let Some(s) = guard.as_ref() {
+            return Ok((
+                unsafe { Library::new(s.path()) }.map_err(|e| e.to_string())?,
+                s.device,
+            ));
+        }
+        // First use: load once and initialize the SDK.
+        let path = s_path();
+        let lib = unsafe { Library::new(&path) }
+            .map_err(|e| format!("LoadLibrary ControlLib.dll: {e}"))?;
+        let ctl_init: libloading::Symbol<FnCtlInit> =
+            unsafe { lib.get(b"ctlInit\0").map_err(|e| e.to_string())? };
+        let mut init_args = CtlInitArgs {
+            size: std::mem::size_of::<CtlInitArgs>() as u32,
+            app_version: 1,
+            flags: 0,
+        };
+        let mut api_handle: CtlApiHandle = std::ptr::null_mut();
+        let rc = unsafe { ctl_init(&mut init_args, &mut api_handle) };
+        if rc != 0 {
+            return Err(format!("ctlInit failed: {rc}"));
+        }
+        let ctl_enumerate: libloading::Symbol<FnCtlEnumerateDevices> = unsafe {
+            lib.get(b"ctlEnumerateDevices\0")
+                .map_err(|e| e.to_string())?
+        };
+        let mut count: u32 = 0;
+        unsafe { ctl_enumerate(api_handle, &mut count, std::ptr::null_mut()) };
+        if count == 0 {
+            return Err("No IGCL devices found".to_string());
+        }
+        let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
+        unsafe { ctl_enumerate(api_handle, &mut count, devices.as_mut_ptr()) };
+        let device = devices[0];
+
+        let s = IgclSession { lib, device };
+        // Re-load for the caller so the stored session keeps its own refcount:
+        // LoadLibrary increments the module refcount and does NOT unload it.
+        let lib_for_caller = unsafe { Library::new(&path) }
+            .map_err(|e| format!("LoadLibrary ControlLib.dll (caller): {e}"))?;
+        *guard = Some(s);
+        Ok((lib_for_caller, device))
+    }
+
+    impl IgclSession {
+        fn path(&self) -> String {
+            // The stored Library keeps the DLL mapped; the caller re-binds
+            // symbols from a fresh handle to the same path.
+            s_path()
+        }
+    }
+
+    fn s_path() -> String {
+        crate::hw::discovery::global_profile()
+            .and_then(|p| p.igcl_dll_path)
+            .unwrap_or_else(|| super::IGCL_DLL.to_string())
+    }
+}
+
+#[cfg(windows)]
+pub fn with_igcl_device_pub<F, T>(f: F) -> HardwareResult<T>
+where
+    F: FnOnce(*mut std::ffi::c_void, &libloading::Library) -> HardwareResult<T>,
+{
+    // Serialize ALL IGCL calls: IGCL/ControlLib is NOT thread-safe. The
+    // brightness loop reads+sets on tokio blocking threads while the frontend
+    // may query brightness simultaneously. Hold the lock for the whole
+    // session-open + op sequence so each IGCL operation is atomic.
+    static IGCL_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _igcl_guard = IGCL_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let (lib, device) = igcl_session::get_session()
+        .map_err(|e| HardwareError::Display(format!("IGCL session: {e}")))?;
+
+    f(device, &lib)
+}
+
 /// S32-003: Set while the Windows display color calibration wizard (dccw.exe)
 /// is open. While set, the adaptive-brightness loop stops touching the
 /// backlight/LUT so the wizard can save its calibration without
@@ -1294,80 +1418,12 @@ mod igcl {
 
     // Function pointer types
     pub type FnCtlInit = unsafe extern "C" fn(*mut CtlInitArgs, *mut CtlApiHandle) -> CtlResult;
-    pub type FnCtlClose = unsafe extern "C" fn(CtlApiHandle) -> CtlResult;
     pub type FnCtlEnumerateDevices =
         unsafe extern "C" fn(CtlApiHandle, *mut u32, *mut CtlDeviceHandle) -> CtlResult;
     pub type FnCtlGetBrightnessSetting =
         unsafe extern "C" fn(CtlDeviceHandle, *mut CtlBrightnessArgs) -> CtlResult;
     pub type FnCtlSetBrightnessSetting =
         unsafe extern "C" fn(CtlDeviceHandle, *mut CtlBrightnessArgs) -> CtlResult;
-}
-
-#[cfg(windows)]
-pub fn with_igcl_device_pub<F, T>(f: F) -> HardwareResult<T>
-where
-    F: FnOnce(*mut std::ffi::c_void, &libloading::Library) -> HardwareResult<T>,
-{
-    use igcl::*;
-    use libloading::Library;
-
-    // Serialize ALL IGCL calls: IGCL/ControlLib is NOT thread-safe. The
-    // brightness loop reads+sets on tokio blocking threads while the frontend
-    // may query brightness simultaneously. Two overlapping ctlInit/ctlClose
-    // sequences caused the BEX64 crash in ControlLib.dll_unloaded (the DLL's
-    // internal global state was torn down by one thread's ctlClose while
-    // another thread was still inside ctlGet/ctlSetBrightnessSetting).
-    // Holding this lock for the whole init→enumerate→f→close sequence makes
-    // each IGCL operation atomic.
-    static IGCL_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _igcl_guard = IGCL_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    unsafe {
-        // SAFETY: IGCL DLL function pointers (ctlInit, ctlEnumerateDevices, ctlClose) are
-        // loaded from the dynamically-linked ControlLib.dll — the Symbol objects guard the
-        // function lifetimes. CtlInitArgs is a POD struct with correct size/alignment.
-        // The api_handle and device pointers are opaque handles managed by IGCL.
-        // Use the IGCL DLL path found during startup discovery; fall back to the system default.
-        let igcl_path = crate::hw::discovery::global_profile()
-            .and_then(|p| p.igcl_dll_path)
-            .unwrap_or_else(|| IGCL_DLL.to_string());
-        let lib = Library::new(&igcl_path).context("Load ControlLib.dll")?;
-
-        let ctl_init: libloading::Symbol<FnCtlInit> = lib.get(b"ctlInit\0").context("ctlInit")?;
-        let ctl_enumerate: libloading::Symbol<FnCtlEnumerateDevices> = lib
-            .get(b"ctlEnumerateDevices\0")
-            .context("ctlEnumerateDevices")?;
-        let ctl_close: libloading::Symbol<FnCtlClose> =
-            lib.get(b"ctlClose\0").context("ctlClose")?;
-
-        let mut init_args = CtlInitArgs {
-            size: std::mem::size_of::<CtlInitArgs>() as u32,
-            app_version: 1,
-            flags: 0,
-        };
-        let mut api_handle: CtlApiHandle = std::ptr::null_mut();
-        let rc = ctl_init(&mut init_args, &mut api_handle);
-        if rc != 0 {
-            return Err(HardwareError::Display(format!("ctlInit failed: {rc}")));
-        }
-
-        let mut count: u32 = 0;
-        ctl_enumerate(api_handle, &mut count, std::ptr::null_mut());
-        if count == 0 {
-            ctl_close(api_handle);
-            return Err(HardwareError::Display("No IGCL devices found".to_string()));
-        }
-        let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
-        ctl_enumerate(api_handle, &mut count, devices.as_mut_ptr());
-
-        let device = devices[0];
-        let result = f(device, &lib);
-        ctl_close(api_handle);
-        result
-    }
 }
 
 #[cfg(windows)]
