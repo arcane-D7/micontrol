@@ -45,6 +45,7 @@ pub mod startup;
 pub mod system_info;
 pub mod thermal;
 pub mod touchpad;
+pub mod transcription;
 pub mod update;
 pub mod wifi;
 #[cfg(windows)]

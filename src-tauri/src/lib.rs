@@ -473,6 +473,10 @@ pub fn run() {
             commands::crossdevice::scrcpy_status,
             commands::crossdevice::scrcpy_start,
             commands::crossdevice::scrcpy_stop,
+            // Cross-device (MIOT-08) — on-device transcription via sherpa-onnx
+            commands::crossdevice::transcription_status,
+            commands::crossdevice::transcription_download_model,
+            commands::crossdevice::transcribe_audio,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,

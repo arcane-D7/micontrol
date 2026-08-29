@@ -7,6 +7,7 @@
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
 use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
 use crate::hw::scrcpy_bridge::ScrcpyStatus;
+use crate::hw::transcription::TranscriptionStatus;
 use std::time::Duration;
 
 /// Current BLE presence state (phone near/far/unknown + telemetry).
@@ -96,4 +97,24 @@ pub async fn scrcpy_start() -> Result<u32, String> {
 #[tauri::command]
 pub async fn scrcpy_stop() -> Result<(), String> {
     crate::hw::scrcpy_bridge::stop_camera()
+}
+
+/// Local transcription status: binary installed? model downloaded?
+#[tauri::command]
+pub async fn transcription_status() -> Result<TranscriptionStatus, String> {
+    Ok(crate::hw::transcription::status())
+}
+
+/// Download the int8 paraformer model into app-data (best-effort, streams
+/// from GitHub releases). Returns the model dir when ready.
+#[tauri::command]
+pub async fn transcription_download_model() -> Result<String, String> {
+    let dir = crate::hw::transcription::download_model()?;
+    Ok(dir.display().to_string())
+}
+
+/// Transcribe a local `.wav` file with sherpa-onnx (on-device, no cloud).
+#[tauri::command]
+pub async fn transcribe_audio(wav_path: String) -> Result<String, String> {
+    crate::hw::transcription::transcribe(&wav_path)
 }
