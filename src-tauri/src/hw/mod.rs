@@ -44,6 +44,7 @@ pub mod scrcpy_bridge;
 pub mod screen_cast;
 pub mod security_scan;
 pub mod startup;
+pub mod syncthing;
 pub mod system_info;
 pub mod thermal;
 pub mod touchpad;

@@ -485,6 +485,11 @@ pub fn run() {
             // Cross-device (MIOT-11) — NFC pairing guidance + NDEF handshake
             commands::crossdevice::nfc_guidance,
             commands::crossdevice::nfc_encode_handshake,
+            // Cross-device (MIOT-12) — Syncthing REST status/folders
+            commands::crossdevice::syncthing_status,
+            commands::crossdevice::syncthing_folders,
+            commands::crossdevice::syncthing_set_folder,
+            commands::crossdevice::syncthing_events,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,
