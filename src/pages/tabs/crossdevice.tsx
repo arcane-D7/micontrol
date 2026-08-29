@@ -61,16 +61,16 @@ interface ScrcpyStatus {
   state: 'not-installed' | 'running' | 'stopped' | 'error';
   pid: number | null;
   error: string | null;
-  install_hint: string;
+  installHint: string;
 }
 
 // ── MIOT-08 transcription ───────────────────────────────────────────────────
 interface TranscriptionStatus {
-  binary_installed: boolean;
-  binary_path: string | null;
-  model_ready: boolean;
-  model_dir: string | null;
-  install_hint: string;
+  binaryInstalled: boolean;
+  binaryPath: string | null;
+  modelReady: boolean;
+  modelDir: string | null;
+  installHint: string;
   missing: string[];
 }
 
@@ -764,7 +764,7 @@ export default function CrossDeviceTab() {
           {t('crossDevice.transcribeDesc')}
         </p>
 
-        {transc && !transc.binary_installed && (
+        {transc && !transc.binaryInstalled && (
           <div className="alert alert-warn" style={{ marginBottom: 8 }}>
             {t('crossDevice.transcribeNotInstalled')}{' '}
             <span className="text-muted" style={{ fontSize: 12 }}>
@@ -794,7 +794,7 @@ export default function CrossDeviceTab() {
           <button
             className="btn btn-primary"
             onClick={handleTranscribe}
-            disabled={transcribing || !wavPath.trim() || !transc?.model_ready}
+            disabled={transcribing || !wavPath.trim() || !transc?.modelReady}
           >
             {transcribing
               ? t('crossDevice.transcribeTranscribing')
@@ -803,16 +803,16 @@ export default function CrossDeviceTab() {
           <button
             className="btn btn-secondary"
             onClick={handleDownloadModel}
-            disabled={downloadingModel || transc?.model_ready}
+            disabled={downloadingModel || transc?.modelReady}
           >
             {downloadingModel
               ? t('crossDevice.transcribeDownloading')
-              : transc?.model_ready
+              : transc?.modelReady
                 ? `✓ ${t('crossDevice.transcribeModelReady')}`
                 : t('crossDevice.transcribeDownloadModel')}
           </button>
         </div>
-        {transc && !transc.model_ready && (
+        {transc && !transc.modelReady && (
           <p className="text-muted" style={{ fontSize: 12 }}>
             {t('crossDevice.transcribeModelMissing')}
           </p>
