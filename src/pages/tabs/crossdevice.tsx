@@ -31,6 +31,21 @@ interface PresenceConfig {
   lock_enabled: boolean;
 }
 
+// BLE discovery modal (MIOT-05 revamp)
+interface BleDevice {
+  name: string;
+  address: string | null;
+  rssi: number | null;
+  paired: boolean;
+  from_scan: boolean;
+}
+
+interface BleScanResult {
+  devices: BleDevice[];
+  scan_ok: boolean;
+  note: string | null;
+}
+
 // ── MIOT-06 LocalSend ───────────────────────────────────────────────────────
 interface LocalSendPeer {
   alias: string;
@@ -112,6 +127,8 @@ interface NfcGuidance {
   linkUri: string;
   instructions: string;
   ndefText: string | null;
+  versionNote: string | null;
+  storeUri: string | null;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -132,6 +149,11 @@ export default function CrossDeviceTab() {
   });
   const [scanning, setScanning] = useState(false);
   const [presenceSaved, setPresenceSaved] = useState(false);
+  // BLE discovery modal (MIOT-05 revamp)
+  const [scanModalOpen, setScanModalOpen] = useState(false);
+  const [scanResult, setScanResult] = useState<BleScanResult | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [connectedPhone, setConnectedPhone] = useState<string | null>(null);
 
   // LocalSend (MIOT-06)
   const [peers, setPeers] = useState<LocalSendPeer[]>([]);
@@ -463,12 +485,51 @@ export default function CrossDeviceTab() {
   };
 
   const handleScanNow = async () => {
+    // Open the discovery modal and run the scan immediately.
+    setScanModalOpen(true);
+    setScanError(null);
+    setScanResult(null);
     setScanning(true);
     try {
-      const st = await invoke<PresenceStatus>('scan_presence_now');
+      const res = await invoke<BleScanResult>('ble_discover', { seconds: 6 });
+      setScanResult(res);
+    } catch (e) {
+      setScanError(String(e));
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  // User picked a device from the modal → save as presence config (auto).
+  const handleDeviceSelect = async (dev: BleDevice) => {
+    try {
+      const cfg: PresenceConfig = {
+        enabled: true,
+        phone_mac: dev.address ?? presenceCfg.phone_mac,
+        phone_name: dev.name || presenceCfg.phone_name,
+        rssi_lock_dbm: presenceCfg.rssi_lock_dbm,
+        lock_enabled: presenceCfg.lock_enabled,
+      };
+      await invoke('set_presence_config', { config: cfg });
+      setPresenceCfg(cfg);
+      setConnectedPhone(dev.name || dev.address);
+      setScanModalOpen(false);
+      const st = await invoke<PresenceStatus>('get_presence_status');
       setPresence(st);
     } catch (e) {
       setErrorMsg(String(e));
+    }
+  };
+
+  const handleRescan = async () => {
+    setScanError(null);
+    setScanResult(null);
+    setScanning(true);
+    try {
+      const res = await invoke<BleScanResult>('ble_discover', { seconds: 6 });
+      setScanResult(res);
+    } catch (e) {
+      setScanError(String(e));
     } finally {
       setScanning(false);
     }
@@ -671,6 +732,29 @@ export default function CrossDeviceTab() {
           }}
         />
 
+        {/* Connected state + scan now button — always available */}
+        {connectedPhone && (
+          <p className="status-ok" style={{ fontSize: 13, marginTop: 10 }}>
+            📱 {t('crossDevice.presenceConnected', { phone: connectedPhone })}
+          </p>
+        )}
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12 }}>
+          <button className="btn btn-primary" onClick={handleScanNow} disabled={scanning}>
+            📡 {scanning ? '…' : t('crossDevice.presenceScanNow')}
+          </button>
+          {presenceCfg.enabled && (
+            <button className="btn btn-secondary" onClick={handleSavePresence}>
+              💾 {t('crossDevice.presenceSave')}
+            </button>
+          )}
+        </div>
+
+        {presenceSaved && (
+          <p className="status-ok" style={{ fontSize: 13 }}>
+            ✓ {t('crossDevice.presenceSaved')}
+          </p>
+        )}
+
         {presenceCfg.enabled && (
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div>
@@ -770,22 +854,7 @@ export default function CrossDeviceTab() {
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 4 }}>
-              <button className="btn btn-primary" onClick={handleSavePresence}>
-                💾 {t('crossDevice.presenceSave')}
-              </button>
-              <button className="btn btn-secondary" onClick={handleScanNow} disabled={scanning}>
-                📡 {scanning ? '…' : t('crossDevice.presenceScanNow')}
-              </button>
-            </div>
-
-            {presenceSaved && (
-              <p className="status-ok" style={{ fontSize: 13 }}>
-                ✓ {t('crossDevice.presenceSaved')}
-              </p>
-            )}
-
-            {presenceCfg.enabled && !presenceCfg.phone_mac && !presenceCfg.phone_name && (
+            {!presenceCfg.phone_mac && !presenceCfg.phone_name && (
               <p className="text-muted" style={{ fontSize: 12 }}>
                 {t('crossDevice.presenceNoPhone')}
               </p>
@@ -794,7 +863,169 @@ export default function CrossDeviceTab() {
         )}
       </div>
 
-      {/* LocalSend — LAN file transfer (MIOT-06) */}
+      {/* BLE discovery modal (MIOT-05 revamp): auto-detection picker */}
+      {scanModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9999,
+            background: 'rgba(0,0,0,0.55)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+          onClick={() => {
+            if (!scanning) setScanModalOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('crossDevice.presenceScanModalTitle')}
+            style={{
+              background: 'var(--color-surface, #1e1e2e)',
+              border: '1px solid var(--color-border, rgba(255,255,255,0.08))',
+              borderRadius: 12,
+              padding: 20,
+              width: 560,
+              maxWidth: '92vw',
+              maxHeight: '75vh',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 24px 64px rgba(0,0,0,0.6)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 8,
+              }}
+            >
+              <div style={{ fontWeight: 600, fontSize: 15 }}>
+                {t('crossDevice.presenceScanModalTitle')}
+              </div>
+              <button
+                onClick={() => setScanModalOpen(false)}
+                disabled={scanning}
+                aria-label="Close"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: 'var(--color-text-dim)',
+                  fontSize: 18,
+                  lineHeight: 1,
+                  padding: '0 4px',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-muted" style={{ fontSize: 12, marginBottom: 12 }}>
+              {t('crossDevice.presenceScanModalDesc')}
+            </p>
+
+            {scanning ? (
+              <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-dim)' }}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>📡</div>
+                {t('crossDevice.presenceScanModalSearching')}
+              </div>
+            ) : scanError ? (
+              <div style={{ padding: 16, color: 'var(--color-danger, #ef4444)', fontSize: 13 }}>
+                {t('crossDevice.presenceScanModalError')}: {scanError}
+              </div>
+            ) : scanResult && scanResult.devices.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 24, color: 'var(--color-text-dim)' }}>
+                {t('crossDevice.presenceScanModalEmpty')}
+              </div>
+            ) : (
+              scanResult && (
+                <div style={{ overflowY: 'auto', flex: 1 }}>
+                  {/* Paired section */}
+                  {scanResult.devices.filter((d) => d.paired).length > 0 && (
+                    <>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: 'var(--color-text-dim)',
+                          margin: '8px 0 4px',
+                        }}
+                      >
+                        {t('crossDevice.presenceScanModalPaired')}
+                      </div>
+                      {scanResult.devices
+                        .filter((d) => d.paired)
+                        .map((d) => (
+                          <DeviceRow
+                            key={`p-${d.address ?? d.name}`}
+                            dev={d}
+                            onSelect={() => void handleDeviceSelect(d)}
+                            selectLabel={t('crossDevice.presenceScanModalConnect')}
+                          />
+                        ))}
+                    </>
+                  )}
+                  {/* Discovered section */}
+                  {scanResult.devices.filter((d) => !d.paired && d.from_scan).length > 0 && (
+                    <>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: 'var(--color-text-dim)',
+                          margin: '8px 0 4px',
+                        }}
+                      >
+                        {t('crossDevice.presenceScanModalFromScan')}
+                      </div>
+                      {scanResult.devices
+                        .filter((d) => !d.paired && d.from_scan)
+                        .map((d) => (
+                          <DeviceRow
+                            key={`s-${d.address ?? d.name}`}
+                            dev={d}
+                            onSelect={() => void handleDeviceSelect(d)}
+                            selectLabel={t('crossDevice.presenceScanModalConnect')}
+                          />
+                        ))}
+                    </>
+                  )}
+                </div>
+              )
+            )}
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 8,
+                marginTop: 14,
+                borderTop: '1px solid var(--color-border, rgba(255,255,255,0.08))',
+                paddingTop: 12,
+              }}
+            >
+              <span className="text-muted" style={{ fontSize: 11, alignSelf: 'center', flex: 1 }}>
+                {t('crossDevice.presenceScanModalNote')}
+              </span>
+              <button
+                className="btn btn-secondary"
+                onClick={() => void handleRescan()}
+                disabled={scanning}
+              >
+                🔄 {t('crossDevice.presenceScanModalRescan')}
+              </button>
+              <button className="btn btn-secondary" onClick={() => setScanModalOpen(false)}>
+                {t('crossDevice.presenceScanModalCancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="card" style={{ marginBottom: 16 }}>
         <h3>📡 {t('crossDevice.lsTitle')}</h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
@@ -1144,9 +1375,31 @@ export default function CrossDeviceTab() {
                 ✓ {t('crossDevice.nfcTagReady')}
               </div>
             )}
-            <button className="btn btn-primary" onClick={handleNfcOpenLink}>
-              🔗 {t('crossDevice.nfcOpenLink')}
-            </button>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+              <button className="btn btn-primary" onClick={handleNfcOpenLink}>
+                🔗 {t('crossDevice.nfcOpenLink')}
+              </button>
+              {nfc.storeUri && (
+                <a
+                  className="btn btn-secondary"
+                  href={nfc.storeUri}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  🛒 {t('crossDevice.nfcUpdateStore')}
+                </a>
+              )}
+            </div>
+            {status?.package_version && (
+              <p className="text-muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                {t('crossDevice.nfcPcVersion')}: <code>{status.package_version}</code>
+              </p>
+            )}
+            {nfc.versionNote && (
+              <div className="alert alert-warn" style={{ fontSize: 12, marginBottom: 8 }}>
+                ⚠️ {nfc.versionNote}
+              </div>
+            )}
             {nfc.linkUri && (
               <p
                 className="text-muted no-overflow-wrap"
@@ -1298,5 +1551,51 @@ export default function CrossDeviceTab() {
         <p className="text-muted">{t('crossDevice.installHint')}</p>
       </div>
     </>
+  );
+}
+
+// ── BLE device row inside the discovery modal ───────────────────────────────
+function DeviceRow({
+  dev,
+  onSelect,
+  selectLabel,
+}: {
+  dev: BleDevice;
+  onSelect: () => void;
+  selectLabel: string;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        marginBottom: 8,
+        padding: 10,
+        borderRadius: 8,
+        border: '1px solid var(--border)',
+      }}
+    >
+      <div style={{ fontSize: 20 }}>{dev.paired ? '📱' : '📶'}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontWeight: 600,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {dev.name}
+        </div>
+        <div className="text-muted" style={{ fontSize: 12 }}>
+          {dev.address ?? '—'}
+          {dev.rssi !== null && <span style={{ marginLeft: 8 }}>{dev.rssi} dBm</span>}
+        </div>
+      </div>
+      <button className="btn btn-primary" onClick={onSelect} style={{ flexShrink: 0 }}>
+        {selectLabel}
+      </button>
+    </div>
   );
 }

@@ -5,6 +5,7 @@
 //! their commands here so the cross-device tab has one command surface.
 
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
+use crate::hw::ble_scan::BleScanResult;
 use crate::hw::kde_connect::{KdeDevice, KdeMessage};
 use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
 use crate::hw::nfc_pairing::{NfcGuidance, NfcHandshake};
@@ -43,6 +44,15 @@ pub async fn scan_presence_now() -> Result<PresenceStatus, String> {
     // Give the one-off scanner a moment to land a result (best-effort).
     tokio::time::sleep(std::time::Duration::from_millis(6000)).await;
     Ok(crate::hw::ble_presence::get_presence_status())
+}
+
+/// Discover BLE devices for the pairing modal: Windows-paired devices
+/// (primary, from WinRT `DeviceInformation`) + a short active scan.
+/// `seconds` caps the active scan (default 5, clamped ≤ 20).
+#[tauri::command]
+pub async fn ble_discover(seconds: Option<u64>) -> Result<BleScanResult, String> {
+    let secs = seconds.unwrap_or(5).clamp(1, 20);
+    Ok(crate::hw::ble_scan::discover_devices(secs).await)
 }
 
 /// Discover LocalSend peers on the LAN for `seconds` (default 3).

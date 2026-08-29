@@ -168,6 +168,12 @@ pub struct NfcGuidance {
     pub instructions: String,
     /// The NDEF text record bytes (base64) the frontend can show as QR/text.
     pub ndef_text: Option<String>,
+    /// Version-mismatch note: the Phone Link protocol compares its own app
+    /// versions between PC and phone and refuses pairing when they differ.
+    /// This note explains that and what to do (update both apps).
+    pub version_note: Option<String>,
+    /// Microsoft Store app link to update Phone Link on the PC (windows).
+    pub store_uri: Option<String>,
 }
 
 /// Build pairing guidance for the current device.
@@ -195,6 +201,22 @@ pub fn guidance(
             .ok()
     };
     let link_uri = format!("ms-phone-link:pairing?pc={}", url_encode(display_name));
+    // Phone Link mismatched-version notice: the "Link to Windows" app on the
+    // phone refuses the pairing when its version differs from the Phone Link
+    // app on the PC. Both sides must be updated. We surface this proactively
+    // because it's the single most common "tag read but nothing happens /
+    // version error" failure.
+    let version_note = Some(
+        "The phone may show \"devices have different software versions\" when \
+reading this tag. That is a Phone Link version check, not a problem with the \
+tag itself. Fix it by updating both apps: on the phone (Link to Windows, via \
+Google Play / app store) and on this PC (Phone Link, via Microsoft Store)."
+            .to_string(),
+    );
+    // Modern Windows: the Microsoft Store page for Phone Link.
+    let store_uri = Some(
+        "https://apps.microsoft.com/detail/9NMPJ99VJBWV".to_string(), // Phone Link
+    );
     NfcGuidance {
         link_available: pair_uri.is_some() && !pair_uri.unwrap_or_default().is_empty(),
         // Keep the well-known scheme regardless; UI decides when to show.
@@ -205,6 +227,8 @@ If nothing happens, enable NFC in phone Settings → Connection & sharing \
 → NFC, then retry."
             .to_string(),
         ndef_text,
+        version_note,
+        store_uri,
     }
 }
 
