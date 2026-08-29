@@ -70,6 +70,53 @@ pub fn find_binary() -> Result<Option<PathBuf>, String> {
     })
 }
 
+/// Install scrcpy via winget (Windows).
+///
+/// Runs `winget install --id Genymobile.scrcpy --exact ...` and captures the
+/// full output. winget writes progress to stderr; on success the binary
+/// becomes available (a fresh PATH lookup picks it up). The caller is
+/// expected to invoke this on a blocking task (it can take a minute).
+#[cfg(windows)]
+pub fn install_scrcpy() -> Result<(), String> {
+    let out = Command::new("winget")
+        .args([
+            "install",
+            "--id",
+            "Genymobile.scrcpy",
+            "--exact",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Failed to run winget (is it installed?): {e}"))?;
+
+    let combined = String::from_utf8_lossy(&out.stdout).trim().to_string()
+        + String::from_utf8_lossy(&out.stderr).trim();
+    if out.status.success() {
+        Ok(())
+    } else {
+        let code = out
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into());
+        let detail = if combined.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", combined.chars().take(600).collect::<String>())
+        };
+        Err(format!("winget exited with code {code}{detail}"))
+    }
+}
+
+/// Install scrcpy via winget (non-Windows unsupported).
+#[cfg(not(windows))]
+pub fn install_scrcpy() -> Result<(), String> {
+    Err("scrcpy auto-install is only available on Windows".into())
+}
+
 fn app_data_dir() -> Result<PathBuf, String> {
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)

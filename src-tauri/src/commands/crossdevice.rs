@@ -102,6 +102,14 @@ pub async fn scrcpy_stop() -> Result<(), String> {
     crate::hw::scrcpy_bridge::stop_camera()
 }
 
+/// Install scrcpy via winget (background task; may take a minute).
+#[tauri::command]
+pub async fn scrcpy_install() -> Result<(), String> {
+    tokio::task::spawn_blocking(crate::hw::scrcpy_bridge::install_scrcpy)
+        .await
+        .map_err(|e| format!("install task failed: {e}"))?
+}
+
 /// Local transcription status: binary installed? model downloaded?
 #[tauri::command]
 pub async fn transcription_status() -> Result<TranscriptionStatus, String> {
@@ -113,6 +121,16 @@ pub async fn transcription_status() -> Result<TranscriptionStatus, String> {
 #[tauri::command]
 pub async fn transcription_download_model() -> Result<String, String> {
     let dir = crate::hw::transcription::download_model()?;
+    Ok(dir.display().to_string())
+}
+
+/// Install the sherpa-onnx CLI (downloads the official Windows build into
+/// app-data — not on winget). Runs on a blocking task.
+#[tauri::command]
+pub async fn transcription_install_binary() -> Result<String, String> {
+    let dir = tokio::task::spawn_blocking(crate::hw::transcription::install_binary)
+        .await
+        .map_err(|e| format!("install task failed: {e}"))??;
     Ok(dir.display().to_string())
 }
 
@@ -170,6 +188,13 @@ pub fn nfc_encode_handshake(handshake: NfcHandshake) -> Result<String, String> {
     let rec = crate::hw::nfc_pairing::build_handshake_record(&handshake)?;
     use base64::Engine;
     Ok(base64::engine::general_purpose::STANDARD.encode(rec.encode()))
+}
+
+/// Open the Phone Link pairing wizard via the `ms-phone-link:` deep link
+/// (built by `nfc_guidance`). Safe: only Phone-Link schemes are allowed.
+#[tauri::command]
+pub fn nfc_open_link(uri: String) -> Result<(), String> {
+    crate::hw::phone_link::launch_phone_link_pairing(&uri).map_err(|e| e.to_string())
 }
 
 /// Syncthing: fetch the compact status (reachable? version? folders?).

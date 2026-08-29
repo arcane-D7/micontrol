@@ -38,6 +38,17 @@ pub enum ModelKind {
     Whisper,
 }
 
+/// sherpa-onnx is not on winget; we ship a pinned Windows x64 static build
+/// from the official GitHub releases. Used by `install_binary()` and the
+/// status hint.
+///
+/// Asset layout (v1.13.6, verified): the tarball contains a `bin/` dir with
+/// `sherpa-onnx.exe` (+ DLLs on shared builds; the static MT build is
+/// fully standalone).
+pub const BIN_VERSION: &str = "v1.13.6";
+pub const BIN_ASSET: &str = "sherpa-onnx-v1.13.6-win-x64-static-MT-Release.tar.bz2";
+pub const BIN_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-v1.13.6-win-x64-static-MT-Release.tar.bz2";
+
 /// App-data locations for the downloaded assets.
 pub fn model_dir() -> Result<PathBuf, String> {
     let base = std::env::var_os("APPDATA")
@@ -50,7 +61,8 @@ pub fn model_dir() -> Result<PathBuf, String> {
         .join(MODEL_SUBDIR))
 }
 
-/// Detect the `sherpa-onnx` CLI on PATH. Returns `Ok(None)` when absent.
+/// Detect the `sherpa-onnx` CLI on PATH **or** in MiControl's app-data bin
+/// dir (where `install_binary()` puts it). Returns `Ok(None)` when absent.
 pub fn find_binary() -> Result<Option<PathBuf>, String> {
     let exe = if cfg!(windows) {
         "sherpa-onnx.exe"
@@ -61,7 +73,21 @@ pub fn find_binary() -> Result<Option<PathBuf>, String> {
         .arg("--version")
         .output()
         .map_err(|e| format!("failed to probe sherpa-onnx: {e}"))?;
-    Ok(out.status.success().then(|| PathBuf::from(exe)))
+    if out.status.success() {
+        return Ok(Some(PathBuf::from(exe)));
+    }
+
+    // Fallback: our managed install dir.
+    if let Ok(dir) = binary_dir() {
+        let candidate = dir.join(exe);
+        let out2 = Command::new(&candidate).arg("--version").output();
+        if let Ok(o) = out2 {
+            if o.status.success() {
+                return Ok(Some(candidate));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Build the argv for a local-file transcription. Pure and unit-testable.
@@ -171,10 +197,108 @@ pub fn download_model() -> Result<PathBuf, String> {
     })
 }
 
+/// Install the sherpa-onnx CLI into MiControl's app-data bin dir.
+///
+/// sherpa-onnx is not published on winget, so we download the pinned static
+/// Windows x64 release from GitHub, extract it, and copy the `.exe` into
+/// `%APPDATA%\MiControl\sherpa-onnx\bin`. `find_binary()` is then updated to
+/// also look there (see below).
+pub fn install_binary() -> Result<PathBuf, String> {
+    let bin_dir = binary_dir()?;
+    let exe = bin_dir.join(exe_name());
+    if exe.exists() {
+        return Ok(exe);
+    }
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("create bin dir: {e}"))?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("build runtime: {e}"))?;
+    rt.block_on(async move {
+        let client = reqwest::Client::builder()
+            .user_agent("MiControl/0.2 (sherpa-onnx install)")
+            .build()
+            .map_err(|e| format!("build http client: {e}"))?;
+        let resp = client
+            .get(BIN_URL)
+            .send()
+            .await
+            .map_err(|e| format!("download failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("download returned HTTP {}", resp.status()));
+        }
+        let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
+
+        let tmp = bin_dir.join("sherpa-onnx.tar.bz2");
+        std::fs::write(&tmp, &bytes).map_err(|e| format!("write tarball: {e}"))?;
+
+        let extract_dir = bin_dir.join("extract");
+        std::fs::create_dir_all(&extract_dir).map_err(|e| format!("create extract dir: {e}"))?;
+        let out = Command::new("tar")
+            .current_dir(&extract_dir)
+            .args(["-xjf", tmp.to_str().unwrap_or("sherpa-onnx.tar.bz2")])
+            .output()
+            .map_err(|e| format!("extract failed: {e}"))?;
+        let _ = std::fs::remove_file(&tmp);
+        if !out.status.success() {
+            return Err(format!(
+                "tar extract failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+
+        // Locate the exe inside the extracted tree (bin/ or root).
+        let found = find_exe_in_dir(&extract_dir);
+        let Some(src) = found else {
+            let _ = std::fs::remove_dir_all(&extract_dir);
+            return Err("sherpa-onnx.exe not found in the downloaded archive layout".into());
+        };
+        std::fs::rename(&src, &exe).map_err(|e| format!("move sherpa-onnx.exe: {e}"))?;
+        let _ = std::fs::remove_dir_all(&extract_dir);
+        Ok(exe)
+    })
+}
+
+/// `%APPDATA%\MiControl\sherpa-onnx\bin`
+fn binary_dir() -> Result<PathBuf, String> {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .ok_or_else(|| "cannot locate app data directory".to_string())?;
+    Ok(base.join("MiControl").join("sherpa-onnx").join("bin"))
+}
+
+fn exe_name() -> &'static str {
+    if cfg!(windows) {
+        "sherpa-onnx.exe"
+    } else {
+        "sherpa-onnx"
+    }
+}
+
+fn find_exe_in_dir(dir: &Path) -> Option<PathBuf> {
+    let exe = exe_name();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.file_name().and_then(|s| s.to_str()) == Some(exe) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Run sherpa-onnx on `wav_path` and return the transcribed text.
 pub fn transcribe(wav_path: &str) -> Result<String, String> {
     let bin = find_binary()?.ok_or_else(|| {
-        "sherpa-onnx is not installed — install with: winget install sherpa-onnx".to_string()
+        "sherpa-onnx is not installed — click Install in the UI or download from GitHub".to_string()
     })?;
     let model = ensure_model_assets()?;
     let args = build_argv(ModelKind::Paraformer, &model, Path::new(wav_path), 2);
@@ -240,7 +364,7 @@ pub fn status() -> TranscriptionStatus {
         binary_path: bin.as_ref().map(|b| b.display().to_string()),
         model_ready: model.is_some(),
         model_dir: model.as_ref().map(|d| d.display().to_string()),
-        install_hint: "winget install sherpa-onnx".into(),
+        install_hint: "sherpa-onnx is not on winget — MiControl can download the official Windows build for you (Install button)".into(),
         missing,
     }
 }

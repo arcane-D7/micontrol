@@ -473,9 +473,11 @@ pub fn run() {
             commands::crossdevice::scrcpy_status,
             commands::crossdevice::scrcpy_start,
             commands::crossdevice::scrcpy_stop,
+            commands::crossdevice::scrcpy_install,
             // Cross-device (MIOT-08) — on-device transcription via sherpa-onnx
             commands::crossdevice::transcription_status,
             commands::crossdevice::transcription_download_model,
+            commands::crossdevice::transcription_install_binary,
             commands::crossdevice::transcribe_audio,
             // Cross-device (MIOT-10) — KDE Connect discovery + ping MVP
             commands::crossdevice::kde_discover,
@@ -485,6 +487,7 @@ pub fn run() {
             // Cross-device (MIOT-11) — NFC pairing guidance + NDEF handshake
             commands::crossdevice::nfc_guidance,
             commands::crossdevice::nfc_encode_handshake,
+            commands::crossdevice::nfc_open_link,
             // Cross-device (MIOT-12) — Syncthing REST status/folders
             commands::crossdevice::syncthing_status,
             commands::crossdevice::syncthing_folders,

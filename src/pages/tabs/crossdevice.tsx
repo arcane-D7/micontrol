@@ -144,12 +144,16 @@ export default function CrossDeviceTab() {
   // scrcpy camera (MIOT-07)
   const [camera, setCamera] = useState<ScrcpyStatus | null>(null);
   const [cameraBusy, setCameraBusy] = useState(false);
+  const [installingCamera, setInstallingCamera] = useState(false);
+  const [cameraInstallMsg, setCameraInstallMsg] = useState<string | null>(null);
 
   // Transcription (MIOT-08)
   const [transc, setTransc] = useState<TranscriptionStatus | null>(null);
   const [wavPath, setWavPath] = useState('');
   const [transcribing, setTranscribing] = useState(false);
   const [downloadingModel, setDownloadingModel] = useState(false);
+  const [installingSherpa, setInstallingSherpa] = useState(false);
+  const [sherpaInstallMsg, setSherpaInstallMsg] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<string | null>(null);
 
   // KDE Connect (MIOT-10)
@@ -314,6 +318,21 @@ export default function CrossDeviceTab() {
     }
   };
 
+  const handleInstallCamera = async () => {
+    setInstallingCamera(true);
+    setCameraInstallMsg(null);
+    try {
+      await invoke('scrcpy_install');
+      const s = await invoke<ScrcpyStatus>('scrcpy_status');
+      setCamera(s);
+      setCameraInstallMsg(t('crossDevice.installDone'));
+    } catch (e) {
+      setCameraInstallMsg(t('crossDevice.installFailed') + `: ${String(e)}`);
+    } finally {
+      setInstallingCamera(false);
+    }
+  };
+
   const handleDownloadModel = async () => {
     setDownloadingModel(true);
     try {
@@ -324,6 +343,21 @@ export default function CrossDeviceTab() {
       setErrorMsg(String(e));
     } finally {
       setDownloadingModel(false);
+    }
+  };
+
+  const handleInstallSherpa = async () => {
+    setInstallingSherpa(true);
+    setSherpaInstallMsg(null);
+    try {
+      await invoke('transcription_install_binary');
+      const s = await invoke<TranscriptionStatus>('transcription_status');
+      setTransc(s);
+      setSherpaInstallMsg(t('crossDevice.installDone'));
+    } catch (e) {
+      setSherpaInstallMsg(t('crossDevice.installFailed') + `: ${String(e)}`);
+    } finally {
+      setInstallingSherpa(false);
     }
   };
 
@@ -403,7 +437,14 @@ export default function CrossDeviceTab() {
 
   const handleNfcOpenLink = async () => {
     try {
-      await invoke('open_phone_link_settings');
+      // The NFC guidance builds the proper `ms-phone-link:pairing?pc=...`
+      // deep link — open that (not just Settings), so the pairing wizard
+      // actually launches on the phone Link side.
+      if (nfc?.linkUri) {
+        await invoke('nfc_open_link', { uri: nfc.linkUri });
+      } else {
+        await invoke('open_phone_link_settings');
+      }
     } catch (e) {
       setErrorMsg(String(e));
     }
@@ -852,11 +893,36 @@ export default function CrossDeviceTab() {
         </p>
 
         {camera?.state === 'not-installed' ? (
-          <div className="alert alert-warn" style={{ marginBottom: 8 }}>
-            {t('crossDevice.cameraNotInstalled')}{' '}
-            <span className="text-muted" style={{ fontSize: 12 }}>
-              {t('crossDevice.cameraInstallHint')}
-            </span>
+          <div>
+            <div className="alert alert-warn" style={{ marginBottom: 8 }}>
+              {t('crossDevice.cameraNotInstalled')}{' '}
+              <span className="text-muted" style={{ fontSize: 12 }}>
+                {t('crossDevice.cameraInstallHint')}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                onClick={handleInstallCamera}
+                disabled={installingCamera}
+              >
+                {installingCamera
+                  ? t('crossDevice.installing')
+                  : `⬇️ ${t('crossDevice.cameraInstallBtn')}`}
+              </button>
+              {cameraInstallMsg && (
+                <span
+                  className={
+                    cameraInstallMsg.startsWith(t('crossDevice.installFailed'))
+                      ? 'status-warn'
+                      : 'status-ok'
+                  }
+                  style={{ fontSize: 13 }}
+                >
+                  {cameraInstallMsg}
+                </span>
+              )}
+            </div>
           </div>
         ) : (
           <>
@@ -903,11 +969,36 @@ export default function CrossDeviceTab() {
         </p>
 
         {transc && !transc.binaryInstalled && (
-          <div className="alert alert-warn" style={{ marginBottom: 8 }}>
-            {t('crossDevice.transcribeNotInstalled')}{' '}
-            <span className="text-muted" style={{ fontSize: 12 }}>
-              {t('crossDevice.transcribeInstallHint')}
-            </span>
+          <div style={{ marginBottom: 8 }}>
+            <div className="alert alert-warn" style={{ marginBottom: 8 }}>
+              {t('crossDevice.transcribeNotInstalled')}{' '}
+              <span className="text-muted" style={{ fontSize: 12 }}>
+                {t('crossDevice.transcribeInstallHint')}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                onClick={handleInstallSherpa}
+                disabled={installingSherpa}
+              >
+                {installingSherpa
+                  ? t('crossDevice.installing')
+                  : `⬇️ ${t('crossDevice.transcribeInstallBtn')}`}
+              </button>
+              {sherpaInstallMsg && (
+                <span
+                  className={
+                    sherpaInstallMsg.startsWith(t('crossDevice.installFailed'))
+                      ? 'status-warn'
+                      : 'status-ok'
+                  }
+                  style={{ fontSize: 13 }}
+                >
+                  {sherpaInstallMsg}
+                </span>
+              )}
+            </div>
           </div>
         )}
 
@@ -1057,8 +1148,11 @@ export default function CrossDeviceTab() {
               🔗 {t('crossDevice.nfcOpenLink')}
             </button>
             {nfc.linkUri && (
-              <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
-                {t('crossDevice.nfcPairUri')}: {nfc.linkUri}
+              <p
+                className="text-muted no-overflow-wrap"
+                style={{ fontSize: 12, marginTop: 8, overflowWrap: 'anywhere' }}
+              >
+                {t('crossDevice.nfcPairUri')}: <code>{nfc.linkUri}</code>
               </p>
             )}
           </>

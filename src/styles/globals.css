@@ -1670,3 +1670,138 @@ input::placeholder {
 .delete-log-button:hover {
   color: var(--error, #f44);
 }
+
+/* ── Cross-device: status table & alerts ───────────────────────────────── */
+
+/* Info table grid: label left, value right (space-between), with wrapping
+   protection so long values never bleed outside the card. */
+.info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  min-width: 0;
+}
+
+.info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.info-row:last-child {
+  border-bottom: none;
+}
+
+.info-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.info-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Status colored values */
+.status-ok {
+  color: var(--ok, oklch(70% 0.16 145));
+  font-weight: 600;
+}
+
+.status-warn {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+/* Muted text */
+.text-muted {
+  color: var(--text-muted);
+}
+
+.text-muted code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs, 6px);
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* Alerts */
+.alert {
+  border-radius: var(--r-sm);
+  padding: 10px 14px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.alert-warn {
+  background: oklch(from var(--warning) l c h / 0.12);
+  border: 1px solid oklch(from var(--warning) l c h / 0.3);
+  color: var(--text);
+}
+
+.alert-error {
+  background: oklch(from var(--error) l c h / 0.12);
+  border: 1px solid oklch(from var(--error) l c h / 0.3);
+  color: var(--error);
+}
+
+.alert-success {
+  background: oklch(70% 0.16 145 / 0.12);
+  border: 1px solid oklch(70% 0.16 145 / 0.28);
+  color: var(--text);
+}
+
+/* Feature grid cards (quick actions) */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.feature-card {
+  min-width: 0;
+}
+
+.feature-card > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Prevent any long content from overflowing a card */
+.card {
+  overflow: hidden;
+}
+
+/* No-overflow helper (the user's requested `no-overflow` semantics) */
+.no-overflow {
+  overflow: hidden !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.no-overflow-wrap {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
