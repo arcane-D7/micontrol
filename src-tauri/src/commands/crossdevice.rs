@@ -7,6 +7,7 @@
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
 use crate::hw::kde_connect::{KdeDevice, KdeMessage};
 use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
+use crate::hw::nfc_pairing::{NfcGuidance, NfcHandshake};
 use crate::hw::scrcpy_bridge::ScrcpyStatus;
 use crate::hw::transcription::TranscriptionStatus;
 use std::time::Duration;
@@ -146,4 +147,26 @@ pub async fn kde_status() -> Result<Vec<KdeDevice>, String> {
 #[tauri::command]
 pub fn kde_identity() -> Result<KdeMessage, String> {
     Ok(crate::hw::kde_connect::build_identity())
+}
+
+/// Build NFC pairing guidance for the UI (deep link + NDEF handshake text).
+#[tauri::command]
+pub fn nfc_guidance(
+    display_name: String,
+    fingerprint: Option<String>,
+    pair_uri: Option<String>,
+) -> Result<NfcGuidance, String> {
+    Ok(crate::hw::nfc_pairing::guidance(
+        &display_name,
+        fingerprint.as_deref(),
+        pair_uri.as_deref(),
+    ))
+}
+
+/// Encode a custom pairing handshake as an NDEF record (base64 text field).
+#[tauri::command]
+pub fn nfc_encode_handshake(handshake: NfcHandshake) -> Result<String, String> {
+    let rec = crate::hw::nfc_pairing::build_handshake_record(&handshake)?;
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::STANDARD.encode(rec.encode()))
 }

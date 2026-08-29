@@ -482,6 +482,9 @@ pub fn run() {
             commands::crossdevice::kde_ping,
             commands::crossdevice::kde_status,
             commands::crossdevice::kde_identity,
+            // Cross-device (MIOT-11) — NFC pairing guidance + NDEF handshake
+            commands::crossdevice::nfc_guidance,
+            commands::crossdevice::nfc_encode_handshake,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,

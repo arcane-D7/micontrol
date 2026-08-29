@@ -30,6 +30,7 @@ pub mod iotservice;
 pub mod kde_connect;
 pub mod localsend;
 pub mod mic;
+pub mod nfc_pairing;
 pub mod os_turbo;
 #[cfg(windows)]
 pub mod osd;
