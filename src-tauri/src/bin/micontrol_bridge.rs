@@ -1221,6 +1221,16 @@ mod watchdog {
             write_log("launch_app: CreateEnvironmentBlock failed — falling back to NULL env (may cause zombie relaunch)");
         }
 
+        // CreateEnvironmentBlock yields a UNICODE (UTF-16) environment block;
+        // per MSDN, when lpEnvironment points at a Unicode block the
+        // CREATE_UNICODE_ENVIRONMENT flag MUST be set in dwCreationFlags,
+        // otherwise CreateProcessAsUserW fails with ERROR_INVALID_PARAMETER
+        // (0x80070057 — observed live after the env-block fix alone).
+        let mut flags = windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0);
+        if env_ok && !env_block.is_null() {
+            flags |= windows::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
+        }
+
         let ok = unsafe {
             CreateProcessAsUserW(
                 token,
@@ -1229,7 +1239,7 @@ mod watchdog {
                 None,
                 None,
                 false,
-                windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(0), // no CREATE_NO_WINDOW — normal GUI launch
+                flags, // no CREATE_NO_WINDOW — normal GUI launch; +CREATE_UNICODE_ENVIRONMENT with user env block
                 if env_ok && !env_block.is_null() {
                     Some(env_block as *const core::ffi::c_void)
                 } else {
