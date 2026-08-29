@@ -43,7 +43,7 @@ use crate::state::PerformanceMode;
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Registry key for IoT-event notification config.
-const CONFIG_KEY: &str = r"SOFTWARE\MiControl\IotEvents";
+pub(crate) const CONFIG_KEY: &str = r"SOFTWARE\MiControl\IotEvents";
 
 #[derive(Debug, Clone)]
 pub struct IotEventsConfig {

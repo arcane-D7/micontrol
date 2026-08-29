@@ -34,6 +34,7 @@ pub mod phone_link;
 #[cfg(windows)]
 pub mod power_listener;
 pub mod processes;
+pub mod scenario_rules;
 pub mod screen_cast;
 pub mod security_scan;
 pub mod startup;

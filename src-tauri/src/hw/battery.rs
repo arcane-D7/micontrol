@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 #[cfg(windows)]
+use crate::hw::errors::HardwareError;
+#[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
 #[cfg(windows)]
 use std::time::Duration;
@@ -84,8 +86,70 @@ struct BatteryStaticData {
 #[cfg(windows)]
 static BATTERY_STATIC_DATA: OnceLock<BatteryStaticData> = OnceLock::new();
 
+/// Upper bound for a single battery WMI query. WMI (COM) can hang for ~15 s
+/// when the battery driver is unresponsive; we cap the caller's wait at 5 s
+/// and fall back to the last known-good snapshot (MIOT-02, crash mitigation).
+#[cfg(windows)]
+const BATTERY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Last successfully produced `BatteryInfo`, used when a WMI query times out.
+#[cfg(windows)]
+static LAST_GOOD_BATTERY: Mutex<Option<BatteryInfo>> = Mutex::new(None);
+
+/// Fetch battery info without blocking the caller for longer than
+/// [`BATTERY_QUERY_TIMEOUT`].
+///
+/// The (potentially slow / hung) WMI work runs on a dedicated thread. On
+/// timeout we log and return the last known-good snapshot; only if no snapshot
+/// exists yet do we fail with a `Timeout` error. Every successful read refreshes
+/// the snapshot cache. The `AC_PROBE_MIN_INTERVAL` throttle inside
+/// `probe_ac_input_power_throttled` is preserved unchanged.
 #[cfg(windows)]
 pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel::<HardwareResult<BatteryInfo>>();
+    std::thread::Builder::new()
+        .name("battery-wmi-query".into())
+        .spawn(move || {
+            let _ = tx.send(get_battery_info_inner());
+        })
+        .map_err(|e| HardwareError::Other(format!("battery query thread spawn failed: {e}")))?;
+
+    match rx.recv_timeout(BATTERY_QUERY_TIMEOUT) {
+        Ok(result) => {
+            if let Ok(info) = &result {
+                let mut guard = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY);
+                *guard = Some(info.clone());
+            }
+            result
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            log::warn!(
+                target: "hw::battery",
+                "battery WMI query exceeded {} ms — returning last known-good snapshot",
+                BATTERY_QUERY_TIMEOUT.as_millis()
+            );
+            let cached = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone();
+            if let Some(info) = cached {
+                Ok(info)
+            } else {
+                Err(HardwareError::Timeout(
+                    "battery WMI query exceeded 5 s (no cached snapshot yet)".into(),
+                ))
+            }
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            log::error!(target: "hw::battery", "battery WMI query thread disconnected");
+            Err(HardwareError::Other(
+                "battery WMI query thread disconnected".into(),
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn get_battery_info_inner() -> HardwareResult<BatteryInfo> {
     use crate::hw::wmi_cache;
     use crate::util::wmi_extract;
     use std::collections::HashMap;

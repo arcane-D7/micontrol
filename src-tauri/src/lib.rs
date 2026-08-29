@@ -742,12 +742,11 @@ pub fn run() {
             // MIOT-01: IoT event listener — synthesizes power/charging/low-
             // battery events into native OSD notifications. Reads config from
             // HKCU\SOFTWARE\MiControl\IotEvents; fully isolated from other HW.
+            // MIOT-02: the hook now applies user scenario rules (auto perf-mode
+            // on AC/battery) — performance changes run on the blocking pool.
             #[cfg(windows)]
             {
-                crate::hw::iot_events::set_event_hook(|_ev| {
-                    // MIOT-02 registers a scenario-rule hook here. Until then
-                    // this is intentionally a no-op (kept to name the event).
-                });
+                crate::hw::iot_events::set_event_hook(crate::hw::scenario_rules::apply_event);
                 crate::hw::iot_events::start_iot_event_listener();
             }
 
