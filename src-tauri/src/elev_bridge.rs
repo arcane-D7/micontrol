@@ -16,7 +16,7 @@
 
 use crate::util::auth;
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -28,6 +28,14 @@ const POLL_INTERVAL_MS: u64 = 150;
 const ELEV_TIMEOUT_SECS: u64 = 15;
 const STALE_FILE_MAX_AGE_SECS: u64 = 120;
 static ELEV_REQUEST_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// UAC prompts from background elevated dispatch are one-shot by default:
+/// once the user cancels a consent dialog (or the elevated helper fails to
+/// launch), every subsequent elevated call in this process skips the prompt
+/// and returns an error instead. This prevents the MIOT-38 UAC storm — the
+/// `MCElev_heal.bat` consent popup firing every few seconds — when the
+/// scheduled task is broken AND the bridge service is absent.
+static UAC_DECLINED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` when the autonomous `MiControlBridge` service pipe is
 /// currently available (i.e. the service is installed and running).
@@ -511,14 +519,33 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
     )
     .await
     .map_err(|_| {
+        // MIOT-38: this silent failure previously hid WHY the app fell back
+        // to the scheduled-task/UAC path — log it so the root cause is
+        // visible in tauri-app.log.
+        log::warn!(
+            "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
+             (service did not respond) — falling back to scheduled task path"
+        );
         format!(
             "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
              (service did not respond)"
         )
     })?
-    .map_err(|e| format!("pipe request task panicked: {e}"))?;
+    .map_err(|e| {
+        log::warn!("pipe request task panicked: {e}");
+        format!("pipe request task panicked: {e}")
+    })?;
 
-    let content = result?;
+    let content = match result {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!(
+                "Bridge service pipe request failed: {e} — falling back to \
+                 scheduled task path"
+            );
+            return Err(e);
+        }
+    };
 
     // Parse + verify response.
     let mut v: Value =
@@ -716,15 +743,24 @@ async fn run_schtasks_run() -> bool {
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        tokio::process::Command::new("schtasks")
+        let status = tokio::process::Command::new("schtasks")
             .args(["/run", "/tn", TASK_NAME])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .await;
+        match status {
+            Ok(s) if s.success() => true,
+            Ok(s) => {
+                log::warn!("schtasks /run MiControlElevated failed with exit {s}");
+                false
+            }
+            Err(e) => {
+                log::warn!("schtasks /run MiControlElevated failed to spawn: {e}");
+                false
+            }
+        }
     }
     #[cfg(not(windows))]
     {
@@ -766,8 +802,20 @@ async fn launch_uac_fallback(request_id: &str, cmd_path: &std::path::Path) -> Re
 /// Blocks until the spawned process exits (max 30 s).
 /// Returns `Ok(())` if the process was launched successfully; the caller
 /// must still poll for `elev_result.json`.
+///
+/// MIOT-38: this is the ONLY remaining UAC prompt in the elevated chain. It
+/// is gated by [`UAC_DECLINED`] — once the user dismisses the dialog, every
+/// later call in this process skips the prompt (no more prompt storms).
 #[cfg(windows)]
 fn launch_elevated_via_uac(request_id: &str) -> Result<(), String> {
+    // Session memory: the user already declined a UAC prompt — do NOT ask
+    // again (this is what turned into the MCElev_heal.bat prompt storm).
+    if UAC_DECLINED.load(Ordering::SeqCst) {
+        return Err(
+            "UAC fallback was declined earlier in this session — skipping prompt".to_string(),
+        );
+    }
+
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
@@ -801,7 +849,21 @@ fn launch_elevated_via_uac(request_id: &str) -> Result<(), String> {
         };
 
         // SAFETY: ShellExecuteExW with SEE_MASK_NOCLOSEPROCESS launches the executable and returns a process handle. The verb ("runas"), file, and parameters are all valid null-terminated wide strings. hProcess is checked for validity before WaitForSingleObject/CloseHandle. zeroed() is safe for the remaining fields as cbSize is explicitly set and Windows ignores unspecified fields.
-        ShellExecuteExW(&mut info).map_err(|e| format!("ShellExecuteExW: {e}"))?;
+        if let Err(e) = ShellExecuteExW(&mut info) {
+            // ERROR_CANCELLED (0x800704C7) — the user closed/dismissed the
+            // UAC consent dialog. Remember it and NEVER re-prompt in this
+            // session (MIOT-38 prompt storm). NOTE: HRESULT is i32, so the
+            // high bit makes this negative (−2147023673).
+            const ERROR_CANCELLED_HRESULT: i32 = 0x8007_04C7u32 as i32;
+            if e.code().0 == ERROR_CANCELLED_HRESULT {
+                UAC_DECLINED.store(true, Ordering::SeqCst);
+                log::warn!(
+                    "UAC prompt declined by the user — suppressing further UAC \
+                     prompts for this session"
+                );
+            }
+            return Err(format!("ShellExecuteExW: {e}"));
+        }
 
         if !info.hProcess.is_invalid() {
             // Wait up to 30 s for the elevated helper to finish writing its result
@@ -916,8 +978,12 @@ fn cleanup_stale_elev_files(dir: &std::path::Path) {
 /// If the task is missing or points to a different path (e.g. debug exe from
 /// `cargo tauri dev`), re-register it with the correct path.
 ///
-/// Tries non-elevated `schtasks` first. If that fails (Access Denied), falls
-/// back to `ShellExecuteExW "runas"` to elevate just the schtasks command.
+/// Tries non-elevated `schtasks` only. If that fails (Access Denied on a
+/// standard user session) it does NOT elevate — the scheduled task is merely
+/// a fallback behind the MiControlBridge SYSTEM service (the primary
+/// elevated path, installed post-install, never prompts). MIOT-38: elevating
+/// here (ShellExecuteExW "runas" → MCElev_heal.bat) is what produced the
+/// UAC prompt storm every few seconds when the task was missing.
 ///
 /// Returns the outcome of the self-healing attempt.
 #[cfg(windows)]
@@ -946,9 +1012,19 @@ fn ensure_task_correct_path() -> TaskHealResult {
     let need_reregister = match output {
         Ok(out) => {
             let xml = String::from_utf8_lossy(&out.stdout);
-            // Check if the task points to the current exe.
-            let path_matches =
-                xml.contains(&current_path) || xml.contains(&current_path.replace('\\', "/"));
+            // Check if the task points to the current exe. The task XML
+            // stores the <Command> WITH quotes around the path
+            // ("C:\...\micontrol.exe") and may use forward slashes — match
+            // on all forms. MIOT-38: comparing against the UNQUOTED path made
+            // a correct task always look "wrong", so the self-heal
+            // re-registered an identical task on every elevated call and
+            // looped UAC prompts.
+            let path_quoted = format!("\"{current_path}\"");
+            let path_quoted_fwd = format!("\"{}\"", current_path.replace('\\', "/"));
+            let path_matches = xml.contains(&current_path)
+                || xml.contains(&current_path.replace('\\', "/"))
+                || xml.contains(&path_quoted)
+                || xml.contains(&path_quoted_fwd);
             if path_matches {
                 false
             } else {
@@ -999,12 +1075,23 @@ fn ensure_task_correct_path() -> TaskHealResult {
     let success = match create_ok {
         Ok(out) if out.status.success() => true,
         _ => {
-            // Try 2: elevated schtasks via UAC prompt
-            log::info!("Non-elevated schtasks failed, trying UAC elevation...");
-            let xml_path_owned = xml_str.clone();
-            std::thread::spawn(move || run_schtasks_elevated(&xml_path_owned))
-                .join()
-                .unwrap_or(false)
+            // MIOT-38: NO UAC prompt here. The non-elevated create failed
+            // (access denied on a standard user session) and the previous
+            // code elevated via ShellExecuteExW "runas" → wrote
+            // MCElev_heal.bat → popped a consent dialog from a BACKGROUND
+            // dispatch chain (thermal/battery polls fire this loop every few
+            // seconds) — the prompt storm the user reported. The scheduled
+            // task is only a fallback: the MiControlBridge service (installed
+            // post-install as SYSTEM, no UAC) is the primary elevated path.
+            // Task missing → return a clean failure; reinstall repairs it
+            // (or the service path is used instead).
+            log::warn!(
+                "Non-elevated schtasks re-register of '{TASK_NAME}' failed — NOT \
+                 prompting UAC (scheduled task is a fallback; the MiControlBridge \
+                 service is the primary elevated path). Reinstall MiControl or run \
+                 'micontrol_bridge.exe install' to repair."
+            );
+            false
         }
     };
 
@@ -1019,69 +1106,7 @@ fn ensure_task_correct_path() -> TaskHealResult {
     }
 }
 
-/// Run `schtasks /delete` + `schtasks /create` elevated via ShellExecuteExW "runas".
-/// Shows a single UAC prompt to the user.
-#[cfg(windows)]
-fn run_schtasks_elevated(xml_path: &str) -> bool {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HWND};
-    use windows::Win32::System::Threading::WaitForSingleObject;
-    use windows::Win32::UI::Shell::{
-        ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-    };
-
-    // Build a batch script that deletes + creates the task, then signals completion.
-    let script = format!(
-        r#"@echo off
-schtasks /delete /tn "MiControlElevated" /f 2>nul
-schtasks /create /tn "MiControlElevated" /xml "{xml_path}" /f
-exit /b %ERRORLEVEL%"#
-    );
-
-    let temp_dir = std::env::temp_dir();
-    let bat_path = temp_dir.join("MCElev_heal.bat");
-    if let Err(e) = std::fs::write(&bat_path, &script) {
-        log::warn!("Cannot write healing batch script: {e}");
-        return false;
-    }
-
-    let bat_str = bat_path.to_string_lossy().to_string();
-    let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
-    let file: Vec<u16> = OsStr::new(&bat_str).encode_wide().chain(Some(0)).collect();
-
-    let result = unsafe {
-        let mut info = SHELLEXECUTEINFOW {
-            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
-            hwnd: HWND(std::ptr::null_mut()),
-            lpVerb: PCWSTR(verb.as_ptr()),
-            lpFile: PCWSTR(file.as_ptr()),
-            lpParameters: PCWSTR::null(),
-            nShow: 0, // SW_HIDE
-            ..std::mem::zeroed()
-        };
-
-        // SAFETY: ShellExecuteExW with "runas" verb launches the batch script
-        // elevated. The verb and file are valid null-terminated wide strings.
-        if let Err(e) = ShellExecuteExW(&mut info) {
-            log::warn!("ShellExecuteExW for task healing failed: {e}");
-            return false;
-        }
-
-        if !info.hProcess.is_invalid() {
-            WaitForSingleObject(info.hProcess, 30_000);
-            let _ = CloseHandle(info.hProcess);
-        }
-        true
-    };
-
-    let _ = std::fs::remove_file(&bat_path);
-    result
-}
-
 #[cfg(not(windows))]
-fn ensure_task_correct_path() -> bool {
-    false
+fn ensure_task_correct_path() -> TaskHealResult {
+    TaskHealResult::Failed
 }
