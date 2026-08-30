@@ -200,6 +200,16 @@ pub fn nfc_encode_handshake(handshake: NfcHandshake) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(rec.encode()))
 }
 
+/// Build a user-defined NFC tag payload (URI / text / internal action).
+/// Returns the base64 NDEF bytes + a human description, ready for the user to
+/// write to a blank NFC tag with their phone (e.g. NFC Tools) or scan as QR.
+#[tauri::command]
+pub fn nfc_build_custom(
+    request: crate::hw::nfc_pairing::NfcCustomRequest,
+) -> Result<crate::hw::nfc_pairing::NfcCustomResult, String> {
+    crate::hw::nfc_pairing::build_custom_tag(&request)
+}
+
 /// Open the Phone Link pairing wizard via the `ms-phone-link:` deep link
 /// (built by `nfc_guidance`). Safe: only Phone-Link schemes are allowed.
 #[tauri::command]

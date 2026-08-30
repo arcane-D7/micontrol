@@ -1676,6 +1676,55 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
+        // S45-001: Install a MiControl update "while the user is away".
+        //
+        // Triggered by the app UI (About/Updates tab) and intended to be run by
+        // the autonomous MiControlBridge service (SYSTEM) — the "Ponte Elevada"
+        // the user asked for — so the update installs WITHOUT a UAC prompt and
+        // even when nobody is sitting at the machine.
+        //
+        // The installer is the Tauri-produced NSIS setup (`MiControl_*.exe`).
+        // It is run SILENTLY with `-UseNewEnvironment:1` semantics similar to
+        // the scheduled-task pattern:
+        //
+        //   setup.exe /S /UPDATE /R
+        //
+        //   /S      → silent (no wizard UI)
+        //   /UPDATE → the custom installer-hooks treat this as an upgrade:
+        //             it does NOT touch $APPDATA config, does NOT create new
+        //             shortcuts, keeps the MiControlElevated task, and the
+        //             POSTINSTALL hook re-creates the MiControlBridge service
+        //             (sc create, sc failure, sc start) — so the bridge is
+        //             SELF-HEALED by the installer itself after this process
+        //             exits.
+        //   /R      → relaunch MiControl as the interactive user after
+        //             install (the NSIS template's .onInstSuccess already
+        //             handles running it as the logged-on user via
+        //             nsis_tauri_utils::RunAsUser).
+        //
+        // CRITICAL: the old MiControl.exe + old bridge are killed BY THE
+        // INSTALLER (KillAppProcess / KillBridgeProcess in installer.nsi), so
+        // we must NOT wait for setup.exe to exit here — this elevated helper
+        // process IS the app until the installer replaces it. We spawn the
+        // installer detached, report the exit code it returned to us, and
+        // return ok. The installer's own retry loops handle lock collisions
+        // (up to 5 attempts, 500ms apart) and the service is re-created by the
+        // POSTINSTALL hook.
+        //
+        // `paths` may be a single installer path or an array; each must be
+        // verified (exists, *.exe, non-empty) before we run it.
+        //
+        // Returns:
+        //   { "launched": bool, "installer": "...", "exit_code": int,
+        //     "command": "setup.exe /S /UPDATE /R", "note": "..." }
+        "install_update" => match install_update(
+            cmd.args.get("installer").cloned(),
+            cmd.args.get("paths").cloned(),
+        ) {
+            Ok(status) => make_ok(serde_json::to_value(status).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
+
         // S42-020: Install + start the MiControlFace auth service (LocalSystem).
         // Called from the Face Unlock tab when `service_installed` is false.
         // Uses the bundled micontrol_face_svc.exe `install` command. Runs via
@@ -1824,6 +1873,86 @@ fn install_bridge_service() -> Result<Value, String> {
 #[cfg(not(windows))]
 fn install_bridge_service() -> Result<Value, String> {
     Err("Bridge service only supported on Windows".to_string())
+}
+
+/// S45-001: Launch a MiControl installer (NSIS setup) SILENTLY via the
+/// elevated bridge so a new version installs without a UAC prompt.
+///
+/// The installer kills the current micontrol.exe + micontrol_bridge.exe itself,
+/// replaces the binaries, and re-creates the MiControlBridge service via the
+/// installer-hooks POSTINSTALL macro. We therefore spawn it DETACHED (fire &
+/// forget) and return the spawn result — waiting for it would deadlock our own
+/// process (the installer's KillAppProcess would kill us mid-wait) and would
+/// also be pointless because the installer restarts the app via /R.
+#[cfg(windows)]
+fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Value, String> {
+    use std::process::Command;
+
+    // ── Resolve the installer path (accept single string or array) ─────────
+    let candidates: Vec<String> = {
+        let mut v = Vec::new();
+        if let Some(Value::String(p)) = &installer {
+            v.push(p.clone());
+        }
+        if let Some(Value::Array(arr)) = &paths {
+            for item in arr {
+                if let Value::String(p) = item {
+                    v.push(p.clone());
+                }
+            }
+        }
+        v
+    };
+
+    let installer_exe = candidates
+        .iter()
+        .find(|p| {
+            let path = PathBuf::from(p);
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("exe"))
+                    .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            "No valid installer .exe path provided (file must exist and end in .exe)".to_string()
+        })?
+        .clone();
+
+    // ── Fire the NSIS installer: silent + update-mode + relaunch ────────────
+    // /S   silent
+    // /UPDATE keeps user config/shortcuts and tells the template this is an
+    //       upgrade (creates no new desktop icon, keeps autostart).
+    // /R   relaunch the app (as the interactive user) after install.
+    //
+    // NOTE: we must NOT `.wait()` or `.output()` here. The installer's own
+    // KillAppProcess / KillBridgeProcess sections terminate this elevated
+    // helper (the bridge service) and the running MiControl process while the
+    // setup runs. Waiting would kill our own reply before the app UI sees it.
+    // `spawn()` returns in a few milliseconds → we answer the bridge request
+    // immediately → the app shows "installing…" → the installer replaces the
+    // binaries and /R relaunches the new version (~2–5 s later).
+    let child = Command::new(&installer_exe)
+        .args(["/S", "/UPDATE", "/R"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("Failed to launch installer {installer_exe}: {e}"))?;
+
+    let pid = child.id();
+
+    Ok(json!({
+        "launched": true,
+        "installer": installer_exe,
+        "pid": pid,
+        "command": "setup.exe /S /UPDATE /R",
+        "note": "Installer spawned detached (fire-and-forget). MiControlBridge is re-created by the installer POSTINSTALL hook; the app relaunches via /R.",
+    }))
+}
+
+#[cfg(not(windows))]
+fn install_update(_installer: Option<Value>, _paths: Option<Value>) -> Result<Value, String> {
+    Err("App updates only supported on Windows".to_string())
 }
 
 /// S42-020: Install and start the `MiControlFace` auth service (LocalSystem).

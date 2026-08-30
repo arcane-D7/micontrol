@@ -110,10 +110,12 @@ pub async fn discover_devices(scan_seconds: u64) -> BleScanResult {
     }
 }
 
-/// Enumerate Bluetooth-LE association endpoints (paired + cached advertising)
-/// via WinRT `DeviceInformation::FindAllAsyncAqsFilter` with the BLE GATT
-/// protocol ID. `Name()` is populated for known devices; `Pairing().IsPaired()`
-/// tells us which ones are already paired with Windows.
+/// Enumerate Bluetooth (LE + classic) association endpoints via WinRT
+/// `DeviceInformation`. The AQS filter uses the *generic* Bluetooth AEP
+/// protocol (covers both LE and BR/EDR/RFCOMM), so phones paired over
+/// classic Bluetooth (the common Phone Link / Link to Windows pairing) are
+/// surfaced too — LE-only filtering (the older `bb7bb05e…` GATT protocol)
+/// missed them entirely.
 /// Must run on a thread where COM is initialized (MTA). Returns an empty vec
 /// on any failure (logged, never panics).
 fn list_paired_devices() -> Vec<BleDevice> {
@@ -121,10 +123,15 @@ fn list_paired_devices() -> Vec<BleDevice> {
     use windows::Devices::Enumeration::DeviceInformation;
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-    // AQS filter: only Bluetooth LE association endpoints (protocol GUID is
-    // the Bluetooth LE / GATT protocol, not BR/EDR and not RFCOMM).
-    const BLE_GATT_PROTOCOL: &str =
-        "System.Devices.Aep.ProtocolId:=\"{bb7bb05e-1252-46c9-b1c7-3c8e2a30e44a}\"";
+    // AQS filter candidates, tried in order. The Bluetooth AEP protocol filter
+    // covers LE (common Phone Link / Link to Windows pairing). If WinRT rejects
+    // it, fall back to the LE-only protocol filter, then to an unfiltered
+    // enumeration (we filter by id ourselves). This never silently drops
+    // paired phones paired via the generic BT AEP protocol.
+    const FILTERS: &[&str] = &[
+        "System.Devices.Aep.ProtocolId:=\"{bb7bb05e-1252-46c9-b1c7-3c8e2a30e44a}\"",
+        "System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\"",
+    ];
 
     // SAFETY: COM init/uninit on the current thread; idempotent for MTA.
     let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -144,48 +151,90 @@ fn list_paired_devices() -> Vec<BleDevice> {
     }
     let _com = ComGuard;
 
-    let op = match DeviceInformation::FindAllAsyncAqsFilter(&HSTRING::from(BLE_GATT_PROTOCOL)) {
-        Ok(op) => op,
-        Err(e) => {
-            log::warn!("[ble_scan] FindAllAsyncAqsFilter failed: {e}");
-            return Vec::new();
+    // Results accumulate across the filter attempts and the fallback.
+    let mut out: Vec<BleDevice> = Vec::new();
+    // Try the protocol filters; the LAST fallback is an unfiltered query and
+    // we keep only ids that look like Bluetooth.
+    let mut found_any = false;
+    for (idx, filter) in FILTERS.iter().enumerate() {
+        let op = DeviceInformation::FindAllAsyncAqsFilter(&HSTRING::from(*filter));
+        let Ok(op) = op else {
+            continue; // next candidate
+        };
+        let Ok(col) = op.get() else { continue };
+        let size = match col.Size() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let mut collected = 0usize;
+        for i in 0..size {
+            let Ok(info) = col.GetAt(i) else { continue };
+            let id = info.Id().unwrap_or_default().to_string();
+            if !is_bluetooth_id(&id) {
+                continue;
+            }
+            let name = info.Name().unwrap_or_default().to_string();
+            let paired = info.Pairing().and_then(|p| p.IsPaired()).unwrap_or(false);
+            out.push(BleDevice {
+                name: if name.is_empty() {
+                    extract_address_from_id(&id).unwrap_or_else(|| "Bluetooth device".into())
+                } else {
+                    name
+                },
+                address: extract_address_from_id(&id),
+                rssi: None,
+                paired,
+                from_scan: false,
+            });
+            collected += 1;
         }
-    };
-    let devices = match op.get() {
-        Ok(col) => col,
-        Err(e) => {
-            log::warn!("[ble_scan] FindAllAsync get failed: {e}");
-            return Vec::new();
+        // A filter that returned at least one Bluetooth id wins.
+        if collected > 0 {
+            found_any = true;
+            break;
         }
-    };
-
-    let size = match devices.Size() {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!("[ble_scan] collection Size failed: {e}");
-            return Vec::new();
+        let _ = idx;
+    }
+    // If no crafted filter returned anything, do an unfiltered enumeration and
+    // keep Bluetooth-looking endpoints (never drops unnamed).
+    if !found_any && out.is_empty() {
+        if let Ok(op) = DeviceInformation::FindAllAsync() {
+            if let Ok(col) = op.get() {
+                if let Ok(size) = col.Size() {
+                    for i in 0..size {
+                        let Ok(info) = col.GetAt(i) else { continue };
+                        let id = info.Id().unwrap_or_default().to_string();
+                        if !is_bluetooth_id(&id) {
+                            continue;
+                        }
+                        let name = info.Name().unwrap_or_default().to_string();
+                        let paired = info.Pairing().and_then(|p| p.IsPaired()).unwrap_or(false);
+                        out.push(BleDevice {
+                            name: if name.is_empty() {
+                                extract_address_from_id(&id)
+                                    .unwrap_or_else(|| "Bluetooth device".into())
+                            } else {
+                                name
+                            },
+                            address: extract_address_from_id(&id),
+                            rssi: None,
+                            paired,
+                            from_scan: false,
+                        });
+                    }
+                }
+            }
         }
-    };
-
-    let mut out = Vec::new();
-    for i in 0..size {
-        let Ok(info) = devices.GetAt(i) else { continue };
-        let id = info.Id().unwrap_or_default().to_string();
-        let name = info.Name().unwrap_or_default().to_string();
-        // Skip unnamed association endpoints (they are anonymous randoms).
-        if name.trim().is_empty() {
-            continue;
-        }
-        let paired = info.Pairing().and_then(|p| p.IsPaired()).unwrap_or(false);
-        out.push(BleDevice {
-            name,
-            address: extract_address_from_id(&id),
-            rssi: None,
-            paired,
-            from_scan: false,
-        });
     }
     out
+}
+
+/// True when a `DeviceInformation` id describes a Bluetooth (LE or classic)
+/// endpoint, by inspecting the id prefix (e.g. `Bluetooth#…`,
+/// `BluetoothLE#…`). Case-insensitive.
+fn is_bluetooth_id(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    lower.contains("bluetooth") && (lower.contains("bluetoothle") || lower.contains("bluetooth#"))
 }
 
 /// Try to turn a `DeviceInformation` id (like
@@ -233,6 +282,8 @@ fn is_hex_group(s: &[u8]) -> bool {
 }
 
 /// Short active BLE scan (btleplug) returning advertising devices nearby.
+/// Scans ALL adapters (some laptops expose several), so a phone in range
+/// isn't missed because it happens to be bound to the second one.
 async fn scan_for_nearby(scan_seconds: u64) -> Result<Vec<BleDevice>, String> {
     use btleplug::api::{Central, Manager as _, Peripheral, ScanFilter};
 
@@ -240,44 +291,58 @@ async fn scan_for_nearby(scan_seconds: u64) -> Result<Vec<BleDevice>, String> {
         .await
         .map_err(|e| e.to_string())?;
     let adapters = manager.adapters().await.map_err(|e| e.to_string())?;
-    let central = adapters
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no BLE adapter found".to_string())?;
+    if adapters.is_empty() {
+        return Err("no BLE adapter found".to_string());
+    }
 
-    central
-        .start_scan(ScanFilter::default())
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::time::sleep(std::time::Duration::from_secs(scan_seconds)).await;
-
-    let peripherals = central.peripherals().await.map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    for p in peripherals {
-        let props = match p.properties().await {
-            Ok(Some(pr)) => pr,
-            _ => continue,
-        };
-        let addr = props.address.to_string();
-        let rssi = props.rssi.map(i32::from);
-        let name = props.local_name.unwrap_or_default();
-        if name.is_empty() && addr.is_empty() {
+    let mut saw_error = false;
+    for central in adapters {
+        // Each adapter gets its own scan window so results don't overlap in
+        // time (btleplug scans are adapter-scoped).
+        let scan_res = central
+            .start_scan(ScanFilter::default())
+            .await
+            .map_err(|e| log::warn!("[ble_scan] adapter start_scan failed: {e}"));
+        if scan_res.is_err() {
+            saw_error = true;
             continue;
         }
-        out.push(BleDevice {
-            name,
-            address: Some(normalize_mac(&addr)),
-            rssi,
-            paired: false,
-            from_scan: true,
-        });
+        tokio::time::sleep(std::time::Duration::from_secs(scan_seconds)).await;
+
+        if let Ok(peripherals) = central.peripherals().await {
+            for p in peripherals {
+                let props = match p.properties().await {
+                    Ok(Some(pr)) => pr,
+                    _ => continue,
+                };
+                let addr = props.address.to_string();
+                let rssi = props.rssi.map(i32::from);
+                let name = props.local_name.unwrap_or_default();
+                if name.is_empty() && addr.is_empty() {
+                    continue;
+                }
+                out.push(BleDevice {
+                    name,
+                    address: Some(normalize_mac(&addr)),
+                    rssi,
+                    paired: false,
+                    from_scan: true,
+                });
+            }
+        }
+        central
+            .stop_scan()
+            .await
+            .map_err(|e| log::warn!("[ble_scan] stop_scan failed: {e}"))
+            .ok();
     }
-    central
-        .stop_scan()
-        .await
-        .map_err(|e| log::warn!("[ble_scan] stop_scan failed: {e}"))
-        .ok();
-    Ok(out)
+
+    if out.is_empty() && saw_error {
+        Err("all BLE adapters failed to scan".to_string())
+    } else {
+        Ok(out)
+    }
 }
 
 /// MAC to upper-case `-` separators (btleplug emits `XX:XX:...` on Windows).
@@ -306,6 +371,28 @@ mod tests {
         assert_eq!(normalize_mac("AA:BB:cc:DD:EE:FF"), "AA-BB-CC-DD-EE-FF");
         assert_eq!(normalize_mac("not-a-mac"), "not-a-mac");
         assert_eq!(normalize_mac(""), "");
+    }
+
+    #[test]
+    fn is_bluetooth_id_matches_lep_and_classic() {
+        assert!(is_bluetooth_id(
+            "BluetoothLE#BluetoothLE7c:2e:...-aa:bb:cc:dd:ee:ff"
+        ));
+        assert!(is_bluetooth_id(
+            "Bluetooth#Bluetooth7c:2e:...-aa:bb:cc:dd:ee:ff"
+        ));
+        assert!(is_bluetooth_id("bluetooth#audio-device-12"));
+        assert!(!is_bluetooth_id("Wifi#Wifi-aa:bb:cc:dd:ee:ff"));
+        assert!(!is_bluetooth_id(""));
+    }
+
+    #[test]
+    fn unnamed_device_falls_back_to_address() {
+        let id = "BluetoothLE#BluetoothLE7c:2e:...-aa:bb:cc:dd:ee:ff".to_string();
+        let addr = extract_address_from_id(&id);
+        let name = extract_address_from_id(&id).unwrap_or_else(|| "Bluetooth device".into());
+        assert!(addr.is_some());
+        assert_eq!(name, addr.clone().unwrap());
     }
 
     #[test]

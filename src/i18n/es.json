@@ -445,7 +445,17 @@
     "driversList": {
       "virtualControlHID": "VirtualControlHID.sys — Modos de rendimiento y teclas de acceso rápido",
       "iotDriver": "IoTDriver.sys — Límite de carga y servicios IoT"
-    }
+    },
+    "bridgeTitle": "Puente Elevado — Actualización Silenciosa",
+    "bridgeDesc": "Instale una actualización de MiControl en segundo plano usando el servicio bridge privilegiado — sin aviso UAC, funciona incluso estando ausente.",
+    "bridgePathPlaceholder": "Ruta a MiControl_*-setup.exe",
+    "bridgeInstall": "Instalar vía Puente",
+    "bridgeInstalling": "Instalando vía puente…",
+    "bridgeSuccess": "Instalador lanzado. MiControl se reiniciará con la nueva versión en breve.",
+    "bridgePathMissing": "Indique la ruta al setup .exe",
+    "bridgeBridgeDown": "Servicio bridge no disponible — el instalador pedirá permisos de administrador.",
+    "bridgeHowTitle": "Cómo funciona",
+    "bridgeHow": "Cómo funciona: se valida la ruta y el servicio MiControlBridge (ejecuta como SYSTEM) lanza el instalador NSIS en silencio (/S /UPDATE /R). El instalador reemplaza la app, recrea el servicio bridge y reinicia MiControl."
   },
   "errors": {
     "hardwareNotAvailable": "Interfaz de hardware no disponible",
@@ -1081,6 +1091,18 @@
     "nfcPcVersion": "Versión de Phone Link en este PC",
     "nfcTagReady": "Etiqueta NFC lista",
     "nfcNotAvailable": "Vinculación NFC no disponible",
+    "nfcCustomTitle": "Crear etiqueta NFC personalizada",
+    "nfcCustomDesc": "Elige qué ocurre cuando el teléfono lee tu etiqueta NFC: abrir una app/sitio, mostrar texto o disparar una acción de MiControl.",
+    "nfcCustomKindUri": "Abrir URL/App",
+    "nfcCustomKindText": "Texto",
+    "nfcCustomKindAction": "Acción MiControl",
+    "nfcCustomPairHint": "Usa la tarjeta superior para la vinculación con Phone Link.",
+    "nfcCustomUriPlaceholder": "https://… o app://… (p. ej. whatsapp://send)",
+    "nfcCustomTextPlaceholder": "Texto que se mostrará al leer la etiqueta",
+    "nfcCustomActionPlaceholder": "Acción (lock, unlock, presence, status)",
+    "nfcCustomBuild": "Generar etiqueta",
+    "nfcCustomQrHint": "Escanea el QR para abrir la URI en tu teléfono — o escríbela directo en la etiqueta con una app de etiquetas.",
+    "nfcCustomHowTo": "Escribe el código de abajo en una etiqueta NFC en blanco con la app de tu teléfono (p. ej. NFC Tools) o úsalo en una herramienta de escritura de etiquetas.",
     "syncTitle": "Sincronización Syncthing",
     "syncDesc": "Monitorea y alterna carpetas de Syncthing mediante su API REST.",
     "syncAddress": "Dirección",

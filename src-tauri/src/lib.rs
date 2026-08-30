@@ -64,7 +64,7 @@ use commands::system::{
     get_display_info, get_drivers_detail, get_error_log_config, get_eye_protection, get_fan_info,
     get_hardware_profile, get_hardware_state_batch, get_model_code, get_os_turbo,
     get_phone_link_status, get_process_list, get_smart_brightness_model, get_system_info,
-    get_threat_history, get_touchpad_info, get_update_status, install_driver,
+    get_threat_history, get_touchpad_info, get_update_status, install_driver, install_update,
     launch_color_calibration_wizard, launch_phone_link, launch_phone_link_feature,
     load_icc_profile, log_frontend_error, mark_clean_exit, open_color_management_settings,
     open_phone_link_settings, open_windows_security, quick_security_scan, read_error_log,
@@ -428,6 +428,8 @@ pub fn run() {
             get_hardware_profile,
             run_hardware_discovery,
             install_driver,
+            // S45-001: Silent self-update via the MiControlBridge service
+            install_update,
             // Hotkeys (keyboard remapping)
             get_hotkey_config,
             set_hotkey_config,
@@ -499,6 +501,7 @@ pub fn run() {
             // Cross-device (MIOT-11) — NFC pairing guidance + NDEF handshake
             commands::crossdevice::nfc_guidance,
             commands::crossdevice::nfc_encode_handshake,
+            commands::crossdevice::nfc_build_custom,
             commands::crossdevice::nfc_open_link,
             // Cross-device (MIOT-12) — Syncthing REST status/folders
             commands::crossdevice::syncthing_status,

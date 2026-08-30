@@ -320,30 +320,42 @@ async fn scan_for_device(needle: &str) -> Result<Option<i32>, String> {
     let manager = btleplug::platform::Manager::new()
         .await
         .map_err(|e| e.to_string())?;
-    // Preferred adapter: first one works on the Xiaomi Book Pro 14.
     let adapters = manager.adapters().await.map_err(|e| e.to_string())?;
-    let central = adapters.into_iter().next().ok_or("no BLE adapter found")?;
-
-    central
-        .start_scan(ScanFilter::default())
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let peripherals = central.peripherals().await.map_err(|e| e.to_string())?;
-    for p in peripherals {
-        if peripheral_matches(&p, needle).await {
-            let rssi = p
-                .properties()
-                .await
-                .ok()
-                .flatten()
-                .and_then(|props| props.rssi)
-                .map(i32::from);
-            return Ok(rssi);
-        }
+    if adapters.is_empty() {
+        return Err("no BLE adapter found".to_string());
     }
-    Ok(None)
+
+    // Try every adapter — a phone may be bound to the second radio.
+    let mut last_err: Option<String> = None;
+    for central in adapters {
+        if let Err(e) = central.start_scan(ScanFilter::default()).await {
+            last_err = Some(e.to_string());
+            continue;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        if let Ok(peripherals) = central.peripherals().await {
+            for p in peripherals {
+                if peripheral_matches(&p, needle).await {
+                    let rssi = p
+                        .properties()
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|props| props.rssi)
+                        .map(i32::from);
+                    // Best effort stop before returning.
+                    let _ = central.stop_scan().await;
+                    return Ok(rssi);
+                }
+            }
+        }
+        let _ = central.stop_scan().await;
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

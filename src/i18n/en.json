@@ -445,7 +445,17 @@
     "driversList": {
       "virtualControlHID": "VirtualControlHID.sys — Performance modes & hotkeys",
       "iotDriver": "IoTDriver.sys — Charging threshold & IoT services"
-    }
+    },
+    "bridgeTitle": "High Bridge — Silent Update",
+    "bridgeDesc": "Install a MiControl update in the background using the privileged bridge service — no UAC prompt, works while you're away.",
+    "bridgePathPlaceholder": "Path to MiControl_*-setup.exe",
+    "bridgeInstall": "Install via Bridge",
+    "bridgeInstalling": "Installing via bridge…",
+    "bridgeSuccess": "Installer launched. MiControl will restart with the new version shortly.",
+    "bridgePathMissing": "Please enter the path to the setup .exe",
+    "bridgeBridgeDown": "Bridge service unavailable — the installer will ask for administrator permission.",
+    "bridgeHowTitle": "How it works",
+    "bridgeHow": "How it works: the path is validated, then the MiControlBridge service (runs as SYSTEM) launches the NSIS installer silently (/S /UPDATE /R). The installer replaces the app, re-creates the bridge service and relaunches MiControl."
   },
   "errors": {
     "hardwareNotAvailable": "Hardware interface not available",
@@ -1081,6 +1091,18 @@
     "nfcPcVersion": "This PC's Phone Link version",
     "nfcTagReady": "NFC tag ready",
     "nfcNotAvailable": "NFC pairing not available",
+    "nfcCustomTitle": "Create custom NFC tag",
+    "nfcCustomDesc": "Choose what happens when your phone reads your NFC tag: open an app/site, show text, or trigger a MiControl action.",
+    "nfcCustomKindUri": "Open URL/App",
+    "nfcCustomKindText": "Text",
+    "nfcCustomKindAction": "MiControl action",
+    "nfcCustomPairHint": "Use the card above for Phone Link pairing.",
+    "nfcCustomUriPlaceholder": "https://… or app://… (e.g. whatsapp://send)",
+    "nfcCustomTextPlaceholder": "Text to show when this tag is read",
+    "nfcCustomActionPlaceholder": "Action (lock, unlock, presence, status)",
+    "nfcCustomBuild": "Build tag",
+    "nfcCustomQrHint": "Scan the QR to open the URI on your phone — or write it straight to the tag with a tag app.",
+    "nfcCustomHowTo": "Write the code below to a blank NFC tag with your phone's app (e.g. NFC Tools) or use it in a tag-writing tool.",
     "syncTitle": "Syncthing Folder Sync",
     "syncDesc": "Monitor and toggle Syncthing folders over its REST API.",
     "syncAddress": "Address",

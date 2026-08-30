@@ -484,14 +484,18 @@ body {
 }
 
 /* ── Tab transition ──────────────────────────────────────────────────────── */
+/* IMPORTANT: opacity-only on purpose. A `transform` (even translateY(0) at
+   the end) kept by `animation-fill-mode: both` makes `.tab-content` a
+   containing block for `position: fixed` descendants — every modal (BLE
+   picker, Info, Process, onboarding…) would anchor to the scrollable content
+   area instead of the viewport. Fade-only keeps the transition and fixes
+   fixed-positioning globally. */
 @keyframes tab-in {
   from {
     opacity: 0;
-    transform: translateY(10px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 @keyframes card-rise {

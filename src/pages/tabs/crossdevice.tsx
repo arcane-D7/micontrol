@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { QRCodeCanvas } from 'qrcode.react';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import ToggleRow from '../../components/ToggleRow';
@@ -131,6 +132,14 @@ interface NfcGuidance {
   storeUri: string | null;
 }
 
+// Custom NFC tag builder (MIOT-11 revamp): user-programmed tags.
+type NfcTagKind = 'pairHandshake' | 'uri' | 'text' | 'internalAction';
+interface NfcCustomResult {
+  ndefB64: string;
+  description: string;
+  recordType: 'uri' | 'text';
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function CrossDeviceTab() {
@@ -192,6 +201,11 @@ export default function CrossDeviceTab() {
 
   // NFC guidance (MIOT-11)
   const [nfc, setNfc] = useState<NfcGuidance | null>(null);
+  // Custom NFC tag builder (MIOT-11 revamp)
+  const [nfcKind, setNfcKind] = useState<NfcTagKind>('uri');
+  const [nfcTarget, setNfcTarget] = useState('');
+  const [nfcBuilt, setNfcBuilt] = useState<NfcCustomResult | null>(null);
+  const [nfcBuilding, setNfcBuilding] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -469,6 +483,26 @@ export default function CrossDeviceTab() {
       }
     } catch (e) {
       setErrorMsg(String(e));
+    }
+  };
+
+  const handleNfcBuildCustom = async () => {
+    setNfcBuilding(true);
+    setNfcBuilt(null);
+    try {
+      const target = nfcTarget.trim();
+      if (!target) {
+        setErrorMsg('NFC custom target is required');
+        return;
+      }
+      const result = await invoke<NfcCustomResult>('nfc_build_custom', {
+        request: { kind: nfcKind, target },
+      });
+      setNfcBuilt(result);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setNfcBuilding(false);
     }
   };
 
@@ -864,6 +898,9 @@ export default function CrossDeviceTab() {
       </div>
 
       {/* BLE discovery modal (MIOT-05 revamp): auto-detection picker */}
+      {/* `position: fixed` is now viewport-relative because the tab-content
+          animation is opacity-only — a transform would have made this modal
+          anchor to the scrollable content area instead of the viewport. */}
       {scanModalOpen && (
         <div
           style={{
@@ -1411,6 +1448,119 @@ export default function CrossDeviceTab() {
           </>
         ) : (
           <p className="text-muted">{t('crossDevice.nfcNotAvailable')}</p>
+        )}
+      </div>
+
+      {/* Custom NFC tag programmer (MIOT-11 revamp) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>🏷️ {t('crossDevice.nfcCustomTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.nfcCustomDesc')}
+        </p>
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+          {(
+            [
+              ['uri', t('crossDevice.nfcCustomKindUri')],
+              ['text', t('crossDevice.nfcCustomKindText')],
+              ['internalAction', t('crossDevice.nfcCustomKindAction')],
+            ] as [NfcTagKind, string][]
+          ).map(([kind, label]) => (
+            <button
+              key={kind}
+              className={`btn ${nfcKind === kind ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => {
+                setNfcKind(kind);
+                setNfcBuilt(null);
+              }}
+              style={{ fontSize: 12 }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {nfcKind === 'pairHandshake' ? (
+          <p className="text-muted" style={{ fontSize: 12, marginBottom: 10 }}>
+            {t('crossDevice.nfcCustomPairHint')}
+          </p>
+        ) : (
+          <>
+            <input
+              className="input"
+              style={{ width: '100%', marginBottom: 10 }}
+              placeholder={
+                nfcKind === 'uri'
+                  ? t('crossDevice.nfcCustomUriPlaceholder')
+                  : nfcKind === 'text'
+                    ? t('crossDevice.nfcCustomTextPlaceholder')
+                    : t('crossDevice.nfcCustomActionPlaceholder')
+              }
+              value={nfcTarget}
+              onChange={(e) => setNfcTarget(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void handleNfcBuildCustom();
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                onClick={() => void handleNfcBuildCustom()}
+                disabled={nfcBuilding || !nfcTarget.trim()}
+              >
+                {nfcBuilding ? '…' : '✨ ' + t('crossDevice.nfcCustomBuild')}
+              </button>
+            </div>
+          </>
+        )}
+
+        {nfcBuilt && (
+          <div
+            className="alert alert-success"
+            style={{ fontSize: 13, marginTop: 12, overflowWrap: 'anywhere' }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>✓ {nfcBuilt.description}</div>
+            {nfcBuilt.recordType === 'uri' && nfcTarget.trim() && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  marginBottom: 8,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <QRCodeCanvas
+                  value={nfcTarget.trim()}
+                  size={140}
+                  bgColor="#ffffff"
+                  fgColor="#111111"
+                  level="M"
+                />
+                <div style={{ flex: 1, minWidth: 180 }}>
+                  <div className="text-muted" style={{ fontSize: 11, marginBottom: 4 }}>
+                    {t('crossDevice.nfcCustomQrHint')}
+                  </div>
+                  <code style={{ fontSize: 11, wordBreak: 'break-all' }}>{nfcTarget.trim()}</code>
+                </div>
+              </div>
+            )}
+            <div className="text-muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              {t('crossDevice.nfcCustomHowTo')}
+            </div>
+            <code
+              style={{
+                display: 'block',
+                fontSize: 11,
+                background: 'var(--color-surface-alt, rgba(255,255,255,0.05))',
+                padding: 8,
+                borderRadius: 6,
+                wordBreak: 'break-all',
+              }}
+            >
+              {nfcBuilt.ndefB64}
+            </code>
+          </div>
         )}
       </div>
 

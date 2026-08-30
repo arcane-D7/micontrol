@@ -168,12 +168,108 @@ pub struct NfcGuidance {
     pub instructions: String,
     /// The NDEF text record bytes (base64) the frontend can show as QR/text.
     pub ndef_text: Option<String>,
-    /// Version-mismatch note: the Phone Link protocol compares its own app
-    /// versions between PC and phone and refuses pairing when they differ.
-    /// This note explains that and what to do (update both apps).
+    /// Optional context-sensitive note. When set, explains the REAL reason the
+    /// phone might show "devices have different software versions" — the
+    /// Xiaomi/HyperOS ("Lyra") tag handler rejecting non-native content, NOT
+    /// a Phone Link version mismatch (a phone-side handler, not the phone link
+    /// versions, triggers that message).
     pub version_note: Option<String>,
     /// Microsoft Store app link to update Phone Link on the PC (windows).
     pub store_uri: Option<String>,
+}
+
+/// What kind of NFC tag content the user wants to program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NfcTagKind {
+    /// Phone Link pairing handshake (existing behaviour).
+    PairHandshake,
+    /// Open a URI (web URL or app deep link, e.g. `whatsapp://`).
+    Uri,
+    /// Free-form text payload.
+    Text,
+    /// MiControl internal action (custom scheme like `micontrol://lock`).
+    InternalAction,
+}
+
+/// A user-requested NFC tag payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NfcCustomRequest {
+    pub kind: NfcTagKind,
+    /// For Uri: the URL / deep link. For Text: the payload. For
+    /// InternalAction: the action command (e.g. "lock").
+    pub target: String,
+}
+
+/// Result of building a custom tag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NfcCustomResult {
+    /// Base64 of the NDEF message to write to the NFC tag.
+    pub ndef_b64: String,
+    /// Human description of what the tag will do when read.
+    pub description: String,
+    /// Suggested record type: "uri" | "text".
+    pub record_type: String,
+}
+
+/// Build a custom NFC tag payload. Never panics; returns Err on invalid input.
+pub fn build_custom_tag(req: &NfcCustomRequest) -> Result<NfcCustomResult, String> {
+    match req.kind {
+        NfcTagKind::PairHandshake => Err("use nfc_guidance for pairing".into()),
+        NfcTagKind::Uri => {
+            let uri = req.target.trim();
+            if uri.is_empty() {
+                return Err("URI target must not be empty".into());
+            }
+            // Accept web URLs and app deep links (scheme://…).
+            if !uri.contains(':') {
+                return Err("URI must include a scheme (e.g. https:// or app://)".into());
+            }
+            let rec = NdefRecord::uri(uri);
+            Ok(NfcCustomResult {
+                ndef_b64: base64_encode(&rec.encode()),
+                description: format!("Open {uri} when the tag is tapped"),
+                record_type: "uri".into(),
+            })
+        }
+        NfcTagKind::Text => {
+            let txt = req.target.trim();
+            if txt.is_empty() {
+                return Err("text must not be empty".into());
+            }
+            if txt.len() > 300 {
+                return Err("text is too long for an NFC tag (max 300 chars)".into());
+            }
+            let rec = NdefRecord::text(txt);
+            Ok(NfcCustomResult {
+                ndef_b64: base64_encode(&rec.encode()),
+                description: format!("Show text: {txt}"),
+                record_type: "text".into(),
+            })
+        }
+        NfcTagKind::InternalAction => {
+            // MiControl custom action. Use a reserved URI scheme so a phone
+            // (or MiControl itself when the scheme is registered server-side)
+            // can act on it. Whitelisted actions only.
+            let action = req.target.trim().to_ascii_lowercase();
+            const ALLOWED: &[&str] = &["lock", "unlock", "presence", "status"];
+            if !ALLOWED.contains(&action.as_str()) {
+                return Err(format!(
+                    "Unknown action '{action}'. Allowed: {}",
+                    ALLOWED.join(", ")
+                ));
+            }
+            let uri = format!("micontrol://action/{action}");
+            let rec = NdefRecord::uri(&uri);
+            Ok(NfcCustomResult {
+                ndef_b64: base64_encode(&rec.encode()),
+                description: format!("Trigger MiControl action: {action}"),
+                record_type: "uri".into(),
+            })
+        }
+    }
 }
 
 /// Build pairing guidance for the current device.
@@ -201,16 +297,19 @@ pub fn guidance(
             .ok()
     };
     let link_uri = format!("ms-phone-link:pairing?pc={}", url_encode(display_name));
-    // Phone Link mismatched-version notice: the "Link to Windows" app on the
-    // phone refuses the pairing when its version differs from the Phone Link
-    // app on the PC. Both sides must be updated. We surface this proactively
-    // because it's the single most common "tag read but nothing happens /
-    // version error" failure.
+    // NOTE ABOUT "different software versions": this message is NOT sent by
+    // Phone Link. It comes from the Xiaomi/HyperOS ("Lyra") tag reader on the
+    // phone when it sees a non-Xiaomi NFC payload (any NDEF it can't parse as
+    // its own Link-to-PC handshake). The fix is NOT updating apps — it's
+    // writing a payload the phone's own reader accepts (raw URI/text), which
+    // the phone interprets natively. We surface this corrected explanation.
     let version_note = Some(
-        "The phone may show \"devices have different software versions\" when \
-reading this tag. That is a Phone Link version check, not a problem with the \
-tag itself. Fix it by updating both apps: on the phone (Link to Windows, via \
-Google Play / app store) and on this PC (Phone Link, via Microsoft Store)."
+        "If the phone says \"devices have different software versions\", that \
+comes from Xiaomi's own tag reader (HyperOS/Lyra) on the phone, not from \
+Phone Link. It appears when the NFC tag contains content the phone doesn't \
+recognise as its own pairing handshake. Use a raw URI/text tag (see \
+\"Create custom tag\") instead of a MiControl text tag, and the phone will \
+read it natively without a version complaint."
             .to_string(),
     );
     // Modern Windows: the Microsoft Store page for Phone Link.
@@ -320,5 +419,79 @@ mod tests {
         let g2 = guidance("MiBook Pro", None, None);
         assert!(!g2.link_available);
         assert_eq!(g2.ndef_text, None);
+    }
+
+    #[test]
+    fn custom_uri_tag_builds_ndef() {
+        let res = build_custom_tag(&NfcCustomRequest {
+            kind: NfcTagKind::Uri,
+            target: "https://example.com".into(),
+        })
+        .unwrap();
+        assert_eq!(res.record_type, "uri");
+        assert!(!res.ndef_b64.is_empty());
+        // Decode the base64 and confirm it's a well-formed URI record.
+        let bytes = base64_decode(&res.ndef_b64);
+        let rec = NdefRecord::decode_single(&bytes).unwrap();
+        assert_eq!(rec.r#type, RTD_URI);
+    }
+
+    #[test]
+    fn custom_uri_rejects_no_scheme() {
+        let err = build_custom_tag(&NfcCustomRequest {
+            kind: NfcTagKind::Uri,
+            target: "example.com".into(),
+        })
+        .unwrap_err();
+        assert!(err.contains("scheme"));
+    }
+
+    #[test]
+    fn custom_text_tag_roundtrip() {
+        let res = build_custom_tag(&NfcCustomRequest {
+            kind: NfcTagKind::Text,
+            target: "Hello from MiControl".into(),
+        })
+        .unwrap();
+        let bytes = base64_decode(&res.ndef_b64);
+        let rec = NdefRecord::decode_single(&bytes).unwrap();
+        assert_eq!(rec.r#type, RTD_TEXT);
+    }
+
+    #[test]
+    fn custom_text_rejects_empty_and_long() {
+        assert!(build_custom_tag(&NfcCustomRequest {
+            kind: NfcTagKind::Text,
+            target: "  ".into(),
+        })
+        .is_err());
+        assert!(build_custom_tag(&NfcCustomRequest {
+            kind: NfcTagKind::Text,
+            target: "x".repeat(400),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn custom_internal_action_whitelist() {
+        let ok = build_custom_tag(&NfcCustomRequest {
+            kind: NfcTagKind::InternalAction,
+            target: "lock".into(),
+        })
+        .unwrap();
+        assert!(ok.description.contains("lock"));
+
+        let err = build_custom_tag(&NfcCustomRequest {
+            kind: NfcTagKind::InternalAction,
+            target: "rm -rf".into(),
+        })
+        .unwrap_err();
+        assert!(err.contains("Unknown action"));
+    }
+
+    /// Minimal base64 decode for tests (mirrors the standard engine).
+    fn base64_decode(s: &str) -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(s).unwrap()
     }
 }

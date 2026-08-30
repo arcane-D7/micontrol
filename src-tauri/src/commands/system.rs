@@ -809,3 +809,46 @@ pub async fn log_frontend_error(target: String, message: String) -> Result<(), E
     crate::util::error_log::log_error(&target, &message);
     Ok(())
 }
+
+// ── Self-Update via the "Ponte Elevada" bridge (S45-001) ─────────────────────
+
+/// Install a MiControl update WITHOUT a UAC prompt by dispatching
+/// `install_update` through the autonomous `MiControlBridge` service (SYSTEM).
+///
+/// The main process calls `elev_bridge::run_elevated` which prefers the bridge
+/// pipe, then the scheduled task, and only as a last resort shows UAC. The
+/// bridge launches the NSIS installer silently (`/S /UPDATE /R`), which kills
+/// the current app + bridge, deploys the new files, re-creates the
+/// `MiControlBridge` service (POSTINSTALL hook) and relaunches MiControl for
+/// the logged-on user.
+///
+/// `installer_path` is the absolute path to `MiControl_<version>-setup.exe`
+/// (or the updater-downloaded artifact). Returns the bridge's status object.
+#[tauri::command]
+pub async fn install_update(installer_path: String) -> Result<serde_json::Value, ErrorResponse> {
+    // The release bundle name is MiControl_0.2.1-beta_x64-setup.exe — validate
+    // the caller passed a real file so we never relay a bogus path to SYSTEM.
+    let p = std::path::PathBuf::from(&installer_path);
+    if !p.is_file() {
+        return Err(ErrorResponse::from(anyhow::anyhow!(
+            "Installer not found: {installer_path}"
+        )));
+    }
+    if !p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("exe"))
+        .unwrap_or(false)
+    {
+        return Err(ErrorResponse::from(anyhow::anyhow!(
+            "Not an .exe installer: {installer_path}"
+        )));
+    }
+
+    let result = elev_bridge::run_elevated(
+        "install_update",
+        serde_json::json!({ "installer": installer_path }),
+    )
+    .await?;
+    Ok(result)
+}

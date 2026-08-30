@@ -24,6 +24,9 @@
 //!   micontrol_bridge console              Run pipe server in console (testing)
 //!   micontrol_bridge install              Install the service (admin required)
 //!   micontrol_bridge uninstall            Uninstall the service (admin required)
+//!   micontrol_bridge self-test            Validate the pipe DACL (no admin)
+//!   micontrol_bridge install-update <file>  Relay a silent update install to the
+//!                                       SYSTEM service (no admin — "Ponte Elevada")
 
 #![cfg(windows)]
 
@@ -86,9 +89,37 @@ fn main() {
             let code = pipe_server::self_test();
             std::process::exit(code);
         }
+        "install-update" => {
+            // S45-001: "Ponte Elevada" self-update trigger.
+            //
+            // Front-of-house entry point with NO elevation: signs an
+            // `install_update` pipe command with the same HMAC key the app
+            // uses, sends it to the MiControlBridge service (SYSTEM) over the
+            // named pipe, and prints the bridge's reply. The bridge launches
+            // the NSIS installer (silent /S /UPDATE /R) which kills the old
+            // app + old bridge, installs the new files, re-creates the
+            // MiControlBridge service and relaunches the app for the
+            // interactive user — all without any UAC prompt.
+            //
+            // Usage:
+            //   micontrol_bridge install-update <C:\path\to\MiControl_setup.exe>
+            let installer_path = args.get(2).cloned();
+            match relay_install_update(installer_path) {
+                Ok(printed) => {
+                    println!("{printed}");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("install-update failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         other => {
             eprintln!("[micontrol_bridge] Unknown mode: {other}");
-            eprintln!("Usage: micontrol_bridge <service|console|install|uninstall|self-test>");
+            eprintln!(
+                "Usage: micontrol_bridge <service|console|install|uninstall|self-test|install-update <setup.exe>>"
+            );
             std::process::exit(1);
         }
     }
@@ -315,6 +346,179 @@ fn uninstall_service() -> Result<(), String> {
     // Wait for the entry to actually disappear (handles may linger).
     let _ = remove_service_wait(SERVICE_NAME);
     Ok(())
+}
+
+// ── Pipe relay (unprivileged "Ponte Elevada" front) ──────────────────────────
+
+/// S45-001: Relay an `install_update` command to the MiControlBridge service
+/// (SYSTEM) over the named pipe, using the same HMAC-keyed protocol the app
+/// uses. Called from the CLI mode `install-update <setup.exe>`.
+///
+/// This is the "Ponte Elevada" the user asked for: running
+///   `micontrol_bridge install-update path\to\MiControl_setup.exe`
+/// (or the app's install-invocation) talks to the ALREADY-RUNNING SYSTEM
+/// service — no admin, no UAC — and the service launches the silent installer
+/// which replaces the app + bridge, re-creates the service, and relaunches the
+/// app for the logged-on user.
+///
+/// Returns the bridge's JSON reply (pretty-printed) on success.
+fn relay_install_update(installer_path: Option<String>) -> Result<String, String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    };
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult};
+
+    let installer_path = installer_path.ok_or_else(|| {
+        "install-update requires an installer path: micontrol_bridge install-update <setup.exe>"
+            .to_string()
+    })?;
+
+    // ── Build the signed request payload (mirrors elev_bridge::run_via_service_pipe) ──
+    let request_id = format!("cli-{}", now_unix_ms());
+    let nonce = micontrol_lib::util::auth::generate_nonce();
+    let mut payload = serde_json::json!({
+        "protocol_version": 3,
+        "request_id": request_id,
+        "created_at_ms": micontrol_lib::util::auth::now_ms(),
+        "nonce": nonce,
+        "caller_pid": std::process::id(),
+        "cmd": "install_update",
+        "args": { "installer": installer_path },
+    });
+    let key = micontrol_lib::util::auth::read_key()
+        .map_err(|e| format!("Cannot read bridge auth key: {e}"))?;
+    micontrol_lib::util::auth::sign_payload(&mut payload, &key);
+
+    // ── Open the pipe (same DACL semantics as the app's pipe_request) ───────
+    let pipe_path_w: Vec<u16> = OsStr::new(BRIDGE_PIPE_NAME)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(pipe_path_w.as_ptr()),
+            (GENERIC_READ | GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+            HANDLE::default(),
+        )
+        .map_err(|e| format!("Open bridge pipe: {e}"))?
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err("INVALID_HANDLE_VALUE opening bridge pipe".to_string());
+    }
+
+    let mut written = 0u32;
+    let body = payload.to_string();
+    // Overlapped write (bounded wait so a wedged bridge can't hang us).
+    let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+        .map_err(|e| format!("CreateEventW: {e}"))?;
+    let mut write_ov: windows::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    write_ov.hEvent = event;
+    let mut write_pending = false;
+    let mut write_result: Result<(), windows::core::Error> = Ok(());
+    unsafe {
+        let op = WriteFile(
+            handle,
+            Some(body.as_bytes()),
+            Some(&mut written),
+            Some(&mut write_ov),
+        );
+        if op.is_err() {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if code == 997 {
+                write_pending = true; // ERROR_IO_PENDING
+            } else {
+                write_result = Err(windows::core::Error::from_win32());
+            }
+        }
+        if write_pending {
+            if WaitForSingleObject(event, 8_000) == WAIT_TIMEOUT {
+                let _ = CancelIoEx(handle, Some(&write_ov));
+                write_result = Err(windows::core::Error::from_win32());
+            } else {
+                let mut transferred = 0u32;
+                if GetOverlappedResult(handle, &write_ov, &mut transferred, false).is_err() {
+                    write_result = Err(windows::core::Error::from_win32());
+                }
+            }
+        }
+    }
+    write_result.map_err(|e| format!("WriteFile to bridge pipe: {e}"))?;
+
+    // ── Read the reply ───────────────────────────────────────────────────────
+    let mut buf = [0u8; MAX_MSG_BYTES];
+    let mut read_ov: windows::Win32::System::IO::OVERLAPPED = unsafe { std::mem::zeroed() };
+    read_ov.hEvent = event;
+    let mut read_result = String::new();
+    loop {
+        let mut bytes_read = 0u32;
+        let op = unsafe {
+            ReadFile(
+                handle,
+                Some(&mut buf),
+                Some(&mut bytes_read),
+                Some(&mut read_ov),
+            )
+        };
+        if op.is_err() {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if code != 997 {
+                break; // real error → stop reading
+            }
+            // ERROR_IO_PENDING → wait bounded
+            let wait = unsafe { WaitForSingleObject(event, 8_000) };
+            if wait == WAIT_TIMEOUT {
+                let _ = unsafe { CancelIoEx(handle, Some(&read_ov)) };
+                break;
+            }
+            let mut transferred = 0u32;
+            let ok = unsafe { GetOverlappedResult(handle, &read_ov, &mut transferred, false) };
+            if ok.is_err() {
+                break;
+            }
+            bytes_read = transferred;
+        }
+        if bytes_read == 0 {
+            break;
+        }
+        read_result.push_str(&String::from_utf8_lossy(&buf[..bytes_read as usize]));
+        if read_result.trim_end().ends_with('}') {
+            break;
+        }
+    }
+
+    unsafe {
+        CloseHandle(event).ok();
+        CloseHandle(handle).ok();
+    }
+
+    if read_result.is_empty() {
+        return Err("Bridge returned no response".to_string());
+    }
+
+    // Pretty-print the bridge's JSON reply.
+    let v: serde_json::Value = serde_json::from_str(&read_result)
+        .map_err(|e| format!("Invalid bridge reply JSON: {e}"))?;
+    Ok(serde_json::to_string_pretty(&v).unwrap_or(read_result))
+}
+
+/// Milliseconds since Unix epoch (small local helper — avoids importing chrono here).
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ── Windows Service plumbing ─────────────────────────────────────────────────
