@@ -6,6 +6,7 @@
 pub mod ai_cache;
 pub mod ai_usage;
 pub mod auth;
+pub mod auto_update;
 pub mod blocking;
 pub mod consent_audit;
 pub mod crash_report;

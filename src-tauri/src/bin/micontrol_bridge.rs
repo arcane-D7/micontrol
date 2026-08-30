@@ -27,6 +27,9 @@
 //!   micontrol_bridge self-test            Validate the pipe DACL (no admin)
 //!   micontrol_bridge install-update <file>  Relay a silent update install to the
 //!                                       SYSTEM service (no admin — "Ponte Elevada")
+//!   micontrol_bridge auto-update [<url>] Download a beta installer (persisted
+//!                                       feed or explicit URL) + install via the
+//!                                       bridge (dev/CLI/MCP hook — hidden option)
 
 #![cfg(windows)]
 
@@ -115,10 +118,45 @@ fn main() {
                 }
             }
         }
+        "auto-update" => {
+            // S45-002: dev-driven auto-update trigger (hidden option).
+            //
+            // Fetches the beta feed URL from HKCU (set via the app UI, the
+            // `set_auto_update_beta_feed` Tauri command, or this CLI's
+            // `--url` argument), downloads the installer to %TEMP%\MiControl\
+            // and relays `install_update` to the SYSTEM service — all in one
+            // step. Intended for development / MCP: point this CLI at a
+            // freshly built setup.exe URL and MiControl updates itself.
+            //
+            // Usage:
+            //   micontrol_bridge auto-update [<url>]
+            //     <url> optional — overrides the persisted beta feed URL.
+            //   micontrol_bridge auto-update --url <url>
+            let url_arg = args.get(2).map(|s| s.as_str());
+            let url = if let Some(a) = url_arg {
+                if a == "--url" {
+                    args.get(3).cloned()
+                } else {
+                    Some(a.to_string())
+                }
+            } else {
+                micontrol_lib::util::auto_update::beta_feed_url()
+            };
+            match relay_auto_update(url) {
+                Ok(printed) => {
+                    println!("{printed}");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("auto-update failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         other => {
             eprintln!("[micontrol_bridge] Unknown mode: {other}");
             eprintln!(
-                "Usage: micontrol_bridge <service|console|install|uninstall|self-test|install-update <setup.exe>>"
+                "Usage: micontrol_bridge <service|console|install|uninstall|self-test|install-update <setup.exe>|auto-update [<url>]>"
             );
             std::process::exit(1);
         }
@@ -519,6 +557,72 @@ fn now_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// S45-002: dev-driven auto-update — download a beta installer from `url`
+/// (or the persisted beta feed) into `%TEMP%\MiControl\updates\`, then relay
+/// `install_update` to the SYSTEM bridge exactly like `auto-update`.
+///
+/// This is the CLI/MCP hook for "instalar a versão beta que queremos e o
+/// instalador faz isso sozinho": point this at a fresh setup.exe URL and the
+/// whole update runs silently via the bridge.
+fn relay_auto_update(url: Option<String>) -> Result<String, String> {
+    let url = url.ok_or_else(|| {
+        "auto-update requires a URL: micontrol_bridge auto-update <installer_url> (or set the beta feed)".to_string()
+    })?;
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("auto-update: empty installer URL".to_string());
+    }
+
+    // ── Download the installer (blocking via a local tokio runtime) ─────────
+    let temp_dir = std::env::temp_dir().join("MiControl").join("updates");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Cannot create update dir: {e}"))?;
+
+    let filename = url
+        .rsplit('/')
+        .next()
+        .filter(|f| !f.is_empty())
+        .ok_or_else(|| "auto-update: cannot derive installer filename from URL".to_string())?;
+
+    if !filename.to_lowercase().ends_with(".exe") {
+        return Err(format!(
+            "auto-update: downloaded file is not an .exe installer: {filename}"
+        ));
+    }
+
+    let dest = temp_dir.join(filename);
+    eprintln!("[auto-update] Downloading {url} -> {}", dest.display());
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio runtime: {e}"))?;
+    let result: Result<(), String> = rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) MiControl/0.2")
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .map_err(|e| format!("HTTP client: {e}"))?;
+        let bytes = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("Download failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("HTTP error: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| format!("Read bytes: {e}"))?;
+        std::fs::write(&dest, &bytes).map_err(|e| format!("Cannot write update: {e}"))?;
+        log::info!(
+            "[auto-update] Downloaded {} ({} bytes)",
+            dest.display(),
+            bytes.len()
+        );
+        Ok(())
+    });
+    result?;
+
+    eprintln!("[auto-update] Downloaded — relaying install_update to the bridge...");
+    relay_install_update(Some(dest.to_string_lossy().to_string()))
 }
 
 // ── Windows Service plumbing ─────────────────────────────────────────────────

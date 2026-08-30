@@ -852,3 +852,103 @@ pub async fn install_update(installer_path: String) -> Result<serde_json::Value,
     .await?;
     Ok(result)
 }
+
+// ── Auto-update config (S45-002) ─────────────────────────────────────────────
+
+/// Read the persisted auto-update config (master switch + hidden beta feed).
+#[tauri::command]
+pub fn get_auto_update_config() -> Result<crate::util::auto_update::AutoUpdateConfig, ErrorResponse>
+{
+    Ok(crate::util::auto_update::config())
+}
+
+/// Persist the auto-update master switch (off by default — opt-in).
+#[tauri::command]
+pub fn set_auto_update_enabled(enabled: bool) -> Result<(), ErrorResponse> {
+    crate::util::auto_update::set_enabled(enabled);
+    Ok(())
+}
+
+/// Persist the hidden dev beta feed URL. Pass `Some("")` (or omit) to clear.
+/// This is the CLI/MCP hook for "instalar a versão beta que queremos" —
+/// the value is stored in HKCU and consumed by the bridge's `auto-update`
+/// mode at trigger time.
+#[tauri::command]
+pub fn set_auto_update_beta_feed(url: Option<String>) -> Result<(), ErrorResponse> {
+    crate::util::auto_update::set_beta_feed_url(url.as_deref());
+    Ok(())
+}
+
+/// Download the update installer and dispatch it via the bridge.
+///
+/// * If a **beta feed URL** is configured (hidden dev option), that URL is
+///   downloaded to `%TEMP%\MiControl\updates\` and installed (silent).
+/// * Otherwise the caller must supply an `installer_url` explicitly.
+///
+/// Returns what the bridge reported for `install_update`.
+#[tauri::command]
+pub async fn trigger_auto_update(
+    installer_url: Option<String>,
+) -> Result<serde_json::Value, ErrorResponse> {
+    let feed = crate::util::auto_update::beta_feed_url();
+    let url = match installer_url.or(feed) {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => {
+            return Err(ErrorResponse::from(anyhow::anyhow!(
+                "No update URL configured — set the beta feed first (dev option) or pass installer_url."
+            )));
+        }
+    };
+
+    let temp_dir = std::env::temp_dir().join("MiControl").join("updates");
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| ErrorResponse::from(anyhow::anyhow!("Cannot create update dir: {e}")))?;
+
+    let filename = url
+        .rsplit('/')
+        .next()
+        .filter(|f| !f.is_empty())
+        .unwrap_or("MiControl_update-setup.exe");
+    let dest = temp_dir.join(filename);
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) MiControl/0.2")
+        .timeout(std::time::Duration::from_secs(600)) // 10 min for large installers
+        .build()
+        .map_err(|e| ErrorResponse::from(anyhow::anyhow!("HTTP client: {e}")))?;
+
+    log::info!("[auto_update] Downloading {} -> {}", url, dest.display());
+    let bytes = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ErrorResponse::from(anyhow::anyhow!("Download failed: {e}")))?
+        .error_for_status()
+        .map_err(|e| ErrorResponse::from(anyhow::anyhow!("HTTP error: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| ErrorResponse::from(anyhow::anyhow!("Read bytes: {e}")))?;
+
+    if !filename.to_lowercase().ends_with(".exe") {
+        // Enforce .exe — the bridge refuses anything else.
+        return Err(ErrorResponse::from(anyhow::anyhow!(
+            "Downloaded file is not an .exe installer: {filename}"
+        )));
+    }
+
+    std::fs::write(&dest, &bytes)
+        .map_err(|e| ErrorResponse::from(anyhow::anyhow!("Cannot write update: {e}")))?;
+    log::info!(
+        "[auto_update] Downloaded {} ({} bytes)",
+        dest.display(),
+        bytes.len()
+    );
+
+    let installer = dest.to_string_lossy().to_string();
+    let result = elev_bridge::run_elevated(
+        "install_update",
+        serde_json::json!({ "installer": installer }),
+    )
+    .await?;
+    Ok(result)
+}

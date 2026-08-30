@@ -455,7 +455,19 @@
     "bridgePathMissing": "Indique o caminho para o setup .exe",
     "bridgeBridgeDown": "Serviço bridge indisponível — o instalador vai pedir permissão de administrador.",
     "bridgeHowTitle": "Como funciona",
-    "bridgeHow": "Como funciona: o caminho é validado e o serviço MiControlBridge (corre como SYSTEM) lança o instalador NSIS em silêncio (/S /UPDATE /R). O instalador substitui o app, recria o serviço bridge e reinicia o MiControl."
+    "bridgeHow": "Como funciona: o caminho é validado e o serviço MiControlBridge (corre como SYSTEM) lança o instalador NSIS em silêncio (/S /UPDATE /R). O instalador substitui o app, recria o serviço bridge e reinicia o MiControl.",
+    "autoUpdateTitle": "Atualização automática",
+    "autoUpdateDesc": "Deixe versões futuras se instalarem silenciosamente via a bridge privilegiada — sem prompt de UAC. Desativado por padrão.",
+    "feedLabel": "URL do feed beta (somente desenvolvimento)",
+    "feedPlaceholder": "https://…/MiControl_*-setup.exe",
+    "feedSave": "Salvar feed",
+    "feedSaved": "Feed beta salvo.",
+    "feedCleared": "Feed beta limpo.",
+    "feedSaveFailed": "Não foi possível salvar o feed beta.",
+    "feedHint": "Opção escondida para desenvolvimento: aponte o MiControl para uma URL de instalador beta e ele se atualiza sozinho. Também disponível via CLI: micontrol_bridge auto-update <url>.",
+    "updateNow": "Atualizar agora",
+    "updateNowInstalling": "Atualizando…",
+    "updateNowSuccess": "Instalador iniciado. O MiControl reiniciará com a nova versão em instantes."
   },
   "errors": {
     "hardwareNotAvailable": "Interface de hardware não disponível",

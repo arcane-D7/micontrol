@@ -2,6 +2,7 @@ import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import AppUpdateBanner from '../../components/AppUpdateBanner';
 import BridgeUpdateCard from '../../components/BridgeUpdateCard';
+import AutoUpdateCard from '../../components/AutoUpdateCard';
 import type { AppUpdateState, AppUpdateInfo } from '../../hooks/useAutoUpdate';
 
 const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
@@ -91,6 +92,9 @@ export default function AboutTab({
 
       {/* S45-001: silent self-update via the privileged bridge service */}
       <BridgeUpdateCard />
+
+      {/* S45-002: auto-update toggle (off by default) + hidden dev beta feed */}
+      <AutoUpdateCard />
     </>
   );
 }

@@ -455,7 +455,19 @@
     "bridgePathMissing": "Please enter the path to the setup .exe",
     "bridgeBridgeDown": "Bridge service unavailable — the installer will ask for administrator permission.",
     "bridgeHowTitle": "How it works",
-    "bridgeHow": "How it works: the path is validated, then the MiControlBridge service (runs as SYSTEM) launches the NSIS installer silently (/S /UPDATE /R). The installer replaces the app, re-creates the bridge service and relaunches MiControl."
+    "bridgeHow": "How it works: the path is validated, then the MiControlBridge service (runs as SYSTEM) launches the NSIS installer silently (/S /UPDATE /R). The installer replaces the app, re-creates the bridge service and relaunches MiControl.",
+    "autoUpdateTitle": "Auto-update",
+    "autoUpdateDesc": "Let future releases install themselves silently via the privileged bridge — no UAC prompt. Off by default.",
+    "feedLabel": "Beta feed URL (development only)",
+    "feedPlaceholder": "https://…/MiControl_*-setup.exe",
+    "feedSave": "Save feed",
+    "feedSaved": "Beta feed saved.",
+    "feedCleared": "Beta feed cleared.",
+    "feedSaveFailed": "Could not save the beta feed.",
+    "feedHint": "Hidden option for development: point MiControl at a beta installer URL and it updates itself. Also usable via CLI: micontrol_bridge auto-update <url>.",
+    "updateNow": "Update now",
+    "updateNowInstalling": "Updating…",
+    "updateNowSuccess": "Installer launched. MiControl will restart with the new version shortly."
   },
   "errors": {
     "hardwareNotAvailable": "Hardware interface not available",
