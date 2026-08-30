@@ -226,6 +226,13 @@
   ; named pipe (\\.\pipe\micontrol_bridge) for privileged commands WITHOUT any
   ; UAC prompt after installation. The main app prefers this path; the
   ; scheduled task above remains only as a fallback.
+  ;
+  ; NOTE: `micontrol_bridge.exe install` is SELF-HEALING on SCM races: its
+  ; Rust install routine already does `sc stop` + delete-wait + retries
+  ; `sc create` while the entry is "marked for deletion" (error 1072). We
+  ; also kill it in PREINSTALL (KillAppProcess → KillBridgeProcess), so it
+  ; is already stopped by the time we get here. This block simply re-arms:
+  ; delete-wait (confirm 1060) is done by KillBridgeProcess in Section Install.
   DetailPrint "Installing MiControlBridge service (autonomous elevated bridge)..."
   nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" install'
   Pop $0

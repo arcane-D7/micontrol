@@ -990,10 +990,12 @@ Function KillAppProcess
     !endif
     Pop $1
     ${If} $1 <> 0
-      ; Main app not running — also kill the elevated bridge service helper
+      ; Main app not running — but ALWAYS release the elevated bridge helper
       ; (micontrol_bridge.exe) which can lock files in $INSTDIR even when the
-      ; app is closed. It runs as a standalone process (installed service or
-      ; scheduled-task child), so the app kill above does not stop it.
+      ; app is closed (it runs as a Windows service, restarted by SCM). The
+      ; bridge lock is REQUIRED before overwriting micontrol_bridge.exe, so
+      ; this must run unconditionally whenever the file may be locked —
+      ; regardless of whether the app process was found above.
       Call KillBridgeProcess
       Return  ; process not found — safe to proceed
     ${EndIf}
@@ -1004,6 +1006,9 @@ Function KillAppProcess
       nsis_tauri_utils::KillProcess "${MAINBINARYNAME}.exe"
     !endif
     Pop $1
+    ; Even if the app was running, release the bridge independently (so a
+    ; service-only lock cannot block the overwrite).
+    Call KillBridgeProcess
     Sleep 500
     IntOp $0 $0 + 1
     ${If} $0 < 5
