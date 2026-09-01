@@ -69,6 +69,12 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
         // flooding the log and wasting a WMI connection. We remember a failure
         // for 60 s and short-circuit afterwards.
         static LAST_FAILURE: OnceLock<AtomicU64> = OnceLock::new();
+        // S37-005b: log WARN only on the FIRST failure of the process. This
+        // query fails PERMANENTLY while unprivileged (access denied by
+        // design; thermal data comes via the elevated bridge), so logging
+        // WARN on every 60 s cache expiry buried real errors under WARN
+        // noise. The retry still runs; only the log level drops to debug.
+        static FIRST_FAILURE_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
         const FAILURE_CACHE_SECS: u64 = 60;
         let last_fail = LAST_FAILURE.get_or_init(|| AtomicU64::new(0));
         let now_epoch = SystemTime::now()
@@ -105,7 +111,14 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
             Ok(r) => r,
             Err(e) => {
                 last_fail.store(now_epoch, AtomicOrdering::Relaxed);
-                log::warn!(target: "hw::fan", "ESIF WMI query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
+                let first = FIRST_FAILURE_LOGGED
+                    .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+                    .swap(true, AtomicOrdering::Relaxed);
+                if !first {
+                    log::warn!(target: "hw::fan", "ESIF WMI query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
+                } else {
+                    log::debug!(target: "hw::fan", "ESIF WMI query failed (cached; retrying in {FAILURE_CACHE_SECS}s): {e}");
+                }
                 return Err(e);
             }
         };

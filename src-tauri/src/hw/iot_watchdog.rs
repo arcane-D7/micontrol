@@ -96,16 +96,24 @@ pub fn check_once() {
         return;
     }
 
-    // ensure_service_running() is a heavyweight install/start path — run it
-    // on the blocking pool so we never stall the async runtime.
-    tauri::async_runtime::spawn_blocking(|| {
-        match crate::hw::ecram_service_mgmt::ensure_service_running() {
-            Ok(status) => {
+    // Route the recovery through the elevated chain (MiControlBridge SYSTEM
+    // service pipe, else the scheduled task). Creating/replacing the
+    // `IoTSvc` service and copying into the DriverStore requires
+    // Administrator rights — calling `sc create` from the unprivileged app
+    // process ALWAYS fails with access denied (error 5), spamming the log.
+    // The elevated path runs as SYSTEM, so it succeeds silently.
+    tauri::async_runtime::spawn(async move {
+        match crate::elev_bridge::run_elevated_no_prompt(
+            "ensure_ecram_service",
+            serde_json::json!({}),
+        )
+        .await
+        {
+            Ok(v) => {
                 log::info!(
-                    "[iot_watchdog] recovery done: installed={} running={} pipe_available={}",
-                    status.installed,
-                    status.running,
-                    status.pipe_available
+                    "[iot_watchdog] recovery done via elevated path: {v} \
+                     (pipe_available={})",
+                    crate::hw::iotservice::is_pipe_available()
                 );
             }
             Err(e) => {

@@ -37,6 +37,13 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
         // class is also denied to unprivileged callers (0x80041003). Cache the
         // failure for 60 s so the 2 s fan poll doesn't spam WMI + the log.
         static LAST_FAILURE: OnceLock<AtomicU64> = OnceLock::new();
+        // S37-005b: log WARN only on the FIRST failure of the process. This
+        // query fails PERMANENTLY while unprivileged (access denied by design;
+        // thermal data comes via the elevated bridge), so logging WARN on
+        // every 60 s cache expiry buried real errors under ~2 WARN/min of
+        // predictable noise. The retry still runs (in case we relaunch as
+        // admin); only the log level drops to debug.
+        static FIRST_FAILURE_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
         const FAILURE_CACHE_SECS: u64 = 60;
         let last_fail = LAST_FAILURE.get_or_init(|| AtomicU64::new(0));
         let now_epoch = SystemTime::now()
@@ -71,7 +78,14 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
             Ok(r) => r,
             Err(e) => {
                 last_fail.store(now_epoch, AtomicOrdering::Relaxed);
-                log::warn!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
+                let first = FIRST_FAILURE_LOGGED
+                    .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+                    .swap(true, AtomicOrdering::Relaxed);
+                if !first {
+                    log::warn!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
+                } else {
+                    log::debug!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (cached; retrying in {FAILURE_CACHE_SECS}s): {e}");
+                }
                 return Err(e);
             }
         };

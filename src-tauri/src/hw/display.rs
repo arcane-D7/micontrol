@@ -54,20 +54,66 @@ mod igcl_session {
 
     /// Open (or reuse) a persistent IGCL session. Returns the stored handles
     /// without ever calling `ctlClose` or unloading the library.
+    ///
+    /// # Crash safety (MIOT-39)
+    /// Never drop the `Library` once loaded: ControlLib.dll spawns internal
+    /// threads that keep executing inside it even after `ctlInit` returns, so
+    /// unmapping the DLL (dropping the last `libloading::Library`) crashes the
+    /// process (`ControlLib.dll_unloaded`, `0xc0000005` in combase/COM).
+    ///
+    /// Intel returns *warning* HRESULTs with the severity bit CLEAR
+    /// (`rc != 0` but `rc & 0x80000000 == 0`) — observed `0x40000021` and
+    /// `0x40000009` from `ctlInit` on this platform. Those are informational
+    /// (e.g. "already initialized by the display driver"), NOT fatal. We log
+    /// them and continue; only hard failures (`rc & 0x80000000 != 0`) are
+    /// treated as errors — and even then the session is stored holding the
+    /// Library so the DLL stays mapped.
     pub fn get_session() -> Result<(Library, *mut std::ffi::c_void), String> {
         let mut guard = IGG_SESSION.lock().map_err(|e| e.to_string())?;
         if let Some(s) = guard.as_ref() {
-            return Ok((
-                unsafe { Library::new(s.path()) }.map_err(|e| e.to_string())?,
-                s.device,
-            ));
+            // Session already stored — its `lib` handle keeps ControlLib.dll
+            // mapped for the whole process. A failed reload here only means
+            // the caller falls back to WMI; the DLL stays mapped regardless.
+            let lib_for_caller = loader_reload(&s.path()).ok_or_else(|| {
+                format!(
+                    "ControlLib.dll reload failed (session: device={:?})",
+                    s.device
+                )
+            })?;
+            return Ok((lib_for_caller, s.device));
         }
         // First use: load once and initialize the SDK.
         let path = s_path();
         let lib = unsafe { Library::new(&path) }
             .map_err(|e| format!("LoadLibrary ControlLib.dll: {e}"))?;
-        let ctl_init: libloading::Symbol<FnCtlInit> =
-            unsafe { lib.get(b"ctlInit\0").map_err(|e| e.to_string())? };
+
+        // ── ctlInit: warning HRESULTs are NOT fatal ─────────────────────────
+        // Intel IGCL init can return 0x40000021 / 0x40000009 (INFO/WARNING:
+        // severity bit clear) even on success paths. Treating those as fatal
+        // made us drop `lib` → ControlLib.dll unloaded → crash. Hard failures
+        // (severity bit 0x80000000 SET) are logged loudly but we STILL store
+        // the session so the DLL never unloads; runtime ops then fall back to
+        // WMI without dismantling the mapped library.
+        let ctl_init: libloading::Symbol<FnCtlInit> = unsafe {
+            match lib.get(b"ctlInit\0") {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!(
+                        "[igcl_session] ctlInit symbol missing: {e} — \
+                         storing session anyway so ControlLib.dll stays mapped"
+                    );
+                    let s = IgclSession {
+                        lib,
+                        device: std::ptr::null_mut(),
+                    };
+                    *guard = Some(s);
+                    let lib_for_caller = loader_reload(&path).ok_or_else(|| {
+                        "ControlLib.dll reload failed after ctlInit symbol error".to_string()
+                    })?;
+                    return Ok((lib_for_caller, std::ptr::null_mut()));
+                }
+            }
+        };
         let mut init_args = CtlInitArgs {
             size: std::mem::size_of::<CtlInitArgs>() as u32,
             app_version: 1,
@@ -76,27 +122,78 @@ mod igcl_session {
         let mut api_handle: CtlApiHandle = std::ptr::null_mut();
         let rc = unsafe { ctl_init(&mut init_args, &mut api_handle) };
         if rc != 0 {
-            return Err(format!("ctlInit failed: {rc}"));
+            let severity = rc & 0x8000_0000;
+            if severity != 0 {
+                log::warn!(
+                    "[igcl_session] ctlInit hard failure rc=0x{rc:08X} — \
+                     storing session anyway so ControlLib.dll stays mapped \
+                     (brightness will fall back to WMI)"
+                );
+            } else {
+                log::warn!(
+                    "[igcl_session] ctlInit warning rc=0x{rc:08X} (severity bit clear) — \
+                     treating as non-fatal, continuing"
+                );
+            }
         }
+
+        // ── ctlEnumerateDevices: best-effort ────────────────────────────────
+        // Warnings are non-fatal; a failed enumerate leaves a null device and
+        // runtime ops fall back to WMI — but the DLL stays mapped either way.
+        let mut device: *mut std::ffi::c_void = std::ptr::null_mut();
         let ctl_enumerate: libloading::Symbol<FnCtlEnumerateDevices> = unsafe {
-            lib.get(b"ctlEnumerateDevices\0")
-                .map_err(|e| e.to_string())?
+            match lib.get(b"ctlEnumerateDevices\0") {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("[igcl_session] ctlEnumerateDevices symbol missing: {e}");
+                    // Still store the session (DLL stays mapped for the whole
+                    // process) and return a reloaded caller handle.
+                    let s = IgclSession { lib, device };
+                    *guard = Some(s);
+                    let lib_for_caller = loader_reload(&path).ok_or_else(|| {
+                        "ControlLib.dll reload failed after enumerate symbol error".to_string()
+                    })?;
+                    return Ok((lib_for_caller, device));
+                }
+            }
         };
         let mut count: u32 = 0;
-        unsafe { ctl_enumerate(api_handle, &mut count, std::ptr::null_mut()) };
-        if count == 0 {
-            return Err("No IGCL devices found".to_string());
+        let erc = unsafe { ctl_enumerate(api_handle, &mut count, std::ptr::null_mut()) };
+        if erc != 0 && (erc & 0x8000_0000) != 0 {
+            log::warn!(
+                "[igcl_session] ctlEnumerateDevices count failed rc=0x{erc:08X} — \
+                 storing session with null device (DLL stays mapped)"
+            );
+        } else if count > 0 {
+            let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
+            let erc2 = unsafe { ctl_enumerate(api_handle, &mut count, devices.as_mut_ptr()) };
+            if erc2 != 0 && (erc2 & 0x8000_0000) != 0 {
+                log::warn!(
+                    "[igcl_session] ctlEnumerateDevices fill failed rc=0x{erc2:08X} — \
+                     keeping null device (DLL stays mapped)"
+                );
+            } else {
+                device = devices[0];
+            }
+        } else {
+            log::warn!(
+                "[igcl_session] no IGCL devices enumerated — storing session with null device"
+            );
         }
-        let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
-        unsafe { ctl_enumerate(api_handle, &mut count, devices.as_mut_ptr()) };
-        let device = devices[0];
 
+        // ALWAYS store the session: the Library must never be dropped.
         let s = IgclSession { lib, device };
+        *guard = Some(s);
         // Re-load for the caller so the stored session keeps its own refcount:
         // LoadLibrary increments the module refcount and does NOT unload it.
-        let lib_for_caller = unsafe { Library::new(&path) }
-            .map_err(|e| format!("LoadLibrary ControlLib.dll (caller): {e}"))?;
-        *guard = Some(s);
+        // Store FIRST so a (virtually impossible) reload failure can never
+        // unmap the DLL — the session already holds its own handle.
+        let lib_for_caller = loader_reload(&path).ok_or_else(|| {
+            format!(
+                "ControlLib.dll reload failed (stored session keeps DLL mapped; device={device:?})"
+            )
+        })?;
+        log::debug!("[igcl_session] persistent IGCL session stored (device={device:?})");
         Ok((lib_for_caller, device))
     }
 
@@ -106,6 +203,19 @@ mod igcl_session {
             // symbols from a fresh handle to the same path.
             s_path()
         }
+    }
+
+    /// Load a fresh `libloading::Library` handle for the caller. The stored
+    /// session keeps its own handle mapped, so this just bumps the module
+    /// refcount — the DLL is never unmapped while we hold either handle.
+    ///
+    /// Returns `None` only if LoadLibrary fails while the DLL is already
+    /// mapped by the session (effectively impossible); the caller treats that
+    /// as a soft failure — the session itself keeps the DLL alive.
+    fn loader_reload(path: &str) -> Option<Library> {
+        unsafe { Library::new(path) }
+            .map_err(|e| log::warn!("[igcl_session] ControlLib.dll reload failed: {e}"))
+            .ok()
     }
 
     fn s_path() -> String {
@@ -1444,10 +1554,16 @@ fn get_brightness_igcl() -> HardwareResult<u8> {
             smooth_time_ms: 0,
         };
         let rc = get_brightness(device as CtlDeviceHandle, &mut args);
-        if rc != 0 {
+        if rc != 0 && (rc & 0x8000_0000) != 0 {
             return Err(HardwareError::Display(format!(
                 "ctlGetBrightnessSetting failed: {rc:#x}"
             )));
+        }
+        if rc != 0 {
+            // Intel warning HRESULT (severity bit clear) — treat as success.
+            log::debug!(
+                "[igcl] ctlGetBrightnessSetting warning rc=0x{rc:08X} — using returned value"
+            );
         }
         Ok(args.target_brightness.clamp(0.0, 100.0) as u8)
     })
@@ -1477,10 +1593,16 @@ fn set_brightness_igcl(level: u8) -> HardwareResult<()> {
             smooth_time_ms: 0,
         };
         let rc = set_brightness(device as CtlDeviceHandle, &mut args);
-        if rc != 0 {
+        if rc != 0 && (rc & 0x8000_0000) != 0 {
             return Err(HardwareError::Display(format!(
                 "ctlSetBrightnessSetting failed: {rc:#x}"
             )));
+        }
+        if rc != 0 {
+            // Intel warning HRESULT (severity bit clear) — treat as success.
+            log::debug!(
+                "[igcl] ctlSetBrightnessSetting warning rc=0x{rc:08X} — treated as applied"
+            );
         }
         Ok(())
     })
