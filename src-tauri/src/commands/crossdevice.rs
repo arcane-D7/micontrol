@@ -55,6 +55,30 @@ pub async fn ble_discover(seconds: Option<u64>) -> Result<BleScanResult, String>
     Ok(crate::hw::ble_scan::discover_devices(secs).await)
 }
 
+/// Read the BLE-advertising config (enabled + advertised name) for the UI.
+#[tauri::command]
+pub async fn ble_advertise_config() -> Result<crate::hw::ble_advertise::BleAdvertiseConfig, String>
+{
+    Ok(crate::hw::ble_advertise::get_config())
+}
+
+/// Persist the BLE-advertising config and start/stop the publisher so the PC
+/// is discoverable by nearby phones via BLE.
+#[tauri::command]
+pub async fn set_ble_advertise_config(
+    config: crate::hw::ble_advertise::BleAdvertiseConfig,
+) -> Result<(), String> {
+    let mut cfg = config;
+    cfg.set_enabled(cfg.enabled);
+    Ok(())
+}
+
+/// True while the BLE advertiser is actually running (publisher Started).
+#[tauri::command]
+pub async fn ble_advertise_status() -> Result<bool, String> {
+    Ok(crate::hw::ble_advertise::is_advertising())
+}
+
 /// Discover LocalSend peers on the LAN for `seconds` (default 3).
 #[tauri::command]
 pub async fn localsend_discover(seconds: Option<u64>) -> Result<Vec<LocalSendPeer>, String> {

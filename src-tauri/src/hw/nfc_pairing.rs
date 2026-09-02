@@ -162,18 +162,21 @@ pub fn build_handshake_record(handshake: &NfcHandshake) -> Result<NdefRecord, St
 pub struct NfcGuidance {
     /// Whether a phone-link compatible deep link is offered.
     pub link_available: bool,
-    /// The Phone Link deep-link URI (empty when unavailable).
+    /// The Phone Link deep-link URI (`ms-phone:` — the ONLY registered
+    /// scheme; `ms-phone-link:` is NOT registered by the package and made
+    /// Windows show "app não existe"). Empty when unavailable.
     pub link_uri: String,
+    /// The official Microsoft website URL the phone's Link-to-Windows app
+    /// reads natively (aka.ms/LinkPCPhone). Writing this as a URI/QR tag is
+    /// the reliable NFC path — the phone's own handler recognises it.
+    pub pair_uri: String,
     /// Plain-language pairing instructions (English).
     pub instructions: String,
     /// The NDEF text record bytes (base64) the frontend can show as QR/text.
     pub ndef_text: Option<String>,
-    /// Optional context-sensitive note. When set, explains the REAL reason the
-    /// phone might show "devices have different software versions" — the
-    /// Xiaomi/HyperOS ("Lyra") tag handler rejecting non-native content, NOT
-    /// a Phone Link version mismatch (a phone-side handler, not the phone link
-    /// versions, triggers that message).
-    pub version_note: Option<String>,
+    /// The NDEF URI record (RFU prefix abbreviated) that a phone reads to
+    /// launch the pairing flow — base64 of an RTD_URI `https://aka.ms/…`.
+    pub ndef_uri: Option<String>,
     /// Microsoft Store app link to update Phone Link on the PC (windows).
     pub store_uri: Option<String>,
 }
@@ -275,7 +278,9 @@ pub fn build_custom_tag(req: &NfcCustomRequest) -> Result<NfcCustomResult, Strin
 /// Build pairing guidance for the current device.
 ///
 /// `pair_uri` is optional — when provided the guidance includes a
-/// `ms-phone-link:` deep link (Phone Link app on Windows 11).
+/// Phone Link deep link. The deep link scheme used is `ms-phone:` (the ONLY
+/// scheme the Phone Link package registers — `ms-phone-link:` is not and
+/// produces Windows' "app não existe" dialog).
 pub fn guidance(
     display_name: &str,
     fingerprint: Option<&str>,
@@ -296,37 +301,35 @@ pub fn guidance(
             .map(|r| base64_encode(&r.encode()))
             .ok()
     };
-    let link_uri = format!("ms-phone-link:pairing?pc={}", url_encode(display_name));
-    // NOTE ABOUT "different software versions": this message is NOT sent by
-    // Phone Link. It comes from the Xiaomi/HyperOS ("Lyra") tag reader on the
-    // phone when it sees a non-Xiaomi NFC payload (any NDEF it can't parse as
-    // its own Link-to-PC handshake). The fix is NOT updating apps — it's
-    // writing a payload the phone's own reader accepts (raw URI/text), which
-    // the phone interprets natively. We surface this corrected explanation.
-    let version_note = Some(
-        "If the phone says \"devices have different software versions\", that \
-comes from Xiaomi's own tag reader (HyperOS/Lyra) on the phone, not from \
-Phone Link. It appears when the NFC tag contains content the phone doesn't \
-recognise as its own pairing handshake. Use a raw URI/text tag (see \
-\"Create custom tag\") instead of a MiControl text tag, and the phone will \
-read it natively without a version complaint."
-            .to_string(),
-    );
+    // The phone's Link-to-Windows app reads THIS URI natively when written to
+    // an NFC tag / QR (the "scan QR to pair" flow). This is the reliable NFC
+    // path — the phone's own handler recognises it, so no "different software
+    // versions" complaint (that came from a non-native MiControl handshake).
+    let pair_uri = pair_uri
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://aka.ms/LinkPCPhone".to_string());
+    // NDEF URI record for the pairing URL (phone reads it and opens the flow).
+    let ndef_uri = Some(base64_encode(&NdefRecord::uri(&pair_uri).encode()));
+    // `ms-phone:pairing?...` — the correct deep link for the PC-side app.
+    let link_uri = format!("ms-phone:pairing?pc={}", url_encode(display_name));
     // Modern Windows: the Microsoft Store page for Phone Link.
     let store_uri = Some(
         "https://apps.microsoft.com/detail/9NMPJ99VJBWV".to_string(), // Phone Link
     );
     NfcGuidance {
-        link_available: pair_uri.is_some() && !pair_uri.unwrap_or_default().is_empty(),
-        // Keep the well-known scheme regardless; UI decides when to show.
+        link_available: true,
         link_uri,
-        instructions: "Hold the back of your Xiaomi phone near the NFC antenna \
-on the laptop (usually palm-rest or top cover) to read the pairing tag. \
-If nothing happens, enable NFC in phone Settings → Connection & sharing \
-→ NFC, then retry."
+        pair_uri,
+        instructions: "How to pair with NFC/QR:\n\
+1. Open Phone Link on this PC (it opens via the link below).\n\
+2. On the phone: Link to Windows → Add a new PC → scan the QR.\n\
+3. If your laptop has a physical NFC antenna, write the pair_uri tag (below)\n\
+   to an NTAG213/215/216 and tap it with the phone's NFC back.\n\
+4. Confirm the pairing code shown on both devices."
             .to_string(),
         ndef_text,
-        version_note,
+        ndef_uri,
         store_uri,
     }
 }
@@ -412,12 +415,18 @@ mod tests {
     fn guidance_never_panics() {
         let g = guidance("MiBook Pro", Some("fp"), Some("https://aka.ms/phone-link"));
         assert!(g.link_available);
-        assert!(g.link_uri.starts_with("ms-phone-link:"));
+        assert!(g.link_uri.starts_with("ms-phone:"));
+        assert!(g.pair_uri.starts_with("https://aka.ms/"));
         assert!(g.ndef_text.is_some());
+        assert!(g.ndef_uri.is_some());
         assert!(!g.instructions.is_empty());
 
         let g2 = guidance("MiBook Pro", None, None);
-        assert!(!g2.link_available);
+        // link is always offered now (ms-phone: is registered on Windows),
+        // and pair_uri falls back to the official aka.ms URL.
+        assert!(g2.link_available);
+        assert!(g2.pair_uri.starts_with("https://aka.ms/"));
+        assert!(g2.ndef_uri.is_some());
         assert_eq!(g2.ndef_text, None);
     }
 

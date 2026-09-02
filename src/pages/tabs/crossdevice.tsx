@@ -47,6 +47,12 @@ interface BleScanResult {
   note: string | null;
 }
 
+// BLE advertising (PC discoverability, MIOT-38)
+interface BleAdvertiseConfig {
+  enabled: boolean;
+  name: string;
+}
+
 // ── MIOT-06 LocalSend ───────────────────────────────────────────────────────
 interface LocalSendPeer {
   alias: string;
@@ -126,9 +132,10 @@ interface SyncthingStatus {
 interface NfcGuidance {
   linkAvailable: boolean;
   linkUri: string;
+  pairUri: string;
   instructions: string;
   ndefText: string | null;
-  versionNote: string | null;
+  ndefUri: string | null;
   storeUri: string | null;
 }
 
@@ -163,6 +170,13 @@ export default function CrossDeviceTab() {
   const [scanResult, setScanResult] = useState<BleScanResult | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [connectedPhone, setConnectedPhone] = useState<string | null>(null);
+
+  // BLE advertising (PC discoverability, MIOT-38)
+  const [advCfg, setAdvCfg] = useState<BleAdvertiseConfig>({
+    enabled: false,
+    name: 'MiControl-PC',
+  });
+  const [advBusy, setAdvBusy] = useState(false);
 
   // LocalSend (MIOT-06)
   const [peers, setPeers] = useState<LocalSendPeer[]>([]);
@@ -279,6 +293,30 @@ export default function CrossDeviceTab() {
     }
   }, []);
 
+  // Load BLE advertising config on mount (best-effort).
+  const fetchAdvertise = useCallback(async () => {
+    try {
+      const cfg = await invoke<BleAdvertiseConfig>('ble_advertise_config');
+      setAdvCfg(cfg);
+    } catch {
+      // Command may be unavailable on older installs — keep defaults.
+    }
+  }, []);
+
+  // Persist + start/stop the BLE advertiser.
+  const handleAdvToggle = async (enabled: boolean) => {
+    setAdvBusy(true);
+    try {
+      const next: BleAdvertiseConfig = { ...advCfg, enabled };
+      await invoke('set_ble_advertise_config', { config: next });
+      setAdvCfg(next);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setAdvBusy(false);
+    }
+  };
+
   useEffect(() => {
     void fetchStatus();
     void fetchPresence();
@@ -286,7 +324,16 @@ export default function CrossDeviceTab() {
     void fetchCamera();
     void fetchTranscription();
     void fetchNfc();
-  }, [fetchStatus, fetchPresence, fetchReceiver, fetchCamera, fetchTranscription, fetchNfc]);
+    void fetchAdvertise();
+  }, [
+    fetchStatus,
+    fetchPresence,
+    fetchReceiver,
+    fetchCamera,
+    fetchTranscription,
+    fetchNfc,
+    fetchAdvertise,
+  ]);
 
   const handleDiscover = async () => {
     setDiscovering(true);
@@ -897,6 +944,59 @@ export default function CrossDeviceTab() {
         )}
       </div>
 
+      {/* BLE advertising (PC discoverability, MIOT-38) */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>📡 {t('crossDevice.advTitle')}</h3>
+        <p className="text-muted" style={{ marginBottom: 12 }}>
+          {t('crossDevice.advDesc')}
+        </p>
+        <ToggleRow
+          label={t('crossDevice.advEnabled')}
+          checked={advCfg.enabled}
+          disabled={advBusy}
+          onChange={handleAdvToggle}
+        />
+        {advCfg.enabled && (
+          <>
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 13, marginBottom: 4 }}>{t('crossDevice.advName')}</div>
+              <input
+                className="text-input"
+                type="text"
+                maxLength={40}
+                value={advCfg.name}
+                disabled={advBusy}
+                onChange={(e) => setAdvCfg((c) => ({ ...c, name: e.target.value }))}
+                style={{ width: '100%' }}
+              />
+              <p className="text-muted" style={{ fontSize: 12, marginTop: 4 }}>
+                {t('crossDevice.advNameHint')}
+              </p>
+              <button
+                className="btn btn-secondary"
+                style={{ marginTop: 8 }}
+                disabled={advBusy || !advCfg.name.trim()}
+                onClick={async () => {
+                  setAdvBusy(true);
+                  try {
+                    await invoke('set_ble_advertise_config', { config: advCfg });
+                  } catch (e) {
+                    setErrorMsg(String(e));
+                  } finally {
+                    setAdvBusy(false);
+                  }
+                }}
+              >
+                💾 {t('crossDevice.presenceSave')}
+              </button>
+            </div>
+            <p className="status-ok" style={{ fontSize: 13, marginTop: 10 }}>
+              {t('crossDevice.advActive')}
+            </p>
+          </>
+        )}
+      </div>
+
       {/* BLE discovery modal (MIOT-05 revamp): auto-detection picker */}
       {/* `position: fixed` is now viewport-relative because the tab-content
           animation is opacity-only — a transform would have made this modal
@@ -1432,9 +1532,44 @@ export default function CrossDeviceTab() {
                 {t('crossDevice.nfcPcVersion')}: <code>{status.package_version}</code>
               </p>
             )}
-            {nfc.versionNote && (
-              <div className="alert alert-warn" style={{ fontSize: 12, marginBottom: 8 }}>
-                ⚠️ {nfc.versionNote}
+            {/* Official pairing URL the phone reads natively (QR/tag). */}
+            {nfc.pairUri && (
+              <div
+                style={{
+                  border: '1px dashed var(--color-border, #333)',
+                  borderRadius: 8,
+                  padding: 10,
+                  marginBottom: 10,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                  {t('crossDevice.nfcPairUri')}
+                </div>
+                <div
+                  className="text-muted no-overflow-wrap"
+                  style={{ fontSize: 12, overflowWrap: 'anywhere' }}
+                >
+                  <code>{nfc.pairUri}</code>
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <QRCodeCanvas value={nfc.pairUri} size={132} />
+                </div>
+                <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
+                  {t('crossDevice.nfcQrHint')}
+                </p>
+                {nfc.ndefUri && (
+                  <div style={{ marginTop: 6 }}>
+                    <div style={{ fontSize: 12, marginBottom: 2 }}>
+                      {t('crossDevice.nfcNdefLabel')}
+                    </div>
+                    <code
+                      className="text-muted"
+                      style={{ fontSize: 11, overflowWrap: 'anywhere', wordBreak: 'break-all' }}
+                    >
+                      {nfc.ndefUri}
+                    </code>
+                  </div>
+                )}
               </div>
             )}
             {nfc.linkUri && (
@@ -1442,7 +1577,7 @@ export default function CrossDeviceTab() {
                 className="text-muted no-overflow-wrap"
                 style={{ fontSize: 12, marginTop: 8, overflowWrap: 'anywhere' }}
               >
-                {t('crossDevice.nfcPairUri')}: <code>{nfc.linkUri}</code>
+                {t('crossDevice.nfcDeepLink')}: <code>{nfc.linkUri}</code>
               </p>
             )}
           </>

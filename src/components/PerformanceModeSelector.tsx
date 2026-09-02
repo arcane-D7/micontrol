@@ -10,6 +10,12 @@ interface Props {
   aiApiKeySet?: boolean;
   /** Navigate to Settings tab to configure API key */
   onOpenSettings?: () => void;
+  /**
+   * While `true`, the UI shows a pending state on the selected mode and
+   * disables the other buttons — the async confirmation from the backend is
+   * awaited (no physical timers).
+   */
+  applying?: boolean;
 }
 
 const MODES: Array<{
@@ -154,6 +160,7 @@ export default function PerformanceModeSelector({
   disabled,
   aiApiKeySet = false,
   onOpenSettings,
+  applying = false,
 }: Props) {
   const spec = MODE_SPECS[current];
   const showSmartDiff = current === 'smart' || current === 'smart_acceleration';
@@ -177,10 +184,12 @@ export default function PerformanceModeSelector({
       <div className="mode-grid">
         {MODES.map((m) => {
           const aiLocked = !!m.requiresAi && !aiApiKeySet;
+          const isCurrent = current === m.key;
+          const showPending = applying && isCurrent;
           return (
             <button
               key={m.key}
-              className={`mode-btn ${current === m.key ? 'active' : ''} ${aiLocked ? 'ai-locked' : ''}`}
+              className={`mode-btn ${isCurrent ? 'active' : ''} ${showPending ? 'applying' : ''} ${aiLocked ? 'ai-locked' : ''}`}
               onClick={() => {
                 if (aiLocked) {
                   onOpenSettings?.();
@@ -188,16 +197,28 @@ export default function PerformanceModeSelector({
                 }
                 void handleModeChange(m.key);
               }}
-              disabled={disabled && !aiLocked}
+              disabled={(disabled || applying) && !aiLocked}
               title={
                 aiLocked
                   ? t('performance.techDetails.aiLockedMsg')
                   : t(`performance.descriptions.${m.descKey}` as Parameters<typeof t>[0])
               }
             >
-              <span className="mode-btn-icon">{m.icon}</span>
+              <span className="mode-btn-icon">{showPending ? '⏳' : m.icon}</span>
               <span className="mode-btn-name">
                 {t(`performance.modes.${m.labelKey}` as Parameters<typeof t>[0])}
+                {showPending && (
+                  <span
+                    style={{
+                      marginLeft: 4,
+                      fontSize: 10,
+                      color: 'var(--text-dim)',
+                      verticalAlign: 'middle',
+                    }}
+                  >
+                    …
+                  </span>
+                )}
                 {aiLocked && (
                   <span
                     style={{

@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod audio_effects;
 pub mod battery;
+pub mod ble_advertise;
 pub mod ble_presence;
 pub mod ble_scan;
 pub mod charging;

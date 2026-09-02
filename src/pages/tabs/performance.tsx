@@ -131,6 +131,7 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
           current={hw.performanceMode}
           onChange={hw.setPerformanceMode}
           disabled={hw.loading}
+          applying={hw.perfApplying}
           aiApiKeySet={aiApiKeySet}
           onOpenSettings={onOpenSettings}
         />

@@ -646,6 +646,22 @@ body {
     0 0 0 3px var(--accent-glow),
     var(--shadow-sm);
 }
+/* Async "applying" state: pending while awaiting the backend confirmation.
+   Keyframes are opacity-only (no transform) so the fixed modal anchoring
+   fix in .tab-content isn't disturbed. */
+.mode-btn.applying {
+  border-color: var(--accent);
+  animation: mode-applying-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mode-applying-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
 .mode-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;

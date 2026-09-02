@@ -79,6 +79,15 @@ export function useHardware() {
   const [touchpad, setTouchpad] = useState<TouchpadInfo | null>(null);
   const [performanceMode, setPerformanceModeState] = useState<PerformanceMode>('balance');
   const [lastPerfResult, setLastPerfResult] = useState<PerformanceResult | null>(null);
+  // True while a set_performance_mode round-trip is in flight (async
+  // confirmation). Drives the "applying" UI state — replaces the old
+  // setTimeout-based mode switching.
+  const [perfApplying, setPerfApplying] = useState(false);
+  // Perf-mode writes can take seconds (elevated bridge round-trip). Until the
+  // confirmed result arrives (plus a small grace), the slow poll must NOT
+  // overwrite the optimistic state — otherwise the UI "jumps" back to the old
+  // mode mid-transition (async fix, no physical timer).
+  const perfWriteDirtyUntil = useRef<number>(0);
   const [chargingThreshold, setChargingThresholdState] = useState<number>(80);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -165,7 +174,11 @@ export function useHardware() {
       if (touchpadResult !== null && Date.now() >= touchpadDirtyUntil.current) {
         setTouchpad(touchpadResult);
       }
-      if (perfMode) setPerformanceModeState(perfMode);
+      // Same guard for perf mode: never let a poll clobber an in-flight (or
+      // recently confirmed) user change with stale data from the old mode.
+      if (perfMode && Date.now() >= perfWriteDirtyUntil.current) {
+        setPerformanceModeState(perfMode);
+      }
       setChargingThresholdState(chargeThreshold);
       // Do NOT clear the error here (see fastPoll). Only the initial load with
       // full success or clearError() clears the error state.
@@ -284,16 +297,28 @@ export function useHardware() {
 
   const setPerformanceMode = useCallback(async (mode: PerformanceMode) => {
     const snap = performanceModeRef.current;
+    // Optimistic UI + guard: polls must not clobber the selection during the
+    // elevated round-trip (which can take seconds). No physical timer — the
+    // confirmed `result.mode` from the backend decides the final state.
+    perfWriteDirtyUntil.current = Date.now() + 8000;
+    setPerfApplying(true);
     setPerformanceModeState(mode);
     try {
       const result = await invoke<PerformanceResult>('set_performance_mode', { mode });
       setLastPerfResult(result);
+      // Apply the CONFIRMED mode (source of truth from the bridge) — this is
+      // the async confirmation that ends the transition.
+      setPerformanceModeState(result.mode);
+      perfWriteDirtyUntil.current = Date.now() + 1500; // grace after settle
       setError(null);
     } catch (e) {
+      perfWriteDirtyUntil.current = 0;
       setPerformanceModeState(snap);
       console.error('[perf] set_performance_mode failed:', e);
       setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
       throw e;
+    } finally {
+      setPerfApplying(false);
     }
   }, []);
 
@@ -944,6 +969,7 @@ export function useHardware() {
       performanceMode: fanState.performanceMode,
       lastPerfResult: fanState.lastPerfResult,
       chargingThreshold: fanState.chargingThreshold,
+      perfApplying,
       loading,
       error,
       clearError,
@@ -994,6 +1020,7 @@ export function useHardware() {
       batteryState,
       displayState,
       touchpadState,
+      perfApplying,
       loading,
       error,
       clearError,

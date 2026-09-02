@@ -484,6 +484,10 @@ pub fn run() {
             commands::crossdevice::set_presence_config,
             commands::crossdevice::scan_presence_now,
             commands::crossdevice::ble_discover,
+            // Cross-device — BLE advertising (PC discoverability)
+            commands::crossdevice::ble_advertise_config,
+            commands::crossdevice::set_ble_advertise_config,
+            commands::crossdevice::ble_advertise_status,
             // Cross-device (MIOT-06) — LocalSend LAN file transfer
             commands::crossdevice::localsend_discover,
             commands::crossdevice::localsend_send_files,

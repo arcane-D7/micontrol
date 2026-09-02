@@ -27,6 +27,7 @@ function OverviewTab({ hw, ai, onOpenSettings }: Props) {
           current={hw.performanceMode}
           onChange={hw.setPerformanceMode}
           disabled={hw.loading}
+          applying={hw.perfApplying}
         />
       </div>
       <AiAdvisor hw={hw} ai={ai} onOpenSettings={onOpenSettings} />

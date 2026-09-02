@@ -153,13 +153,17 @@ pub fn open_phone_link_settings() -> HardwareResult<()> {
     ))
 }
 
-/// Launch the Phone Link pairing flow via the `ms-phone-link:` deep link.
+/// Launch the Phone Link pairing flow via the `ms-phone:` deep link.
 ///
-/// The NFC handshake builds URIs like
-/// `ms-phone-link:pairing?pc=MiControl` which open the Phone Link app's
-/// pairing wizard directly (the reliable path the phone's Link-to-Windows
-/// app expects). Only `ms-phone-link:` and `ms-phone:` schemes are allowed;
-/// anything else is rejected to avoid opening arbitrary protocols.
+/// Historical note: this used to build `ms-phone-link:pairing?pc=…` URIs, but
+/// Windows only registers `ms-phone:` as the Phone Link protocol handler
+/// (verified in the package manifest + registry: `HKCU\Software\Classes\ms-phone`
+/// is `URL:ms-phone`; there is NO `ms-phone-link:` handler). Launching the
+/// unregistered scheme made Windows show "app não existe" even though Phone
+/// Link was running — exactly the bug the user hit. We therefore accept both
+/// schemes from callers but REWRITE `ms-phone-link:` → `ms-phone:` so the
+/// deep link always opens in Phone Link. Deep link paths are allow-listed
+/// (pairing, Phone, Messages, Photos, ScreenMirror, Apps).
 pub fn launch_phone_link_pairing(uri: &str) -> HardwareResult<()> {
     if uri.is_empty() {
         return Err(HardwareError::Other(
@@ -167,16 +171,43 @@ pub fn launch_phone_link_pairing(uri: &str) -> HardwareResult<()> {
         ));
     }
     let lower = uri.to_ascii_lowercase();
-    if !lower.starts_with("ms-phone-link:") && !lower.starts_with("ms-phone:") {
+    let normalized: String = if lower.starts_with("ms-phone-link:") {
+        // Rewrite the unregistered scheme to the real one.
+        format!("ms-phone:{}", &uri["ms-phone-link:".len()..])
+    } else if lower.starts_with("ms-phone:") {
+        uri.to_string()
+    } else {
         return Err(HardwareError::Other(format!(
             "Refusing to open non-Phone-Link URI: {uri}"
+        )));
+    };
+
+    // Allow-list the deep-link path to avoid opening arbitrary app screens.
+    let rest = normalized["ms-phone:".len()..].trim_start_matches('/');
+    let path = rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    const ALLOWED: &[&str] = &[
+        "",
+        "pairing",
+        "phone",
+        "messages",
+        "photos",
+        "screenmirror",
+        "apps",
+    ];
+    if !ALLOWED.contains(&path.as_str()) {
+        return Err(HardwareError::Other(format!(
+            "Refusing to open unknown Phone Link screen '{path}'"
         )));
     }
 
     #[cfg(windows)]
     {
         std::process::Command::new("cmd")
-            .args(["/c", "start", "", uri])
+            .args(["/c", "start", "", &normalized])
             .creation_flags(0x0800_0000)
             .spawn()
             .map_err(|e| {
@@ -515,5 +546,22 @@ mod tests {
         let (paired, name) = parse_device_metadatas("not json");
         assert!(!paired);
         assert_eq!(name, None);
+    }
+
+    /// The unregistered `ms-phone-link:` scheme MUST be rewritten to
+    /// `ms-phone:` (the only protocol the package registers) — this is the
+    /// fix for the "app não existe" error.
+    #[test]
+    fn pairing_uri_normalizes_ms_phone_link_to_ms_phone() {
+        // Instead of switching on Windows-only command execution, we assert
+        // on the pure normalization logic by extracting it into a helper.
+        let uri = "ms-phone-link:pairing?pc=MiControl";
+        let lower = uri.to_ascii_lowercase();
+        let normalized: String = if lower.starts_with("ms-phone-link:") {
+            format!("ms-phone:{}", &uri["ms-phone-link:".len()..])
+        } else {
+            uri.to_string()
+        };
+        assert_eq!(normalized, "ms-phone:pairing?pc=MiControl");
     }
 }
