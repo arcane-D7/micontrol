@@ -222,7 +222,7 @@ fn list_paired_devices() -> Vec<BleDevice> {
             .unwrap_or_default();
     for dev in &mut out {
         if let Some(addr) = &dev.address {
-            let plain = addr.replace('-', "").to_ascii_uppercase();
+            let plain = addr.replace('-', "").to_ascii_lowercase();
             if paired_macs.contains(&plain) {
                 dev.paired = true;
             }

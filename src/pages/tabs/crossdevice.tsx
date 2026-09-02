@@ -38,7 +38,7 @@ interface BleDevice {
   address: string | null;
   rssi: number | null;
   paired: boolean;
-  from_scan: boolean;
+  fromScan: boolean;
 }
 
 interface BleScanResult {
@@ -1108,7 +1108,7 @@ export default function CrossDeviceTab() {
                     </>
                   )}
                   {/* Discovered section */}
-                  {scanResult.devices.filter((d) => !d.paired && d.from_scan).length > 0 && (
+                  {scanResult.devices.filter((d) => !d.paired && d.fromScan).length > 0 && (
                     <>
                       <div
                         style={{
@@ -1120,7 +1120,7 @@ export default function CrossDeviceTab() {
                         {t('crossDevice.presenceScanModalFromScan')}
                       </div>
                       {scanResult.devices
-                        .filter((d) => !d.paired && d.from_scan)
+                        .filter((d) => !d.paired && d.fromScan)
                         .map((d) => (
                           <DeviceRow
                             key={`s-${d.address ?? d.name}`}
