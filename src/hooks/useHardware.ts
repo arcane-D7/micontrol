@@ -111,11 +111,25 @@ export function useHardware() {
   const chargingThresholdRef = useRef<number>(80);
   const audioStateRef = useRef<AudioVolumeResult | null>(null);
   const fastPollInFlightRef = useRef(false);
+  const systemPollInFlightRef = useRef(false);
   const slowPollInFlightRef = useRef(false);
   const initialLoadInFlightRef = useRef(false);
+  // Watchdogs: if a poll leg hangs (e.g. WMI wedged after sleep), the in-flight
+  // flag stays true forever and every later poll is skipped → CPU/GPU freeze in
+  // the overview. Storing the start time lets the next tick detect the stall and
+  // reset the flag (the abandoned promise keeps running, but cannot block us).
+  const fastPollStartedAtRef = useRef(0);
+  const systemPollStartedAtRef = useRef(0);
+  const slowPollStartedAtRef = useRef(0);
+  // Hard cap for one fan/audio poll leg. get_fan_info can take very long when
+  // WMI is degraded; beyond this we abandon it and keep the fast tier moving.
+  const FAST_POLL_LEG_MS = 6000;
+  const STALL_MS = 8000;
 
   // ── Tiered polling (S11-002) ─────────────────────────────────────────────
-  // Fast tier: 2 s — fan speed, CPU temp, GPU temp, CPU usage, GPU usage
+  // Fast tier: 2 s — CPU usage, GPU usage, RAM (get_system_info) + fan speed,
+  // CPU temp, GPU temp, audio. get_system_info is polled on its OWN leg so a
+  // slow/hung get_fan_info can never freeze the overview CPU/GPU values.
   // Slow tier: 15 s — battery, display, touchpad
   // Poll-once: system info — fetched on mount only
 
@@ -138,17 +152,62 @@ export function useHardware() {
     [],
   );
 
+  // System leg (CPU/GPU/RAM) — polled alone so a hung get_fan_info cannot
+  // freeze the overview. This is the hottest, cheapest query (PDH caches).
+  const fastPollSystem = useCallback(async () => {
+    // Stall watchdog: a previous leg may have hung with no timeout (abandoned
+    // promise never resolves) → reset the flag so polling keeps working.
+    if (systemPollInFlightRef.current && systemPollStartedAtRef.current) {
+      if (Date.now() - systemPollStartedAtRef.current > STALL_MS) {
+        systemPollInFlightRef.current = false;
+      } else {
+        return;
+      }
+    }
+    if (systemPollInFlightRef.current || initialLoadInFlightRef.current) return;
+    systemPollInFlightRef.current = true;
+    systemPollStartedAtRef.current = Date.now();
+    try {
+      const systemResult = await safe(
+        invoke<SystemInfo>('get_system_info'),
+        null,
+        'get_system_info',
+      );
+      if (systemResult) setSystemInfo(systemResult);
+    } finally {
+      systemPollInFlightRef.current = false;
+    }
+  }, [safe]);
+
   const fastPoll = useCallback(async () => {
+    // Stall watchdog (see fastPollSystem).
+    if (fastPollInFlightRef.current && fastPollStartedAtRef.current) {
+      if (Date.now() - fastPollStartedAtRef.current > STALL_MS) {
+        fastPollInFlightRef.current = false;
+      } else {
+        return;
+      }
+    }
     if (fastPollInFlightRef.current || initialLoadInFlightRef.current) return;
     fastPollInFlightRef.current = true;
+    fastPollStartedAtRef.current = Date.now();
     try {
-      const [fanResult, systemResult, audioResult] = await Promise.all([
-        safe(invoke<FanInfo>('get_fan_info'), null, 'get_fan_info'),
-        safe(invoke<SystemInfo>('get_system_info'), null, 'get_system_info'),
+      const [fanResult, audioResult] = await Promise.all([
+        // Bounded fan leg: if get_fan_info exceeds FAST_POLL_LEG_MS, abandon it
+        // (the invoke keeps running in the background; the next poll reads the
+        // last value). Never let one slow query pin this poll forever.
+        Promise.race([
+          safe(invoke<FanInfo>('get_fan_info'), null, 'get_fan_info'),
+          new Promise<FanInfo | null>((resolve) =>
+            setTimeout(() => {
+              console.warn('[hardware] get_fan_info exceeded', FAST_POLL_LEG_MS, 'ms — abandoned');
+              resolve(null);
+            }, FAST_POLL_LEG_MS),
+          ),
+        ]),
         safe(invoke<AudioVolumeResult>('get_audio_volume'), null, 'get_audio_volume'),
       ]);
       if (fanResult) setFan(fanResult);
-      if (systemResult) setSystemInfo(systemResult);
       if (audioResult) setAudioState(audioResult);
       // Do NOT clear the error here. Polls run independently; a successful fast
       // poll must not erase an error surfaced by another reading's failure.
@@ -159,8 +218,16 @@ export function useHardware() {
   }, [safe]);
 
   const slowPoll = useCallback(async () => {
+    if (slowPollInFlightRef.current && slowPollStartedAtRef.current) {
+      if (Date.now() - slowPollStartedAtRef.current > STALL_MS) {
+        slowPollInFlightRef.current = false;
+      } else {
+        return;
+      }
+    }
     if (slowPollInFlightRef.current || initialLoadInFlightRef.current) return;
     slowPollInFlightRef.current = true;
+    slowPollStartedAtRef.current = Date.now();
     try {
       const [batteryResult, displayResult, touchpadResult, perfMode, chargeThreshold] =
         await Promise.all([
@@ -205,6 +272,7 @@ export function useHardware() {
     if (!initialLoadRef.current) {
       initialLoadRef.current = true;
       initialLoadInFlightRef.current = true;
+      const initialLoadStartedAt = Date.now();
       setLoading(true);
       const doInitialLoad = async () => {
         try {
@@ -217,7 +285,22 @@ export function useHardware() {
             perfMode,
             chargeThreshold,
           ] = await Promise.all([
-            safe(invoke<FanInfo>('get_fan_info'), null, 'init:get_fan_info'),
+            // Bounded fan leg at boot too: get_fan_info can hang when WMI is
+            // wedged — never let it pin initialLoadInFlightRef forever (which
+            // would block ALL later polls → frozen overview).
+            Promise.race([
+              safe(invoke<FanInfo>('get_fan_info'), null, 'init:get_fan_info'),
+              new Promise<FanInfo | null>((resolve) =>
+                setTimeout(() => {
+                  console.warn(
+                    '[hardware] init get_fan_info exceeded',
+                    FAST_POLL_LEG_MS,
+                    'ms — abandoned',
+                  );
+                  resolve(null);
+                }, FAST_POLL_LEG_MS),
+              ),
+            ]),
             safe(invoke<SystemInfo>('get_system_info'), null, 'init:get_system_info'),
             safe(invoke<BatteryInfo>('get_battery_info'), null, 'init:get_battery_info'),
             safe(invoke<DisplayInfo>('get_display_info'), null, 'init:get_display_info'),
@@ -268,9 +351,31 @@ export function useHardware() {
         }
       };
       void doInitialLoad();
+      // Watchdog: if the whole initial load is still in flight past the stall
+      // window (some non-fan leg hung), release the flag so polling starts even
+      // if the abandoned promise never resolves. get_system_info will fill in
+      // the overview within 2 s regardless.
+      setTimeout(
+        () => {
+          if (initialLoadInFlightRef.current) {
+            const elapsed = Date.now() - initialLoadStartedAt;
+            if (elapsed > STALL_MS + FAST_POLL_LEG_MS) {
+              console.warn(
+                '[hardware] Initial load exceeded',
+                elapsed,
+                'ms — releasing polling (abandoned load keeps running in background)',
+              );
+              initialLoadInFlightRef.current = false;
+            }
+          }
+        },
+        STALL_MS + FAST_POLL_LEG_MS + 1000,
+      );
     }
 
-    // Fast polling interval
+    // Fast polling interval: the system leg (CPU/GPU/RAM) runs on its own
+    // every tick, so a slow/hung fan query can never delay the overview.
+    const systemInterval = setInterval(() => refreshIfVisible(fastPollSystem), FAST_POLL_INTERVAL);
     const fastInterval = setInterval(() => refreshIfVisible(fastPoll), FAST_POLL_INTERVAL);
 
     // Slow polling interval
@@ -278,11 +383,13 @@ export function useHardware() {
 
     const onVisibilityChange = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void fastPollSystem();
         void fastPoll();
         void slowPoll();
       }
     };
     const onWindowFocus = () => {
+      void fastPollSystem();
       void fastPoll();
       void slowPoll();
     };
@@ -292,10 +399,11 @@ export function useHardware() {
     return () => {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('focus', onWindowFocus);
+      clearInterval(systemInterval);
       clearInterval(fastInterval);
       clearInterval(slowInterval);
     };
-  }, [fastPoll, slowPoll, safe]);
+  }, [fastPoll, fastPollSystem, slowPoll, safe]);
 
   const setPerformanceMode = useCallback(async (mode: PerformanceMode) => {
     const snap = performanceModeRef.current;
