@@ -18,6 +18,10 @@ use crate::hw::performance::get_performance_mode as hw_get_perf;
 use crate::hw::processes::{get_process_list as hw_get_processes, ProcessInfo};
 use crate::hw::startup::{get_autostart as hw_get_autostart, set_autostart as hw_set_autostart};
 use crate::hw::system_info::{get_system_info as hw_get_sysinfo, SystemInfo};
+use crate::hw::taskmgr::{
+    get_network_interfaces as hw_get_network, get_task_manager as hw_get_task_manager,
+    kill_process as hw_kill_process, NetworkInterfaceSample, ProcessTaskInfo,
+};
 use crate::hw::touchpad::{
     get_touchpad_info as hw_get_touchpad, set_touchpad_edge_slide as hw_set_touchpad_edge_slide,
     set_touchpad_gesture_screenshot as hw_set_touchpad_gesture_screenshot,
@@ -268,6 +272,27 @@ pub async fn get_system_info() -> Result<SystemInfo, ErrorResponse> {
 #[tauri::command]
 pub async fn get_process_list() -> Result<Vec<ProcessInfo>, ErrorResponse> {
     run_blocking(move || Ok(hw_get_processes()))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn get_task_manager() -> Result<Vec<ProcessTaskInfo>, ErrorResponse> {
+    run_blocking(move || Ok(hw_get_task_manager()))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn kill_process(pid: u32) -> Result<(), ErrorResponse> {
+    run_blocking(move || hw_kill_process(pid))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn get_network_perf() -> Result<Vec<NetworkInterfaceSample>, ErrorResponse> {
+    run_blocking(move || Ok(hw_get_network()))
         .await
         .map_err(ErrorResponse::from)
 }

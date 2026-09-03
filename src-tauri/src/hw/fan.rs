@@ -6,6 +6,9 @@
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::{Mutex as StdMutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FanInfo {
@@ -202,31 +205,54 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
 ///
 /// # Failure backoff (circuit breaker)
 /// An elevated round-trip is comparatively expensive (service pipe or a
+// ── Elevated thermal circuit-breaker state ──────────────────────────────────
+// Module-level so it can be reset on power-resume (sleep/wake) — see
+// `reset_elevated_thermal_circuit`. Without the reset, a sleep cycle that
+// kills the bridge service leaves the circuit open for 60 s, repeating on
+// every poll and permanently suppressing temperatures (S37-006).
+static CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
+static BACKOFF_UNTIL: OnceLock<StdMutex<Option<StdInstant>>> = OnceLock::new();
+/// Set when the bridge service is detected as unavailable after a thermal
+/// failure. On the next backoff expiry, `get_elevated_thermal_readings`
+/// attempts `ensure_bridge_service()` once to recover (S37-006).
+static HEAL_BRIDGE_NEEDED: AtomicBool = AtomicBool::new(false);
+/// TTL cache of the last successful elevated thermal read (15 s). Only one
+/// elevated round-trip per cache window is made — the 2s fan poll reuses it.
+static THERMAL_CACHE: OnceLock<StdMutex<Option<(StdInstant, EsifReadings)>>> = OnceLock::new();
+const THERMAL_CACHE_SECS: u64 = 15;
+/// Reset the elevated-thermal circuit-breaker (called on power resume).
+///
+/// After sleep/resume, the MiControlBridge service may be momentarily gone;
+/// previously-open circuits now retry immediately instead of waiting out the
+/// 60 s backoff — so temperatures recover right after wake.
+pub fn reset_elevated_thermal_circuit() {
+    CONSECUTIVE_FAILURES.store(0, AtomicOrdering::Relaxed);
+    HEAL_BRIDGE_NEEDED.store(false, AtomicOrdering::Relaxed);
+    if let Some(b) = BACKOFF_UNTIL.get() {
+        if let Ok(mut guard) = b.lock() {
+            if guard.is_some() {
+                log::info!(target: "hw::fan", "Reset thermal circuit-breaker (sleep/wake)");
+                *guard = None;
+            }
+        }
+    }
+    // Also drop the TTL cache so the first post-resume read is fresh.
+    if let Some(c) = THERMAL_CACHE.get() {
+        if let Ok(mut guard) = c.lock() {
+            *guard = None;
+        }
+    }
+}
+
 /// scheduled-task launch). When it fails repeatedly — e.g. the bridge service
 /// is not installed or its pipe denies access — retrying on every 2s/15s poll
 /// wasted resources and, in the worst case, spawned a crashing helper every
 /// cycle. We therefore back off after consecutive failures: 3 failures in a
 /// row open the circuit and skip elevated attempts for `BACKOFF_SECS` (60s).
 pub async fn get_elevated_thermal_readings() -> EsifReadings {
-    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
-    use std::sync::{Mutex as StdMutex, OnceLock};
-    use std::time::{Duration as StdDuration, Instant as StdInstant};
+    // (TTL cache is module-level: THERMAL_CACHE / THERMAL_CACHE_SECS.)
 
-    static CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
-    static BACKOFF_UNTIL: OnceLock<StdMutex<Option<StdInstant>>> = OnceLock::new();
-
-    // ── S37-004: TTL cache of the last successful elevated thermal read ──────
-    // The app polls `get_fan_info` every 2 s (fast poll), and each call with
-    // empty local temps triggers a NEW elevated `read_thermal_readings`
-    // command file. The scheduled-task helper processes one command per
-    // invocation, so a 2 s thermal poll floods the single slot and starves
-    // writes like set_performance_mode / set_charging_threshold until their
-    // 15 s timeouts. Cache the successful reading for 15 s: the fan poll can
-    // reuse it, and only one elevated round-trip per cache window is made.
-    static CACHE: OnceLock<StdMutex<Option<(StdInstant, EsifReadings)>>> = OnceLock::new();
-    const THERMAL_CACHE_SECS: u64 = 15;
-
-    let cache = CACHE.get_or_init(|| StdMutex::new(None));
+    let cache = THERMAL_CACHE.get_or_init(|| StdMutex::new(None));
     if let Ok(mut guard) = cache.lock() {
         if let Some((at, ref readings)) = *guard {
             if at.elapsed() < StdDuration::from_secs(THERMAL_CACHE_SECS) {
@@ -264,6 +290,21 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
         CONSECUTIVE_FAILURES.store(0, AtomicOrdering::Relaxed);
     }
 
+    // S37-006: Heal the bridge service once the backoff expires.
+    if HEAL_BRIDGE_NEEDED.swap(false, AtomicOrdering::Relaxed) {
+        log::info!(target: "hw::fan", "Attempting bridge service heal (backoff expired)");
+        if let Ok(v) = crate::elev_bridge::ensure_bridge_service().await {
+            log::info!(
+                target: "hw::fan",
+                "Bridge service heal result: {}",
+                v.get("status").and_then(|s| s.as_str()).unwrap_or("ok")
+            );
+        } else {
+            log::warn!(target: "hw::fan", "Bridge service heal failed — will retry at next backoff expiry");
+            HEAL_BRIDGE_NEEDED.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+
     let raw = match crate::elev_bridge::run_elevated_no_prompt(
         "read_thermal_readings",
         serde_json::json!({}),
@@ -280,6 +321,17 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
                     "Elevated thermal read failed {failures} consecutive times — \
                      opening circuit for {BACKOFF_SECS}s"
                 );
+                // S37-006: The service may have died (overnight idle / sleep).
+                // Opening the circuit is fine, but don't leave temps suppressed
+                // forever — if the bridge is gone, schedule a reinstall attempt
+                // when the backoff expires.
+                if !crate::elev_bridge::is_bridge_service_available() {
+                    HEAL_BRIDGE_NEEDED.store(true, AtomicOrdering::Relaxed);
+                    log::info!(
+                        target: "hw::fan",
+                        "Bridge service unavailable after thermal failure — will attempt heal"
+                    );
+                }
                 *backoff_until.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some(StdInstant::now() + StdDuration::from_secs(BACKOFF_SECS));
             } else {

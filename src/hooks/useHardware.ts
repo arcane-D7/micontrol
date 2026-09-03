@@ -67,6 +67,8 @@ import type {
   EcSensorData,
   HqWmiResponse,
   ThermalZoneInfo,
+  ProcessTaskInfo,
+  NetworkInterfaceSample,
 } from '../types/hardware';
 
 // ── Hardware hook ────────────────────────────────────────────────────────────
@@ -566,6 +568,41 @@ export function useHardware() {
     }
   }, []);
 
+  /**
+   * Global task-manager snapshot: every process with per-PID CPU/GPU/NPU/RAM.
+   * Sorted by CPU% descending, top 100.
+   */
+  const getTaskManager = useCallback(async () => {
+    try {
+      const result = await invoke<ProcessTaskInfo[]>('get_task_manager');
+      setError(null);
+      return result;
+    } catch (e) {
+      console.error('[sys] get_task_manager failed:', e);
+      setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+      return [];
+    }
+  }, []);
+
+  /** Kill a process by PID (Task Manager "End task"). */
+  const killProcess = useCallback(async (pid: number) => {
+    const result = await invoke<void>('kill_process', { pid });
+    return result;
+  }, []);
+
+  /** Network throughput per interface (bytes/sec, up+down combined). */
+  const getNetworkPerf = useCallback(async () => {
+    try {
+      const result = await invoke<NetworkInterfaceSample[]>('get_network_perf');
+      setError(null);
+      return result;
+    } catch (e) {
+      console.error('[sys] get_network_perf failed:', e);
+      setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+      return [];
+    }
+  }, []);
+
   // Update status is NOT polled — fetched once on mount + manually
   const refreshUpdateStatus = useCallback(async () => {
     setLoadingUpdate(true);
@@ -997,6 +1034,9 @@ export function useHardware() {
       setRefreshRate,
       setAdaptiveRefreshRate,
       getProcessList,
+      getTaskManager,
+      killProcess,
+      getNetworkPerf,
       writeAiPerfLog,
       readAiPerfLogs,
       openAiLogsDir,
@@ -1048,6 +1088,9 @@ export function useHardware() {
       setRefreshRate,
       setAdaptiveRefreshRate,
       getProcessList,
+      getTaskManager,
+      killProcess,
+      getNetworkPerf,
       writeAiPerfLog,
       readAiPerfLogs,
       openAiLogsDir,

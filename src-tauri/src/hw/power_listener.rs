@@ -130,6 +130,12 @@ fn on_resume() {
     // Reset the ambient light sensor
     crate::hw::display::request_sensor_reset();
 
+    // S37-006: Reset the elevated thermal circuit-breaker + TTL cache.
+    // After sleep/resume the MiControlBridge service may be momentarily
+    // unavailable; without this reset the breaker stays open (60 s backoff)
+    // and temperatures remain suppressed long after wake.
+    crate::hw::fan::reset_elevated_thermal_circuit();
+
     // Clear WMI cache so fresh queries are made after resume
     crate::hw::wmi_cache::invalidate();
 

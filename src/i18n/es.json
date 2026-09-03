@@ -131,6 +131,13 @@
     "temperature": "Temperatura",
     "noData": "Cargando datos de hardware..."
   },
+  "taskmgr": {
+    "title": "Administrador de Tareas",
+    "filterPlaceholder": "Filtrar por nombre o PID…",
+    "refresh": "Actualizar",
+    "noProcesses": "No se encontraron procesos",
+    "noMatches": "Ningún proceso coincide con el filtro"
+  },
   "performance": {
     "title": "Modo de Rendimiento",
     "subtitle": "Elige cómo el portátil equilibra energía y rendimiento",

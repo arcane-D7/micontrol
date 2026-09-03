@@ -131,6 +131,13 @@
     "temperature": "Température",
     "noData": "Chargement des données matérielles..."
   },
+  "taskmgr": {
+    "title": "Gestionnaire de tâches",
+    "filterPlaceholder": "Filtrer par nom ou PID…",
+    "refresh": "Actualiser",
+    "noProcesses": "Aucun processus trouvé",
+    "noMatches": "Aucun processus ne correspond au filtre"
+  },
   "performance": {
     "title": "Mode de performance",
     "subtitle": "Choisissez comment le portable équilibre énergie et performance",

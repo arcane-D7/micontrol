@@ -36,6 +36,7 @@
   },
   "nav": {
     "overview": "Visão Geral",
+    "taskmgr": "Gestor de Tarefas",
     "performance": "Desempenho",
     "battery": "Bateria",
     "display": "Ecrã",
@@ -130,6 +131,13 @@
     "battery": "Bateria",
     "temperature": "Temperatura",
     "noData": "A carregar dados de hardware..."
+  },
+  "taskmgr": {
+    "title": "Gestor de Tarefas",
+    "filterPlaceholder": "Filtrar por nome ou PID…",
+    "refresh": "Atualizar",
+    "noProcesses": "Nenhum processo encontrado",
+    "noMatches": "Nenhum processo corresponde ao filtro"
   },
   "performance": {
     "title": "Modo de Desempenho",

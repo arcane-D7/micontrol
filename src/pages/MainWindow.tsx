@@ -14,6 +14,7 @@ import PrivacyPolicy from './PrivacyPolicy';
 
 // ── Lazy-loaded tab content ──────────────────────────────────────────────────
 const OverviewTab = lazy(() => import('./tabs/overview'));
+const TaskManagerTab = lazy(() => import('./tabs/taskmanager'));
 const PerformanceTab = lazy(() => import('./tabs/performance'));
 const BatteryTab = lazy(() => import('./tabs/battery'));
 const DisplayTab = lazy(() => import('./tabs/display'));
@@ -48,6 +49,7 @@ interface Props {
 
 const NAV_ITEMS = [
   { id: 'overview', icon: '📊', label: 'nav.overview' },
+  { id: 'taskmgr', icon: '⚙️📈', label: 'nav.taskmgr' },
   { id: 'performance', icon: '⚡', label: 'nav.performance' },
   { id: 'battery', icon: '🔋', label: 'nav.battery' },
   { id: 'display', icon: '🖥️', label: 'nav.display' },
@@ -292,6 +294,8 @@ export default function MainWindow({
             onOpenSettings={() => onTabChange('settings')}
           />
         );
+      case 'taskmgr':
+        return <TaskManagerTab hw={hardware} />;
       case 'performance':
         return (
           <PerformanceTab

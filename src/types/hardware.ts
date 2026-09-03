@@ -44,6 +44,24 @@ export interface ProcessInfo {
   memory_mb: number;
 }
 
+/** Per-process entry returned by the global task-manager command. */
+export interface ProcessTaskInfo {
+  name: string;
+  pid: number;
+  cpu_percent: number;
+  memory_mb: number;
+  gpu_percent: number;
+  npu_percent: number;
+  net_bytes_per_sec: number;
+  thread_count: number;
+}
+
+/** Network interface throughput sample (bytes/sec, up+down combined). */
+export interface NetworkInterfaceSample {
+  name: string;
+  bytes_per_sec: number;
+}
+
 export interface BatteryInfo {
   level: number;
   is_charging: boolean;

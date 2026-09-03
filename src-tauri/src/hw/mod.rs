@@ -48,6 +48,7 @@ pub mod security_scan;
 pub mod startup;
 pub mod syncthing;
 pub mod system_info;
+pub mod taskmgr;
 pub mod thermal;
 pub mod touchpad;
 pub mod transcription;

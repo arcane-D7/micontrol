@@ -36,6 +36,7 @@
   },
   "nav": {
     "overview": "Overview",
+    "taskmgr": "Task Manager",
     "performance": "Performance",
     "battery": "Battery",
     "display": "Display",
@@ -130,6 +131,13 @@
     "battery": "Battery",
     "temperature": "Temperature",
     "noData": "Loading hardware data..."
+  },
+  "taskmgr": {
+    "title": "Task Manager",
+    "filterPlaceholder": "Filter by name or PID…",
+    "refresh": "Refresh",
+    "noProcesses": "No processes found",
+    "noMatches": "No processes match the filter"
   },
   "performance": {
     "title": "Performance Mode",
