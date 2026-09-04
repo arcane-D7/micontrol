@@ -118,6 +118,7 @@ export default function BatteryInfo({ battery }: Props) {
           alignItems: 'center',
           marginBottom: 16,
         }}
+        title={t('battery.healthHint')}
       >
         <span className={`badge ${healthColor(battery.health_percent)}`}>
           {t('battery.health')}
@@ -153,10 +154,9 @@ export default function BatteryInfo({ battery }: Props) {
           )}
         </span>
       </div>
-      <div className="stat-row">
-        <span className="stat-label">{t('battery.cycleCount')}</span>
-        <span className="stat-value">{battery.cycle_count}</span>
-      </div>
+      {/* Cycle count intentionally NOT shown: the COSMX BX70 firmware never
+          reports it (WMI CycleCount and powercfg both return 0), so displaying
+          it would present a false "0 cycles" as real data. */}
       {battery.voltage_mv > 0 && (
         <div className="stat-row">
           <span className="stat-label">{t('battery.voltage')}</span>
@@ -255,9 +255,6 @@ export default function BatteryInfo({ battery }: Props) {
         <InfoSection title={t('battery.infoModal.capacitySection')}>
           <InfoRow label={t('battery.infoModal.capacityLabel')}>
             {t('battery.infoModal.capacityDesc')}
-          </InfoRow>
-          <InfoRow label={t('battery.infoModal.cyclesLabel')}>
-            {t('battery.infoModal.cyclesDesc')}
           </InfoRow>
         </InfoSection>
         <InfoSection title={t('battery.infoModal.powerSection')}>

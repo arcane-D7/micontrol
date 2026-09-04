@@ -28,7 +28,7 @@ OS: ${sys?.os_version ?? 'Unknown'}
 
 == BATTERY ==
 Level: ${bat?.level ?? '?'}%  |  Charging: ${bat?.is_charging ? 'yes' : 'no'}
-Health: ${bat?.health_percent ?? '?'}%  |  Cycles: ${bat?.cycle_count ?? '?'}
+Health: ${bat?.health_percent ?? '?'}%
 Temperature: ${bat?.temperature_celsius != null ? bat.temperature_celsius + '°C' : 'unavailable'}
 Capacity: ${bat?.full_capacity_mwh ?? '?'} mWh (designed: ${bat?.designed_capacity_mwh ?? '?'} mWh)
 
