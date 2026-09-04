@@ -407,7 +407,7 @@ export default function MainWindow({
             right: 14,
             fontSize: 10,
             color: 'var(--color-text-muted, oklch(50% 0 0))',
-            opacity: 0.55,
+            opacity: 0.75,
             userSelect: 'none',
             pointerEvents: 'none',
             display: 'flex',

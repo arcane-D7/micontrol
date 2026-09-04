@@ -256,8 +256,8 @@ function TaskManagerTab({ hw }: Props) {
             padding: '8px 12px',
             marginBottom: 8,
             borderRadius: 8,
-            background: 'rgba(239,68,68,0.12)',
-            color: '#ef4444',
+            background: 'oklch(from var(--error) l c h / 0.12)',
+            color: 'var(--error)',
             fontSize: 12,
           }}
         >
@@ -408,8 +408,8 @@ function TaskManagerTab({ hw }: Props) {
                       disabled={killing === p.pid}
                       title={`End ${p.name}`}
                       style={{
-                        background: 'rgba(239,68,68,0.12)',
-                        color: '#ef4444',
+                        background: 'oklch(from var(--error) l c h / 0.12)',
+                        color: 'var(--error)',
                         border: 'none',
                         borderRadius: 6,
                         padding: '3px 8px',

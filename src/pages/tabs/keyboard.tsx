@@ -213,7 +213,7 @@ function KeyBindingRow({
           <div
             style={{
               fontSize: 11.5,
-              opacity: 0.55,
+              color: 'var(--text-muted)',
               marginTop: 1,
               whiteSpace: 'nowrap',
               overflow: 'hidden',

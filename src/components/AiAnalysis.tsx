@@ -445,7 +445,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
   };
   const gpuTemps: SeriesDef = {
     values: chartLogs.map((l) => l.gpu_temp),
-    color: '#ff9800',
+    color: 'var(--warning)',
     label: t('aiAnalysis.charts.gpuTemp'),
   };
   const tdpSeries: SeriesDef = {
@@ -460,7 +460,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
   };
   const gpuPct: SeriesDef = {
     values: chartLogs.map((l) => l.gpu_pct),
-    color: '#00bcd4',
+    color: 'var(--info)',
     label: 'GPU%',
   };
 

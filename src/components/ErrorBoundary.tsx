@@ -146,7 +146,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
                 borderRadius: 8,
                 cursor: 'pointer',
                 background: 'var(--color-accent, #6c8cff)',
-                color: '#fff',
+                color: 'var(--accent-contrast, oklch(98% 0 0))',
               }}
             >
               {t.reloadTab}
@@ -208,7 +208,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
               borderRadius: 8,
               cursor: 'pointer',
               background: 'var(--color-accent, #6c8cff)',
-              color: '#fff',
+              color: 'var(--accent-contrast, oklch(98% 0 0))',
             }}
           >
             {t.reload}

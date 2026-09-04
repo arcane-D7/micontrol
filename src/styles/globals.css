@@ -138,6 +138,20 @@
   --color-warning: var(--warning);
   --color-error: var(--error);
   --color-info: var(--info);
+  /* S48c contrast audit: these were referenced by components but never
+     defined — callers silently fell back to hardcoded hexes that don't
+     adapt to the active theme (e.g. var(--color-danger, #f87171) rendered
+     pink in both themes; --text-secondary fell through to --text-dim which
+     is near-invisible in dark mode). Define them as theme-aware aliases. */
+  --color-danger: var(--error);
+  --text-secondary: var(--text-muted);
+  --color-surface-alt: var(--surface-2);
+  --color-surface-raised: var(--surface-2);
+  --color-surface-sunken: var(--surface-hover);
+  /* Readable text color for use ON accent-colored backgrounds (buttons,
+     active chips). Dark theme flips this to dark text because the dark
+     accent is light (oklch 70%) — white-on-accent was ≈2.1:1, failing WCAG. */
+  --accent-contrast: oklch(98% 0 0);
   --radius-sm: var(--r-xs);
   --radius-md: var(--r-sm);
   --radius-lg: var(--r-md);
@@ -159,16 +173,22 @@
   --surface-hover: oklch(27% 0.016 260 / 0.76);
   --border: oklch(100% 0 0 / 0.07);
   --border-strong: oklch(100% 0 0 / 0.14);
+  /* S48c contrast audit: dark --text was 60%/37% for muted/dim ≈2.7:1 and
+     ≈1.5:1 against the 17% surface — both below WCAG AA (4.5:1 body text).
+     Raised to 72%/60% (≈4.6:1 / ≈3.4:1); dim is still visually secondary to
+     muted but no longer unreadable on essential text (card titles, labels). */
   --text: oklch(93% 0.007 75);
-  --text-muted: oklch(60% 0.01 260);
-  --text-dim: oklch(37% 0.01 260);
+  --text-muted: oklch(72% 0.01 260);
+  --text-dim: oklch(60% 0.01 260);
   --accent: oklch(70% 0.17 268);
   --accent-hover: oklch(74% 0.18 268);
   --accent-soft: oklch(70% 0.17 268 / 0.15);
   --accent-glow: oklch(70% 0.17 268 / 0.32);
+  /* Dark text on the light dark-theme accent (see --accent-contrast note). */
+  --accent-contrast: oklch(15% 0.02 268);
   --success: oklch(72% 0.16 148);
   --warning: oklch(76% 0.16 75);
-  --error: oklch(68% 0.21 25);
+  --error: oklch(70% 0.21 25);
   --info: oklch(68% 0.17 248);
   --cat-perf: oklch(78% 0.17 44);
   --cat-battery: oklch(74% 0.16 148);
@@ -196,16 +216,18 @@
     --surface-hover: oklch(27% 0.016 260 / 0.76);
     --border: oklch(100% 0 0 / 0.07);
     --border-strong: oklch(100% 0 0 / 0.14);
+    /* S48c: keep in sync with [data-theme='dark'] (contrast audit). */
     --text: oklch(93% 0.007 75);
-    --text-muted: oklch(60% 0.01 260);
-    --text-dim: oklch(37% 0.01 260);
+    --text-muted: oklch(72% 0.01 260);
+    --text-dim: oklch(60% 0.01 260);
     --accent: oklch(70% 0.17 268);
     --accent-hover: oklch(74% 0.18 268);
     --accent-soft: oklch(70% 0.17 268 / 0.15);
     --accent-glow: oklch(70% 0.17 268 / 0.32);
+    --accent-contrast: oklch(15% 0.02 268);
     --success: oklch(72% 0.16 148);
     --warning: oklch(76% 0.16 75);
-    --error: oklch(68% 0.21 25);
+    --error: oklch(70% 0.21 25);
     --info: oklch(68% 0.17 248);
     --cat-perf: oklch(78% 0.17 44);
     --cat-battery: oklch(74% 0.16 148);
@@ -460,7 +482,7 @@ body {
   border-radius: var(--r-sm);
   border: none;
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text-muted);
   font-family: var(--font);
   font-size: 0.75rem;
   font-weight: 500;
@@ -548,7 +570,7 @@ body {
 .card-title {
   font-size: 0.71875rem;
   font-weight: 600;
-  color: var(--text-dim);
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin-bottom: 16px;
@@ -680,7 +702,7 @@ body {
 }
 .mode-btn-desc {
   font-size: 0.6875rem;
-  color: var(--text-dim);
+  color: var(--text-muted);
   line-height: 1.35;
 }
 
@@ -974,15 +996,15 @@ input[type='range']:active::-webkit-slider-thumb {
   color: var(--success);
 }
 .badge.warning {
-  background: oklch(from var(--warning) l c h / 0.12);
+  background: oklch(from var(--warning) l c h / 0.14);
   color: var(--warning);
 }
 .badge.error {
-  background: oklch(from var(--error) l c h / 0.12);
+  background: oklch(from var(--error) l c h / 0.16);
   color: var(--error);
 }
 .badge.info {
-  background: oklch(from var(--info) l c h / 0.12);
+  background: oklch(from var(--info) l c h / 0.14);
   color: var(--info);
 }
 .badge.accent {
@@ -1068,7 +1090,7 @@ input[type='range']:active::-webkit-slider-thumb {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-dim);
+  color: var(--text-muted);
   margin-bottom: 8px;
 }
 .tray-mode-row {
@@ -1196,7 +1218,7 @@ input[type='range']:active::-webkit-slider-thumb {
 .tray-path-hint {
   margin-top: 6px;
   font-size: 0.625rem;
-  color: var(--text-dim);
+  color: var(--text-muted);
   line-height: 1.4;
   word-break: break-all;
 }
@@ -1277,7 +1299,7 @@ input[type='range']:active::-webkit-slider-thumb {
 }
 .btn-primary {
   background: var(--accent);
-  color: oklch(98% 0 0);
+  color: var(--accent-contrast);
   box-shadow: 0 2px 8px var(--accent-glow);
 }
 .btn-primary:hover:not(:disabled) {
@@ -1364,7 +1386,7 @@ input[type='range']:active::-webkit-slider-thumb {
 .chip-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: oklch(98% 0 0);
+  color: var(--accent-contrast);
 }
 
 /* Link / inline text button */
@@ -1400,7 +1422,7 @@ input[type='range']:active::-webkit-slider-thumb {
   cursor: pointer;
   font-family: var(--font);
   font-size: 0.6875rem;
-  color: var(--text-dim);
+  color: var(--text-muted);
   transition:
     color var(--t-fast) var(--ease),
     background var(--t-fast) var(--ease);
