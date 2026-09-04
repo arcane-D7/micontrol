@@ -182,15 +182,17 @@ fn pid_engine_pdh_poller_thread() {
 /// `\GPU Engine(*)\Utilization Percentage`, accumulating per-PID sums.
 ///
 /// Buffer layout for PDH_FMT_DOUBLE (x64) — `PDH_FMT_COUNTERVALUE_ITEM_W`:
-///   - The buffer starts at the first item (ItemBuffer). Each item is 24
-///     bytes:
-///       +0:  szName (LPWSTR, 8 bytes) — pointer to a null-terminated wide
-///            instance string stored somewhere in the buffer
-///       +8:  PDH_FMT_COUNTERVALUE (16 bytes):
-///             +8: CStatus (i32)
-///            +12: pad
-///            +16: doubleValue (f64)
-///   - `lpdwItemCount` (returned by the API) tells how many items exist.
+///
+/// The buffer starts at the first item (ItemBuffer). Each item is 24 bytes:
+///
+/// - `+0`:  szName (LPWSTR, 8 bytes) — pointer to a null-terminated wide
+///   instance string stored somewhere in the buffer
+/// - `+8`:  PDH_FMT_COUNTERVALUE (16 bytes):
+///   - `+8`: CStatus (i32)
+///   - `+12`: pad
+///   - `+16`: doubleValue (f64)
+///
+/// `lpdwItemCount` (returned by the API) tells how many items exist.
 ///
 /// We resolve each szName pointer by translating its offset into our byte
 /// slice and reading the wide string there.
@@ -546,14 +548,12 @@ pub fn kill_process(pid: u32) -> HardwareResult<()> {
         // SAFETY: pid is a u32 process id; OpenProcess/PROCESS_TERMINATE +
         // PROCESS_QUERY_INFORMATION. We close the handle.
         unsafe {
-            let handle = OpenProcess(
-                PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE,
-                false,
-                pid as u32,
-            )
-            .map_err(|e| {
-                crate::hw::errors::HardwareError::Other(format!("OpenProcess({pid}) failed: {e}"))
-            })?;
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE, false, pid)
+                .map_err(|e| {
+                    crate::hw::errors::HardwareError::Other(format!(
+                        "OpenProcess({pid}) failed: {e}"
+                    ))
+                })?;
             let res = TerminateProcess(handle, 1);
             CloseHandle(handle).ok();
             match res {

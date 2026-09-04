@@ -36,6 +36,7 @@
   },
   "nav": {
     "overview": "Resumen",
+    "taskmgr": "Administrador de tareas",
     "performance": "Rendimiento",
     "battery": "Batería",
     "display": "Pantalla",
@@ -285,6 +286,8 @@
     "dischargeRate": "Tasa de descarga",
     "wh": "Wh",
     "voltageUnit": "V",
+    "slowCharger": "Cargador lento detectado",
+    "slowChargerHint": "El adaptador conectado entrega menos de 45 W. La carga tardará bastante más. Usa el adaptador original de 100 W para velocidad completa.",
     "batteryCare": "Modo Cuidado de Batería",
     "batteryCareDesc": "Activa cuidado de batería vía EC (registro 0xA4) para optimizar patrones de carga y prolongar vida útil",
     "batteryCareOn": "Cuidado de Batería activado",

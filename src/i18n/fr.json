@@ -36,6 +36,7 @@
   },
   "nav": {
     "overview": "Vue d'ensemble",
+    "taskmgr": "Gestionnaire des tâches",
     "performance": "Performance",
     "battery": "Batterie",
     "display": "Affichage",
@@ -285,6 +286,8 @@
     "dischargeRate": "Taux de décharge",
     "wh": "Wh",
     "voltageUnit": "V",
+    "slowCharger": "Chargeur lent détecté",
+    "slowChargerHint": "L'adaptateur connecté fournit moins de 45 W. La charge prendra beaucoup plus de temps. Utilisez l'adaptateur d'origine 100 W pour la vitesse maximale.",
     "batteryCare": "Mode Soins de Batterie",
     "batteryCareDesc": "Active les soins de batterie via EC (registre 0xA4) pour optimiser les patterns de charge et prolonger la durée de vie",
     "batteryCareOn": "Soins de Batterie activés",

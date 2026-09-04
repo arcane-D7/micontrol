@@ -165,6 +165,27 @@ export default function BatteryInfo({ battery }: Props) {
           </span>
         </div>
       )}
+      {/* S48-002: slow-charger hint next to the charging voltage/power block.
+          While actively charging, an adapter under 45 W stretches a full
+          charge into many hours — warn the user inline (matching the OSD). */}
+      {battery.is_charging &&
+        battery.ac_input_power_mw != null &&
+        battery.ac_input_power_mw < 45_000 && (
+          <div
+            className="badge warning"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              margin: '0 0 12px',
+              width: '100%',
+              justifyContent: 'center',
+            }}
+            title={t('battery.slowChargerHint')}
+          >
+            ⚠ {t('battery.slowCharger')}
+          </div>
+        )}
       {battery.temperature_celsius != null && (
         <div className="stat-row">
           <span className="stat-label">{t('battery.temperature')}</span>

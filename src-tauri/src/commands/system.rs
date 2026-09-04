@@ -41,6 +41,43 @@ pub async fn get_battery_info() -> Result<BatteryInfo, ErrorResponse> {
     let result = run_blocking(hw_get_battery)
         .await
         .map_err(ErrorResponse::from);
+
+    // S48-001: The in-process (unprivileged) WMAA adapter-power read is
+    // denied on this platform (same 0x80041003 pattern as the thermal WMI
+    // classes). The elevated bridge (SYSTEM) CAN read it — the dedicated
+    // `wmi_ec_read_adapter_power` command already proves it works. When the
+    // local read inside get_battery_info came back None but the machine is
+    // plugged in, re-probe via the elevated bridge so the UI gets a real
+    // wattage instead of hiding the charging field.
+    let mut result = result;
+    if let Ok(info) = &mut result {
+        if info.is_plugged && info.ac_input_power_mw.is_none() {
+            match elev_bridge::run_elevated_no_prompt(
+                "wmi_ec_read_adapter_power",
+                serde_json::json!({}),
+            )
+            .await
+            {
+                Ok(v) => {
+                    if let Some(watts) = v.as_u64() {
+                        info.ac_input_power_mw = Some((watts.min(i32::MAX as u64)) as i32 * 1000);
+                        log::debug!(
+                            target: "cmd::system",
+                            "get_battery_info: elevated adapter-power fallback -> {} W",
+                            watts
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::debug!(
+                        target: "cmd::system",
+                        "get_battery_info: elevated adapter-power fallback unavailable: {e}"
+                    );
+                }
+            }
+        }
+    }
+
     match &result {
         Ok(info) => log::debug!(
             target: "cmd::system",

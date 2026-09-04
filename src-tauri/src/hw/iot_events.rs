@@ -148,6 +148,9 @@ struct ListenerState {
     last_ac: RwLock<Option<bool>>,
     last_charging: RwLock<Option<bool>>,
     last_level: RwLock<Option<u8>>,
+    /// S48-002: last adapter power seen while charging (mW). Used to detect
+    /// "slow charger" (sustained input below the slow-charger threshold).
+    last_adapter_mw: RwLock<Option<i32>>,
 }
 
 static STATE: OnceLock<ListenerState> = OnceLock::new();
@@ -158,6 +161,7 @@ fn state() -> &'static ListenerState {
         last_ac: RwLock::new(None),
         last_charging: RwLock::new(None),
         last_level: RwLock::new(None),
+        last_adapter_mw: RwLock::new(None),
     })
 }
 
@@ -277,6 +281,50 @@ fn tick() {
         }
         *last_level = Some(level_now);
     }
+
+    // — Slow charger detection (S48-002) ─────────────────────────────────────
+    // While ACTIVELY charging (not merely plugged at 100%), if the adapter
+    // input is below SLOW_CHARGER_MW the battery takes many hours to fill.
+    // Notify once per plug-in cycle; reset when unplugged or charging ends.
+    // The official adapter delivers 100 W; anything under 45 W is "slow"
+    // (USB-C PD phone chargers, hub-passed power, degraded cables).
+    {
+        const SLOW_CHARGER_MW: i32 = 45_000;
+        const CONSECUTIVE_TICKS_NEEDED: u32 = 6; // ~30 s at 5 s cadence
+        static SLOW_TICKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let mut last_adapter = state().last_adapter_mw.write().unwrap();
+
+        if !ac_now {
+            // Unplugged — reset detection window.
+            SLOW_TICKS.store(0, std::sync::atomic::Ordering::Relaxed);
+            *last_adapter = None;
+        } else {
+            let adapter_mw = info.ac_input_power_mw;
+            let charging = info.is_charging;
+            if let Some(mw) = adapter_mw {
+                if charging && mw < SLOW_CHARGER_MW {
+                    let ticks = SLOW_TICKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if ticks == CONSECUTIVE_TICKS_NEEDED {
+                        log::info!(
+                            "[iot_events] slow charger detected: {} W sustained",
+                            mw / 1000
+                        );
+                        if cfg.notify_charging {
+                            show_power_notification("power_slow_charger");
+                        }
+                        fire_hook("slow_charger");
+                    }
+                } else {
+                    // Healthy charge or full battery — reset the window.
+                    SLOW_TICKS.store(0, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                // No adapter-power reading this tick — keep previous state.
+                SLOW_TICKS.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            *last_adapter = adapter_mw;
+        }
+    }
 }
 
 fn fire_hook(ev: &str) {
@@ -301,6 +349,7 @@ fn show_power_notification(kind: &str) {
         "power_charging_on" => show_generic_notification(2, 0xE8B7), // battery charging
         "power_charging_off" => show_generic_notification(2, 0xE8B7),
         "power_battery_low" => show_generic_notification(2, 0xECA5), // warning
+        "power_slow_charger" => show_generic_notification(2, 0xECA5), // warning (⚡ low input)
         _ => return,
     }
     log::info!("[iot_events] notification requested: {kind}");

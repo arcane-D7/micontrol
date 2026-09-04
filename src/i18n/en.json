@@ -288,6 +288,8 @@
     "celsius": "°C",
     "volts": "V",
     "voltageUnit": "V",
+    "slowCharger": "Slow charger detected",
+    "slowChargerHint": "The connected adapter delivers less than 45 W. Charging will take significantly longer. Use the original 100 W adapter for full speed.",
     "batteryCare": "Battery Care Mode",
     "batteryCareDesc": "Enables EC-based battery care (register 0xA4) to optimize charging patterns and extend battery lifespan",
     "batteryCareOn": "Battery Care is enabled",

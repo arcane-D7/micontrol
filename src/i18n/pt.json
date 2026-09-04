@@ -288,6 +288,8 @@
     "acInputPower": "Potência do adaptador AC",
     "wh": "Wh",
     "voltageUnit": "V",
+    "slowCharger": "Carregador lento detectado",
+    "slowChargerHint": "O adaptador conectado fornece menos de 45 W. O carregamento levará consideravelmente mais tempo. Use o adaptador original de 100 W para velocidade total.",
     "batteryCare": "Modo Cuidado de Bateria",
     "batteryCareDesc": "Ativa cuidado de bateria via EC (registro 0xA4) para otimizar padrões de carga e prolongar vida útil",
     "batteryCareOn": "Cuidado de Bateria ativado",

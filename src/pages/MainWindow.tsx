@@ -49,7 +49,7 @@ interface Props {
 
 const NAV_ITEMS = [
   { id: 'overview', icon: '📊', label: 'nav.overview' },
-  { id: 'taskmgr', icon: '⚙️📈', label: 'nav.taskmgr' },
+  { id: 'taskmgr', icon: '📈', label: 'nav.taskmgr' },
   { id: 'performance', icon: '⚡', label: 'nav.performance' },
   { id: 'battery', icon: '🔋', label: 'nav.battery' },
   { id: 'display', icon: '🖥️', label: 'nav.display' },
