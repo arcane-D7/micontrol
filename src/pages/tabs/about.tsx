@@ -127,7 +127,7 @@ export default function AboutTab({
                 className="btn-primary btn-sm"
                 onClick={() =>
                   void invoke('open_external_url', {
-                    url: 'https://buymeacoffee.com/micontrol',
+                    url: 'https://buymeacoffee.com/freitasma1t',
                   }).catch((e) => console.error('[support] open failed:', e))
                 }
               >
