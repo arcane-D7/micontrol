@@ -40,6 +40,10 @@ export default function PrivacyPolicy() {
         <Section title={t('privacy.section6Title')}>
           <p>{t('privacy.section6Body')}</p>
         </Section>
+
+        <Section title={t('privacy.section7Title')}>
+          <p>{t('privacy.section7Body')}</p>
+        </Section>
       </div>
     </>
   );

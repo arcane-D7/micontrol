@@ -49,6 +49,9 @@ export function useTelemetryConsent() {
   async function setTelemetryConsent(value: 'granted' | 'denied'): Promise<void> {
     try {
       await invoke('set_secret', { key: TELEMETRY_CONSENT_KEY, value });
+      // S49: notify live listeners (App-level Sentry init reacts to this and
+      // enables/disables crash reporting without an app restart).
+      window.dispatchEvent(new CustomEvent('micontrol:consent-changed'));
     } catch (err) {
       console.error('[settings] Failed to store telemetry consent:', err);
     }
@@ -58,6 +61,7 @@ export function useTelemetryConsent() {
   async function revokeTelemetryConsent(): Promise<void> {
     try {
       await invoke('delete_secret', { key: TELEMETRY_CONSENT_KEY });
+      window.dispatchEvent(new CustomEvent('micontrol:consent-changed'));
     } catch {
       // Ignore — key may not exist yet
     }

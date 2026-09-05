@@ -46,30 +46,48 @@ if (isTrayPopup) {
 }
 
 // ── Sentry crash reporting (respects telemetry consent) ──────────────────────
+//
+// S49: crash reporting is completely optional and agnostic. The DSN comes
+// from VITE_SENTRY_DSN (build-time) and the user's consent is stored in the
+// OS credential store. The init listens for the `micontrol:consent-changed`
+// window event (dispatched by Settings) so toggling the consent in Settings
+// enables/disables Sentry WITHOUT an app restart.
+
+let sentryEnabled = false;
+
+async function applySentryState() {
+  try {
+    const consent = await invoke<string | null>('get_secret', { key: 'telemetry_consent' });
+    const dsn = import.meta.env.VITE_SENTRY_DSN;
+    const shouldEnable = Boolean(dsn) && consent?.includes('granted') === true;
+
+    if (shouldEnable && !sentryEnabled) {
+      const Sentry = await import('@sentry/react');
+      Sentry.init({
+        dsn,
+        // Crash reports only — no performance tracing, no session replay.
+        tracesSampleRate: 0,
+        environment: import.meta.env.DEV ? 'development' : 'production',
+      });
+      sentryEnabled = true;
+    } else if (!shouldEnable && sentryEnabled) {
+      const Sentry = await import('@sentry/react');
+      // Close flushes pending events and disables further capture.
+      await Sentry.close(2000);
+      sentryEnabled = false;
+    }
+  } catch {
+    // Sentry init/close is best-effort; never break the app over it.
+  }
+}
 
 function useSentry() {
   useEffect(() => {
-    let cancelled = false;
-    const init = async () => {
-      try {
-        // Only send crash reports if user has granted telemetry consent
-        const consent = await invoke<string | null>('get_secret', { key: 'telemetry_consent' });
-        const dsn = import.meta.env.VITE_SENTRY_DSN;
-        if (!dsn || !consent?.includes('granted') || cancelled) return;
-
-        const Sentry = await import('@sentry/react');
-        Sentry.init({
-          dsn,
-          tracesSampleRate: 0.1,
-          environment: import.meta.env.DEV ? 'development' : 'production',
-        });
-      } catch {
-        // Sentry init is best-effort
-      }
-    };
-    void init();
+    void applySentryState();
+    const onConsentChanged = () => void applySentryState();
+    window.addEventListener('micontrol:consent-changed', onConsentChanged);
     return () => {
-      cancelled = true;
+      window.removeEventListener('micontrol:consent-changed', onConsentChanged);
     };
   }, []);
 }

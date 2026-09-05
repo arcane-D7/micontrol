@@ -454,6 +454,13 @@
       "virtualControlHID": "VirtualControlHID.sys — Modos de desempenho e teclas de atalho",
       "iotDriver": "IoTDriver.sys — Limite de carga e serviços IoT"
     },
+    "support": {
+      "title": "Apoie o projeto",
+      "desc": "O MiControl é um software gratuito e de código aberto, desenvolvido no tempo livre. Se ele deixa o seu portátil melhor, uma pequena doação de agradecimento ajuda a manter o desenvolvimento — cobre hardware de teste, certificados de assinatura de código e café ☕.",
+      "bmc": "Buy me a coffee",
+      "star": "Estrela no GitHub",
+      "note": "As doações são 100% opcionais e não desbloqueiam nada extra — todas as funcionalidades são gratuitas para todos. Uma estrela no GitHub também é muito apreciada!"
+    },
     "bridgeTitle": "Ponte Elevada — Atualização Silenciosa",
     "bridgeDesc": "Instale uma atualização do MiControl em segundo plano usando o serviço bridge privilegiado — sem pedido de UAC, funciona mesmo enquanto estiver ausente.",
     "bridgePathPlaceholder": "Caminho para MiControl_*-setup.exe",
@@ -787,16 +794,27 @@
   },
   "consent": {
     "dialog": {
-      "title": "Consentimento de Telemetria e Recursos de IA",
-      "intro": "O MiControl pode enviar telemetria de hardware (estado do dispositivo, dados de sensores) para a OpenAI para alimentar recursos assistidos por IA. Estes dados ajudam a fornecer recomendações inteligentes de otimização de hardware.",
-      "what": "Telemetria de hardware: nível de bateria, temperatura de CPU/GPU, modo de desempenho, estado do touchpad, definições de ecrã e informações do sistema",
-      "where": "API da OpenAI — processada nos seus servidores de acordo com a sua política de privacidade",
-      "why": "Para fornecer insights alimentados por IA e recomendações de otimização de hardware",
-      "control": "Pode revogar este consentimento a qualquer momento em Definições → Privacidade. Os recursos de IA pararão imediatamente.",
-      "sentryDisclosure": "Relatórios de falhas serão enviados ao Sentry para ajudar a melhorar a aplicação. Nenhum dado pessoal é incluído.",
-      "allow": "Permitir",
-      "deny": "Negar",
-      "privacyLink": "Leia a nossa Política de Privacidade"
+      "title": "Ajude a melhorar o MiControl",
+      "intro": "Pode escolher se o MiControl envia relatórios anónimos de falhas para o Sentry. É completamente opcional — todas as funcionalidades funcionam exatamente da mesma forma.",
+      "benefitsLabel": "Benefícios de partilhar relatórios de falhas",
+      "benefit1": "Correções mais rápidas — as falhas são reportadas automaticamente com detalhes técnicos que teria de descrever manualmente",
+      "benefit2": "Mais estabilidade em muitas máquinas — relatórios de diferentes configurações de hardware revelam problemas que um único tester nunca encontraria",
+      "benefit3": "Ajuda a definir as atualizações — os dados mostram que problemas afetam mais utilizadores reais, para serem corrigidos primeiro",
+      "scopeTitle": "O que é enviado:",
+      "scopeBody": "traces de erro, versão da aplicação, versão do Windows e modelo do hardware. Sem dados pessoais, sem ficheiros, sem histórico de navegação, sem conteúdo do ecrã.",
+      "reassurance": "Os relatórios são guardados pelo Sentry num projeto privado. Apenas o programador do MiControl tem acesso.",
+      "allow": "Sim, enviar relatórios de falhas",
+      "deny": "Não enviar",
+      "changeLater": "Pode alterar isto a qualquer momento nas Definições.",
+      "privacyLink": "Ler a Política de Privacidade",
+      "settingsTitle": "Relatórios de Falhas (Sentry)",
+      "settingsDesc": "Relatórios anónimos de falhas ajudam a depurar e melhorar o MiControl em muitas máquinas e configurações diferentes. Totalmente opcional; pode alterar quando quiser.",
+      "settingsEnable": "Enviar relatórios de falhas",
+      "settingsEnabledAt": "Ativado",
+      "settingsDisabledAt": "Desativado",
+      "settingsStatusOn": "Relatórios de falhas ATIVOS — obrigado por ajudar a melhorar o MiControl!",
+      "settingsStatusOff": "Relatórios de falhas desativados — nada é enviado ao Sentry.",
+      "settingsStatusUndecided": "Ainda não escolheu — nada está a ser enviado."
     }
   },
   "privacy": {
@@ -814,6 +832,8 @@
     "section5Body": "Tem controlo total sobre os seus dados:\n\n• Conceder ou negar consentimento a qualquer momento através de Definições → Privacidade\n• Revogar consentimento previamente concedido — isto interrompe imediatamente toda a transmissão de telemetria\n• Eliminar registos de desempenho armazenados localmente a partir do separador Análise IA\n• Desinstalar o MiControl para remover toda a configuração e registos armazenados localmente\n\nSe forneceu dados pessoais separadamente à OpenAI, deve contactá-los diretamente para exercer os seus direitos de dados nos termos da lei aplicável.",
     "section6Title": "6. Contacto",
     "section6Body": "Para questões relacionadas com a privacidade sobre o MiControl, abra um issue no repositório GitHub: github.com/arcane-D7/micontrol",
+    "section7Title": "7. Relatórios de Falhas (Sentry) — Opcional",
+    "section7Body": "Se — e somente se — aderir explicitamente, o MiControl envia relatórios anónimos de falhas ao Sentry (sentry.io) quando a aplicação encontra um erro inesperado.\n\n• O que é enviado: traces de erro, versão do MiControl, versão do Windows e modelo do hardware. Sem dados pessoais, sem ficheiros, sem conteúdo do ecrã, sem análises de utilização.\n• Onde: Sentry (sentry.io), num projeto privado acessível apenas ao programador do MiControl.\n• Porquê: para reproduzir e corrigir falhas mais rapidamente, especialmente em configurações de hardware que o programador não possui.\n• Controle: pode ativar ou desativar os relatórios a qualquer momento em Definições → Privacidade, e a alteração surte efeito imediatamente — sem reiniciar. Se recusar, nada é enviado.",
     "consentStatus": "Estado de Consentimento",
     "consentGranted": "Concedido",
     "consentDenied": "Negado",

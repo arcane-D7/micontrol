@@ -55,7 +55,7 @@ use commands::hotkeys::{
     get_detected_key, get_hotkey_config, get_remap_apply_state, grant_script_consent,
     is_hook_active, set_hotkey_config, start_key_detect,
 };
-use commands::privacy::{export_user_data, reveal_in_explorer};
+use commands::privacy::{export_user_data, open_external_url, reveal_in_explorer};
 use commands::system::{
     check_official_driver_updates, clean_junk_files, clear_error_log, custom_security_scan,
     debug_ecram_dump, download_driver_package, fetch_official_drivers, full_security_scan,
@@ -482,6 +482,7 @@ pub fn run() {
             // Data export — GDPR Art.20 (S19-16)
             export_user_data,
             reveal_in_explorer,
+            open_external_url,
             // Cross-device (MIOT-04+) — BLE presence
             commands::crossdevice::get_presence_status,
             commands::crossdevice::get_presence_config,

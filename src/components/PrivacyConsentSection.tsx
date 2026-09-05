@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
 
@@ -24,6 +24,32 @@ export default function PrivacyConsentSection({
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
+  // ── S49: Crash reports (Sentry) dedicated card ──────────────────────────
+  // The consent state is shared with the AI features (same store) but this
+  // card speaks plainly about crash reports only, with a real toggle. The
+  // Sentry init in App.tsx listens for `micontrol:consent-changed` and
+  // enables/disables capture live — no restart needed.
+  const [crashReports, setCrashReports] = useState<'granted' | 'denied' | null>(consent);
+  const [crashBusy, setCrashBusy] = useState(false);
+  useEffect(() => {
+    setCrashReports(consent);
+  }, [consent]);
+
+  const handleCrashToggle = async (next: boolean) => {
+    setCrashBusy(true);
+    try {
+      if (next) {
+        await onGrant();
+        setCrashReports('granted');
+      } else {
+        await onRevoke();
+        setCrashReports('denied');
+      }
+    } finally {
+      setCrashBusy(false);
+    }
+  };
+
   const handleExportData = async () => {
     setIsExporting(true);
     setExportError(null);
@@ -38,6 +64,45 @@ export default function PrivacyConsentSection({
   };
   return (
     <>
+      {/* ── S49: Crash Reports (Sentry) — dedicated, plain-language card ── */}
+      <div className="card">
+        <div className="card-title">{t('consent.dialog.settingsTitle')}</div>
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 14 }}>
+          {t('consent.dialog.settingsDesc')}
+        </p>
+        <label className="toggle" style={{ padding: '4px 0 14px' }}>
+          <span className="toggle-info">
+            <span className="toggle-name">{t('consent.dialog.settingsEnable')}</span>
+            <span className="toggle-desc">
+              {crashReports === 'granted'
+                ? t('consent.dialog.settingsStatusOn')
+                : crashReports === 'denied'
+                  ? t('consent.dialog.settingsStatusOff')
+                  : t('consent.dialog.settingsStatusUndecided')}
+            </span>
+          </span>
+          <span className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={crashReports === 'granted'}
+              disabled={crashBusy}
+              onChange={(e) => void handleCrashToggle(e.target.checked)}
+            />
+            <span className="toggle-track" />
+            <span className="toggle-knob" />
+          </span>
+        </label>
+        <div className="badge" style={{ alignSelf: 'flex-start' }}>
+          <span className={`badge ${crashReports === 'granted' ? 'success' : 'info'}`}>
+            {crashReports === 'granted'
+              ? `✓ ${t('consent.dialog.settingsEnabledAt')}`
+              : crashReports === 'denied'
+                ? `⊘ ${t('consent.dialog.settingsDisabledAt')}`
+                : `? ${t('privacy.consentNotSet')}`}
+          </span>
+        </div>
+      </div>
+
       {/* Privacy & Consent */}
       <div className="card" style={{ marginTop: 16 }}>
         <div className="card-title">{t('settings.privacy')}</div>

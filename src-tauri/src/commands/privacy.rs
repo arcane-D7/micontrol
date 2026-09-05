@@ -179,3 +179,51 @@ pub async fn reveal_in_explorer(app: AppHandle, path: String) -> Result<(), Stri
 
     Ok(())
 }
+
+/// S49: Open an external URL in the default browser.
+///
+/// Whitelist-only: only https:// URLs on domains the app actually links to
+/// are allowed. This prevents the WebView from being used as a launchpad for
+/// arbitrary protocols (file://, ms-settings:, etc.) if a caller is ever
+/// tricked into passing a malicious value.
+#[tauri::command]
+pub async fn open_external_url(_app: AppHandle, url: String) -> Result<(), String> {
+    const ALLOWED_HOSTS: &[&str] = &[
+        "github.com",
+        "www.github.com",
+        "buymeacoffee.com",
+        "www.buymeacoffee.com",
+        "cafecito.app",
+        "ko-fi.com",
+        "sentry.io",
+    ];
+
+    let parsed = url::Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err("Only https:// URLs are allowed".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+    if !ALLOWED_HOSTS.contains(&host.to_ascii_lowercase().as_str()) {
+        return Err(format!("Host not allowed: {host}"));
+    }
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .spawn()
+            .map_err(|e| format!("Cannot open browser: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Cannot open browser: {e}"))?;
+    }
+
+    Ok(())
+}

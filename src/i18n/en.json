@@ -454,6 +454,13 @@
       "virtualControlHID": "VirtualControlHID.sys — Performance modes & hotkeys",
       "iotDriver": "IoTDriver.sys — Charging threshold & IoT services"
     },
+    "support": {
+      "title": "Support the project",
+      "desc": "MiControl is free, open-source software developed in spare time. If it makes your laptop better, a small thank-you donation helps keep development going — covers test hardware, code-signing certificates and coffee ☕.",
+      "bmc": "Buy me a coffee",
+      "star": "Star on GitHub",
+      "note": "Donations are 100% optional and unlock nothing extra — all features are free for everyone. Star on GitHub is equally appreciated!"
+    },
     "bridgeTitle": "High Bridge — Silent Update",
     "bridgeDesc": "Install a MiControl update in the background using the privileged bridge service — no UAC prompt, works while you're away.",
     "bridgePathPlaceholder": "Path to MiControl_*-setup.exe",
@@ -787,16 +794,27 @@
   },
   "consent": {
     "dialog": {
-      "title": "Telemetry & AI Features Consent",
-      "intro": "MiControl can send hardware telemetry (device state, sensor data) to OpenAI to power AI-assisted features. This data helps provide intelligent hardware optimisation recommendations.",
-      "what": "Hardware telemetry: battery level, CPU/GPU temperature, performance mode, touchpad state, display settings, and system information",
-      "where": "OpenAI API — processed on their servers in accordance with their privacy policy",
-      "why": "To provide AI-powered insights and hardware optimisation recommendations",
-      "control": "You can revoke this consent at any time in Settings → Privacy. AI features will stop immediately.",
-      "sentryDisclosure": "Crash reports will be sent to Sentry to help improve the app. No personal data is included.",
-      "allow": "Allow",
-      "deny": "Deny",
-      "privacyLink": "Read our Privacy Policy"
+      "title": "Help improve MiControl",
+      "intro": "You can choose whether MiControl sends anonymous crash reports to Sentry. This is completely optional — every feature works exactly the same either way.",
+      "benefitsLabel": "Benefits of sharing crash reports",
+      "benefit1": "Faster bug fixes — crashes are reported automatically with technical details you'd have to describe manually",
+      "benefit2": "Better stability across many machines — reports from different hardware configurations reveal issues one tester could never find",
+      "benefit3": "You help shape updates — the data shows which problems affect real users most, so they get fixed first",
+      "scopeTitle": "What is sent:",
+      "scopeBody": "error traces, app version, Windows version and hardware model. No personal data, no files, no browsing history, no screen content.",
+      "reassurance": "Reports are stored by Sentry under a private project. Only the MiControl developer has access.",
+      "allow": "Yes, send crash reports",
+      "deny": "No, don't send",
+      "changeLater": "You can change this anytime in Settings.",
+      "privacyLink": "Read the Privacy Policy",
+      "settingsTitle": "Crash Reports (Sentry)",
+      "settingsDesc": "Anonymous crash reports help debug and improve MiControl across many different machines and hardware configurations. Fully optional; you can change this anytime.",
+      "settingsEnable": "Send crash reports",
+      "settingsEnabledAt": "Enabled",
+      "settingsDisabledAt": "Off",
+      "settingsStatusOn": "Crash reports are ON — thank you for helping improve MiControl!",
+      "settingsStatusOff": "Crash reports are off — nothing is sent to Sentry.",
+      "settingsStatusUndecided": "You haven't chosen yet — nothing is being sent."
     }
   },
   "privacy": {
@@ -814,6 +832,8 @@
     "section5Body": "You have full control over your data:\n\n• Grant or deny consent at any time via Settings → Privacy\n• Revoke previously granted consent — this immediately stops all telemetry transmission\n• Delete locally stored performance logs from the AI Analysis tab\n• Uninstall MiControl to remove all locally stored configuration and logs\n\nIf you have separately provided personal data to OpenAI, you must contact them directly to exercise your data rights under applicable law.",
     "section6Title": "6. Contact",
     "section6Body": "For privacy-related inquiries about MiControl, please open an issue on the GitHub repository: github.com/arcane-D7/micontrol",
+    "section7Title": "7. Crash Reports (Sentry) — Optional",
+    "section7Body": "If — and only if — you explicitly opt in, MiControl sends anonymous crash reports to Sentry (sentry.io) when the app encounters an unexpected error.\n\n• What is sent: error stack traces, MiControl version, Windows version and hardware model. No personal data, no files, no screen content, no usage analytics.\n• Where: Sentry (sentry.io), under a private project accessible only to the MiControl developer.\n• Why: to reproduce and fix crashes faster, especially on hardware configurations the developer does not own.\n• Control: you can enable or disable crash reporting at any time in Settings → Privacy, and the change takes effect immediately — no restart needed. If you decline, nothing is ever sent.",
     "consentStatus": "Consent Status",
     "consentGranted": "Granted",
     "consentDenied": "Denied",

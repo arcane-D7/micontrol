@@ -454,6 +454,13 @@
       "virtualControlHID": "VirtualControlHID.sys — Modes de performance et touches de raccourci",
       "iotDriver": "IoTDriver.sys — Seuil de charge et services IoT"
     },
+    "support": {
+      "title": "Soutenir le projet",
+      "desc": "MiControl est un logiciel libre et gratuit, développé sur du temps personnel. S'il améliore votre portable, un petit don de remerciement aide à continuer le développement : matériel de test, certificats de signature de code et café ☕.",
+      "bmc": "Buy me a coffee",
+      "star": "Étoile sur GitHub",
+      "note": "Les dons sont 100% optionnels et ne débloquent rien de supplémentaire — toutes les fonctionnalités sont gratuites pour tous. Une étoile GitHub est aussi très appréciée !"
+    },
     "bridgeTitle": "Pont Élevé — Mise à jour silencieuse",
     "bridgeDesc": "Installez une mise à jour de MiControl en arrière-plan via le service bridge privilégié — sans UAC, fonctionne même en votre absence.",
     "bridgePathPlaceholder": "Chemin vers MiControl_*-setup.exe",
@@ -787,16 +794,27 @@
   },
   "consent": {
     "dialog": {
-      "title": "Consentement pour la Télémétrie et les Fonctions IA",
-      "intro": "MiControl peut envoyer la télémétrie matérielle (état de l'appareil, données des capteurs) à OpenAI pour alimenter les fonctions assistées par IA. Ces données aident à fournir des recommandations intelligentes d'optimisation matérielle.",
-      "what": "Télémétrie matérielle : niveau de batterie, température CPU/GPU, mode de performance, état du pavé tactile, paramètres d'affichage et informations système",
-      "where": "API OpenAI — traitée sur leurs serveurs conformément à leur politique de confidentialité",
-      "why": "Pour fournir des informations basées sur l'IA et des recommandations d'optimisation matérielle",
-      "control": "Vous pouvez révoquer ce consentement à tout moment dans Paramètres → Confidentialité. Les fonctions IA s'arrêteront immédiatement.",
-      "sentryDisclosure": "Les rapports de plantage seront envoyés à Sentry pour aider à améliorer l'application. Aucune donnée personnelle n'est incluse.",
-      "allow": "Autoriser",
-      "deny": "Refuser",
-      "privacyLink": "Lire notre Politique de Confidentialité"
+      "title": "Aidez à améliorer MiControl",
+      "intro": "Vous pouvez choisir si MiControl envoie des rapports anonymes de plantage à Sentry. C'est totalement optionnel — toutes les fonctionnalités fonctionnent exactement pareil.",
+      "benefitsLabel": "Avantages du partage des rapports de plantage",
+      "benefit1": "Corrections plus rapides — les plantages sont signalés automatiquement avec des détails techniques que vous devriez décrire manuellement",
+      "benefit2": "Plus de stabilité sur de nombreuses machines — les rapports de différentes configurations matérielles révèlent des problèmes qu'un seul testeur ne trouverait jamais",
+      "benefit3": "Vous influencez les mises à jour — les données montrent quels problèmes touchent le plus d'utilisateurs réels, pour qu'ils soient corrigés en premier",
+      "scopeTitle": "Ce qui est envoyé :",
+      "scopeBody": "traces d'erreur, version de l'application, version de Windows et modèle du matériel. Aucune donnée personnelle, aucun fichier, aucun historique de navigation, aucun contenu d'écran.",
+      "reassurance": "Les rapports sont stockés par Sentry dans un projet privé. Seul le développeur de MiControl y a accès.",
+      "allow": "Oui, envoyer les rapports de plantage",
+      "deny": "Non, ne pas envoyer",
+      "changeLater": "Vous pouvez changer cela à tout moment dans les Paramètres.",
+      "privacyLink": "Lire la Politique de Confidentialité",
+      "settingsTitle": "Rapports de plantage (Sentry)",
+      "settingsDesc": "Les rapports anonymes de plantage aident à déboguer et améliorer MiControl sur de nombreuses machines et configurations différentes. Totalement optionnel ; modifiable à tout moment.",
+      "settingsEnable": "Envoyer les rapports de plantage",
+      "settingsEnabledAt": "Activé",
+      "settingsDisabledAt": "Désactivé",
+      "settingsStatusOn": "Rapports de plantage ACTIFS — merci d'aider à améliorer MiControl !",
+      "settingsStatusOff": "Rapports de plantage désactivés — rien n'est envoyé à Sentry.",
+      "settingsStatusUndecided": "Vous n'avez pas encore choisi — rien n'est envoyé."
     }
   },
   "privacy": {
@@ -814,6 +832,8 @@
     "section5Body": "Vous avez un contrôle total sur vos données :\n\n• Accorder ou refuser le consentement à tout moment via Paramètres → Confidentialité\n• Révoquer un consentement précédemment accordé — cela arrête immédiatement toute transmission de télémétrie\n• Supprimer les journaux de performances stockés localement depuis l'onglet Analyse IA\n• Désinstaller MiControl pour supprimer toute la configuration et les journaux stockés localement\n\nSi vous avez fourni séparément des données personnelles à OpenAI, vous devez les contacter directement pour exercer vos droits sur les données conformément à la loi applicable.",
     "section6Title": "6. Contact",
     "section6Body": "Pour toute question relative à la confidentialité concernant MiControl, veuillez ouvrir un issue sur le dépôt GitHub : github.com/arcane-D7/micontrol",
+    "section7Title": "7. Rapports de plantage (Sentry) — Optionnel",
+    "section7Body": "Si — et seulement si — vous y consentez explicitement, MiControl envoie des rapports anonymes de plantage à Sentry (sentry.io) lorsque l'app rencontre une erreur inattendue.\n\n• Ce qui est envoyé : traces d'erreur, version de MiControl, version de Windows et modèle du matériel. Aucune donnée personnelle, aucun fichier, aucun contenu d'écran, aucune analytique d'utilisation.\n• Où : Sentry (sentry.io), dans un projet privé accessible uniquement au développeur de MiControl.\n• Pourquoi : pour reproduire et corriger les plantages plus rapidement, en particulier sur des configurations matérielles que le développeur ne possède pas.\n• Contrôle : vous pouvez activer ou désactiver les rapports à tout moment dans Paramètres → Confidentialité, le changement prend effet immédiatement — sans redémarrage. Si vous refusez, rien n'est jamais envoyé.",
     "consentStatus": "État du Consentement",
     "consentGranted": "Accordé",
     "consentDenied": "Refusé",

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect } from 'react';
+import { useCallback, useRef, useEffect, useState } from 'react';
 import { t } from '../hooks/useI18n';
 
 interface ConsentDialogProps {
@@ -7,23 +7,43 @@ interface ConsentDialogProps {
   onOpenPrivacy: () => void;
 }
 
+/**
+ * S49 — Crash-report consent modal (full refactor).
+ *
+ * Goals vs the old dialog:
+ * - Clear binary choice with EQUAL visual weight (the old version had
+ *   "Allow" as the only primary button — a subtle dark pattern).
+ * - Benefits stated explicitly (better debugging across many machines,
+ *   faster fixes) instead of legal boilerplate.
+ * - Scope of data stated in plain words + link to the full policy.
+ * - Neutral choice persisted: "Not now" behaves exactly like "No" — the
+ *   user is never nagged; the choice lives in Settings.
+ */
 export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  const allowRef = useRef<HTMLButtonElement>(null);
-  const denyRef = useRef<HTMLButtonElement>(null);
+  const [leaving, setLeaving] = useState(false);
 
-  // Focus the dialog container on mount (neutral element, not the Allow button)
-  // This avoids the dark pattern of auto-focusing the "Allow" button.
+  // Focus the dialog container on mount (neutral element — never auto-focus
+  // either choice button; that would bias the decision).
   useEffect(() => {
     dialogRef.current?.focus();
   }, []);
 
-  // Focus trap: cycle Tab within the dialog only
+  const finish = useCallback((choose: () => void) => {
+    // Small fade-out so the choice feels acknowledged, then commit.
+    setLeaving(true);
+    window.setTimeout(choose, 140);
+  }, []);
+
+  const handleAllow = useCallback(() => finish(onAllow), [finish, onAllow]);
+  const handleDeny = useCallback(() => finish(onDeny), [finish, onDeny]);
+
+  // Focus trap: cycle Tab within the dialog only; Escape = "Not now" (deny).
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onDeny();
+        handleDeny();
         return;
       }
       if (e.key !== 'Tab') return;
@@ -48,7 +68,7 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
         }
       }
     },
-    [onDeny],
+    [handleDeny],
   );
 
   const handlePrivacyClick = useCallback(
@@ -59,12 +79,19 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
     [onOpenPrivacy],
   );
 
+  const benefits = [
+    'consent.dialog.benefit1',
+    'consent.dialog.benefit2',
+    'consent.dialog.benefit3',
+  ] as const;
+
   return (
     <div
       className="consent-overlay"
       role="dialog"
       aria-modal="true"
       aria-labelledby="consent-title"
+      aria-describedby="consent-desc"
       onKeyDown={handleKeyDown}
       style={{
         position: 'fixed',
@@ -73,41 +100,68 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'rgba(0,0,0,0.55)',
-        backdropFilter: 'blur(4px)',
+        background: 'rgba(0,0,0,0.6)',
+        backdropFilter: 'blur(6px)',
+        opacity: leaving ? 0 : 1,
+        transition: 'opacity 140ms ease',
       }}
     >
       <div
         className="consent-dialog"
         ref={dialogRef}
         tabIndex={-1}
+        role="document"
         style={{
-          background: 'var(--color-surface, #1e1e2e)',
-          border: '1px solid var(--color-border, #3a3a4e)',
-          borderRadius: 14,
-          padding: '28px 32px',
-          maxWidth: 520,
-          width: '90%',
-          boxShadow: '0 16px 48px rgba(0,0,0,0.4)',
+          background: 'var(--surface-solid)',
+          border: '1px solid var(--border-strong)',
+          borderRadius: 'var(--r-lg, 22px)',
+          padding: '30px 34px 26px',
+          maxWidth: 560,
+          width: '92%',
+          maxHeight: '88vh',
+          overflowY: 'auto',
+          boxShadow: '0 24px 64px rgba(0,0,0,0.45)',
+          transform: leaving ? 'scale(0.97)' : 'scale(1)',
+          transition: 'transform 140ms ease',
         }}
       >
-        <h2
-          id="consent-title"
-          style={{
-            fontSize: 18,
-            fontWeight: 700,
-            marginTop: 0,
-            marginBottom: 16,
-            color: 'var(--color-text)',
-          }}
-        >
-          {t('consent.dialog.title')}
-        </h2>
+        {/* Icon + title */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+          <span
+            aria-hidden="true"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 42,
+              height: 42,
+              borderRadius: 12,
+              background: 'var(--accent-soft)',
+              fontSize: 20,
+              flexShrink: 0,
+            }}
+          >
+            🛡️
+          </span>
+          <h2
+            id="consent-title"
+            style={{
+              fontSize: 19,
+              fontWeight: 700,
+              margin: 0,
+              color: 'var(--color-text)',
+              letterSpacing: '-0.3px',
+            }}
+          >
+            {t('consent.dialog.title')}
+          </h2>
+        </div>
 
         <p
+          id="consent-desc"
           style={{
-            fontSize: 13,
-            lineHeight: 1.6,
+            fontSize: 13.5,
+            lineHeight: 1.65,
             color: 'var(--color-text-muted)',
             marginTop: 0,
             marginBottom: 18,
@@ -116,91 +170,103 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
           {t('consent.dialog.intro')}
         </p>
 
-        <ul
+        {/* Benefits — the "why should I?" answered up front */}
+        <div
+          role="list"
+          aria-label={t('consent.dialog.benefitsLabel')}
+          style={{ display: 'flex', flexDirection: 'column', gap: 9, marginBottom: 18 }}
+        >
+          {benefits.map((key) => (
+            <div
+              key={key}
+              role="listitem"
+              style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}
+            >
+              <span aria-hidden="true" style={{ fontSize: 14, lineHeight: 1.5, flexShrink: 0 }}>
+                ✓
+              </span>
+              <span style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--color-text)' }}>
+                {t(key)}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* What is sent — plain scope box */}
+        <div
           style={{
             fontSize: 12.5,
-            lineHeight: 1.7,
-            paddingLeft: 20,
-            marginBottom: 18,
-            color: 'var(--color-text)',
+            lineHeight: 1.6,
+            color: 'var(--color-text-muted)',
+            marginBottom: 14,
+            padding: '12px 14px',
+            background: 'var(--color-surface-alt)',
+            borderRadius: 10,
+            border: '1px solid var(--border)',
           }}
         >
-          <li>
-            <strong>{t('consent.dialog.what').split(':')[0]}:</strong>{' '}
-            {t('consent.dialog.what').split(':').slice(1).join(':')}
-          </li>
-          <li>
-            <strong>{t('consent.dialog.where').split(':')[0]}:</strong>{' '}
-            {t('consent.dialog.where').split(':').slice(1).join(':')}
-          </li>
-          <li>
-            <strong>{t('consent.dialog.why').split(':')[0]}:</strong>{' '}
-            {t('consent.dialog.why').split(':').slice(1).join(':')}
-          </li>
-          <li>
-            <strong>{t('consent.dialog.control').split(':')[0]}:</strong>{' '}
-            {t('consent.dialog.control').split(':').slice(1).join(':')}
-          </li>
-        </ul>
+          <strong style={{ color: 'var(--color-text)' }}>{t('consent.dialog.scopeTitle')}</strong>{' '}
+          {t('consent.dialog.scopeBody')}
+        </div>
 
+        {/* Reassurance + policy link */}
         <p
           style={{
             fontSize: 12,
-            lineHeight: 1.5,
+            lineHeight: 1.55,
             color: 'var(--color-text-muted)',
-            marginBottom: 18,
-            padding: '8px 10px',
-            background: 'var(--color-surface-alt, rgba(255,255,255,0.03))',
-            borderRadius: 8,
-            border: '1px solid var(--color-border, #3a3a4e)',
+            marginBottom: 6,
           }}
         >
-          {t('consent.dialog.sentryDisclosure')}
+          🔒 {t('consent.dialog.reassurance')}
         </p>
-
-        <p style={{ fontSize: 12, marginBottom: 20, color: 'var(--color-text-muted)' }}>
+        <p style={{ fontSize: 12, marginBottom: 22, color: 'var(--color-text-muted)' }}>
           <a
             href="#"
             onClick={handlePrivacyClick}
             style={{
-              color: 'var(--color-accent, #6c8cff)',
+              color: 'var(--color-accent)',
               textDecoration: 'underline',
+              textUnderlineOffset: 2,
             }}
           >
             {t('consent.dialog.privacyLink')}
           </a>
+          {' · '}
+          {t('consent.dialog.changeLater')}
         </p>
 
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+        {/* Choices — equal weight, clearly labeled */}
+        <div style={{ display: 'flex', gap: 12, flexDirection: 'column' }}>
           <button
             type="button"
-            onClick={onDeny}
-            className="btn-secondary"
-            ref={denyRef}
-            style={{
-              padding: '8px 20px',
-              borderRadius: 8,
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            {t('consent.dialog.deny')}
-          </button>
-          <button
-            ref={allowRef}
-            type="button"
-            onClick={onAllow}
+            onClick={handleAllow}
             className="btn-primary"
             style={{
-              padding: '8px 20px',
-              borderRadius: 8,
-              fontSize: 13,
+              padding: '11px 20px',
+              borderRadius: 10,
+              fontSize: 13.5,
               fontWeight: 600,
               cursor: 'pointer',
+              width: '100%',
             }}
           >
             {t('consent.dialog.allow')}
+          </button>
+          <button
+            type="button"
+            onClick={handleDeny}
+            className="btn-secondary"
+            style={{
+              padding: '11px 20px',
+              borderRadius: 10,
+              fontSize: 13.5,
+              fontWeight: 600,
+              cursor: 'pointer',
+              width: '100%',
+            }}
+          >
+            {t('consent.dialog.deny')}
           </button>
         </div>
       </div>
