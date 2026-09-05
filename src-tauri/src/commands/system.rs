@@ -888,22 +888,20 @@ pub async fn log_frontend_error(target: String, message: String) -> Result<(), E
 /// (or the updater-downloaded artifact). Returns the bridge's status object.
 #[tauri::command]
 pub async fn install_update(installer_path: String) -> Result<serde_json::Value, ErrorResponse> {
-    // The release bundle name is MiControl_0.2.1-beta_x64-setup.exe — validate
-    // the caller passed a real file so we never relay a bogus path to SYSTEM.
+    // S50 SECURITY: only a genuine MiControl installer may be relayed to the
+    // SYSTEM bridge. Accepting an arbitrary .exe would let a malicious user
+    // gain privileged execution. The name must match the release pattern
+    // `MiControl_<version>[-<channel>]_x64-setup.exe` (case-insensitive).
     let p = std::path::PathBuf::from(&installer_path);
     if !p.is_file() {
         return Err(ErrorResponse::from(anyhow::anyhow!(
             "Installer not found: {installer_path}"
         )));
     }
-    if !p
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("exe"))
-        .unwrap_or(false)
-    {
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if !crate::elevated::is_micontrol_installer_name(name) {
         return Err(ErrorResponse::from(anyhow::anyhow!(
-            "Not an .exe installer: {installer_path}"
+            "Not a MiControl installer (expected MiControl_<version>_x64-setup.exe): {installer_path}"
         )));
     }
 
@@ -971,6 +969,14 @@ pub async fn trigger_auto_update(
         .next()
         .filter(|f| !f.is_empty())
         .unwrap_or("MiControl_update-setup.exe");
+    // S50: the downloaded artifact must be a genuine MiControl installer name,
+    // otherwise the SYSTEM bridge will refuse it (and we fail fast with a
+    // clear message instead of a cryptic bridge error).
+    if !crate::elevated::is_micontrol_installer_name(filename) {
+        return Err(ErrorResponse::from(anyhow::anyhow!(
+            "Update URL must point to a MiControl installer (MiControl_<version>_x64-setup.exe): {filename}"
+        )));
+    }
     let dest = temp_dir.join(filename);
 
     let client = reqwest::Client::builder()

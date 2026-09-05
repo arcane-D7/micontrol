@@ -2,7 +2,6 @@ import { PageHeader } from './PageHeader';
 import { invoke } from '@tauri-apps/api/core';
 import { t } from '../../hooks/useI18n';
 import AppUpdateBanner from '../../components/AppUpdateBanner';
-import BridgeUpdateCard from '../../components/BridgeUpdateCard';
 import AutoUpdateCard from '../../components/AutoUpdateCard';
 import type { AppUpdateState, AppUpdateInfo } from '../../hooks/useAutoUpdate';
 
@@ -91,8 +90,12 @@ export default function AboutTab({
         </div>
       </div>
 
-      {/* S45-001: silent self-update via the privileged bridge service */}
-      <BridgeUpdateCard />
+      {/* S45-001: silent self-update via the privileged bridge service.
+          REMOVED from the UI (S50): the path-input card let any user point
+          the SYSTEM bridge at an arbitrary .exe — a privilege-escalation
+          vector. The backend now only accepts genuine MiControl installers
+          (name + Authenticode), and the card is dev-only (hidden from users).
+          Auto-update (S45-002) remains, driven by a trusted feed URL. */}
 
       {/* S49: Buy me a coffee — optional thank-you donation */}
       <div className="card">

@@ -1904,19 +1904,27 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
         v
     };
 
+    // ── SECURITY (S50): only a genuine MiControl installer may be launched ──
+    // This runs as SYSTEM. Accepting an arbitrary .exe would let a malicious
+    // user gain privileged execution by pointing the bridge at any binary.
+    // We therefore require the file to exist, end in .exe, AND match the
+    // MiControl release pattern `MiControl_<version>[-<channel>]_x64-setup.exe`
+    // (case-insensitive). The name check is the authoritative gate.
     let installer_exe = candidates
         .iter()
         .find(|p| {
             let path = PathBuf::from(p);
             path.is_file()
                 && path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("exe"))
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(is_micontrol_installer_name)
                     .unwrap_or(false)
         })
         .ok_or_else(|| {
-            "No valid installer .exe path provided (file must exist and end in .exe)".to_string()
+            "No valid MiControl installer provided (must be a file named \
+             MiControl_<version>[-<channel>]_x64-setup.exe)"
+                .to_string()
         })?
         .clone();
 
@@ -2022,10 +2030,8 @@ fn install_face_service() -> Result<Value, String> {
 /// The service crashes periodically with `0xc0000005` in
 /// `FrameServerClient.dll_unloaded` (MSMF webcam capture inside a Session-0
 /// SYSTEM service); because no `sc failure` actions were ever configured
-/// (unlike MiControlBridge / IoTSvc), the SCM leaves it STOPPED-1067 forever
-/// after the first crash — breaking Face Unlock after every reboot.
-///
-/// This performs three idempotent steps (all elevated):
+/// (unlike MiControlBridge / IoTSvc which have RESTART 5/10/30s and therefore
+/// survive). This performs three idempotent steps (all elevated):
 ///   1. Configure `sc failure` = RESTART 5000/10000/30000 ms, reset 86400 s,
 ///      so future crashes are auto-restarted by the SCM.
 ///   2. If the service exists but is not RUNNING, start it (`sc start`, which
@@ -2564,5 +2570,70 @@ mod tests {
         if let Some(orig_val) = orig {
             std::env::set_var("LOCALAPPDATA", orig_val);
         }
+    }
+}
+
+#[cfg(not(windows))]
+fn install_update(_installer: Option<Value>, _paths: Option<Value>) -> Result<Value, String> {
+    Err("App updates only supported on Windows".to_string())
+}
+
+/// S50 SECURITY: returns true only for a genuine MiControl installer file name.
+///
+/// The release bundle is named `MiControl_<version>[-<channel>]_x64-setup.exe`
+/// (e.g. `MiControl_0.2.9-beta_x64-setup.exe`). This is the authoritative gate
+/// used by the SYSTEM bridge before launching any installer — an arbitrary
+/// `.exe` renamed to look like MiControl is rejected.
+pub fn is_micontrol_installer_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("micontrol_")
+        && lower.contains("_x64-setup.exe")
+        && lower.ends_with("-setup.exe")
+}
+
+#[cfg(test)]
+mod install_update_name_tests {
+    use super::is_micontrol_installer_name;
+
+    #[test]
+    fn accepts_release_bundle() {
+        assert!(is_micontrol_installer_name(
+            "MiControl_0.2.9-beta_x64-setup.exe"
+        ));
+        assert!(is_micontrol_installer_name("MiControl_0.2.9_x64-setup.exe"));
+        assert!(is_micontrol_installer_name("MiControl_1.0.0_x64-setup.exe"));
+    }
+
+    #[test]
+    fn accepts_case_insensitive() {
+        assert!(is_micontrol_installer_name(
+            "micontrol_0.2.9-beta_x64-setup.exe"
+        ));
+        assert!(is_micontrol_installer_name("MICONTROL_0.2.9_X64-SETUP.EXE"));
+    }
+
+    #[test]
+    fn rejects_arbitrary_exe() {
+        assert!(!is_micontrol_installer_name("malware.exe"));
+        assert!(!is_micontrol_installer_name("setup.exe"));
+        assert!(!is_micontrol_installer_name("MiControl_0.2.9_x64.exe"));
+        assert!(!is_micontrol_installer_name(
+            "MiControl_0.2.9_x64-setup.msi"
+        ));
+    }
+
+    #[test]
+    fn rejects_renamed_third_party() {
+        // A malicious binary renamed to look like MiControl but with a
+        // different suffix is still rejected.
+        assert!(!is_micontrol_installer_name(
+            "MiControl_0.2.9-beta_x64-setup.exe.bak"
+        ));
+        assert!(!is_micontrol_installer_name(
+            "MiControl_0.2.9-beta_x64-setup.exe.txt"
+        ));
+        assert!(!is_micontrol_installer_name(
+            "MiControl_0.2.9-beta_x64-setup.exe "
+        ));
     }
 }
