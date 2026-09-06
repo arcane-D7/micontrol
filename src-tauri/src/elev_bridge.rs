@@ -192,6 +192,64 @@ pub async fn run_elevated_no_prompt(cmd: &'static str, args: Value) -> Result<Va
     run_elevated_impl(cmd, args, false).await
 }
 
+// ── S51: session circuit breaker for a degraded elevated infrastructure ─────
+//
+// When neither the bridge service NOR the scheduled task is available (e.g.
+// the service was deleted by a previous update and the task is missing), every
+// elevated call runs the full failure chain: pipe attempt → schtasks spawn →
+// heal attempt → schtasks retry → 3-4 WARN logs. At boot ~12 features fire
+// elevated commands simultaneously, producing ~90 WARNs and a dozen pointless
+// process spawns in a single second.
+//
+// The breaker tracks consecutive "no elevated path" failures. After
+// BREAKER_TRIP_THRESHOLD consecutive failures it short-circuits with the
+// cached error (no schtasks spawn, single log line) until
+// `note_elevated_recovery()` is called — either by a successful call or by the
+// periodic `ensure_bridge_service` health check succeeding.
+const BREAKER_TRIP_THRESHOLD: u32 = 3;
+
+static ELEVATED_BROKEN_STREAK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static ELEVATED_BROKEN_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// True when the elevated infrastructure is known-degraded this session and
+/// further attempts would just repeat the same failure chain.
+fn elevated_broken() -> bool {
+    ELEVATED_BROKEN_STREAK.load(std::sync::atomic::Ordering::Relaxed) >= BREAKER_TRIP_THRESHOLD
+}
+
+/// Record an elevated-path failure (pipe + task both unavailable).
+fn note_elevated_failure() {
+    let streak = ELEVATED_BROKEN_STREAK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if streak == BREAKER_TRIP_THRESHOLD {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        ELEVATED_BROKEN_SINCE.store(now, std::sync::atomic::Ordering::Relaxed);
+        log::warn!(
+            target: "elev_bridge",
+            "Elevated infrastructure unavailable (bridge service missing, scheduled task \
+             missing) — circuit open, elevated commands will fail fast this session. \
+             Reinstall MiControl or run 'micontrol_bridge.exe install' (as admin) to repair."
+        );
+    }
+}
+
+/// Record an elevated-path success — closes the circuit.
+fn note_elevated_success() {
+    let was_broken = ELEVATED_BROKEN_STREAK.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if was_broken >= BREAKER_TRIP_THRESHOLD {
+        log::info!(target: "elev_bridge", "Elevated infrastructure recovered — circuit closed");
+    }
+    ELEVATED_BROKEN_SINCE.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Manually close the circuit breaker (e.g. after a successful bridge-service
+/// health check that did not go through `run_elevated`).
+pub fn note_elevated_recovery() {
+    note_elevated_success();
+}
+
 /// Shared implementation; `allow_uac` controls whether the function may
 /// escalate via a `ShellExecuteExW("runas")` UAC prompt as a last resort.
 async fn run_elevated_impl(
@@ -229,9 +287,20 @@ async fn run_elevated_impl(
     // ── Preferred path: autonomous MiControlBridge service pipe ─────────────
     // The service runs as SYSTEM since installation — no UAC prompt ever.
     if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
+        note_elevated_success();
         return Ok(response);
     }
     // Service pipe unavailable — fall through to the scheduled task.
+
+    // ── S51 circuit breaker: short-circuit when the infra is known-degraded ─
+    // Only for no-prompt calls: critical user-initiated writes (UAC allowed)
+    // always get the full attempt chain, since the user explicitly asked.
+    if !allow_uac && elevated_broken() {
+        return Err(format!(
+            "Elevated command '{cmd}' skipped: elevated infrastructure is degraded \
+             (bridge service and scheduled task both unavailable) — circuit open"
+        ));
+    }
 
     let dir = crate::elevated::elev_dir();
     // S26-006: Wrap in spawn_blocking — cleanup_stale_elev_files() uses std::fs::read_dir.
@@ -351,6 +420,10 @@ async fn run_elevated_impl(
                 }
             }
         }
+        // S51: pipe + task both failed without UAC — the infrastructure is
+        // degraded this session. Count it so later no-prompt calls fail fast
+        // instead of repeating the whole spawn/heal chain.
+        note_elevated_failure();
     }
 
     // Poll for the result file (check every 150 ms, timeout per-command)
@@ -384,6 +457,7 @@ async fn run_elevated_impl(
             }
 
             return if v["ok"].as_bool().unwrap_or(false) {
+                note_elevated_success();
                 Ok(v["data"].clone())
             } else {
                 Err(v["error"]

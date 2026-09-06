@@ -145,6 +145,11 @@ async fn check_bridge() {
     .await
     .unwrap_or(false);
     let at = now_ms();
+    // S51: keep the elev_bridge circuit breaker in sync — when the bridge
+    // service comes back (or goes away) the breaker must know.
+    if available {
+        crate::elev_bridge::note_elevated_recovery();
+    }
     let should_recover = state()
         .lock()
         .map(|mut snapshot| {
