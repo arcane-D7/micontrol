@@ -37,6 +37,7 @@
   "nav": {
     "overview": "Overview",
     "taskmgr": "Task Manager",
+    "sysOpt": "System Optimization",
     "performance": "Performance",
     "battery": "Battery",
     "display": "Display",
@@ -427,7 +428,14 @@
     },
     "applying": "Applying...",
     "applied": "Setting saved",
-    "error": "Failed to apply touchpad setting"
+    "error": "Failed to apply touchpad setting",
+    "applyFailed": "Touchpad: hardware write failed",
+    "toastSensitivity": "Sensitivity applied",
+    "toastHaptics": "Haptic feedback",
+    "toastHapticsIntensity": "Vibration intensity applied",
+    "toastGestureScreenshot": "Gesture screenshot",
+    "toastRepress": "Repress applied",
+    "toastEdgeSlide": "Edge slide"
   },
   "startup": {
     "title": "Startup",
@@ -815,6 +823,74 @@
       "settingsStatusOn": "Crash reports are ON — thank you for helping improve MiControl!",
       "settingsStatusOff": "Crash reports are off — nothing is sent to Sentry.",
       "settingsStatusUndecided": "You haven't chosen yet — nothing is being sent."
+    }
+  },
+  "sysOpt": {
+    "title": "System Optimization",
+    "subtitle": "OS Turbo + safe, reversible Windows debloat & telemetry reduction",
+    "activeCount": "active",
+    "enabled": "enabled",
+    "disabled": "disabled",
+    "applyFailed": "Failed to apply",
+    "impact": "Relative impact",
+    "safetyNotice": "All changes are reversible (previous values are stored) and never touch Windows Update, Defender or BitLocker. Changes are re-applied automatically after Windows updates if they get reset.",
+    "osTurboTitle": "OS Turbo",
+    "osTurboDesc": "Scheduler-level optimization: switches Windows to the Best Performance power plan and throttles heavy background processes (Search indexer, Defender scans, Update worker) to efficiency cores via EcoQoS. Does not touch EC/TDP registers.",
+    "osTurboToggle": "Enable OS Turbo",
+    "osTurboOn": "Active — background processes throttled",
+    "osTurboOff": "Off — system at default scheduling",
+    "osTurboPlan": "Power plan",
+    "osTurboEnabled": "OS Turbo enabled",
+    "osTurboDisabled": "OS Turbo disabled",
+    "items": {
+      "telemetry_level": {
+        "title": "Diagnostic data (telemetry) — minimal",
+        "desc": "Sets Windows telemetry to the lowest level Microsoft allows on Home/Pro (Required). Windows Update keeps working."
+      },
+      "diagtrack_service": {
+        "title": "Disable DiagTrack service",
+        "desc": "Connected User Experiences and Telemetry — the service that uploads diagnostic data to Microsoft. Safe to disable; restored to Automatic on undo."
+      },
+      "ceip_tasks": {
+        "title": "Disable CEIP scheduled tasks",
+        "desc": "Customer Experience Improvement Program tasks (Consolidator, UsbCeip, Uploader, Error Reporting queue). Tasks are disabled, never deleted."
+      },
+      "compatAppraiser": {
+        "title": "Disable Compatibility Appraiser",
+        "desc": "The heaviest scheduled task on Windows (CompatTelRunner) — scans your files and programs periodically. Biggest real CPU/disk win."
+      },
+      "advertising_id": {
+        "title": "Disable Advertising ID",
+        "desc": "Stops apps from showing personalized ads using a per-device advertising identifier."
+      },
+      "tailored": {
+        "title": "Disable tailored experiences",
+        "desc": "Stops Windows using diagnostic data to personalize tips, ads and recommendations."
+      },
+      "activityHistory": {
+        "title": "Disable Activity History",
+        "desc": "Stops Windows collecting and publishing your activity timeline (local clipboard history is kept)."
+      },
+      "feedback": {
+        "title": "Disable feedback requests",
+        "desc": "Stops Windows asking for feedback periodically."
+      },
+      "webSearch": {
+        "title": "Disable web results in Start search",
+        "desc": "Start menu search becomes local-only — faster results, no Bing integration."
+      },
+      "consumerFeatures": {
+        "title": "Disable consumer features & suggestions",
+        "desc": "Blocks suggested third-party apps and consumer content pushed by Windows."
+      },
+      "deliveryOpt": {
+        "title": "Limit Delivery Optimization upload",
+        "desc": "Stops your PC uploading Windows updates to other PCs over the internet (downloads keep working)."
+      },
+      "backgroundApps": {
+        "title": "Disable Store apps background execution",
+        "desc": "Blocks all Microsoft Store apps from running in the background (desktop apps are unaffected)."
+      }
     }
   },
   "privacy": {

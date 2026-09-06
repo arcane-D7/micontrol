@@ -47,6 +47,7 @@ pub mod screen_cast;
 pub mod security_scan;
 pub mod startup;
 pub mod syncthing;
+pub mod sys_opt;
 pub mod system_info;
 pub mod taskmgr;
 pub mod thermal;

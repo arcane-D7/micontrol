@@ -542,6 +542,30 @@ pub async fn set_os_turbo(
     Ok(result)
 }
 
+// ── System Optimization (S53 — debloat/telemetry, all HKLM → elevated) ──────
+
+/// List all System Optimization tweaks and their applied state.
+#[tauri::command]
+pub async fn get_sys_opt_status() -> Result<Vec<crate::hw::sys_opt::SysOptStatus>, ErrorResponse> {
+    // HKLM reads are allowed unprivileged.
+    run_blocking(crate::hw::sys_opt::get_status)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Apply/restore one System Optimization tweak (goes through the elevated
+/// bridge — every tweak writes HKLM policies, services or scheduled tasks).
+#[tauri::command]
+pub async fn set_sys_opt_tweak(id: String, enabled: bool) -> Result<(), ErrorResponse> {
+    elev_bridge::run_elevated(
+        "set_sys_opt_tweak",
+        serde_json::json!({ "id": id, "enabled": enabled }),
+    )
+    .await
+    .map_err(ErrorResponse::from)?;
+    Ok(())
+}
+
 // ── Crash Recovery ───────────────────────────────────────────────────────────
 
 #[tauri::command]

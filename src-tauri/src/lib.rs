@@ -64,19 +64,20 @@ use commands::system::{
     get_defender_status, get_display_info, get_drivers_detail, get_error_log_config,
     get_eye_protection, get_fan_info, get_hardware_profile, get_hardware_state_batch,
     get_model_code, get_network_perf, get_os_turbo, get_phone_link_status, get_process_list,
-    get_smart_brightness_model, get_system_info, get_task_manager, get_threat_history,
-    get_touchpad_info, get_update_status, install_driver, install_update, kill_process,
-    launch_color_calibration_wizard, launch_phone_link, launch_phone_link_feature,
+    get_smart_brightness_model, get_sys_opt_status, get_system_info, get_task_manager,
+    get_threat_history, get_touchpad_info, get_update_status, install_driver, install_update,
+    kill_process, launch_color_calibration_wizard, launch_phone_link, launch_phone_link_feature,
     load_icc_profile, log_frontend_error, mark_clean_exit, open_color_management_settings,
     open_phone_link_settings, open_windows_security, quick_security_scan, read_error_log,
     reset_smart_brightness_model, run_hardware_discovery, scan_junk_files,
     set_adaptive_refresh_rate, set_ai_brightness, set_ai_brightness_config,
     set_auto_update_beta_feed, set_auto_update_enabled, set_autostart, set_brightness,
     set_error_logging_enabled, set_eye_protection, set_fan_mode, set_hdr, set_mic_noise_canceling,
-    set_os_turbo, set_refresh_rate, set_speaker_noise_canceling, set_touchpad_edge_slide,
-    set_touchpad_gesture_screenshot, set_touchpad_haptics, set_touchpad_haptics_intensity,
-    set_touchpad_repress, set_touchpad_sensitivity, set_voice_focus, trigger_auto_update,
-    trigger_driver_scan, unload_icc_profile, update_defender_signatures,
+    set_os_turbo, set_refresh_rate, set_speaker_noise_canceling, set_sys_opt_tweak,
+    set_touchpad_edge_slide, set_touchpad_gesture_screenshot, set_touchpad_haptics,
+    set_touchpad_haptics_intensity, set_touchpad_repress, set_touchpad_sensitivity,
+    set_voice_focus, trigger_auto_update, trigger_driver_scan, unload_icc_profile,
+    update_defender_signatures,
 };
 use state::AppState;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -562,6 +563,8 @@ pub fn run() {
             // OS Turbo (system optimization)
             get_os_turbo,
             set_os_turbo,
+            get_sys_opt_status,
+            set_sys_opt_tweak,
             // Crash Recovery
             get_crash_recovery_status,
             mark_clean_exit,
@@ -795,6 +798,10 @@ pub fn run() {
             // S50: re-apply OS Turbo if it was enabled in the previous session
             // (EcoQoS throttling is per-process one-shot; Windows forgets it).
             crate::hw::os_turbo::restore_os_turbo();
+
+            // S53: re-apply enabled System Optimization tweaks (feature
+            // updates and Windows servicing reset HKLM policies).
+            std::thread::spawn(crate::hw::sys_opt::restore_all);
 
             // Give the gesture thread access to the app handle so it can show the OSD.
             crate::hw::touchpad::set_app_handle(app.handle().clone());

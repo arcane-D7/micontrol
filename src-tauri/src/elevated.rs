@@ -396,6 +396,23 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        // S53: System Optimization tweaks (debloat/telemetry) — HKLM writes,
+        // services and scheduled tasks need the SYSTEM context.
+        "set_sys_opt_tweak" => {
+            let id: String = match serde_json::from_value(cmd.args["id"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad id arg: {e}")),
+            };
+            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
+                Ok(v) => v,
+                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
+            };
+            match crate::hw::sys_opt::set_tweak(&id, enabled) {
+                Ok(()) => make_ok(Value::Null),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
         "set_function_key" => {
             let mode: crate::hw::fn_key::FnKeyMode =
                 match serde_json::from_value(cmd.args["mode"].clone()) {

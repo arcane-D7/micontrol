@@ -83,9 +83,20 @@ pub fn get_phone_link_status() -> PhoneLinkStatus {
 }
 
 /// Launch Phone Link app via URI scheme.
+///
+/// S53 fix: Phone Link is a single-instance app — a fresh `ms-phone:` URI
+/// activation re-initializes the running `PhoneExperienceHost`, which tears
+/// down and re-handles its relay to the phone's Link to Windows service and
+/// breaks sync until the app is fully restarted. We therefore only fire the
+/// URI when the app is NOT already running; when it runs, activation is a
+/// no-op (the window is simply focused by Windows when the user needs it).
 pub fn launch_phone_link() -> HardwareResult<()> {
     #[cfg(windows)]
     {
+        if check_running() {
+            log::info!("[phone_link] already running — skipping ms-phone: activation (avoids relay reset that breaks sync)");
+            return Ok(());
+        }
         std::process::Command::new("cmd")
             .args(["/c", "start", "", "ms-phone:"])
             .creation_flags(0x0800_0000)
@@ -107,6 +118,10 @@ pub fn launch_phone_link() -> HardwareResult<()> {
 /// - `Photos` — photos
 /// - `ScreenMirror` — screen mirroring
 /// - `Apps` — app streaming
+///
+/// S53 fix: same single-instance guard as `launch_phone_link` — a feature
+/// deep link while the app runs re-initializes the host and resets the sync
+/// channel (user-reported: "o app do windows para de sincronizar").
 pub fn launch_phone_link_feature(feature: &str) -> HardwareResult<()> {
     // Validate feature against allow-list to prevent URI injection
     const ALLOWED_FEATURES: &[&str] = &["Phone", "Messages", "Photos", "ScreenMirror", "Apps"];
@@ -118,6 +133,14 @@ pub fn launch_phone_link_feature(feature: &str) -> HardwareResult<()> {
 
     #[cfg(windows)]
     {
+        if check_running() {
+            log::info!(
+                "[phone_link] feature '{feature}' requested while app is running — skipping URI activation (avoids sync reset); opening plain ms-phone: focus instead"
+            );
+            // Plain launch: Windows focuses the existing window without a
+            // full re-activation of the feature session.
+            return launch_phone_link();
+        }
         let uri = format!("ms-phone:{}", feature);
         std::process::Command::new("cmd")
             .args(["/c", "start", "", &uri])

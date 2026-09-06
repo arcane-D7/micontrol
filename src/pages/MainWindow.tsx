@@ -16,6 +16,7 @@ import PrivacyPolicy from './PrivacyPolicy';
 const OverviewTab = lazy(() => import('./tabs/overview'));
 const TaskManagerTab = lazy(() => import('./tabs/taskmanager'));
 const PerformanceTab = lazy(() => import('./tabs/performance'));
+const SysOptTab = lazy(() => import('./tabs/sys_opt'));
 const BatteryTab = lazy(() => import('./tabs/battery'));
 const DisplayTab = lazy(() => import('./tabs/display'));
 const FanTab = lazy(() => import('./tabs/fan'));
@@ -51,6 +52,7 @@ const NAV_ITEMS = [
   { id: 'overview', icon: '📊', label: 'nav.overview' },
   { id: 'taskmgr', icon: '📈', label: 'nav.taskmgr' },
   { id: 'performance', icon: '⚡', label: 'nav.performance' },
+  { id: 'sysopt', icon: '🚀', label: 'nav.sysOpt' },
   { id: 'battery', icon: '🔋', label: 'nav.battery' },
   { id: 'display', icon: '🖥️', label: 'nav.display' },
   { id: 'fan', icon: '💨', label: 'nav.fan' },
@@ -304,6 +306,8 @@ export default function MainWindow({
             onOpenSettings={() => onTabChange('settings')}
           />
         );
+      case 'sysopt':
+        return <SysOptTab />;
       case 'battery':
         return <BatteryTab hw={hardware} />;
       case 'display':

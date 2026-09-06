@@ -37,6 +37,7 @@
   "nav": {
     "overview": "Vue d'ensemble",
     "taskmgr": "Gestionnaire des tâches",
+    "sysOpt": "Optimisation du système",
     "performance": "Performance",
     "battery": "Batterie",
     "display": "Affichage",
@@ -427,7 +428,14 @@
     },
     "applying": "Application...",
     "applied": "Paramètre enregistré",
-    "error": "Échec de l'application du paramètre du pavé tactile"
+    "error": "Échec de l'application du paramètre du pavé tactile",
+    "applyFailed": "Pavé tactile : échec d'écriture matérielle",
+    "toastSensitivity": "Sensibilité appliquée",
+    "toastHaptics": "Retour haptique",
+    "toastHapticsIntensity": "Intensité de vibration appliquée",
+    "toastGestureScreenshot": "Capture par geste",
+    "toastRepress": "Repress appliqué",
+    "toastEdgeSlide": "Edge slide"
   },
   "startup": {
     "title": "Démarrage",
@@ -815,6 +823,74 @@
       "settingsStatusOn": "Rapports de plantage ACTIFS — merci d'aider à améliorer MiControl !",
       "settingsStatusOff": "Rapports de plantage désactivés — rien n'est envoyé à Sentry.",
       "settingsStatusUndecided": "Vous n'avez pas encore choisi — rien n'est envoyé."
+    }
+  },
+  "sysOpt": {
+    "title": "Optimisation du système",
+    "subtitle": "OS Turbo + debloat et réduction de télémétrie sûrs et réversibles",
+    "activeCount": "actifs",
+    "enabled": "activé",
+    "disabled": "désactivé",
+    "applyFailed": "Échec de l'application",
+    "impact": "Impact relatif",
+    "safetyNotice": "Tous les changements sont réversibles (les valeurs précédentes sont sauvegardées) et ne touchent jamais Windows Update, Defender ni BitLocker. Ils sont réappliqués automatiquement après les mises à jour de Windows s'ils sont réinitialisés.",
+    "osTurboTitle": "OS Turbo",
+    "osTurboDesc": "Optimisation au niveau de l'ordonnanceur : passe Windows au plan d'alimentation Performances optimales et limite les processus de fond lourds (indexeur de recherche, analyses Defender, worker de mises à jour) aux cœurs d'efficacité via EcoQoS. Ne touche pas aux registres EC/TDP.",
+    "osTurboToggle": "Activer OS Turbo",
+    "osTurboOn": "Actif — processus de fond limités",
+    "osTurboOff": "Inactif — ordonnancement par défaut",
+    "osTurboPlan": "Plan d'alimentation",
+    "osTurboEnabled": "OS Turbo activé",
+    "osTurboDisabled": "OS Turbo désactivé",
+    "items": {
+      "telemetry_level": {
+        "title": "Données de diagnostic (télémétrie) — minimal",
+        "desc": "Règle la télémétrie Windows au niveau le plus bas autorisé par Microsoft sur Home/Pro (Obligatoire). Windows Update continue de fonctionner."
+      },
+      "diagtrack_service": {
+        "title": "Désactiver le service DiagTrack",
+        "desc": "Expériences des utilisateurs connectés et télémétrie — le service qui envoie les données de diagnostic à Microsoft. Sans risque de le désactiver ; restauré en Automatique à l'annulation."
+      },
+      "ceip_tasks": {
+        "title": "Désactiver les tâches planifiées CEIP",
+        "desc": "Tâches du Programme d'amélioration de l'expérience client (Consolidator, UsbCeip, Uploader, file des Rapports d'erreurs). Les tâches sont désactivées, jamais supprimées."
+      },
+      "compatAppraiser": {
+        "title": "Désactiver Compatibility Appraiser",
+        "desc": "La tâche planifiée la plus lourde de Windows (CompatTelRunner) — analyse vos fichiers et programmes périodiquement. Le plus grand gain réel de CPU/disque."
+      },
+      "advertising_id": {
+        "title": "Désactiver l'ID publicitaire",
+        "desc": "Empêche les applications d'afficher des publicités personnalisées via un identifiant publicitaire par appareil."
+      },
+      "tailored": {
+        "title": "Désactiver les expériences personnalisées",
+        "desc": "Empêche Windows d'utiliser les données de diagnostic pour personnaliser conseils, publicités et recommandations."
+      },
+      "activityHistory": {
+        "title": "Désactiver l'Historique des activités",
+        "desc": "Empêche Windows de collecter et publier votre chronologie d'activités (l'historique du presse-papiers local est conservé)."
+      },
+      "feedback": {
+        "title": "Désactiver les demandes de commentaires",
+        "desc": "Empêche Windows de demander des commentaires périodiquement."
+      },
+      "webSearch": {
+        "title": "Désactiver les résultats web dans la recherche du menu Démarrer",
+        "desc": "La recherche du menu Démarrer devient locale uniquement — résultats plus rapides, sans intégration Bing."
+      },
+      "consumerFeatures": {
+        "title": "Désactiver les fonctionnalités grand public et suggestions",
+        "desc": "Bloque les applications tierces suggérées et le contenu grand public poussé par Windows."
+      },
+      "deliveryOpt": {
+        "title": "Limiter l'upload de Delivery Optimization",
+        "desc": "Empêche le PC d'envoyer des mises à jour Windows à d'autres PC par internet (les téléchargements continuent de fonctionner)."
+      },
+      "backgroundApps": {
+        "title": "Désactiver l'exécution en arrière-plan des apps du Store",
+        "desc": "Empêche toutes les applications Microsoft Store de s'exécuter en arrière-plan (les applications de bureau ne sont pas affectées)."
+      }
     }
   },
   "privacy": {
