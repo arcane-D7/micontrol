@@ -15,6 +15,13 @@ use crate::hw::errors::{HardwareError, HardwareResult};
 use serde::{Deserialize, Serialize};
 
 /// Registry key for persisting OS Turbo state.
+///
+/// S50 fix: this MUST be HKLM, not HKCU. `set_os_turbo` runs inside the
+/// elevated bridge (SYSTEM context), so an HKCU write landed in the SYSTEM
+/// account's hive while `get_os_turbo` read the logged-in user's HKCU — the
+/// flag was therefore always "disabled" after an app restart. HKLM is
+/// machine-wide and visible to both contexts (same approach as
+/// performance.rs with `HKLM\SOFTWARE\MI\PerformanceMode`).
 #[cfg(windows)]
 const OS_TURBO_REG_KEY: &str = r"SOFTWARE\MiControl\OSTurbo";
 
@@ -51,9 +58,9 @@ pub fn get_os_turbo() -> HardwareResult<OsTurboStatus> {
     #[cfg(windows)]
     {
         use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
 
-        let enabled = RegKeyGuard::open_read(HKEY_CURRENT_USER, OS_TURBO_REG_KEY)
+        let enabled = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, OS_TURBO_REG_KEY)
             .ok()
             .flatten()
             .and_then(|k| k.read_u32("Enabled").ok().flatten())
@@ -368,9 +375,9 @@ fn persist_os_turbo(enabled: bool) -> HardwareResult<()> {
     #[cfg(windows)]
     {
         use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
 
-        let key = RegKeyGuard::create_write(HKEY_CURRENT_USER, OS_TURBO_REG_KEY)
+        let key = RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, OS_TURBO_REG_KEY)
             .map_err(|e| HardwareError::Registry(format!("Create OS Turbo key: {e}")))?;
 
         key.write_u32("Enabled", if enabled { 1 } else { 0 })
@@ -381,5 +388,35 @@ fn persist_os_turbo(enabled: bool) -> HardwareResult<()> {
     #[cfg(not(windows))]
     {
         Ok(())
+    }
+}
+
+/// Re-apply OS Turbo at app startup (S50 persistence fix).
+///
+/// EcoQoS throttling is a one-shot, per-process operation: Windows forgets it
+/// when throttled processes exit and applies nothing to newly spawned ones.
+/// Without this call the "enabled" flag survived the restart but the actual
+/// effect did not. Called from `lib.rs` setup after the async runtime is up.
+pub fn restore_os_turbo() {
+    #[cfg(windows)]
+    {
+        let status = match get_os_turbo() {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("[os_turbo] restore: cannot read state: {e}");
+                return;
+            }
+        };
+        if !status.enabled {
+            return;
+        }
+        log::info!("[os_turbo] restore: re-applying enabled state from previous session");
+        // Re-apply the EcoQoS throttling sweep. The power plan switch is
+        // deliberately skipped here: a boot-time plan change races the user's
+        // own power slider and the plan persists in Windows by itself.
+        std::thread::spawn(|| {
+            let n = throttle_background_processes();
+            log::info!("[os_turbo] restore: throttle sweep done ({n} processes seen)");
+        });
     }
 }

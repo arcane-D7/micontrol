@@ -189,14 +189,18 @@ pub fn set_touchpad_haptics(enabled: bool) -> HardwareResult<()> {
     persist_reg_dword(TP_REG_HAPTICS, if enabled { 1 } else { 0 })?;
     #[cfg(windows)]
     {
-        // Read current intensity from registry so we can send the full combined report.
+        // S50 fix: report 0x59 is `WriteEnableHeavyPress` (the repress /
+        // second-tap feature), NOT haptics on/off — sending it from the
+        // haptics toggle silently corrupted the repress state. Xiaomi's own
+        // app has NO haptics on/off setter (only a getter); haptics on this
+        // pad is firmware-always-on with configurable intensity. So the
+        // toggle only re-sends the motor gears for the current intensity,
+        // which is the only device-side haptics control that exists.
         let intensity = read_touchpad_registry()
             .map(|i| i.haptics_intensity)
             .unwrap_or(HapticsIntensity::Medium);
-        // Propagate HID error to frontend — registry is already updated, but
-        // the user needs to know the hardware didn't accept the change.
-        if let Err(e) = send_haptics_hid_report(enabled, &intensity) {
-            log::warn!("[touchpad] haptics HID report failed: {e} — registry updated but hardware may not reflect change");
+        if let Err(e) = send_motor_gears_hid_report(&intensity) {
+            log::warn!("[touchpad] haptics gears HID report failed: {e} — registry updated but hardware may not reflect change");
             return Err(e);
         }
     }
@@ -214,13 +218,7 @@ pub fn set_touchpad_haptics_intensity(intensity: HapticsIntensity) -> HardwareRe
     )?;
     #[cfg(windows)]
     {
-        // Read current enabled state from registry.
-        let enabled = read_touchpad_registry()
-            .map(|i| i.haptics_enabled)
-            .unwrap_or(true);
-        // Propagate HID error to frontend — registry is already updated, but
-        // the user needs to know the hardware didn't accept the change.
-        if let Err(e) = send_haptics_hid_report(enabled, &intensity) {
+        if let Err(e) = send_motor_gears_hid_report(&intensity) {
             log::warn!("[touchpad] intensity HID report failed: {e} — registry updated but hardware may not reflect change");
             return Err(e);
         }
@@ -238,8 +236,15 @@ pub fn set_touchpad_gesture_screenshot(enabled: bool) -> HardwareResult<()> {
     Ok(())
 }
 
+/// S50 fix: repress (second-tap / heavy-press) now sends the REAL hardware
+/// control — HID report 0x59 `WriteEnableHeavyPress`, which the old haptics
+/// toggle was wrongly spending. Previously this was a registry-only stub and
+/// the touchpad behavior never changed.
 pub fn set_touchpad_repress(enabled: bool) -> HardwareResult<()> {
-    persist_reg_dword(TP_REG_TRACKPAD_REPRESS, if enabled { 1 } else { 0 })
+    persist_reg_dword(TP_REG_TRACKPAD_REPRESS, if enabled { 1 } else { 0 })?;
+    #[cfg(windows)]
+    send_heavy_press_hid_report(enabled)?;
+    Ok(())
 }
 
 pub fn set_touchpad_edge_slide(enabled: bool) -> HardwareResult<()> {
@@ -676,11 +681,20 @@ fn motor_gears(intensity: &HapticsIntensity) -> (u16, u16) {
 }
 
 /// Force threshold shorts for pressing sensitivity, verified against Xiaomi's
-/// SvrCModule.dll disassembly (WriteForceGears):
-///   mode 1 (Light)  → threshold 100, scaled = (int)(100 * 0.33) = 33, param 400
-///   mode 2 (Medium) → threshold 120, scaled = (int)(120 * 0.33) = 39, param 400
-///   mode 3 (Firm)   → threshold 140, scaled = (int)(140 * 0.33) = 46, param 400
-/// The 4 shorts are sent as an 8-byte payload with report ID 0x5B.
+/// SvrCModule.dll disassembly + svrc log hexdump:
+///
+///   log hexdump for mode 2 (Medium): `"12039500400"` →
+///   `12 03 95 00 40 0?` = payload shorts (120, 39, 500, 400) — i.e.
+///   `OpenWriteForceThreshold(threshold, scaled, max1=500, max2=400)`.
+///
+///   mode 1 (Light)  → threshold 100, scaled = (int)(100*0.33) = 33
+///   mode 2 (Medium) → threshold 120, scaled = (int)(120*0.33) = 39
+///   mode 3 (Firm)   → threshold 140, scaled = (int)(140*0.33) = 46
+///
+/// S50 fix: the previous payload `(scaled, 400, 0, 0)` dropped the raw
+/// threshold AND zeroed the 500 param — the device rejected/clamped the
+/// report, making the sensitivity slider a silent no-op. Now we send the
+/// full 4-short payload `(threshold, scaled, 500, 400)` per the log.
 #[cfg(windows)]
 fn force_threshold_shorts(sensitivity: &TouchpadSensitivity) -> [u16; 4] {
     let threshold: u16 = match sensitivity {
@@ -690,7 +704,7 @@ fn force_threshold_shorts(sensitivity: &TouchpadSensitivity) -> [u16; 4] {
         TouchpadSensitivity::High | TouchpadSensitivity::VeryHigh => 140,
     };
     let scaled = (threshold as f64 * 0.33) as u16; // 33 / 39 / 46
-    [scaled, 400, 0, 0]
+    [threshold, scaled, 500, 400]
 }
 
 /// Build a 33-byte BLTP7853 output report frame.
@@ -719,30 +733,26 @@ fn build_touchpad_report(report_id: u8, payload: &[u8], commit: bool) -> [u8; 33
     r
 }
 
-/// Send haptic feedback on/off + vibration intensity via HID output report.
-///
-/// This replicates Xiaomi's SvrCModule.dll call chain (verified by reverse
-/// engineering):
-///   1. `WriteEnableHeavyPress(bool)` → report ID 0x59, payload [0x01]/[0x02]
-///   2. `OpenWriteMotorGears(a, b)` + `WriteMotorGears` → report ID 0x5D,
-///      payload = 2 × little-endian shorts (the gear pair)
-///
-/// Each command is sent as two frames: an initial frame (phase flag 0x01) and
-/// a commit frame (phase flag 0x00) — the DLL sends both for heavy-press.
+/// Send heavy-press (repress / second-tap) enable/disable via HID output
+/// report 0x59 `WriteEnableHeavyPress` — replicated from Xiaomi's
+/// SvrCModule.dll (payload [0x01]=on, [0x02]=off, sent in two frames:
+/// phase-flag 0x01 then commit 0x00).
 #[cfg(windows)]
-fn send_haptics_hid_report(enabled: bool, intensity: &HapticsIntensity) -> HardwareResult<()> {
-    // Step 1: WriteEnableHeavyPress — report ID 0x59, payload [0x01]=on [0x02]=off
+fn send_heavy_press_hid_report(enabled: bool) -> HardwareResult<()> {
     let heavy_payload = [if enabled { 0x01 } else { 0x02 }];
     let heavy1 = build_touchpad_report(0x59, &heavy_payload, false);
-    if let Err(e) = send_touchpad_output_report(&heavy1) {
-        log::warn!("[touchpad] WriteEnableHeavyPress (phase 1) failed: {e}");
-    } else {
-        let heavy2 = build_touchpad_report(0x59, &heavy_payload, true);
-        let _ = send_touchpad_output_report(&heavy2);
-        log::info!("[touchpad] WriteEnableHeavyPress: enabled={}", enabled);
-    }
+    send_touchpad_output_report(&heavy1)?;
+    let heavy2 = build_touchpad_report(0x59, &heavy_payload, true);
+    send_touchpad_output_report(&heavy2)?;
+    log::info!("[touchpad] WriteEnableHeavyPress: enabled={}", enabled);
+    Ok(())
+}
 
-    // Step 2: WriteMotorGears — report ID 0x5D, payload = 2 LE shorts (gear pair)
+/// Send haptic vibration intensity via HID output report 0x5D
+/// `WriteMotorGears` (2 LE shorts gear pair, two frames phase+commit) —
+/// replicated from Xiaomi's SvrCModule.dll.
+#[cfg(windows)]
+fn send_motor_gears_hid_report(intensity: &HapticsIntensity) -> HardwareResult<()> {
     let (g1, g2) = motor_gears(intensity);
     let mut motor_payload = [0u8; 4];
     motor_payload[..2].copy_from_slice(&g1.to_le_bytes());

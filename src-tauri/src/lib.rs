@@ -792,6 +792,10 @@ pub fn run() {
             // Start touchpad gesture listener (5-finger screenshot, edge slide volume/brightness)
             crate::hw::touchpad::start_gesture_listener();
 
+            // S50: re-apply OS Turbo if it was enabled in the previous session
+            // (EcoQoS throttling is per-process one-shot; Windows forgets it).
+            crate::hw::os_turbo::restore_os_turbo();
+
             // Give the gesture thread access to the app handle so it can show the OSD.
             crate::hw::touchpad::set_app_handle(app.handle().clone());
 
