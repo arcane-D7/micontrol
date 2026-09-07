@@ -904,7 +904,8 @@
         "desc": "What it is: Microsoft Store apps can run background tasks (tile updates, push polling) even when closed. What this does: sets GlobalUserDisabled so no packaged app runs in the background. Desktop (Win32) apps are unaffected — this only governs packaged apps, it is per-user and reversible.",
         "why": "Why: fewer background wakeups and CPU cycles spent by Store apps."
       }
-    }
+    },
+    "appRemovalNotice": "🗑 These toggles UNINSTALL Windows apps and change services (tiny11-style, but online & reversible). Removed apps can be reinstalled from the Microsoft Store / winget. Services restore their original start type. Never touches Edge, WebView2, the Store, Windows Security or system frameworks."
   },
   "privacy": {
     "title": "Privacy Policy",

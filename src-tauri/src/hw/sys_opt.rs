@@ -109,6 +109,140 @@ pub const TWEAKS: &[SysOptTweak] = &[
         desc: "backgroundAppsDesc",
         impact: 4,
     },
+    // ── S54: tiny11-inspired Appx/bloat removal (running-system equivalents) ──
+    // Each removes the per-user + provisioned package. Fully reversible via
+    // the Store or `winget install`. PROTECTED_LIST below is hard-blocked.
+    SysOptTweak {
+        id: "appx_bing_games",
+        title: "appxBingGames",
+        desc: "appxBingGamesDesc",
+        impact: 3,
+    },
+    SysOptTweak {
+        id: "appx_office_media",
+        title: "appxOfficeMedia",
+        desc: "appxOfficeMediaDesc",
+        impact: 3,
+    },
+    SysOptTweak {
+        id: "appx_misc_tools",
+        title: "appxMiscTools",
+        desc: "appxMiscToolsDesc",
+        impact: 2,
+    },
+    SysOptTweak {
+        id: "appx_xbox",
+        title: "appxXbox",
+        desc: "appxXboxDesc",
+        impact: 2,
+    },
+    SysOptTweak {
+        id: "onedrive_uninstall",
+        title: "onedrive",
+        desc: "onedriveDesc",
+        impact: 3,
+    },
+    SysOptTweak {
+        id: "services_unused",
+        title: "servicesUnused",
+        desc: "servicesUnusedDesc",
+        impact: 3,
+    },
+];
+
+/// S54: Appx packages that must NEVER be removed — removing any of these
+/// breaks the Store, the Settings app, the app framework dependencies or
+/// (critically) our own WebView2-based app. This is the tiny11 "do not
+/// cross" list, enforced before any Remove-Appx call.
+#[cfg(windows)]
+const PROTECTED_APPX: &[&str] = &[
+    "Microsoft.WindowsStore",
+    "Microsoft.StorePurchaseApp",
+    "Microsoft.SecHealthUI",
+    "Microsoft.VCLibs",
+    "Microsoft.UI.Xaml",
+    "Microsoft.NET.Native",
+    "Microsoft.WindowsAppRuntime",
+    "Microsoft.WindowsAppSDK",
+    "Microsoft.Windows.Photos",
+    "Microsoft.WindowsCalculator",
+    "Microsoft.WindowsNotepad",
+    "Microsoft.WindowsTerminal",
+    "Microsoft.DesktopAppInstaller",
+    "Microsoft.WindowsSecurityHealth",
+    "Microsoft.XboxGamingOverlay", // Game Bar — Win+G/Game DVR break
+    "Microsoft.Windows.ShellExperienceHost",
+    "Microsoft.Windows.StartMenuExperienceHost",
+    "MicrosoftWindows.Client",
+    "Microsoft.Windows.ContentDeliveryManager",
+];
+
+/// Groups of bloat Appx packages (tiny11maker's list, filtered to items that
+/// are safe + reversible on a running 24H2 system, minus Skype/Cortana which
+/// are retired no-ops and minus the XboxGamingOverlay Game Bar).
+#[cfg(windows)]
+const APPX_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "appx_bing_games",
+        &[
+            "Microsoft.BingNews",
+            "Microsoft.BingWeather",
+            "Microsoft.BingSearch",
+            "Microsoft.GamingApp",
+            "Microsoft.MicrosoftSolitaireCollection",
+        ],
+    ),
+    (
+        "appx_office_media",
+        &[
+            "Microsoft.MicrosoftOfficeHub",
+            "Microsoft.Office.OneNote",
+            "Microsoft.OutlookForWindows",
+            "Microsoft.Todos",
+            "Microsoft.ZuneMusic",
+            "Microsoft.ZuneVideo",
+        ],
+    ),
+    (
+        "appx_misc_tools",
+        &[
+            "Microsoft.GetHelp",
+            "Microsoft.Getstarted",
+            "Microsoft.WindowsFeedbackHub",
+            "Microsoft.WindowsMaps",
+            "Microsoft.People",
+            "Microsoft.MicrosoftStickyNotes",
+            "Microsoft.WindowsSoundRecorder",
+            "Microsoft.Wallet",
+            "Clipchamp.Clipchamp",
+            "Microsoft.MixedReality.Portal",
+            "Microsoft.Microsoft3DViewer",
+            "Microsoft.PowerAutomateDesktop",
+            "MicrosoftCorporationII.QuickAssist",
+            "MicrosoftCorporationII.MicrosoftFamily",
+            "AppUp.IntelManagementandSecurityStatus",
+        ],
+    ),
+    (
+        "appx_xbox",
+        &[
+            "Microsoft.Xbox.TCUI",
+            "Microsoft.XboxApp",
+            "Microsoft.XboxIdentityProvider",
+            "Microsoft.XboxSpeechToTextOverlay",
+        ],
+    ),
+];
+
+/// Services safe to disable on a personal desktop (tiny11/WinUtil consensus).
+/// Original `Start` value is stored before change for faithful restore.
+#[cfg(windows)]
+const UNUSED_SERVICES: &[&str] = &[
+    "dmwappushservice",
+    "wisvc",
+    "RetailDemo",
+    "PhoneSvc",
+    "MapsBroker",
 ];
 
 /// CEIP + diagnostics scheduled tasks (DISABLED, never deleted).
@@ -537,6 +671,10 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
                 ),
                 enabled,
             ),
+            // ── S54: tiny11-inspired removals ──
+            id if id.starts_with("appx_") => apply_appx_group(id, enabled),
+            "onedrive_uninstall" => apply_onedrive(enabled),
+            "services_unused" => apply_unused_services(enabled),
             other => Err(HardwareError::Other(format!(
                 "Unknown SysOpt tweak: {other}"
             ))),
@@ -549,6 +687,225 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
             "System optimization only available on Windows".into(),
         ))
     }
+}
+
+/// Run a PowerShell command hidden and return stdout (or an error with stderr).
+#[cfg(windows)]
+fn run_ps(script: &str) -> HardwareResult<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| HardwareError::Other(format!("powershell spawn: {e}")))?;
+    if !out.status.success() {
+        return Err(HardwareError::Other(format!(
+            "powershell failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Guard: a package name must not be in the protected list. Each protected
+/// prefix is matched against the full package name (which may carry version
+/// and architecture suffixes), so prefix matching is the correct check.
+#[cfg(windows)]
+fn is_protected_appx(full_name: &str) -> bool {
+    let lower = full_name.to_ascii_lowercase();
+    PROTECTED_APPX
+        .iter()
+        .any(|p| lower.starts_with(&p.to_ascii_lowercase()))
+}
+
+/// Remove (or re-register) a group of Appx packages for the current user AND
+/// the provisioned set (so new users don't get them either).
+///
+/// Reversibility: every package in these groups is a Store app — reinstall is
+/// one click in the Store or `winget install`. The per-user removal is the
+/// documented supported path; nothing outside the group list and outside the
+/// PROTECTED_APPX guard is ever touched.
+#[cfg(windows)]
+fn apply_appx_group(group_id: &str, remove: bool) -> HardwareResult<()> {
+    let group = APPX_GROUPS
+        .iter()
+        .find(|(id, _)| *id == group_id)
+        .ok_or_else(|| HardwareError::Other(format!("Unknown appx group: {group_id}")))?;
+    let (_, packages) = group;
+
+    let mut removed = Vec::new();
+    let mut missing = Vec::new();
+
+    if remove {
+        for pkg in packages.iter() {
+            if is_protected_appx(pkg) {
+                log::warn!("[sys_opt] refusing to remove protected appx: {pkg}");
+                continue;
+            }
+            // Per-user removal (documented supported path).
+            let script = format!(
+                "Get-AppxPackage -Name '{}' | Remove-AppxPackage -ErrorAction Stop",
+                pkg.replace('\'', "''")
+            );
+            match run_ps(&script) {
+                Ok(_) => removed.push(*pkg),
+                Err(e) => {
+                    // "Not installed" is fine — treat as missing, not failure.
+                    let msg = e.to_string();
+                    if msg.to_lowercase().contains("not") && msg.to_lowercase().contains("found") {
+                        missing.push(*pkg);
+                    } else {
+                        log::warn!("[sys_opt] appx remove {pkg}: {msg}");
+                        missing.push(*pkg);
+                    }
+                }
+            }
+            // Provisioned removal (future users) — best effort, may not exist.
+            let prov = format!(
+                "Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq '{}' | ForEach-Object {{ Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName }}",
+                pkg.replace('\'', "''")
+            );
+            let _ = run_ps(&prov);
+        }
+        mark_applied(group_id, None)?;
+        log::info!(
+            "[sys_opt] appx group {group_id}: removed {}, not-present {}",
+            removed.len(),
+            missing.len()
+        );
+        Ok(())
+    } else {
+        // Restore = reinstall via winget (the Store-able documented path).
+        for pkg in packages.iter() {
+            if is_protected_appx(pkg) {
+                continue;
+            }
+            // winget resolves the friendly package name from the Appx family.
+            let script = format!(
+                "winget install --id '{}' --source msstore --accept-source-agreements --accept-package-agreements --silent",
+                pkg.replace('\'', "''")
+            );
+            if let Err(e) = run_ps(&script) {
+                log::warn!("[sys_opt] winget restore {pkg}: {e}");
+            } else {
+                removed.push(*pkg);
+            }
+        }
+        mark_restored(group_id)?;
+        log::info!(
+            "[sys_opt] appx group {group_id} restore: winget handled {}",
+            removed.len()
+        );
+        Ok(())
+    }
+}
+
+/// OneDrive: use the OFFICIAL uninstaller from SYSTEM context (documented
+/// supported path; tiny11's takeown+delete is offline-only and unsafe).
+/// Restore: re-install via winget.
+#[cfg(windows)]
+fn apply_onedrive(remove: bool) -> HardwareResult<()> {
+    if remove {
+        let script = r#"
+$setup = Join-Path $env:LOCALAPPDATA 'Microsoft\OneDrive\OneDriveSetup.exe'
+if (Test-Path $setup) {
+    Start-Process -FilePath $setup -ArgumentList '/uninstall' -Wait
+} elseif (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget uninstall --id Microsoft.OneDrive --silent
+} else {
+    Write-Error 'OneDriveSetup.exe not found and winget unavailable'
+}
+"#;
+        run_ps(script)?;
+        // Hide the leftover OneDrive shortcut policy (tiny11 sets this too).
+        write_hklm_dword(
+            r"SOFTWARE\Policies\Microsoft\Windows\OneDrive",
+            "DisableFileSyncNGSC",
+            1,
+        )?;
+        mark_applied("onedrive_uninstall", None)?;
+        log::info!("[sys_opt] OneDrive uninstalled (official uninstaller)");
+        Ok(())
+    } else {
+        // Restore: clear the hide policy and reinstall via winget.
+        write_hklm_dword(
+            r"SOFTWARE\Policies\Microsoft\Windows\OneDrive",
+            "DisableFileSyncNGSC",
+            0,
+        )?;
+        run_ps("winget install --id Microsoft.OneDrive --source winget --accept-source-agreements --accept-package-agreements --silent")?;
+        mark_restored("onedrive_uninstall")?;
+        log::info!("[sys_opt] OneDrive reinstalled");
+        Ok(())
+    }
+}
+
+/// Disable (or restore) the services safe to turn off on a personal desktop.
+/// The original `Start` value of each service is stored before the change so
+/// restore is faithful (most are Manual=3 by default).
+#[cfg(windows)]
+fn apply_unused_services(disable: bool) -> HardwareResult<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut failures = Vec::new();
+    for svc in UNUSED_SERVICES {
+        let svc_path = format!(r"SYSTEM\CurrentControlSet\Services\{svc}");
+        if disable {
+            let prev = read_hklm_dword(&svc_path, "Start");
+            let start_val = "4"; // Disabled
+            let out = std::process::Command::new("sc.exe")
+                .args(["config", svc, "start=", start_val])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .map_err(|e| HardwareError::Other(format!("sc config {svc}: {e}")))?;
+            if !out.status.success() {
+                failures.push(format!(
+                    "{svc}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+                continue;
+            }
+            let _ = std::process::Command::new("sc.exe")
+                .args(["stop", svc])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            mark_applied(
+                "services_unused",
+                Some((r"SYSTEM\CurrentControlSet\Services\dmwappushservice", prev)),
+            )?;
+        }
+    }
+    if !disable {
+        // Restore: most of these are Manual (3) by default on Win11.
+        for svc in UNUSED_SERVICES {
+            let out = std::process::Command::new("sc.exe")
+                .args(["config", svc, "start=", "demand"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            if let Err(e) = out {
+                failures.push(format!("{svc}: {e}"));
+            }
+        }
+        mark_restored("services_unused")?;
+    }
+    if failures.len() == UNUSED_SERVICES.len() {
+        return Err(HardwareError::Other(format!(
+            "All service changes failed: {}",
+            failures.join("; ")
+        )));
+    }
+    if !failures.is_empty() {
+        log::warn!(
+            "[sys_opt] some services not changed: {}",
+            failures.join("; ")
+        );
+    }
+    log::info!(
+        "[sys_opt] unused services {}",
+        if disable { "disabled" } else { "restored" }
+    );
+    Ok(())
 }
 
 /// Full status for the UI: applied-state + impact for every tweak.

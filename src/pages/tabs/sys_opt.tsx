@@ -157,53 +157,89 @@ function SystemOptimizationTab() {
         </details>
       </div>
 
-      {/* Tweak list */}
+      {/* Tweak list — split in two groups: privacy/policies vs app removal */}
       {statuses.length === 0 ? (
         <div className="card">
           <div className="skeleton" style={{ height: 200 }} />
         </div>
       ) : (
-        statuses.map((st) => {
-          return (
-            <div key={st.id} className="card" style={{ marginBottom: 10 }}>
-              <label className="toggle" style={{ padding: '4px 0' }}>
-                <span className="toggle-info">
-                  <span className="toggle-name">
-                    {t(`sysOpt.items.${st.id}.title` as Parameters<typeof t>[0])}
-                    <span
-                      className="badge warning"
-                      style={{ marginLeft: 8, fontSize: '0.6rem' }}
-                      title={t('sysOpt.impact')}
-                    >
-                      {'★'.repeat(impactOf(st.id))}
-                    </span>
-                  </span>
-                  <span className="toggle-desc">
-                    {t(`sysOpt.items.${st.id}.desc` as Parameters<typeof t>[0])}
-                  </span>
-                  <span
-                    className="toggle-desc"
-                    style={{ display: 'block', color: 'var(--color-text)', marginTop: 4 }}
-                  >
-                    ✓ {t(`sysOpt.items.${st.id}.why` as Parameters<typeof t>[0])}
-                  </span>
-                </span>
-                <span className="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={st.applied}
-                    disabled={busy === st.id}
-                    onChange={(e) => void toggle(st.id, e.target.checked)}
-                  />
-                  <span className="toggle-track" />
-                  <span className="toggle-knob" />
-                </span>
-              </label>
-            </div>
-          );
-        })
+        <>
+          {statuses
+            .filter((s) => !APPX_GROUP_IDS.has(s.id))
+            .map((st) => (
+              <TweakCard key={st.id} st={st} busy={busy === st.id} onToggle={toggle} />
+            ))}
+
+          {/* ── App removal section (tiny11-style) ── */}
+          <div className="alert alert-warn" style={{ margin: '14px 0' }}>
+            🗑 {t('sysOpt.appRemovalNotice')}
+          </div>
+          {statuses
+            .filter((s) => APPX_GROUP_IDS.has(s.id))
+            .map((st) => (
+              <TweakCard key={st.id} st={st} busy={busy === st.id} onToggle={toggle} />
+            ))}
+        </>
       )}
     </>
+  );
+}
+
+const APPX_GROUP_IDS = new Set([
+  'appx_bing_games',
+  'appx_office_media',
+  'appx_misc_tools',
+  'appx_xbox',
+  'onedrive_uninstall',
+  'services_unused',
+]);
+
+/** One toggle card: title + impact stars + desc + why. */
+function TweakCard({
+  st,
+  busy,
+  onToggle,
+}: {
+  st: SysOptStatus;
+  busy: boolean;
+  onToggle: (id: string, next: boolean) => Promise<void>;
+}) {
+  return (
+    <div className="card" style={{ marginBottom: 10 }}>
+      <label className="toggle" style={{ padding: '4px 0' }}>
+        <span className="toggle-info">
+          <span className="toggle-name">
+            {t(`sysOpt.items.${st.id}.title` as Parameters<typeof t>[0])}
+            <span
+              className="badge warning"
+              style={{ marginLeft: 8, fontSize: '0.6rem' }}
+              title={t('sysOpt.impact')}
+            >
+              {'★'.repeat(impactOf(st.id))}
+            </span>
+          </span>
+          <span className="toggle-desc">
+            {t(`sysOpt.items.${st.id}.desc` as Parameters<typeof t>[0])}
+          </span>
+          <span
+            className="toggle-desc"
+            style={{ display: 'block', color: 'var(--color-text)', marginTop: 4 }}
+          >
+            ✓ {t(`sysOpt.items.${st.id}.why` as Parameters<typeof t>[0])}
+          </span>
+        </span>
+        <span className="toggle-switch">
+          <input
+            type="checkbox"
+            checked={st.applied}
+            disabled={busy}
+            onChange={(e) => void onToggle(st.id, e.target.checked)}
+          />
+          <span className="toggle-track" />
+          <span className="toggle-knob" />
+        </span>
+      </label>
+    </div>
   );
 }
 
