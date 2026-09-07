@@ -901,6 +901,36 @@
         "title": "Désactiver l'exécution en arrière-plan des apps du Store",
         "desc": "Empêche toutes les applications Microsoft Store de s'exécuter en arrière-plan (les applications de bureau ne sont pas affectées).",
         "why": "Pourquoi : moins de réveils en arrière-plan et de cycles CPU dépensés par les apps du Store."
+      },
+      "appx_bing_games": {
+        "title": "Supprimer les apps Bing, Gaming et Solitaire",
+        "desc": "Qu'est-ce que c'est : Microsoft préinstalle des applications grand public que la plupart des gens n'ouvrent jamais — Bing News, Bing Weather, Bing Search, l'application de jeux Xbox et Solitaire Collection. Ce que ça fait : les désinstalle pour votre utilisateur et de l'ensemble provisionné (les futurs comptes ne les reçoivent pas).",
+        "why": "Pourquoi : libère de l'espace disque et supprime l'encombrement du menu Démarrer. Toutes se réinstallent en un clic depuis le Microsoft Store."
+      },
+      "appx_office_media": {
+        "title": "Supprimer les stubs Office et apps multimédia",
+        "desc": "Qu'est-ce que c'est : les tuiles promotionnelles Microsoft 365/Office préinstallées, OneNote pour Windows 10, le nouveau Outlook, Microsoft To Do et les apps Media Player/Films et TV basées sur Zune. Ce que ça fait : les désinstalle par utilisateur et provisionnées.",
+        "why": "Pourquoi : supprime les fonctionnalités dupliquées (vous utilisez probablement le vrai Office/Outlook/VLC) et nettoie le menu Démarrer. Réinstallables depuis le Store."
+      },
+      "appx_misc_tools": {
+        "title": "Supprimer les outils préinstallés divers",
+        "desc": "Qu'est-ce que c'est : un ensemble d'applications préinstallées rarement utilisées — Get Help, Get Started, Feedback Hub, Maps, People, Sticky Notes, Enregistreur sonore, Wallet, Clipchamp, Mixed Reality Portal, 3D Viewer, Power Automate, Quick Assist, Microsoft Family et la tuile d'état Intel. Ce que ça fait : les désinstalle par utilisateur et provisionnées.",
+        "why": "Pourquoi : le debloat essentiel style tiny11 — la plupart des machines n’en ouvrent aucune. Réinstallables du Store à la demande."
+      },
+      "appx_xbox": {
+        "title": "Supprimer identité et services overlay Xbox (apps)",
+        "desc": "Qu'est-ce que c'est : les paquets du framework Xbox (TCUI, Identity Provider, overlay de reconnaissance vocale) qui exécutent des tâches en arrière-plan même sur des machines sans jeux. Ce que ça fait : les désinstalle par utilisateur et provisionnés. Note : cela ne supprime PAS l'overlay Game Bar (XboxGamingOverlay est protégé — le retirer casse Win+G et Game DVR).",
+        "why": "Pourquoi : supprime l’activité Xbox en arrière-plan sur les machines sans jeux. Si vous utilisez Game Pass plus tard, le Store les réinstalle automatiquement."
+      },
+      "onedrive_uninstall": {
+        "title": "Désinstaller OneDrive",
+        "desc": "Qu'est-ce que c'est : OneDrive est préinstallé et démarre avec Windows même sans utilisation. Ce que ça fait : exécute le désinstalleur OFFICIEL de OneDrive depuis le contexte système (jamais de suppression de fichiers comme les outils hors ligne) et définit la stratégie qui masque son intégration au shell. Restaurer : réinstalle via winget et efface la stratégie.",
+        "why": "Pourquoi : supprime un moteur de synchronisation qui démarre tout seul et que beaucoup remplacent par d’autres clouds. AVERTISSEMENT : connectez-vous / vérifiez que vos fichiers sont synchronisés dans le cloud ou copiés localement avant de désinstaller — ce qui n’est pas synchronisé ne vivra que dans le dossier OneDrive local."
+      },
+      "services_unused": {
+        "title": "Désactiver les services Windows inutilisés",
+        "desc": "Qu'est-ce que c'est : cinq services inutiles sur un bureau personnel : dmwappushservice (WAP push/MDM), wisvc (programme Windows Insider), RetailDemo (mode démo), PhoneSvc (téléphonie héritée) et MapsBroker (téléchargement de cartes hors ligne). Ce que ça fait : définit chacun sur Désactivé et l'arrête. Le type de démarrage d'origine de chaque service est sauvegardé et restauré exactement à l'annulation.",
+        "why": "Pourquoi : moins de services = moins de surface d’attaque et moins de réveils en arrière-plan. Réversible en Manuel avec un toggle."
       }
     },
     "osTurboHowTitle": "Comment fonctionne OS Turbo",

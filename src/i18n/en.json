@@ -903,6 +903,36 @@
         "title": "Disable Store apps background execution",
         "desc": "What it is: Microsoft Store apps can run background tasks (tile updates, push polling) even when closed. What this does: sets GlobalUserDisabled so no packaged app runs in the background. Desktop (Win32) apps are unaffected — this only governs packaged apps, it is per-user and reversible.",
         "why": "Why: fewer background wakeups and CPU cycles spent by Store apps."
+      },
+      "appx_bing_games": {
+        "title": "Remove Bing, Gaming & Solitaire apps",
+        "desc": "What it is: Microsoft pre-installs consumer apps most people never open — Bing News, Bing Weather, Bing Search, the Xbox gaming app and Solitaire Collection. What this does: uninstalls them for your user and from the provisioned set (so future accounts don't get them).",
+        "why": "Why: frees disk space and removes Start-menu clutter. All are reinstallable with one click from the Microsoft Store."
+      },
+      "appx_office_media": {
+        "title": "Remove Office stubs & Media apps",
+        "desc": "What it is: pre-installed Microsoft 365/Office promotion tiles, OneNote for Windows 10, the new Outlook, Microsoft To Do, and the Zune-based Media Player/Movies & TV apps. What this does: uninstalls them per-user and provisioned.",
+        "why": "Why: removes duplicated functionality (you likely use the real Office/Outlook/VLC) and clears Start clutter. Reinstallable from the Store."
+      },
+      "appx_misc_tools": {
+        "title": "Remove misc bundled tools",
+        "desc": "What it is: a grab-bag of rarely-used pre-installed apps — Get Help, Get Started, Feedback Hub, Maps, People, Sticky Notes, Sound Recorder, Wallet, Clipchamp, Mixed Reality Portal, 3D Viewer, Power Automate, Quick Assist, Microsoft Family and the Intel Management status tile. What this does: uninstalls them per-user and provisioned.",
+        "why": "Why: the tiny11-style core debloat — most machines never open any of these. Reinstallable from the Store on demand."
+      },
+      "appx_xbox": {
+        "title": "Remove Xbox identity & overlay services (apps)",
+        "desc": "What it is: Xbox app framework packages (TCUI, Identity Provider, Speech-to-Text overlay) that run background tasks even on non-gaming machines. What this does: uninstalls them per-user and provisioned. Note: this does NOT remove the Game Bar overlay (XboxGamingOverlay is protected — removing it breaks Win+G and Game DVR).",
+        "why": "Why: removes Xbox background activity from non-gaming machines. If you later use Game Pass, the Store reinstalls them automatically."
+      },
+      "onedrive_uninstall": {
+        "title": "Uninstall OneDrive",
+        "desc": "What it is: OneDrive comes pre-installed and auto-starts with Windows even when unused. What this does: runs the OFFICIAL OneDrive uninstaller from the system context (never file-deletion like offline tools) and sets the policy that hides its shell integration. Restore: reinstalls via winget and clears the policy.",
+        "why": "Why: removes an auto-starting sync engine many users replace with other clouds. WARNING: sign in / verify your files are cloud-synced or locally copied before uninstalling — anything not synced will only live in the local OneDrive folder."
+      },
+      "services_unused": {
+        "title": "Disable unused Windows services",
+        "desc": "What it is: five services that are useless on a personal desktop: dmwappushservice (WAP push/MDM), wisvc (Windows Insider program), RetailDemo (store demo mode), PhoneSvc (legacy telephony) and MapsBroker (offline Maps downloader). What this does: sets each to Disabled and stops it. The original start type of every service is stored and restored exactly when you toggle back.",
+        "why": "Why: fewer services = less attack surface and fewer background wakeups. Reversible to Manual with one toggle."
       }
     },
     "appRemovalNotice": "🗑 These toggles UNINSTALL Windows apps and change services (tiny11-style, but online & reversible). Removed apps can be reinstalled from the Microsoft Store / winget. Services restore their original start type. Never touches Edge, WebView2, the Store, Windows Security or system frameworks."

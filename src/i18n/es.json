@@ -901,6 +901,36 @@
         "title": "Desactivar ejecución en segundo plano de apps de la Store",
         "desc": "Bloquea que todas las apps de Microsoft Store se ejecuten en segundo plano (las apps de escritorio no se ven afectadas).",
         "why": "Por qué: menos despertares en segundo plano y ciclos de CPU gastados por apps de la Store."
+      },
+      "appx_bing_games": {
+        "title": "Eliminar apps de Bing, Gaming y Solitaire",
+        "desc": "Qué es: Microsoft preinstala apps de consumo que casi nadie abre — Bing News, Bing Weather, Bing Search, la app de juegos Xbox y Solitaire Collection. Qué hace: las desinstala para tu usuario y del conjunto provisionado (las cuentas futuras no las reciben).",
+        "why": "Por qué: libera espacio en disco y elimina desorden del Menú Inicio. Todas se reinstalan con un clic desde Microsoft Store."
+      },
+      "appx_office_media": {
+        "title": "Eliminar stubs de Office y apps de medios",
+        "desc": "Qué es: mosaicos de promoción de Microsoft 365/Office preinstalados, OneNote para Windows 10, el nuevo Outlook, Microsoft To Do y las apps Media Player/Películas y TV basadas en Zune. Qué hace: las desinstala por usuario y provisionadas.",
+        "why": "Por qué: elimina funcionalidad duplicada (probablemente usas el Office/Outlook/VLC reales) y limpia el Menú Inicio. Reinstalables desde la Store."
+      },
+      "appx_misc_tools": {
+        "title": "Eliminar herramientas variadas preinstaladas",
+        "desc": "Qué es: un lote de apps preinstaladas raramente usadas — Get Help, Get Started, Feedback Hub, Maps, People, Sticky Notes, Grabadora de sonido, Wallet, Clipchamp, Mixed Reality Portal, 3D Viewer, Power Automate, Quick Assist, Microsoft Family y el mosaico de estado de Intel. Qué hace: las desinstala por usuario y provisionadas.",
+        "why": "Por qué: el debloat esencial estilo tiny11 — la mayoría de las máquinas nunca abre ninguna. Reinstalables de la Store cuando las necesites."
+      },
+      "appx_xbox": {
+        "title": "Eliminar identidad y servicios overlay de Xbox (apps)",
+        "desc": "Qué es: paquetes de framework de Xbox (TCUI, Identity Provider, overlay de voz a texto) que ejecutan tareas en segundo plano incluso en máquinas sin juegos. Qué hace: los desinstala por usuario y provisionados. Nota: NO elimina el overlay Game Bar (XboxGamingOverlay está protegido — quitarlo rompe Win+G y Game DVR).",
+        "why": "Por qué: elimina actividad Xbox de fondo en máquinas sin juegos. Si usas Game Pass después, la Store los reinstala automáticamente."
+      },
+      "onedrive_uninstall": {
+        "title": "Desinstalar OneDrive",
+        "desc": "Qué es: OneDrive viene preinstalado e inicia con Windows aunque no se use. Qué hace: ejecuta el desinstalador OFICIAL de OneDrive desde el contexto del sistema (nunca borrado de archivos como las herramientas offline) y establece la política que oculta su integración en el shell. Restaurar: reinstala vía winget y limpia la política.",
+        "why": "Por qué: elimina un motor de sincronización que se autoinicia y que muchos reemplazan con otras nubes. AVISO: inicia sesión / verifica que tus archivos estén sincronizados en la nube o copiados localmente antes de desinstalar — lo que no esté sincronizado solo vivirá en la carpeta local de OneDrive."
+      },
+      "services_unused": {
+        "title": "Desactivar servicios de Windows no usados",
+        "desc": "Qué es: cinco servicios inútiles en un escritorio personal: dmwappushservice (WAP push/MDM), wisvc (programa Windows Insider), RetailDemo (modo demostración), PhoneSvc (telefonía heredada) y MapsBroker (descarga de mapas sin conexión). Qué hace: establece cada uno como Deshabilitado y lo detiene. El tipo de inicio original de cada servicio se guarda y se restaura exactamente al revertir.",
+        "why": "Por qué: menos servicios = menos superficie de ataque y menos despertares en segundo plano. Reversible a Manual con un toggle."
       }
     },
     "osTurboHowTitle": "Cómo funciona OS Turbo",
