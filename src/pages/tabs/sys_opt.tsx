@@ -140,6 +140,21 @@ function SystemOptimizationTab() {
             <span className="toggle-knob" />
           </span>
         </label>
+        <details style={{ marginTop: 4 }}>
+          <summary style={{ fontSize: '0.8rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
+            ℹ️ {t('sysOpt.osTurboHowTitle')}
+          </summary>
+          <p
+            style={{
+              fontSize: '0.8rem',
+              color: 'var(--text-muted)',
+              marginTop: 8,
+              lineHeight: 1.6,
+            }}
+          >
+            {t('sysOpt.osTurboHow')}
+          </p>
+        </details>
       </div>
 
       {/* Tweak list */}
@@ -165,6 +180,12 @@ function SystemOptimizationTab() {
                   </span>
                   <span className="toggle-desc">
                     {t(`sysOpt.items.${st.id}.desc` as Parameters<typeof t>[0])}
+                  </span>
+                  <span
+                    className="toggle-desc"
+                    style={{ display: 'block', color: 'var(--color-text)', marginTop: 4 }}
+                  >
+                    ✓ {t(`sysOpt.items.${st.id}.why` as Parameters<typeof t>[0])}
                   </span>
                 </span>
                 <span className="toggle-switch">

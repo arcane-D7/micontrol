@@ -603,7 +603,7 @@
     "triggerScan": "Iniciar Análisis de Controladores",
     "scanning": "Analizando…",
     "scanSuccess": "Análisis iniciado a través del núcleo XPM",
-    "scanError": "Error al iniciar análisis: {error}",
+    "scanError": "Error de verificación",
     "nucleusNote": "Invoca el motor de análisis de XiaomiPCManager para encontrar actualizaciones oficiales de controladores y BIOS, evitando que controladores genéricos de Windows Update reemplacen versiones específicas del hardware Xiaomi.",
     "appVersion": "Versión de la App",
     "checkingForUpdates": "Buscando actualizaciones…",
@@ -625,8 +625,7 @@
     "driverManufacturer": "Fabricante",
     "driverStatus": "Estado",
     "noDrivers": "No hay detalles de drivers disponibles",
-    "scanComplete": "Verificación de controladores completa",
-    "scanError": "Error de verificación"
+    "scanComplete": "Verificación de controladores completa"
   },
   "discovery": {
     "title": "Configuración del Dispositivo",
@@ -845,53 +844,67 @@
     "items": {
       "telemetry_level": {
         "title": "Datos de diagnóstico (telemetría) — mínimo",
-        "desc": "Establece la telemetría de Windows al nivel más bajo que Microsoft permite en Home/Pro (Obligatorio). Windows Update sigue funcionando."
+        "desc": "Establece la telemetría de Windows al nivel más bajo que Microsoft permite en Home/Pro (Obligatorio). Windows Update sigue funcionando.",
+        "why": "Por qué: menos recogida y envío de datos en segundo plano; sin pérdida de funcionalidad en una máquina personal."
       },
       "diagtrack_service": {
         "title": "Desactivar servicio DiagTrack",
-        "desc": "Experiencias del usuario conectado y telemetría — el servicio que sube datos de diagnóstico a Microsoft. Seguro desactivarlo; restaurado a Automático al revertir."
+        "desc": "Experiencias del usuario conectado y telemetría — el servicio que sube datos de diagnóstico a Microsoft. Seguro desactivarlo; restaurado a Automático al revertir.",
+        "why": "Por qué: es un simple uploader — desactivarlo corta el pipeline de telemetría en el origen, con impacto cero en Windows Update, Defender o la Store."
       },
       "ceip_tasks": {
         "title": "Desactivar tareas programadas CEIP",
-        "desc": "Tareas del Programa de mejora de la experiencia del cliente (Consolidator, UsbCeip, Uploader, cola de Informes de errores). Las tareas se desactivan, nunca se eliminan."
-      },
-      "compatAppraiser": {
-        "title": "Desactivar Compatibility Appraiser",
-        "desc": "La tarea programada más pesada de Windows (CompatTelRunner) — escanea tus archivos y programas periódicamente. El mayor ahorro real de CPU/disco."
+        "desc": "Tareas del Programa de mejora de la experiencia del cliente (Consolidator, UsbCeip, Uploader, cola de Informes de errores). Las tareas se desactivan, nunca se eliminan.",
+        "why": "Por qué: elimina despertares periódicos de disco/CPU/red cuyo único resultado es telemetría."
       },
       "advertising_id": {
         "title": "Desactivar ID de publicidad",
-        "desc": "Impide que las apps muestren anuncios personalizados usando un identificador de publicidad por dispositivo."
+        "desc": "Impide que las apps muestren anuncios personalizados usando un identificador de publicidad por dispositivo.",
+        "why": "Por qué: rompe el perfil publicitario entre apps; sin pérdida funcional (los anuncios pasan a ser genéricos en vez de personalizados)."
       },
-      "tailored": {
+      "compat_appraiser": {
+        "title": "Desactivar Compatibility Appraiser",
+        "desc": "La tarea programada más pesada de Windows (CompatTelRunner) — escanea tus archivos y programas periódicamente. El mayor ahorro real de CPU/disco.",
+        "why": "Por qué: la mayor ganancia real de rendimiento de esta lista — nada en una máquina personal depende de su resultado."
+      },
+      "tailored_experiences": {
         "title": "Desactivar experiencias personalizadas",
-        "desc": "Impide que Windows use datos de diagnóstico para personalizar consejos, anuncios y recomendaciones."
+        "desc": "Impide que Windows use datos de diagnóstico para personalizar consejos, anuncios y recomendaciones.",
+        "why": "Por qué: desacopla tus datos de diagnóstico de la personalización de marketing — una ganancia de privacidad sin cambio de funcionalidad."
       },
-      "activityHistory": {
+      "activity_history": {
         "title": "Desactivar Historial de actividades",
-        "desc": "Impide que Windows recopile y publique tu línea de tiempo de actividades (se conserva el historial del portapapeles local)."
+        "desc": "Impide que Windows recopile y publique tu línea de tiempo de actividades (se conserva el historial del portapapeles local).",
+        "why": "Por qué: tu línea de tiempo de uso deja de registrarse y enviarse; nada más cambia."
       },
-      "feedback": {
+      "feedback_requests": {
         "title": "Desactivar solicitudes de comentarios",
-        "desc": "Impide que Windows pida comentarios periódicamente."
+        "desc": "Impide que Windows pida comentarios periódicamente.",
+        "why": "Por qué: elimina interrupciones recurrentes; la app Feedback Hub sigue siendo utilizable manualmente."
       },
-      "webSearch": {
+      "web_search_start": {
         "title": "Desactivar resultados web en la búsqueda del Menú Inicio",
-        "desc": "La búsqueda del Menú Inicio pasa a ser solo local — resultados más rápidos, sin integración con Bing."
+        "desc": "La búsqueda del Menú Inicio pasa a ser solo local — resultados más rápidos, sin integración con Bing.",
+        "why": "Por qué: la búsqueda del Menú Inicio se vuelve drásticamente más rápida y los resultados locales dejan de quedar debajo de contenido web."
       },
-      "consumerFeatures": {
+      "consumer_features": {
         "title": "Desactivar características de consumidor y sugerencias",
-        "desc": "Bloquea las apps de terceros sugeridas y el contenido de consumidor que empuja Windows."
+        "desc": "Bloquea las apps de terceros sugeridas y el contenido de consumidor que empuja Windows.",
+        "why": "Por qué: sin más sugerencias preinstaladas; la Store sigue funcionando con normalidad."
       },
-      "deliveryOpt": {
+      "delivery_opt_upload": {
         "title": "Limitar subida de Delivery Optimization",
-        "desc": "Impide que el PC suba actualizaciones de Windows a otros PCs por internet (las descargas siguen funcionando)."
+        "desc": "Impide que el PC suba actualizaciones de Windows a otros PCs por internet (las descargas siguen funcionando).",
+        "why": "Por qué: ahorra ancho de banda de subida; las descargas no se ven afectadas."
       },
-      "backgroundApps": {
+      "background_apps": {
         "title": "Desactivar ejecución en segundo plano de apps de la Store",
-        "desc": "Bloquea que todas las apps de Microsoft Store se ejecuten en segundo plano (las apps de escritorio no se ven afectadas)."
+        "desc": "Bloquea que todas las apps de Microsoft Store se ejecuten en segundo plano (las apps de escritorio no se ven afectadas).",
+        "why": "Por qué: menos despertares en segundo plano y ciclos de CPU gastados por apps de la Store."
       }
-    }
+    },
+    "osTurboHowTitle": "Cómo funciona OS Turbo",
+    "osTurboHow": "Windows 11 programa cada proceso en una escala de calidad de servicio: las apps en primer plano reciben núcleos de rendimiento a frecuencia máxima, mientras que el trabajo en segundo plano puede ejecutarse en núcleos de eficiencia a velocidades menores. OS Turbo lo aprovecha de tres formas: (1) activa el plan de energía \"Mejor rendimiento\" para que el gobernador tenga menos ganas de reducir frecuencias; (2) marca servicios pesados conocidos — SearchIndexer, MsMpEng de Defender, el worker de Windows Update — con la flag EcoQoS, forzándolos a los E-cores a baja frecuencia y liberando los P-cores para lo que realmente estás haciendo; (3) el marcado se reaplica automáticamente en cada arranque de la app, porque Windows olvida las etiquetas por proceso cuando el proceso se reinicia. Lo que NO hace: nunca toca el controlador integrado, los límites de TDP ni las curvas del ventilador — eso pertenece a la pestaña de Modos de Rendimiento. Espera un escritorio más fluido bajo carga y menos contención de CPU en segundo plano; en un sistema ya inactivo la diferencia es pequeña."
   },
   "privacy": {
     "title": "Política de Privacidad",

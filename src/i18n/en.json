@@ -603,7 +603,7 @@
     "triggerScan": "Trigger Driver Scan",
     "scanning": "Scanning…",
     "scanSuccess": "Scan triggered via XPM nucleus",
-    "scanError": "Failed to trigger scan: {error}",
+    "scanError": "Scan error",
     "nucleusNote": "Invokes XiaomiPCManager's scan engine to find official driver and BIOS updates, preventing generic Windows Update drivers from overriding Xiaomi hardware-specific versions.",
     "appVersion": "App Version",
     "checkingForUpdates": "Checking for updates…",
@@ -625,8 +625,7 @@
     "driverManufacturer": "Manufacturer",
     "driverStatus": "Status",
     "noDrivers": "No driver details available",
-    "scanComplete": "Driver scan complete",
-    "scanError": "Scan error"
+    "scanComplete": "Driver scan complete"
   },
   "discovery": {
     "title": "Device Setup",
@@ -836,6 +835,8 @@
     "safetyNotice": "All changes are reversible (previous values are stored) and never touch Windows Update, Defender or BitLocker. Changes are re-applied automatically after Windows updates if they get reset.",
     "osTurboTitle": "OS Turbo",
     "osTurboDesc": "Scheduler-level optimization: switches Windows to the Best Performance power plan and throttles heavy background processes (Search indexer, Defender scans, Update worker) to efficiency cores via EcoQoS. Does not touch EC/TDP registers.",
+    "osTurboHowTitle": "How OS Turbo works",
+    "osTurboHow": "Windows 11 schedules every process on a quality-of-service scale: foreground apps get performance cores at full frequency, while background work is free to run on efficiency cores at lower clocks. OS Turbo exploits this in three ways: (1) it activates the 'Best Performance' power plan so the governor is less eager to downclock; (2) it tags known heavy background services — SearchIndexer, Defender's MsMpEng, the Windows Update worker — with the EcoQoS flag, forcing them onto E-cores at low frequency and freeing P-cores for what you are actually doing; (3) the tagging is re-applied automatically on every app start, because Windows forgets per-process tags when a process restarts. What it does NOT do: it never touches the embedded controller, TDP limits, or fan curves — those belong to the hardware Performance Modes tab. Expect a smoother desktop under load and less background CPU contention; on an already-idle system the difference is small.",
     "osTurboToggle": "Enable OS Turbo",
     "osTurboOn": "Active — background processes throttled",
     "osTurboOff": "Off — system at default scheduling",
@@ -845,51 +846,63 @@
     "items": {
       "telemetry_level": {
         "title": "Diagnostic data (telemetry) — minimal",
-        "desc": "Sets Windows telemetry to the lowest level Microsoft allows on Home/Pro (Required). Windows Update keeps working."
+        "desc": "What it is: Windows continuously sends usage and diagnostic data to Microsoft (app launches, device health, feature usage). What this does: sets the policy value to 'Required only' — the lowest level Microsoft honors on Home/Pro (level 0 'Security' is Enterprise-only and gets coerced to 1 anyway). Windows Update keeps working normally.",
+        "why": "Why: less background data collection and upload traffic; no loss of functionality on a personal machine."
       },
       "diagtrack_service": {
         "title": "Disable DiagTrack service",
-        "desc": "Connected User Experiences and Telemetry — the service that uploads diagnostic data to Microsoft. Safe to disable; restored to Automatic on undo."
+        "desc": "What it is: 'Connected User Experiences and Telemetry' (DiagTrack.exe) is the service that packages and uploads the diagnostic data above to Microsoft servers. What this does: sets the service to Disabled and stops it. Restore: turning the toggle off returns it to Automatic.",
+        "why": "Why: it is a pure uploader — disabling it stops the telemetry pipeline at the source with zero impact on Windows Update, Defender or Store."
       },
       "ceip_tasks": {
         "title": "Disable CEIP scheduled tasks",
-        "desc": "Customer Experience Improvement Program tasks (Consolidator, UsbCeip, Uploader, Error Reporting queue). Tasks are disabled, never deleted."
-      },
-      "compatAppraiser": {
-        "title": "Disable Compatibility Appraiser",
-        "desc": "The heaviest scheduled task on Windows (CompatTelRunner) — scans your files and programs periodically. Biggest real CPU/disk win."
+        "desc": "What it is: the Customer Experience Improvement Program runs hidden scheduled tasks (Consolidator, UsbCeip, Uploader, Error Reporting queue) that aggregate and upload usage reports. What this does: disables those tasks — they are never deleted, and this app re-disables them automatically if a Windows update re-enables them.",
+        "why": "Why: removes periodic disk/CPU/network wakeups whose only output is telemetry."
       },
       "advertising_id": {
         "title": "Disable Advertising ID",
-        "desc": "Stops apps from showing personalized ads using a per-device advertising identifier."
+        "desc": "What it is: Windows assigns a unique per-device advertising ID that apps read to build an ad profile and serve personalized ads. What this does: zeroes the ID so apps receive a blank value.",
+        "why": "Why: breaks ad profiling across apps; no functional loss (ads become generic instead of personalized)."
       },
-      "tailored": {
+      "compat_appraiser": {
+        "title": "Disable Compatibility Appraiser",
+        "desc": "What it is: CompatTelRunner.exe scans every program and file on your machine to build compatibility/rating data — historically the heaviest scheduled task in Windows and a well-known cause of random 100% disk/CPU spikes. What this does: disables the scheduled task.",
+        "why": "Why: the biggest real performance win in this list — nothing on a personal machine depends on its output."
+      },
+      "tailored_experiences": {
         "title": "Disable tailored experiences",
-        "desc": "Stops Windows using diagnostic data to personalize tips, ads and recommendations."
+        "desc": "What it is: Windows uses your diagnostic data to personalize tips, advertising and recommendations shown inside the system. What this does: turns the tailored-experiences flag off.",
+        "why": "Why: decouples your diagnostic data from marketing personalization — a privacy win with no functionality change."
       },
-      "activityHistory": {
+      "activity_history": {
         "title": "Disable Activity History",
-        "desc": "Stops Windows collecting and publishing your activity timeline (local clipboard history is kept)."
+        "desc": "What it is: Windows Timeline records which apps, files and websites you use, and can upload that history to Microsoft for cross-device continuation. What this does: disables the activity feed policy and its publish/upload flags (your local clipboard history keeps working).",
+        "why": "Why: your usage timeline stops being recorded and uploaded; nothing else changes."
       },
-      "feedback": {
+      "feedback_requests": {
         "title": "Disable feedback requests",
-        "desc": "Stops Windows asking for feedback periodically."
+        "desc": "What it is: Windows periodically pops 'How is Windows working for you?' feedback questionnaires. What this does: sets the request counter to zero so the prompts never appear.",
+        "why": "Why: removes recurring interruptions; the Feedback Hub app itself remains usable manually."
       },
-      "webSearch": {
+      "web_search_start": {
         "title": "Disable web results in Start search",
-        "desc": "Start menu search becomes local-only — faster results, no Bing integration."
+        "desc": "What it is: typing in the Start menu queries Bing and shows web results above your local files. What this does: disables the web-suggestions policy and Bing integration so search is local-only.",
+        "why": "Why: Start search becomes dramatically faster and local results stop being pushed below web content."
       },
-      "consumerFeatures": {
+      "consumer_features": {
         "title": "Disable consumer features & suggestions",
-        "desc": "Blocks suggested third-party apps and consumer content pushed by Windows."
+        "desc": "What it is: Windows occasionally pushes suggested third-party apps, lock-screen content and 'get started' tips. What this does: enables the CloudContent policies that block consumer suggestions and third-party recommendations.",
+        "why": "Why: no more pre-installed suggestions; the Store itself keeps working normally."
       },
-      "deliveryOpt": {
+      "delivery_opt_upload": {
         "title": "Limit Delivery Optimization upload",
-        "desc": "Stops your PC uploading Windows updates to other PCs over the internet (downloads keep working)."
+        "desc": "What it is: Delivery Optimization lets your PC upload already-downloaded Windows updates to other PCs over the internet (P2P). What this does: sets the download mode so your PC only downloads, never uploads. The Delivery Optimization SERVICE is left untouched (disabling it would break Windows Update).",
+        "why": "Why: saves upload bandwidth; downloads are unaffected."
       },
-      "backgroundApps": {
+      "background_apps": {
         "title": "Disable Store apps background execution",
-        "desc": "Blocks all Microsoft Store apps from running in the background (desktop apps are unaffected)."
+        "desc": "What it is: Microsoft Store apps can run background tasks (tile updates, push polling) even when closed. What this does: sets GlobalUserDisabled so no packaged app runs in the background. Desktop (Win32) apps are unaffected — this only governs packaged apps, it is per-user and reversible.",
+        "why": "Why: fewer background wakeups and CPU cycles spent by Store apps."
       }
     }
   },

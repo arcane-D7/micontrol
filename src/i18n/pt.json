@@ -572,7 +572,7 @@
     "triggerScan": "Iniciar Análise de Drivers",
     "scanning": "A analisar…",
     "scanSuccess": "Análise iniciada via núcleo XPM",
-    "scanError": "Falha ao iniciar análise: {error}",
+    "scanError": "Erro de verificação",
     "nucleusNote": "Invoca o motor de análise do XiaomiPCManager para encontrar atualizações oficiais de drivers e BIOS, evitando que drivers genéricos do Windows Update substituam versões específicas do hardware Xiaomi.",
     "appVersion": "Versão do App",
     "checkingForUpdates": "Verificando atualizações…",
@@ -594,8 +594,7 @@
     "driverManufacturer": "Fabricante",
     "driverStatus": "Status",
     "noDrivers": "Nenhum detalhe de driver disponível",
-    "scanComplete": "Verificação de drivers concluída",
-    "scanError": "Erro de verificação"
+    "scanComplete": "Verificação de drivers concluída"
   },
   "discovery": {
     "title": "Configuração do Dispositivo",
@@ -845,53 +844,67 @@
     "items": {
       "telemetry_level": {
         "title": "Dados de diagnóstico (telemetria) — mínimo",
-        "desc": "Define a telemetria do Windows no nível mais baixo permitido pela Microsoft em Home/Pro (Obrigatório). O Windows Update continua a funcionar."
+        "desc": "Define a telemetria do Windows no nível mais baixo permitido pela Microsoft em Home/Pro (Obrigatório). O Windows Update continua a funcionar.",
+        "why": "Porquê: menos recolha e envio de dados em segundo plano; sem perda de funcionalidade numa máquina pessoal."
       },
       "diagtrack_service": {
         "title": "Desativar serviço DiagTrack",
-        "desc": "Experiências de Utilizador Ligadas e Telemetria — o serviço que envia dados de diagnóstico para a Microsoft. Seguro desativar; restaurado para Automático ao reverter."
+        "desc": "Experiências de Utilizador Ligadas e Telemetria — o serviço que envia dados de diagnóstico para a Microsoft. Seguro desativar; restaurado para Automático ao reverter.",
+        "why": "Porquê: é um simples uploader — desativá-lo para o pipeline de telemetria na origem, com impacto zero no Windows Update, Defender ou Store."
       },
       "ceip_tasks": {
         "title": "Desativar tarefas agendadas CEIP",
-        "desc": "Tarefas do Programa de Melhoria da Experiência do Cliente (Consolidator, UsbCeip, Uploader, fila do Relatório de Erros). As tarefas são desativadas, nunca eliminadas."
-      },
-      "compatAppraiser": {
-        "title": "Desativar Compatibility Appraiser",
-        "desc": "A tarefa agendada mais pesada do Windows (CompatTelRunner) — analisa os seus ficheiros e programas periodicamente. Maior ganho real de CPU/disco."
+        "desc": "Tarefas do Programa de Melhoria da Experiência do Cliente (Consolidator, UsbCeip, Uploader, fila do Relatório de Erros). As tarefas são desativadas, nunca eliminadas.",
+        "why": "Porquê: elimina despertares periódicos de disco/CPU/rede cujo único resultado é telemetria."
       },
       "advertising_id": {
         "title": "Desativar ID de publicidade",
-        "desc": "Impede que as apps mostrem anúncios personalizados usando um identificador de publicidade por dispositivo."
+        "desc": "Impede que as apps mostrem anúncios personalizados usando um identificador de publicidade por dispositivo.",
+        "why": "Porquê: quebra o perfil de publicidade entre apps; sem perda funcional (os anúncios tornam-se genéricos em vez de personalizados)."
       },
-      "tailored": {
+      "compat_appraiser": {
+        "title": "Desativar Compatibility Appraiser",
+        "desc": "A tarefa agendada mais pesada do Windows (CompatTelRunner) — analisa os seus ficheiros e programas periodicamente. Maior ganho real de CPU/disco.",
+        "why": "Porquê: o maior ganho real de desempenho desta lista — nada numa máquina pessoal depende do seu resultado."
+      },
+      "tailored_experiences": {
         "title": "Desativar experiências personalizadas",
-        "desc": "Impede o Windows de usar dados de diagnóstico para personalizar dicas, anúncios e recomendações."
+        "desc": "Impede o Windows de usar dados de diagnóstico para personalizar dicas, anúncios e recomendações.",
+        "why": "Porquê: separa os seus dados de diagnóstico da personalização de marketing — ganho de privacidade sem alteração de funcionalidade."
       },
-      "activityHistory": {
+      "activity_history": {
         "title": "Desativar Histórico de Atividades",
-        "desc": "Impede o Windows de recolher e publicar a sua linha do tempo de atividades (o histórico da área de transferência local é mantido)."
+        "desc": "Impede o Windows de recolher e publicar a sua linha do tempo de atividades (o histórico da área de transferência local é mantido).",
+        "why": "Porquê: a sua linha do tempo de uso deixa de ser registada e enviada; nada mais muda."
       },
-      "feedback": {
+      "feedback_requests": {
         "title": "Desativar pedidos de feedback",
-        "desc": "Impede o Windows de pedir feedback periodicamente."
+        "desc": "Impede o Windows de pedir feedback periodicamente.",
+        "why": "Porquê: remove interrupções recorrentes; o app Feedback Hub continua utilizável manualmente."
       },
-      "webSearch": {
+      "web_search_start": {
         "title": "Desativar resultados web na pesquisa do Menu Iniciar",
-        "desc": "A pesquisa do Menu Iniciar torna-se apenas local — resultados mais rápidos, sem integração com o Bing."
+        "desc": "A pesquisa do Menu Iniciar torna-se apenas local — resultados mais rápidos, sem integração com o Bing.",
+        "why": "Porquê: a pesquisa do Menu Iniciar fica drasticamente mais rápida e os resultados locais deixam de ser empurrados para baixo de conteúdo web."
       },
-      "consumerFeatures": {
+      "consumer_features": {
         "title": "Desativar funcionalidades de consumidor e sugestões",
-        "desc": "Bloqueia apps de terceiros sugeridas e conteúdo de consumidor impulsionado pelo Windows."
+        "desc": "Bloqueia apps de terceiros sugeridas e conteúdo de consumidor impulsionado pelo Windows.",
+        "why": "Porquê: sem mais sugestões pré-instaladas; a Store continua a funcionar normalmente."
       },
-      "deliveryOpt": {
+      "delivery_opt_upload": {
         "title": "Limitar upload do Delivery Optimization",
-        "desc": "Impede o PC de enviar atualizações do Windows para outros PCs pela internet (as transferências continuam a funcionar)."
+        "desc": "Impede o PC de enviar atualizações do Windows para outros PCs pela internet (as transferências continuam a funcionar).",
+        "why": "Porquê: poupa largura de banda de upload; as transferências não são afetadas."
       },
-      "backgroundApps": {
+      "background_apps": {
         "title": "Desativar execução em segundo plano de apps da Store",
-        "desc": "Impede todas as apps da Microsoft Store de correr em segundo plano (as apps de desktop não são afetadas)."
+        "desc": "Impede todas as apps da Microsoft Store de correr em segundo plano (as apps de desktop não são afetadas).",
+        "why": "Porquê: menos despertares de fundo e ciclos de CPU gastos por apps da Store."
       }
-    }
+    },
+    "osTurboHowTitle": "Como o OS Turbo funciona",
+    "osTurboHow": "O Windows 11 agenda cada processo numa escala de qualidade de serviço: apps em primeiro plano recebem núcleos de performance em frequência máxima, enquanto trabalho de fundo pode rodar em núcleos de eficiência com clocks menores. O OS Turbo explora isso de três formas: (1) ativa o plano de energia \"Melhor Desempenho\" para que o governador tenha menos vontade de reduzir clocks; (2) marca serviços pesados conhecidos — SearchIndexer, MsMpEng do Defender, o worker do Windows Update — com a flag EcoQoS, forçando-os para os E-cores em baixa frequência e libertando os P-cores para o que você está realmente a fazer; (3) a marcação é reaplicada automaticamente a cada arranque do app, porque o Windows esquece tags por-processo quando o processo reinicia. O que NÃO faz: nunca toca no controlador embutido, nos limites de TDP ou nas curvas de ventoinha — isso pertence à aba de Modos de Desempenho. Espere uma área de trabalho mais suave sob carga e menos contenção de CPU de fundo; num sistema já inativo a diferença é pequena."
   },
   "privacy": {
     "title": "Política de Privacidade",
