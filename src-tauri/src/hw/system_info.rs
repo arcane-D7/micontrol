@@ -307,9 +307,11 @@ fn gpu_pdh_poller_thread() {
                 let contains_3d = if name_ptr >= buf_base && name_ptr + 2 <= buf_base + buf.len() {
                     let off = name_ptr - buf_base;
                     let wchars: Vec<u16> = buf[off..]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .take(256)
-                        .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+                        .map(|c| u16::from_ne_bytes(*c))
                         .take_while(|&w| w != 0)
                         .collect();
                     String::from_utf16_lossy(&wchars).contains("3D")

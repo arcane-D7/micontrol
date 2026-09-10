@@ -148,7 +148,7 @@ impl Frame {
     /// Convert RGB → BGR in place (for models expecting BGR input).
     pub fn to_bgr(&self) -> Vec<u8> {
         let mut out = self.data.clone();
-        for px in out.chunks_exact_mut(3) {
+        for px in out.as_chunks_mut::<3>().0 {
             px.swap(0, 2);
         }
         out

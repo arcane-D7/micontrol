@@ -1581,8 +1581,10 @@ fn read_fw_version_from_registry() -> Option<String> {
     // Interpret as REG_SZ (UTF-16LE string)
     let utf16_len = (buf_len as usize) / 2;
     let utf16: Vec<u16> = buf[..buf_len as usize]
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
         .take(utf16_len)
         .collect();
 
