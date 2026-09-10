@@ -773,7 +773,7 @@ mod pipe_server {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
     use windows::Win32::Storage::FileSystem::{
-        ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
+        FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
@@ -850,6 +850,64 @@ mod pipe_server {
             .encode_wide()
             .chain(Some(0))
             .collect();
+
+        // S55 FIX 23b: fixed worker pool — see the long comment at the send
+        // site below for why thread-per-client had to go (std Windows TLS
+        // dtor AV on thread exit crashing the whole SYSTEM service).
+        // 4 workers absorb realistic bursts (app serialized lock + pollers);
+        // the unbounded channel queue absorbs spikes with zero thread churn.
+        //
+        // SAFETY: HANDLEs crossing the channel are owned 1:1 by whichever
+        // worker pops the job; the accept loop never touches them again and
+        // no other thread can see them (unbounded channel, single consumer
+        // per item). The SendHandle/SendEvent newtypes assert `Send` only.
+        struct SendHandle(windows::Win32::Foundation::HANDLE);
+        unsafe impl Send for SendHandle {}
+        struct SendEvent(windows::Win32::Foundation::HANDLE);
+        unsafe impl Send for SendEvent {}
+
+        const PIPE_WORKERS: usize = 4;
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel::<(SendHandle, SendEvent)>();
+        let worker_rx = Arc::new(std::sync::Mutex::new(worker_rx));
+        for worker_id in 0..PIPE_WORKERS {
+            let rx = Arc::clone(&worker_rx);
+            let spawned = std::thread::Builder::new()
+                .name(format!("pipe-worker-{worker_id}"))
+                .spawn(move || loop {
+                    // Park until the accept loop hands us a connected client.
+                    // The lock is held only for the pop — handle_client runs
+                    // OUTSIDE the lock so workers serve in parallel.
+                    let job = {
+                        let guard = rx.lock().expect("worker rx mutex poisoned");
+                        guard.recv()
+                    };
+                    let Ok((h, ev)) = job else {
+                        // Channel closed (sender dropped) — only happens at
+                        // process teardown. Exit is fine here: the process is
+                        // dying anyway.
+                        break;
+                    };
+                    let (handle, event) = (h.0, ev.0);
+                    handle_client(handle);
+                    unsafe {
+                        // S55 FIX 24c: the pipe handle was created with
+                        // FILE_FLAG_OVERLAPPED (needed for the async accept).
+                        // handle_client's sync WriteFile(…, None) on an async
+                        // handle leaves the response in flight — disconnecting
+                        // immediately can discard it, and the client sees
+                        // EOF/"No response". FlushFileBuffers blocks until
+                        // all buffered data is delivered to the client.
+                        FlushFileBuffers(handle).ok();
+                        DisconnectNamedPipe(handle).ok();
+                        CloseHandle(handle).ok();
+                        CloseHandle(event).ok();
+                    }
+                });
+            if let Err(e) = spawned {
+                eprintln!("[micontrol_bridge] failed to spawn pipe-worker-{worker_id}: {e}");
+            }
+        }
+        let worker_tx = Arc::new(worker_tx);
 
         // S32-005c FIX: this server used to serve ONE connection at a time in
         // this loop (create instance → connect → handle_client inline →
@@ -945,41 +1003,31 @@ mod pipe_server {
                 continue;
             }
 
-            // S32-005c: serve on a dedicated thread so the accept loop can
-            // immediately create the next pipe instance. DisconnectNamedPipe
-            // + handle cleanup happen on the client thread.
+            // S55 FIX 23b: serve on a worker from a FIXED pool instead of
+            // spawning a short-lived thread per client.
             //
-            // SAFETY: `handle` and `event` are owned exclusively by this
-            // accept iteration — the loop creates a fresh pair per client and
-            // never touches them again after transferring ownership to the
-            // spawned thread, so moving the raw HANDLE across the thread
-            // boundary is sound. The newtype exists purely to assert `Send`.
-            struct SendHandle(windows::Win32::Foundation::HANDLE);
-            // SAFETY: ownership is transferred 1:1 to the client thread; no
-            // other thread accesses the handle concurrently.
-            unsafe impl Send for SendHandle {}
-
-            struct SendEvent(windows::Win32::Foundation::HANDLE);
-            // SAFETY: same 1:1 ownership transfer as SendHandle.
-            unsafe impl Send for SendEvent {}
-
-            let owned = (SendHandle(handle), SendEvent(event));
-            let spawn_result = std::thread::Builder::new()
-                .name("pipe-client".into())
-                .spawn(move || {
-                    let (h, ev) = owned;
-                    handle_client(h.0);
-                    unsafe {
-                        DisconnectNamedPipe(h.0).ok();
-                        CloseHandle(h.0).ok();
-                        CloseHandle(ev.0).ok();
-                    }
-                });
-            if spawn_result.is_err() {
-                // Thread spawn failed — serve inline as a fallback so the
-                // request is not lost.
+            // WHY: every OS thread that exits runs the Rust std Windows TLS
+            // destructor path (tls_callback → destructors::list::run →
+            // eager::destroy), which crashed this SYSTEM service with
+            // 0xc0000005 under load (see dumps: AV at eager::destroy+0x18).
+            // The bug exists in rustc 1.95 AND 1.98.1 (PR #148799 changed the
+            // storage model but the callback path is still unsafe here). With
+            // thread-per-client, the service created/destroyed dozens of
+            // threads per minute — each exit a lottery ticket for the crash.
+            //
+            // FIX: N long-lived worker threads (created ONCE, never exit) pull
+            // client handles from a channel. Zero thread churn → the buggy
+            // exit path is never exercised. If all workers are busy, the
+            // channel queue holds the client briefly (each request completes
+            // in ms; the queue absorbs bursts).
+            let job = (SendHandle(handle), SendEvent(event));
+            if let Err(e) = worker_tx.send(job) {
+                // All workers gone (should never happen — they never exit).
+                // Serve inline as a last resort so the request is not lost.
+                eprintln!("[micontrol_bridge] worker pool dead ({e}); serving inline");
                 handle_client(handle);
                 unsafe {
+                    FlushFileBuffers(handle).ok();
                     DisconnectNamedPipe(handle).ok();
                     CloseHandle(handle).ok();
                     CloseHandle(event).ok();
@@ -989,27 +1037,75 @@ mod pipe_server {
     }
 
     fn handle_client(handle: windows::Win32::Foundation::HANDLE) {
-        // Read the full request (loop until a full JSON object is received).
+        // S55 FIX 24d: the pipe instance was created with FILE_FLAG_OVERLAPPED
+        // (required by the async accept). Doing SYNCHRONOUS ReadFile/WriteFile
+        // (overlapped=None) on an async handle is invalid: the call starts the
+        // I/O and returns ERROR_IO_PENDING, which the old loop treated as an
+        // error and bailed out — the client then saw EOF / "No response from
+        // bridge service (timed out or empty)" even though the service was
+        // healthy. This is why the app kept falling back to the (missing)
+        // scheduled task while raw probes (which happened to race differently)
+        // succeeded.
+        //
+        // FIX: proper overlapped I/O with a dedicated event and bounded waits,
+        // mirroring the client-side logic in `send_pipe_request`.
+        use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+
+        const IO_TIMEOUT_MS: u32 = 15_000;
+
+        let io_event = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+            Ok(ev) => ev,
+            Err(_) => return,
+        };
+
+        let do_io = |buf: &mut [u8], write: bool| -> Option<usize> {
+            let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+            ov.hEvent = io_event;
+            let mut transferred = 0u32;
+            unsafe {
+                let op = if write {
+                    WriteFile(handle, Some(buf), Some(&mut transferred), Some(&mut ov))
+                } else {
+                    ReadFile(handle, Some(buf), Some(&mut transferred), Some(&mut ov))
+                };
+                if op.is_err() {
+                    let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                    if code != 997 {
+                        // ERROR_IO_PENDING (997) is expected; anything else is fatal.
+                        return None;
+                    }
+                    match WaitForSingleObject(io_event, IO_TIMEOUT_MS) {
+                        WAIT_OBJECT_0 => {}
+                        _ => {
+                            let _ = CancelIoEx(handle, Some(&ov));
+                            return None;
+                        }
+                    }
+                    let mut done = 0u32;
+                    if GetOverlappedResult(handle, &ov, &mut done, false).is_err() {
+                        return None;
+                    }
+                    return Some(done as usize);
+                }
+                // Completed synchronously.
+                Some(transferred as usize)
+            }
+        };
+
+        // ── Read the full request ────
         let mut read_buf = [0u8; MAX_MSG_BYTES];
         let mut total_read = 0usize;
-
         loop {
             if total_read >= read_buf.len() {
                 break;
             }
-            let mut bytes_read = 0u32;
-            let result = unsafe {
-                ReadFile(
-                    handle,
-                    Some(&mut read_buf[total_read..]),
-                    Some(&mut bytes_read),
-                    None,
-                )
-            };
-            if result.is_err() || bytes_read == 0 {
+            let Some(n) = do_io(&mut read_buf[total_read..], false) else {
                 break;
+            };
+            if n == 0 {
+                break; // client closed / EOF
             }
-            total_read += bytes_read as usize;
+            total_read += n;
             // Stop when the JSON object appears complete (ends with }).
             if total_read > 0 && read_buf[total_read - 1] == b'}' {
                 break;
@@ -1017,16 +1113,24 @@ mod pipe_server {
         }
 
         if total_read == 0 {
+            unsafe {
+                CloseHandle(io_event).ok();
+            }
             return;
         }
 
         let request_str = String::from_utf8_lossy(&read_buf[..total_read]).to_string();
         let response = process_request(&request_str);
 
-        let resp_bytes = response.as_bytes();
-        let mut written = 0u32;
+        // ── Write the response (overlapped, bounded) ────
+        let mut resp_bytes = response.into_bytes();
+        let _ = do_io(&mut resp_bytes, true);
+
         unsafe {
-            let _ = WriteFile(handle, Some(resp_bytes), Some(&mut written), None);
+            // Push the response fully to the client before tearing the pipe
+            // down (see FIX 24c comment at the worker cleanup sites).
+            FlushFileBuffers(handle).ok();
+            CloseHandle(io_event).ok();
         }
     }
 
