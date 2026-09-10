@@ -684,12 +684,35 @@ mod service {
                     pipe_server::run(shutdown_clone);
                 });
 
-                // S26-006: Watchdog — relaunch micontrol.exe if it dies
-                // unexpectedly. Runs for the service lifetime; joins below.
-                let wd_shutdown = shutdown.clone();
-                let watchdog_thread = std::thread::spawn(move || {
-                    watchdog::run(wd_shutdown, 30_000);
-                });
+                // S55 FIX 19: watchdog DISABLED.
+                //
+                // The watchdog thread crashes the whole SYSTEM service with
+                // 0xc0000005 ~40 s after every start (its first poll — WTS
+                // token / CreateProcessAsUserW path in launch_app). Access
+                // violations in Win32 FFI cannot be caught by Rust panics, so
+                // every restart reproduced the crash within a minute: the pipe
+                // went down ~90% of the time → all elevated tabs stuck in
+                // "Loading" and the app fell back to the broken scheduled-task
+                // path → UAC prompts.
+                //
+                // The watchdog is redundant anyway: the app self-restarts via
+                // RegisterApplicationRestart (Restart Manager) and the Run-key
+                // autostart covers boot. It stays in the codebase behind this
+                // opt-in flag until the AV in its Win32 path is root-caused
+                // with a dump.
+                let watchdog_enabled =
+                    std::env::var("MCONTROL_WATCHDOG").ok().as_deref() == Some("1");
+                let watchdog_thread = if watchdog_enabled {
+                    let wd_shutdown = shutdown.clone();
+                    Some(std::thread::spawn(move || {
+                        watchdog::run(wd_shutdown, 30_000);
+                    }))
+                } else {
+                    eprintln!(
+                        "[micontrol_bridge] watchdog disabled (MCONTROL_WATCHDOG=1 to enable)"
+                    );
+                    None
+                };
 
                 set_service_state(h, SERVICE_RUNNING);
                 eprintln!("[micontrol_bridge] Service running — pipe: {BRIDGE_PIPE_NAME}");
@@ -700,7 +723,9 @@ mod service {
 
                 shutdown.store(true, Ordering::SeqCst);
                 let _ = pipe_thread.join();
-                let _ = watchdog_thread.join();
+                if let Some(wd) = watchdog_thread {
+                    let _ = wd.join();
+                }
                 set_service_state(h, SERVICE_STOPPED);
                 eprintln!("[micontrol_bridge] Service stopped");
             }
@@ -751,7 +776,8 @@ mod pipe_server {
         ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
     use windows::Win32::System::IO::CancelIoEx;
@@ -825,6 +851,19 @@ mod pipe_server {
             .chain(Some(0))
             .collect();
 
+        // S32-005c FIX: this server used to serve ONE connection at a time in
+        // this loop (create instance → connect → handle_client inline →
+        // recreate). While a client was being served (even briefly, but
+        // especially when its request took time — HMAC verify, EC access,
+        // PowerShell helpers), the second instance did not exist, so a second
+        // concurrent client got ERROR_PIPE_BUSY (0x800700E7). The app's
+        // elevated calls serialize on one lock, but background pollers
+        // (thermal/battery via other processes/threads) and the app's own
+        // health checks raced, producing the storm of
+        // "All pipe instances are busy" fallbacks to schtasks in the app log.
+        // FIX: accept loop creates a fresh pipe instance, then serves the
+        // client on a dedicated short-lived thread while the loop immediately
+        // recreates the listener — effectively unlimited concurrent clients.
         while !shutdown.load(Ordering::SeqCst) {
             // Keep the SECURITY_ATTRIBUTES alive for the duration of the
             // CreateNamedPipeW call — passing it as an inline temporary and
@@ -837,7 +876,7 @@ mod pipe_server {
                     PCWSTR(pipe_name_w.as_ptr()),
                     PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    1,
+                    PIPE_UNLIMITED_INSTANCES,
                     PIPE_BUF_SIZE,
                     PIPE_BUF_SIZE,
                     0,
@@ -883,10 +922,45 @@ mod pipe_server {
                 continue;
             }
 
-            handle_client(handle);
-            unsafe {
-                CloseHandle(handle).ok();
-                CloseHandle(event).ok();
+            // S32-005c: serve on a dedicated thread so the accept loop can
+            // immediately create the next pipe instance. DisconnectNamedPipe
+            // + handle cleanup happen on the client thread.
+            //
+            // SAFETY: `handle` and `event` are owned exclusively by this
+            // accept iteration — the loop creates a fresh pair per client and
+            // never touches them again after transferring ownership to the
+            // spawned thread, so moving the raw HANDLE across the thread
+            // boundary is sound. The newtype exists purely to assert `Send`.
+            struct SendHandle(windows::Win32::Foundation::HANDLE);
+            // SAFETY: ownership is transferred 1:1 to the client thread; no
+            // other thread accesses the handle concurrently.
+            unsafe impl Send for SendHandle {}
+
+            struct SendEvent(windows::Win32::Foundation::HANDLE);
+            // SAFETY: same 1:1 ownership transfer as SendHandle.
+            unsafe impl Send for SendEvent {}
+
+            let owned = (SendHandle(handle), SendEvent(event));
+            let spawn_result = std::thread::Builder::new()
+                .name("pipe-client".into())
+                .spawn(move || {
+                    let (h, ev) = owned;
+                    handle_client(h.0);
+                    unsafe {
+                        DisconnectNamedPipe(h.0).ok();
+                        CloseHandle(h.0).ok();
+                        CloseHandle(ev.0).ok();
+                    }
+                });
+            if spawn_result.is_err() {
+                // Thread spawn failed — serve inline as a fallback so the
+                // request is not lost.
+                handle_client(handle);
+                unsafe {
+                    DisconnectNamedPipe(handle).ok();
+                    CloseHandle(handle).ok();
+                    CloseHandle(event).ok();
+                }
             }
         }
     }
@@ -1329,25 +1403,22 @@ mod watchdog {
     /// hiccup during the app's own startup (before the first write includes
     /// the window) doesn't cause a kill loop.
     fn app_heartbeat_fresh() -> bool {
-        let Some(hb) = read_heartbeat_ms() else {
-            return false;
-        };
+        match heartbeat_age_ms() {
+            Some(age) => age < HEARTBEAT_STALE_MS,
+            None => false,
+        }
+    }
+
+    /// Age of the app's heartbeat in milliseconds (0 if in the future).
+    /// `None` if missing/unreadable. Used both for the freshness check and
+    /// for diagnostic logging (how stale was the heartbeat when we killed).
+    fn heartbeat_age_ms() -> Option<u64> {
+        let hb = read_heartbeat_ms()?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
+            .ok()?
             .as_millis() as u64;
-        let fresh = now_ms.saturating_sub(hb) < HEARTBEAT_STALE_MS;
-        if !fresh {
-            return false;
-        }
-        // Timestamp fresh — now verify UI liveness (third line). Missing
-        // third line (older heartbeat format) is treated as alive for
-        // backward compatibility.
-        match read_ui_ok() {
-            Some(1) => true,
-            Some(0) => false,
-            _ => true, // old format or unparseable — fall back to timestamp only
-        }
+        Some(now_ms.saturating_sub(hb))
     }
 
     /// Force-terminate the running micontrol.exe instance(s). Returns true if
@@ -1596,59 +1667,22 @@ mod watchdog {
         let mut consecutive_dead = 0u32;
         // Consecutive "running but zombie (stale heartbeat)" detections.
         // Bounded: after MAX_ZOMBIE_RESETS force-restarts in a row we stop
-        // hammering the machine and wait for the app or user to act.
+        // hammering the machine and wait for the user or app to act.
         let mut consecutive_zombie = 0u32;
-        const MAX_ZOMBIE_RESETS: u32 = 3;
         while !shutdown.load(Ordering::SeqCst) {
-            if user_quit_pending() {
-                consecutive_dead = 0;
-                consecutive_zombie = 0;
-            } else if !watchdog_armed() {
-                write_log("watchdog disabled (autostart off) — sleeping");
-                consecutive_dead = 0;
-                consecutive_zombie = 0;
-            } else if !app_is_running() {
-                consecutive_dead += 1;
-                write_log(&format!(
-                    "micontrol.exe NOT running (miss #{consecutive_dead})"
-                ));
-                consecutive_zombie = 0;
-                // Require 4 consecutive misses (~2 min) before relaunching.
-                // Gives Windows Restart Manager (RegisterApplicationRestart)
-                // and any in-flight user launch time to bring the process up,
-                // avoiding a redundant launch racing the WER restart dialog.
-                if consecutive_dead >= 4 {
-                    if let Some(exe) = find_app_exe() {
-                        launch_app(&exe, true);
-                    }
-                    consecutive_dead = 0;
-                }
-            } else if !app_heartbeat_fresh() {
-                // S32-005: Process alive but the UI heartbeat is stale →
-                // frozen zombie (the exact "volta travada" the user reported).
-                // Force-kill and fresh-relaunch instead of leaving a dead UI.
-                consecutive_dead = 0;
-                consecutive_zombie += 1;
-                write_log(&format!(
-                    "micontrol.exe running but heartbeat STALE (zombie #{consecutive_zombie})"
-                ));
-                if consecutive_zombie <= MAX_ZOMBIE_RESETS {
-                    if kill_app() {
-                        if let Some(exe) = find_app_exe() {
-                            // Zombie: relaunch with a VISIBLE window so the
-                            // user sees the UI is back and can confirm it.
-                            launch_app(&exe, false);
-                        }
-                    } else {
-                        write_log("could not kill zombie — waiting for next poll");
-                    }
-                } else {
-                    write_log(&format!(
-                        "zombie detected {consecutive_zombie}x in a row — giving up until \
-                         next user launch (bounded)"
-                    ));
-                }
-            } else {
+            // S55 FIX 18: the whole poll body runs inside catch_unwind. A
+            // panic anywhere here (WTS token paths, registry reads, process
+            // enumeration — all unsafe Win32) previously unwound past the
+            // thread boundary and TERMINATED THE WHOLE SYSTEM SERVICE,
+            // producing an endless crash/restart loop every ~45 s with the
+            // pipe down between restarts (the "abas em Loading eterno" and
+            // UAC fallback storms the user saw). A panicked poll is now just
+            // a skipped tick: the service survives and the next poll retries.
+            let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                watchdog_poll(&mut consecutive_dead, &mut consecutive_zombie);
+            }));
+            if poll_result.is_err() {
+                write_log("watchdog poll PANICKED — tick skipped, service kept alive");
                 consecutive_dead = 0;
                 consecutive_zombie = 0;
             }
@@ -1661,5 +1695,73 @@ mod watchdog {
             }
         }
         write_log("watchdog thread stopped");
+    }
+
+    /// One watchdog poll: quit-pending check, armed check, app-liveness
+    /// check (relaunch after 4 misses) and stale-heartbeat zombie handling
+    /// (kill + relaunch after 2 confirmations, bounded by MAX_ZOMBIE_RESETS).
+    /// S55 FIX 18: extracted so the watchdog loop can run it inside
+    /// catch_unwind — a panic here must skip the tick, not kill the service.
+    fn watchdog_poll(consecutive_dead: &mut u32, consecutive_zombie: &mut u32) {
+        const MAX_ZOMBIE_RESETS: u32 = 3;
+        if user_quit_pending() {
+            *consecutive_dead = 0;
+            *consecutive_zombie = 0;
+        } else if !watchdog_armed() {
+            write_log("watchdog disabled (autostart off) — sleeping");
+            *consecutive_dead = 0;
+            *consecutive_zombie = 0;
+        } else if !app_is_running() {
+            *consecutive_dead += 1;
+            write_log(&format!(
+                "micontrol.exe NOT running (miss #{consecutive_dead})"
+            ));
+            *consecutive_zombie = 0;
+            // Require 4 consecutive misses (~2 min) before relaunching.
+            // Gives Windows Restart Manager (RegisterApplicationRestart)
+            // and any in-flight user launch time to bring the process up,
+            // avoiding a redundant launch racing the WER restart dialog.
+            if *consecutive_dead >= 4 {
+                if let Some(exe) = find_app_exe() {
+                    launch_app(&exe, true);
+                }
+                *consecutive_dead = 0;
+            }
+        } else if !app_heartbeat_fresh() {
+            // S32-005: Process alive but the UI heartbeat is stale → frozen
+            // zombie. Force-kill and fresh-relaunch instead of leaving a dead
+            // UI. S32-005b: require TWO consecutive stale detections before
+            // killing (a single transient miss recovers on the next tick).
+            *consecutive_dead = 0;
+            *consecutive_zombie += 1;
+            let hb_age = heartbeat_age_ms();
+            let ui_ok = read_ui_ok();
+            write_log(&format!(
+                "micontrol.exe running but heartbeat STALE (zombie #{consecutive_zombie}, \
+                 age={}ms, ui_ok={ui_ok:?})",
+                hb_age.unwrap_or(0)
+            ));
+            if *consecutive_zombie >= 2 && *consecutive_zombie <= MAX_ZOMBIE_RESETS {
+                if kill_app() {
+                    if let Some(exe) = find_app_exe() {
+                        // Zombie: relaunch with a VISIBLE window so the
+                        // user sees the UI is back and can confirm it.
+                        launch_app(&exe, false);
+                    }
+                } else {
+                    write_log("could not kill zombie — waiting for next poll");
+                }
+            } else if *consecutive_zombie > MAX_ZOMBIE_RESETS {
+                write_log(&format!(
+                    "zombie detected {consecutive_zombie}x in a row — giving up until \
+                     next user launch (bounded)"
+                ));
+            } else {
+                write_log("stale once — waiting for next poll to confirm");
+            }
+        } else {
+            *consecutive_dead = 0;
+            *consecutive_zombie = 0;
+        }
     }
 }

@@ -471,18 +471,31 @@ pub fn write_heartbeat() {
     }
 }
 
-/// Periodically refresh the heartbeat from the adaptive-brightness loop's
-/// existing tokio runtime (a cheap, already-running 2 s ticker).
-/// The write itself is tiny; we only do it every HEARTBEAT_INTERVAL_MS.
+/// Periodically refresh the heartbeat.
+///
+/// S32-005b FIX: this used to be a tokio task (`tauri::async_runtime::spawn`)
+/// with a 10 s sleep. Tokio tasks starve when any other task on the shared
+/// multi-thread runtime blocks a worker for tens of seconds (e.g. an
+/// elevated-bridge retry storm, WMI probes, synchronous file IO). When the
+/// runtime starved, the heartbeat stopped being refreshed while the process
+/// (and the UI!) stayed perfectly alive — the SYSTEM bridge watchdog then
+/// read the stale heartbeat, declared the app a zombie and force-killed it,
+/// producing the visible "app closes and reopens" loop every ~3.5 minutes.
+/// A dedicated OS thread is immune to tokio starvation: it always wakes on
+/// schedule no matter what the async runtime is doing.
 pub fn start_heartbeat_ticker() {
     #[cfg(windows)]
     {
-        use std::time::Duration;
-        tauri::async_runtime::spawn(async move {
-            loop {
-                write_heartbeat();
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
+        // Spawn exactly once per process.
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(|| {
+            std::thread::Builder::new()
+                .name("heartbeat".into())
+                .spawn(|| loop {
+                    write_heartbeat();
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                })
+                .expect("failed to spawn heartbeat thread");
         });
     }
 }

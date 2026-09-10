@@ -931,11 +931,52 @@
         "title": "Desactivar servicios de Windows no usados",
         "desc": "Qué es: cinco servicios inútiles en un escritorio personal: dmwappushservice (WAP push/MDM), wisvc (programa Windows Insider), RetailDemo (modo demostración), PhoneSvc (telefonía heredada) y MapsBroker (descarga de mapas sin conexión). Qué hace: establece cada uno como Deshabilitado y lo detiene. El tipo de inicio original de cada servicio se guarda y se restaura exactamente al revertir.",
         "why": "Por qué: menos servicios = menos superficie de ataque y menos despertares en segundo plano. Reversible a Manual con un toggle."
+      },
+      "red_copilot": {
+        "title": "Desactivar y eliminar Copilot",
+        "desc": "Qué es: la app de IA asistente Microsoft Copilot y su integración con el sistema. Qué hace: aplica una política que desactiva Copilot y desinstala la app.",
+        "why": "Por qué: elimina un servicio de IA en segundo plano que la mayoría nunca usa, liberando RAM y ciclos de CPU."
+      },
+      "red_edge_preinstall": {
+        "title": "Bloquear pre-lanzamiento y segundo plano de Edge",
+        "desc": "Qué es: Edge mantiene procesos pre-lanzados en segundo plano incluso cerrado. Qué hace: aplica políticas de Edge desactivando Startup Boost, modo en segundo plano y pre-launch.",
+        "why": "Por qué: Edge deja de consumir RAM/CPU silenciosamente cuando no lo usas. Edge NO se desinstala."
+      },
+      "red_widgets": {
+        "title": "Desactivar Widgets (News & Interests)",
+        "desc": "Qué es: el feed de Widgets de Windows con noticias/clima en la barra de tareas. Qué hace: desactiva el servicio de Widgets vía política.",
+        "why": "Por qué: elimina un proceso persistente de captura de datos en segundo plano y el consumo en la barra de tareas."
+      },
+      "red_cortana_relics": {
+        "title": "Eliminar Cortana",
+        "desc": "Qué es: la asistente de voz Cortana heredada. Qué hace: desactiva la política de Cortana y desinstala la app.",
+        "why": "Por qué: elimina una app de asistente de voz sin usar en segundo plano. Reinstalable desde la Store."
       }
     },
     "osTurboHowTitle": "Cómo funciona OS Turbo",
     "osTurboHow": "Windows 11 programa cada proceso en una escala de calidad de servicio: las apps en primer plano reciben núcleos de rendimiento a frecuencia máxima, mientras que el trabajo en segundo plano puede ejecutarse en núcleos de eficiencia a velocidades menores. OS Turbo lo aprovecha de tres formas: (1) activa el plan de energía \"Mejor rendimiento\" para que el gobernador tenga menos ganas de reducir frecuencias; (2) marca servicios pesados conocidos — SearchIndexer, MsMpEng de Defender, el worker de Windows Update — con la flag EcoQoS, forzándolos a los E-cores a baja frecuencia y liberando los P-cores para lo que realmente estás haciendo; (3) el marcado se reaplica automáticamente en cada arranque de la app, porque Windows olvida las etiquetas por proceso cuando el proceso se reinicia. Lo que NO hace: nunca toca el controlador integrado, los límites de TDP ni las curvas del ventilador — eso pertenece a la pestaña de Modos de Rendimiento. Espera un escritorio más fluido bajo carga y menos contención de CPU en segundo plano; en un sistema ya inactivo la diferencia es pequeña.",
-    "appRemovalNotice": "🗑 Estos toggles DESINSTALAN apps de Windows y cambian servicios (estilo tiny11, pero en línea y reversible). Las apps eliminadas se pueden reinstalar desde Microsoft Store / winget. Los servicios restauran su tipo de inicio original. Nunca toca Edge, WebView2, la Store, Windows Security ni los frameworks del sistema."
+    "appRemovalNotice": "🗑 Estos toggles DESINSTALAN apps de Windows y cambian servicios (estilo tiny11, pero en línea y reversible). Las apps eliminadas se pueden reinstalar desde Microsoft Store / winget. Los servicios restauran su tipo de inicio original. Nunca toca Edge, WebView2, la Store, Windows Security ni los frameworks del sistema.",
+    "debloaterTitle": "Windows Debloater",
+    "debloaterDesc": "Catálogo de acciones de limpieza del sistema para reducir el consumo de recursos de Windows: telemetría, apps preinstaladas, servicios sin usar y procesos en segundo plano. Cada opción es un uninstall/apply real con su ruta de reinstall/restore correspondiente — nada aquí es un toggle ciego.",
+    "debloaterInspiration": "Inspirado en tiny11builder (NTDEV), Win11Debloat (Raphire) y Sophia Script (farag2). El nivel de optimización, suave o agresivo, es siempre responsabilidad del usuario — nosotros solo damos las herramientas.",
+    "debloaterOpen": "Abrir Debloater",
+    "debloatDone": "eliminado / aplicado",
+    "debloatRestored": "reinstalado / restaurado",
+    "debloatUninstall": "Desinstalar",
+    "debloatReinstall": "Reinstalar",
+    "debloatUninstallTitle": "Eliminar / aplicar esta optimización",
+    "debloatReinstallTitle": "Reinstalar / restaurar al patrón de Windows",
+    "tierGreenTitle": "Verde — sin riesgo",
+    "tierGreenDesc": "Seguras y totalmente reversibles. Reinstala cualquier app eliminada desde la Microsoft Store.",
+    "tierYellowTitle": "Amarillo — pueden romper funciones no esenciales",
+    "tierYellowDesc": "Pueden afectar funciones de juegos Xbox, sincronización de OneDrive o servicios opcionales. No son esenciales para Windows y pueden reinstalarse.",
+    "tierYellowConsent": "Entiendo que estas acciones pueden romper funciones no esenciales — habilitar botones",
+    "tierRedTitle": "Rojo — pueden desestabilizar Windows",
+    "tierRedDesc": "Cambios agresivos que tocan partes integrales del sistema. Lee la advertencia antes de habilitar.",
+    "tierRedAck": "Soy consciente de que estas acciones pueden causar inestabilidad en Windows y, en caso de fallo del sistema, podría haber pérdida de datos. miControl NO se responsabiliza de ningún daño o pérdida causada. Quiero habilitar estas acciones.",
+    "debloatWorking": "Aplicando…",
+    "stateApplied": "APLICADO",
+    "stateDefault": "Predeterminado de Windows"
   },
   "privacy": {
     "title": "Política de Privacidad",

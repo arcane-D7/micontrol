@@ -933,9 +933,50 @@
         "title": "Disable unused Windows services",
         "desc": "What it is: five services that are useless on a personal desktop: dmwappushservice (WAP push/MDM), wisvc (Windows Insider program), RetailDemo (store demo mode), PhoneSvc (legacy telephony) and MapsBroker (offline Maps downloader). What this does: sets each to Disabled and stops it. The original start type of every service is stored and restored exactly when you toggle back.",
         "why": "Why: fewer services = less attack surface and fewer background wakeups. Reversible to Manual with one toggle."
+      },
+      "red_copilot": {
+        "title": "Disable & remove Copilot",
+        "desc": "What it is: the Microsoft Copilot AI assistant app and its system integration. What this does: applies a policy disabling Copilot and uninstalls the app.",
+        "why": "Why: removes a background AI service most users never use, freeing RAM and CPU cycles."
+      },
+      "red_edge_preinstall": {
+        "title": "Block Edge pre-launch & background",
+        "desc": "What it is: Edge keeps pre-launching and running background processes even when closed. What this does: applies Edge policies disabling Startup Boost, background mode and pre-launch.",
+        "why": "Why: Edge no longer silently consumes RAM/CPU when you are not using it. Edge itself is NOT uninstalled."
+      },
+      "red_widgets": {
+        "title": "Disable Widgets (News & Interests)",
+        "desc": "What it is: the Windows Widgets feed with news/weather on the taskbar. What this does: disables the Widgets service via policy.",
+        "why": "Why: removes a persistent background data-fetching process and taskbar resource usage."
+      },
+      "red_cortana_relics": {
+        "title": "Remove Cortana",
+        "desc": "What it is: the legacy Cortana voice assistant. What this does: disables the Cortana policy and uninstalls the app.",
+        "why": "Why: eliminates an unused voice-assistant background app. Reinstallable from the Store."
       }
     },
-    "appRemovalNotice": "🗑 These toggles UNINSTALL Windows apps and change services (tiny11-style, but online & reversible). Removed apps can be reinstalled from the Microsoft Store / winget. Services restore their original start type. Never touches Edge, WebView2, the Store, Windows Security or system frameworks."
+    "appRemovalNotice": "🗑 These toggles UNINSTALL Windows apps and change services (tiny11-style, but online & reversible). Removed apps can be reinstalled from the Microsoft Store / winget. Services restore their original start type. Never touches Edge, WebView2, the Store, Windows Security or system frameworks.",
+    "debloaterTitle": "Windows Debloater",
+    "debloaterDesc": "Catalog of system-cleaning actions to reduce Windows resource usage: telemetry, pre-installed apps, unused services and background processes. Each option is a real uninstall/apply with a matching reinstall/restore path — nothing here is a blind toggle.",
+    "debloaterInspiration": "Inspired by tiny11builder (NTDEV), Win11Debloat (Raphire) and Sophia Script (farag2). You decide how soft or aggressive the optimization gets — we only provide the tools.",
+    "debloaterOpen": "Open Debloater",
+    "debloatDone": "removed / applied",
+    "debloatRestored": "reinstalled / restored",
+    "debloatUninstall": "Uninstall",
+    "debloatReinstall": "Reinstall",
+    "debloatUninstallTitle": "Remove / apply this optimization",
+    "debloatReinstallTitle": "Reinstall / restore to Windows default",
+    "tierGreenTitle": "Green — no risk",
+    "tierGreenDesc": "Safe and fully reversible. Reinstall any removed app from the Microsoft Store.",
+    "tierYellowTitle": "Yellow — may break non-essential features",
+    "tierYellowDesc": "May affect Xbox gaming features, OneDrive sync or optional services. These are not essential to Windows and can be reinstalled.",
+    "tierYellowConsent": "I understand these may break non-essential functionality — enable actions",
+    "tierRedTitle": "Red — may destabilize Windows",
+    "tierRedDesc": "Aggressive changes touching integral parts of the system. Read the warning before enabling.",
+    "tierRedAck": "I am aware that these actions may cause Windows instability and, in case of a system failure, data loss may occur. MiControl is NOT responsible for any damage or loss caused. I want to enable these actions.",
+    "debloatWorking": "Working…",
+    "stateApplied": "APPLIED",
+    "stateDefault": "Windows default"
   },
   "privacy": {
     "title": "Privacy Policy",

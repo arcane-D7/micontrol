@@ -1345,7 +1345,13 @@ input[type='range']:active::-webkit-slider-thumb {
 .btn-secondary:disabled,
 .btn-ghost:disabled,
 .btn-danger:disabled {
-  opacity: 0.38;
+  /* S55 FIX 12: real grey-out. opacity alone did not read as "disabled" on
+     the tinted button variants (danger/secondary kept their hue). Desaturate
+     to grey and kill the hover affordance entirely. */
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border-color: var(--border);
+  opacity: 0.55;
   cursor: not-allowed;
   transform: none !important;
   box-shadow: none !important;

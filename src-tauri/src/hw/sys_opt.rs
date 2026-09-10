@@ -148,7 +148,46 @@ pub const TWEAKS: &[SysOptTweak] = &[
         desc: "servicesUnusedDesc",
         impact: 3,
     },
+    // ── S55: RED tier — aggressive, potentially destabilizing (Sophia/Win11Debloat
+    // aggressive lists). Each still has a documented restore path. The UI gates
+    // these behind an explicit damage-acknowledgement consent.
+    SysOptTweak {
+        id: "red_copilot",
+        title: "redCopilot",
+        desc: "redCopilotDesc",
+        impact: 4,
+    },
+    SysOptTweak {
+        id: "red_edge_preinstall",
+        title: "redEdge",
+        desc: "redEdgeDesc",
+        impact: 5,
+    },
+    SysOptTweak {
+        id: "red_widgets",
+        title: "redWidgets",
+        desc: "redWidgetsDesc",
+        impact: 4,
+    },
+    SysOptTweak {
+        id: "red_cortana_relics",
+        title: "redCortana",
+        desc: "redCortanaDesc",
+        impact: 4,
+    },
 ];
+
+/// S55: risk tier per tweak id — drives the debloater modal accordion group.
+/// green: safe/reversible (open + enabled). yellow: may break non-essential
+/// functionality (consent gate). red: may destabilize Windows (explicit
+/// damage-acknowledgement gate).
+pub fn risk_tier(id: &str) -> &'static str {
+    match id {
+        "red_copilot" | "red_edge_preinstall" | "red_widgets" | "red_cortana_relics" => "red",
+        "appx_xbox" | "onedrive_uninstall" | "services_unused" | "diagtrack_service" => "yellow",
+        _ => "green",
+    }
+}
 
 /// S54: Appx packages that must NEVER be removed — removing any of these
 /// breaks the Store, the Settings app, the app framework dependencies or
@@ -364,42 +403,33 @@ fn restore_telemetry_level() -> HardwareResult<()> {
 }
 
 /// DiagTrack (Connected User Experiences and Telemetry) service → Disabled.
+/// S55 FIX: the service's security descriptor grants ChangeConfig (DC) only
+/// to BUILTIN\Administrators — SYSTEM (our bridge) only gets start/stop, so
+/// `sc config` fails with Access Denied. The registry Start value under
+/// HKLM\SYSTEM\CurrentControlSet\Services IS writable by SYSTEM, so set it
+/// there directly (equivalent and persistent) and stop/start via `sc`.
 #[cfg(windows)]
 fn apply_diagtrack(disable: bool) -> HardwareResult<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let prev_start = read_hklm_dword(r"SYSTEM\CurrentControlSet\Services\DiagTrack", "Start");
-    let start_val: &str = if disable { "4" } else { "2" };
-    let out = std::process::Command::new("sc.exe")
-        .args(["config", "DiagTrack", "start=", start_val])
+    const SVC_PATH: &str = r"SYSTEM\CurrentControlSet\Services\DiagTrack";
+    let prev_start = read_hklm_dword(SVC_PATH, "Start");
+    let start_val: u32 = if disable { 4 } else { 2 };
+    write_hklm_dword(SVC_PATH, "Start", start_val)?;
+    let verb = if disable { "stop" } else { "start" };
+    let _ = std::process::Command::new("sc.exe")
+        .args([verb, "DiagTrack"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| HardwareError::Other(format!("sc config DiagTrack: {e}")))?;
-    if !out.status.success() {
-        return Err(HardwareError::Other(format!(
-            "sc config DiagTrack failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )));
-    }
+        .output();
     if disable {
-        let _ = std::process::Command::new("sc.exe")
-            .args(["stop", "DiagTrack"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-    } else {
-        let _ = std::process::Command::new("sc.exe")
-            .args(["start", "DiagTrack"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-    }
-    if disable {
-        mark_applied(
-            "diagtrack_service",
-            Some((r"SYSTEM\CurrentControlSet\Services\DiagTrack", prev_start)),
-        )?;
+        mark_applied("diagtrack_service", Some((SVC_PATH, prev_start)))?;
     } else {
         mark_restored("diagtrack_service")?;
     }
+    log::info!(
+        "[sys_opt] DiagTrack {} (registry Start={start_val})",
+        if disable { "disabled" } else { "restored" }
+    );
     Ok(())
 }
 
@@ -417,10 +447,21 @@ fn apply_ceip_tasks(disable: bool) -> HardwareResult<()> {
             .output();
         match out {
             Ok(o) if o.status.success() => {}
-            Ok(o) => failures.push(format!(
-                "{task}: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
+            Ok(o) => {
+                // S55 FIX: schtasks/sc write errors to STDOUT, not stderr.
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                if text.to_lowercase().contains("does not exist")
+                    || text.to_lowercase().contains("não existe")
+                {
+                    log::info!("[sys_opt] CEIP task {task} not present on this build — skipped");
+                } else {
+                    failures.push(format!("{task}: {}", text.trim()));
+                }
+            }
             Err(e) => failures.push(format!("{task}: {e}")),
         }
     }
@@ -518,21 +559,43 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
                 // control via its own task.
                 use std::os::windows::process::CommandExt;
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                // S55 FIX: on several 24H2 builds this task no longer exists —
+                // "task not found" is a successful no-op, not an error.
+                const APPRAISER_TASK: &str =
+                    r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser";
                 let out = std::process::Command::new("schtasks")
                     .args([
                         "/Change",
                         if enabled { "/DISABLE" } else { "/ENABLE" },
                         "/TN",
-                        r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+                        APPRAISER_TASK,
                     ])
                     .creation_flags(CREATE_NO_WINDOW)
                     .output()
                     .map_err(|e| HardwareError::Other(format!("schtasks: {e}")))?;
-                if !out.status.success() {
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if !out.status.success()
+                    && !combined.to_lowercase().contains("does not exist")
+                    && !combined.to_lowercase().contains("não existe")
+                {
                     return Err(HardwareError::Other(format!(
                         "Compatibility Appraiser task: {}",
-                        String::from_utf8_lossy(&out.stderr)
+                        combined.trim()
                     )));
+                }
+                if out.status.success() {
+                    log::info!(
+                        "[sys_opt] Compatibility Appraiser task {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    );
+                } else {
+                    log::info!(
+                        "[sys_opt] Compatibility Appraiser task not present on this build — no-op"
+                    );
                 }
                 if enabled {
                     mark_applied("compat_appraiser", None)
@@ -675,6 +738,11 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
             id if id.starts_with("appx_") => apply_appx_group(id, enabled),
             "onedrive_uninstall" => apply_onedrive(enabled),
             "services_unused" => apply_unused_services(enabled),
+            // ── S55: red-tier aggressive tweaks ──
+            "red_copilot" => apply_copilot(enabled),
+            "red_edge_preinstall" => apply_edge_preinstall(enabled),
+            "red_widgets" => apply_widgets(enabled),
+            "red_cortana_relics" => apply_cortana_relics(enabled),
             other => Err(HardwareError::Other(format!(
                 "Unknown SysOpt tweak: {other}"
             ))),
@@ -804,17 +872,51 @@ fn apply_appx_group(group_id: &str, remove: bool) -> HardwareResult<()> {
 /// OneDrive: use the OFFICIAL uninstaller from SYSTEM context (documented
 /// supported path; tiny11's takeown+delete is offline-only and unsafe).
 /// Restore: re-install via winget.
+///
+/// S55 FIX: the elevated context may be SYSTEM, where $env:LOCALAPPDATA
+/// points at systemprofile and winget.exe is not on PATH. Probe all known
+/// OneDriveSetup.exe locations (user profile dirs of real users, Program
+/// Files, SysWOW64) and fall back to the per-user uninstaller registry key;
+/// winget is resolved via its stable WinGetLinks path as a last resort.
 #[cfg(windows)]
 fn apply_onedrive(remove: bool) -> HardwareResult<()> {
     if remove {
         let script = r#"
-$setup = Join-Path $env:LOCALAPPDATA 'Microsoft\OneDrive\OneDriveSetup.exe'
-if (Test-Path $setup) {
+$ErrorActionPreference = 'Stop'
+$setups = @()
+foreach ($root in @('C:\Users')) {
+  $setups += Get-ChildItem -Path $root -Filter 'OneDriveSetup.exe' -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -like '*Microsoft\OneDrive*' } | Select-Object -ExpandProperty FullName
+}
+$setups += "$env:ProgramFiles\Microsoft OneDrive\OneDriveSetup.exe"
+$setups += "$env:ProgramFiles(x86)\Microsoft OneDrive\OneDriveSetup.exe"
+$setup = $setups | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($setup) {
     Start-Process -FilePath $setup -ArgumentList '/uninstall' -Wait
-} elseif (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget uninstall --id Microsoft.OneDrive --silent
+    Write-Output "uninstalled via $setup"
 } else {
-    Write-Error 'OneDriveSetup.exe not found and winget unavailable'
+    # Fallback: the registered uninstaller string (documented per-machine entry).
+    $uninst = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe' -ErrorAction SilentlyContinue).UninstallString
+    if (-not $uninst) {
+        $uninst = (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OneDriveSetup.exe' -ErrorAction SilentlyContinue).UninstallString
+    }
+    if ($uninst) {
+        Start-Process -FilePath $uninst -ArgumentList '/uninstall' -Wait
+        Write-Output "uninstalled via registry entry"
+    } else {
+        # winget last (may not be on PATH for SYSTEM — try known links path too)
+        $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if (-not $wg) {
+            $links = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe"
+            if (Test-Path $links) { $wg = $links }
+        }
+        if ($wg) {
+            & $wg uninstall --id Microsoft.OneDrive --silent --accept-source-agreements
+            Write-Output "uninstalled via winget"
+        } else {
+            Write-Output "OneDrive not present (nothing to uninstall)"
+        }
+    }
 }
 "#;
         run_ps(script)?;
@@ -841,9 +943,210 @@ if (Test-Path $setup) {
     }
 }
 
+/// S55 (RED): remove the Copilot app + disable the Copilot policy. Restore
+/// re-registers via the Store / winget and clears the policy. Windows itself
+/// re-offers Copilot on updates, so this is a persistent-policy approach.
+#[cfg(windows)]
+fn apply_copilot(disable: bool) -> HardwareResult<()> {
+    if disable {
+        write_hklm_dword(
+            r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
+            "TurnOffWindowsCopilot",
+            1,
+        )?;
+        let _ = run_ps(
+            "Get-AppxPackage -Name 'Microsoft.Copilot' | Remove-AppxPackage -ErrorAction SilentlyContinue",
+        );
+        mark_applied("red_copilot", None)?;
+        log::info!("[sys_opt] Copilot disabled (policy + app removal)");
+    } else {
+        write_hklm_dword(
+            r"SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot",
+            "TurnOffWindowsCopilot",
+            0,
+        )?;
+        mark_restored("red_copilot")?;
+        log::info!("[sys_opt] Copilot policy restored (app reinstall via Store)");
+    }
+    Ok(())
+}
+
+/// S55 (RED): block Edge pre-launch/background and its preload of startup
+/// processes. Does NOT uninstall Edge (unsupported and unsafe on Win11 —
+/// Sophia Script's approach is exactly this policy set). Restore re-enables.
+#[cfg(windows)]
+fn apply_edge_preinstall(disable: bool) -> HardwareResult<()> {
+    let v: u32 = if disable { 1 } else { 0 };
+    write_hklm_dword(
+        r"SOFTWARE\Policies\Microsoft\Edge",
+        "StartupBoostEnabled",
+        if disable { 0 } else { 1 },
+    )?;
+    write_hklm_dword(
+        r"SOFTWARE\Policies\Microsoft\Edge",
+        "BackgroundModeEnabled",
+        if disable { 0 } else { 1 },
+    )?;
+    write_hklm_dword(
+        r"SOFTWARE\Policies\Microsoft\Windows\EdgeUpdate",
+        "AllowEdgePrelaunch",
+        v,
+    )?;
+    if disable {
+        mark_applied("red_edge_preinstall", None)?;
+    } else {
+        mark_restored("red_edge_preinstall")?;
+    }
+    log::info!(
+        "[sys_opt] Edge prelaunch {}",
+        if disable { "blocked" } else { "restored" }
+    );
+    Ok(())
+}
+
+/// S55 (RED): disable/restore the Widgets (News & Interests) feed.
+///
+/// FIX 6 (final): registry paths are a dead end on this machine —
+/// `HKCU\...\Advanced\TaskbarDa` is blocked by Microsoft's UCPD.sys
+/// (User Choice Protection Driver, blocks SetValue for that value name from
+/// any process outside Explorer/Settings) and `HKLM\...\Dsh` denies service
+/// tokens. The viable documented path is removing the Widgets APP itself:
+/// the `MicrosoftWindows.Client.WebExperience` Appx (Web Experience Pack).
+/// Remove-AppxPackage is not a User Choice operation, so UCPD does not block
+/// it. Restore reinstalls via winget/Store. TaskbarDa is still attempted
+/// best-effort for builds where UCPD permits it.
+#[cfg(windows)]
+fn apply_widgets(disable: bool) -> HardwareResult<()> {
+    const WEB_EXPERIENCE: &str = "MicrosoftWindows.Client.WebExperience";
+    if disable {
+        let script = format!(
+            "Get-AppxPackage -Name '{WEB_EXPERIENCE}' | Remove-AppxPackage -ErrorAction Stop"
+        );
+        match run_ps(&script) {
+            Ok(_) => {
+                log::info!("[sys_opt] Widgets removed (Web Experience Pack uninstalled)");
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.to_lowercase().contains("not") && msg.to_lowercase().contains("found") {
+                    log::info!("[sys_opt] Widgets app not installed — no-op");
+                } else {
+                    log::warn!("[sys_opt] Web Experience removal failed: {msg}");
+                }
+            }
+        }
+        // Best-effort taskbar setting (works on builds without UCPD guard).
+        let _ = std::process::Command::new("reg.exe")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                "/v",
+                "TaskbarDa",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f",
+            ])
+            .output();
+        // Best-effort policy (service tokens are denied on some builds).
+        let _ = std::process::Command::new("reg.exe")
+            .args([
+                "add",
+                r"HKLM\SOFTWARE\Policies\Microsoft\Dsh",
+                "/v",
+                "AllowNewsAndInterests",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f",
+            ])
+            .output();
+        mark_applied("red_widgets", None)?;
+        log::info!("[sys_opt] Widgets disabled");
+    } else {
+        // Restore: reinstall the Web Experience Pack from the Store/winget.
+        if let Err(e) = run_ps(
+            "winget install --id 9MSSGKG348SP --source msstore --accept-source-agreements --accept-package-agreements --silent",
+        ) {
+            log::warn!("[sys_opt] Widgets restore via winget failed (install manually from Store): {e}");
+        }
+        let _ = std::process::Command::new("reg.exe")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                "/v",
+                "TaskbarDa",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "1",
+                "/f",
+            ])
+            .output();
+        mark_restored("red_widgets")?;
+        log::info!("[sys_opt] Widgets restored");
+    }
+    Ok(())
+}
+
+/// S55 (RED): remove Cortana leftovers (app + policy).
+///
+/// S55 FIX 4: `HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search` also
+/// denies writes to service tokens on this build (RegCreateKeyExW → ERROR_5),
+/// so the policy write goes through reg.exe best-effort while the app removal
+/// (per-user Appx) does the real work. Failure of the policy write alone is
+/// logged, not fatal.
+#[cfg(windows)]
+fn apply_cortana_relics(disable: bool) -> HardwareResult<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let v: u32 = if disable { 0 } else { 1 };
+    let policy = std::process::Command::new("reg.exe")
+        .args([
+            "add",
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search",
+            "/v",
+            "AllowCortana",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            &v.to_string(),
+            "/f",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    if let Ok(o) = &policy {
+        if !o.status.success() {
+            log::warn!(
+                "[sys_opt] Cortana policy write denied (best-effort skipped): {}",
+                String::from_utf8_lossy(&o.stdout).trim()
+            );
+        }
+    }
+    let _ = run_ps(
+        "Get-AppxPackage -Name 'Microsoft.549981C3F5F10' | Remove-AppxPackage -ErrorAction SilentlyContinue",
+    );
+    if disable {
+        mark_applied("red_cortana_relics", None)?;
+        log::info!("[sys_opt] Cortana disabled (app removal; policy best-effort)");
+    } else {
+        mark_restored("red_cortana_relics")?;
+        log::info!("[sys_opt] Cortana policy restored (app reinstall via Store)");
+    }
+    Ok(())
+}
+
 /// Disable (or restore) the services safe to turn off on a personal desktop.
 /// The original `Start` value of each service is stored before the change so
 /// restore is faithful (most are Manual=3 by default).
+///
+/// S55 FIX: service security descriptors commonly deny ChangeConfig to
+/// SYSTEM (only Administrators get DC), so `sc config` fails with Access
+/// Denied from the bridge. Writing the registry `Start` value directly under
+/// HKLM\SYSTEM\CurrentControlSet\Services IS permitted to SYSTEM and is the
+/// same persistent change; `sc stop` still works (SYSTEM has that right).
 #[cfg(windows)]
 fn apply_unused_services(disable: bool) -> HardwareResult<()> {
     use std::os::windows::process::CommandExt;
@@ -853,37 +1156,23 @@ fn apply_unused_services(disable: bool) -> HardwareResult<()> {
         let svc_path = format!(r"SYSTEM\CurrentControlSet\Services\{svc}");
         if disable {
             let prev = read_hklm_dword(&svc_path, "Start");
-            let start_val = "4"; // Disabled
-            let out = std::process::Command::new("sc.exe")
-                .args(["config", svc, "start=", start_val])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .map_err(|e| HardwareError::Other(format!("sc config {svc}: {e}")))?;
-            if !out.status.success() {
-                failures.push(format!(
-                    "{svc}: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
+            // Disabled = 4. Write the registry Start value directly.
+            if let Err(e) = write_hklm_dword(&svc_path, "Start", 4) {
+                failures.push(format!("{svc}: {e}"));
                 continue;
             }
             let _ = std::process::Command::new("sc.exe")
                 .args(["stop", svc])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
-            mark_applied(
-                "services_unused",
-                Some((r"SYSTEM\CurrentControlSet\Services\dmwappushservice", prev)),
-            )?;
+            mark_applied("services_unused", Some((&svc_path, prev)))?;
         }
     }
     if !disable {
         // Restore: most of these are Manual (3) by default on Win11.
         for svc in UNUSED_SERVICES {
-            let out = std::process::Command::new("sc.exe")
-                .args(["config", svc, "start=", "demand"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            if let Err(e) = out {
+            let svc_path = format!(r"SYSTEM\CurrentControlSet\Services\{svc}");
+            if let Err(e) = write_hklm_dword(&svc_path, "Start", 3) {
                 failures.push(format!("{svc}: {e}"));
             }
         }
@@ -908,11 +1197,13 @@ fn apply_unused_services(disable: bool) -> HardwareResult<()> {
     Ok(())
 }
 
-/// Full status for the UI: applied-state + impact for every tweak.
+/// Full status for the UI: applied-state + impact + risk tier for every tweak.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SysOptStatus {
     pub id: String,
     pub applied: bool,
+    /// S55: "green" | "yellow" | "red" — debloater modal accordion group.
+    pub tier: String,
 }
 
 pub fn get_status() -> HardwareResult<Vec<SysOptStatus>> {
@@ -923,6 +1214,7 @@ pub fn get_status() -> HardwareResult<Vec<SysOptStatus>> {
             .map(|t| SysOptStatus {
                 id: t.id.to_string(),
                 applied: is_applied(t.id),
+                tier: risk_tier(t.id).to_string(),
             })
             .collect())
     }
@@ -933,6 +1225,7 @@ pub fn get_status() -> HardwareResult<Vec<SysOptStatus>> {
             .map(|t| SysOptStatus {
                 id: t.id.to_string(),
                 applied: false,
+                tier: risk_tier(t.id).to_string(),
             })
             .collect())
     }

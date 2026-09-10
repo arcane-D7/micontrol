@@ -931,11 +931,52 @@
         "title": "Désactiver les services Windows inutilisés",
         "desc": "Qu'est-ce que c'est : cinq services inutiles sur un bureau personnel : dmwappushservice (WAP push/MDM), wisvc (programme Windows Insider), RetailDemo (mode démo), PhoneSvc (téléphonie héritée) et MapsBroker (téléchargement de cartes hors ligne). Ce que ça fait : définit chacun sur Désactivé et l'arrête. Le type de démarrage d'origine de chaque service est sauvegardé et restauré exactement à l'annulation.",
         "why": "Pourquoi : moins de services = moins de surface d’attaque et moins de réveils en arrière-plan. Réversible en Manuel avec un toggle."
+      },
+      "red_copilot": {
+        "title": "Désactiver et supprimer Copilot",
+        "desc": "Qu'est-ce que c'est : l'app d'assistant IA Microsoft Copilot et son intégration système. Ce que ça fait : applique une politique désactivant Copilot et désinstalle l'app.",
+        "why": "Pourquoi : supprime un service IA en arrière-plan que la plupart des utilisateurs ne utilisent jamais, libérant RAM et cycles CPU."
+      },
+      "red_edge_preinstall": {
+        "title": "Bloquer le pré-lancement et l'arrière-plan d'Edge",
+        "desc": "Qu'est-ce que c'est : Edge maintient des processus pré-lancés en arrière-plan même fermé. Ce que ça fait : applique des politiques Edge désactivant Startup Boost, le mode arrière-plan et le pré-lancement.",
+        "why": "Pourquoi : Edge cesse de consommer RAM/CPU silencieusement quand vous ne l'utilisez pas. Edge n'est PAS désinstallé."
+      },
+      "red_widgets": {
+        "title": "Désactiver les Widgets (News & Interests)",
+        "desc": "Qu'est-ce que c'est : le flux de Widgets Windows avec actualités/météo dans la barre des tâches. Ce que ça fait : désactive le service Widgets via politique.",
+        "why": "Pourquoi : supprime un processus persistant de récupération de données en arrière-plan et la consommation dans la barre des tâches."
+      },
+      "red_cortana_relics": {
+        "title": "Supprimer Cortana",
+        "desc": "Qu'est-ce que c'est : l'assistante vocale Cortana héritée. Ce que ça fait : désactive la politique Cortana et désinstalle l'app.",
+        "why": "Pourquoi : élimine une app dassistante vocale inutilisée en arrière-plan. Réinstallable depuis le Store."
       }
     },
     "osTurboHowTitle": "Comment fonctionne OS Turbo",
     "osTurboHow": "Windows 11 programme chaque processus sur une échelle de qualité de service : les applications au premier plan obtiennent des cœurs de performance à pleine fréquence, tandis que le travail en arrière-plan peut s'exécuter sur des cœurs d'efficacité à fréquences réduites. OS Turbo l'exploite de trois façons : (1) il active le plan d'alimentation « Performances optimales » pour que le gouverneur soit moins enclin à réduire les fréquences ; (2) il marque les services de fond lourds connus — SearchIndexer, MsMpEng de Defender, le worker de Windows Update — avec le drapeau EcoQoS, les forçant sur les E-cores à basse fréquence et libérant les P-cores pour ce que vous faites réellement ; (3) le marquage est réappliqué automatiquement à chaque démarrage de l'app, car Windows oublie les tags par processus quand un processus redémarre. Ce qu'il NE fait PAS : il ne touche jamais au contrôleur embarqué, aux limites TDP ni aux courbes de ventilation — cela appartient à l'onglet Modes de Performance. Attendrez-vous à un bureau plus fluide sous charge et moins de contention CPU en arrière-plan ; sur un système déjà inactif la différence est faible.",
-    "appRemovalNotice": "🗑 Ces toggles DÉSINSTALLENT des applications Windows et modifient des services (style tiny11, mais en ligne et réversible). Les applications supprimées peuvent être réinstallées depuis le Microsoft Store / winget. Les services restaurent leur type de démarrage d’origine. Ne touche jamais Edge, WebView2, le Store, Windows Security ni les frameworks système."
+    "appRemovalNotice": "🗑 Ces toggles DÉSINSTALLENT des applications Windows et modifient des services (style tiny11, mais en ligne et réversible). Les applications supprimées peuvent être réinstallées depuis le Microsoft Store / winget. Les services restaurent leur type de démarrage d’origine. Ne touche jamais Edge, WebView2, le Store, Windows Security ni les frameworks système.",
+    "debloaterTitle": "Windows Debloater",
+    "debloaterDesc": "Catalogue d'actions de nettoyage système pour réduire la consommation de ressources de Windows : télémétrie, apps préinstallées, services inutilisés et processus en arrière-plan. Chaque option est un véritable uninstall/apply avec son chemin de reinstall/restore correspondant — rien ici n'est un toggle aveugle.",
+    "debloaterInspiration": "Inspiré de tiny11builder (NTDEV), Win11Debloat (Raphire) et Sophia Script (farag2). Le niveau d'optimisation, doux ou agressif, reste toujours la responsabilité de l'utilisateur — nous ne fournissons que les outils.",
+    "debloaterOpen": "Ouvrir le Debloater",
+    "debloatDone": "supprimé / appliqué",
+    "debloatRestored": "réinstallé / restauré",
+    "debloatUninstall": "Désinstaller",
+    "debloatReinstall": "Réinstaller",
+    "debloatUninstallTitle": "Supprimer / appliquer cette optimisation",
+    "debloatReinstallTitle": "Réinstaller / restaurer aux valeurs par défaut de Windows",
+    "tierGreenTitle": "Vert — sans risque",
+    "tierGreenDesc": "Sûres et entièrement réversibles. Réinstallez toute app supprimée depuis le Microsoft Store.",
+    "tierYellowTitle": "Jaune — peuvent casser des fonctions non essentielles",
+    "tierYellowDesc": "Peuvent affecter les fonctions de jeu Xbox, la synchronisation OneDrive ou des services optionnels. Non essentielles à Windows et réinstallables.",
+    "tierYellowConsent": "Je comprends que ces actions peuvent casser des fonctions non essentielles — activer les boutons",
+    "tierRedTitle": "Rouge — peuvent déstabiliser Windows",
+    "tierRedDesc": "Modifications agressives touchant des parties intégrales du système. Lisez l'avertissement avant d'activer.",
+    "tierRedAck": "Je suis conscient que ces actions peuvent causer des instabilités dans Windows et, en cas de défaillance du système, des pertes de données peuvent se produire. miControl n'est PAS responsable de tout dommage ou perte causée. Je souhaite activer ces actions.",
+    "debloatWorking": "Application…",
+    "stateApplied": "APPLIQUÉ",
+    "stateDefault": "Défaut Windows"
   },
   "privacy": {
     "title": "Politique de Confidentialité",

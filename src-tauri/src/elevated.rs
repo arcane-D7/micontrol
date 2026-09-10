@@ -413,6 +413,49 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        // S55 FIX 9: re-apply every enabled tweak at boot. This used to run
+        // in the app process as the plain user — every HKLM write failed with
+        // ERROR_ACCESS_DENIED (a full WARN line per tweak per boot). The
+        // elevated context has the rights the tweaks need.
+        //
+        // S55 FIX 14: run fire-and-forget. restore_all() takes MINUTES (each
+        // appx group runs PowerShell; services run sc stop per service) and
+        // it used to run inline — holding this pipe connection busy while the
+        // app's pollers (battery/thermal/fan, all elevated) queued behind the
+        // same bridge: the UI showed "data stuck for minutes" after every
+        // boot. Spawning a thread returns the pipe immediately.
+        "restore_sys_opt_all" => {
+            static RESTORE_RUNNING: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if RESTORE_RUNNING
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                // S55 FIX 17: catch panics. A panic inside restore_all (Appx
+                // removal, PowerShell helpers, registry guards) previously
+                // unwound into the pipe-server thread and took the WHOLE
+                // SYSTEM service down, producing an endless crash/restart
+                // loop while the app kept re-dispatching. Now the panic is
+                // contained: the service survives, the flag resets, and the
+                // failure is reported on the next attempt.
+                std::thread::spawn(|| {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::hw::sys_opt::restore_all();
+                    }));
+                    if result.is_err() {
+                        eprintln!("[sys_opt] restore_all PANICKED — service kept alive");
+                    }
+                    RESTORE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+            make_ok(Value::Null)
+        }
+
         "set_function_key" => {
             let mode: crate::hw::fn_key::FnKeyMode =
                 match serde_json::from_value(cmd.args["mode"].clone()) {

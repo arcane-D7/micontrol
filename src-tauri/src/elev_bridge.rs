@@ -164,7 +164,16 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "set_speaker_noise_canceling"
         | "set_voice_focus" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
 
-        "clean_junk_files" => Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS),
+        "clean_junk_files" | "set_sys_opt_tweak" => {
+            // S55 FIX 7: set_sys_opt_tweak can run heavy operations — OneDrive
+            // uninstall (PowerShell + OneDriveSetup wait), services sweep
+            // (multiple sc stop), Appx removals. The default 15 s timeout
+            // killed the pipe round-trip mid-operation: the UI showed an
+            // error while the bridge kept working, leaving the toggle state
+            // inconsistent ("clico num e o outro some"). Give it the slow
+            // budget (90 s).
+            Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS)
+        }
         // SCM query + start is quick (~1-2 s), but `sc failure` may hit a
         // busy SCM on cold boot — give it the medium timeout.
         "ensure_face_service" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
@@ -674,24 +683,49 @@ fn pipe_request(body: &str) -> Result<String, String> {
 
     const PIPE_OP_TIMEOUT_MS: u32 = 8_000; // per read/write wait
     const MAX_RESPONSE_BYTES: usize = 16_384;
+    // S32-005c: ERROR_PIPE_BUSY (0xE7 / 231) means the service's listener had
+    // no free instance at this instant. Previously this immediately fell
+    // through to the scheduled-task path (which spawns 3-4 failing schtasks
+    // processes and 4 WARN log lines). A short bounded retry is correct:
+    // the service accepts the next client within milliseconds.
+    const PIPE_BUSY_RETRIES: u32 = 20;
+    const PIPE_BUSY_BACKOFF_MS: u32 = 50;
 
     let path_w: Vec<u16> = std::ffi::OsStr::new(BRIDGE_PIPE_NAME)
         .encode_wide()
         .chain(Some(0))
         .collect();
 
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(path_w.as_ptr()),
-            (GENERIC_READ | GENERIC_WRITE).0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-            HANDLE::default(),
-        )
-        .map_err(|e| format!("Open bridge pipe: {e}"))?
-    };
+    let mut handle = INVALID_HANDLE_VALUE;
+    for attempt in 0..=PIPE_BUSY_RETRIES {
+        let attempt_result = unsafe {
+            CreateFileW(
+                PCWSTR(path_w.as_ptr()),
+                (GENERIC_READ | GENERIC_WRITE).0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                HANDLE::default(),
+            )
+        };
+        match attempt_result {
+            Ok(h) => {
+                handle = h;
+                break;
+            }
+            Err(e) => {
+                let busy = e.code() == windows::core::HRESULT(0x8007_00E7_u32 as i32);
+                if busy && attempt < PIPE_BUSY_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        PIPE_BUSY_BACKOFF_MS as u64,
+                    ));
+                    continue;
+                }
+                return Err(format!("Open bridge pipe: {e}"));
+            }
+        }
+    }
 
     if handle == INVALID_HANDLE_VALUE {
         return Err("INVALID_HANDLE_VALUE opening bridge pipe".to_string());

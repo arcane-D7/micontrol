@@ -400,6 +400,18 @@ fn persist_os_turbo(enabled: bool) -> HardwareResult<()> {
 pub fn restore_os_turbo() {
     #[cfg(windows)]
     {
+        // S55 FIX 8: migrate legacy state. Older builds persisted the flag in
+        // HKCU (broken — see the OS_TURBO_REG_KEY doc comment). If the HKLM
+        // key is absent but the old HKCU value says enabled, adopt it so a
+        // user who had Turbo on before the update does not see it reset.
+        if read_hklm_enabled().is_none() {
+            if let Some(legacy) = read_legacy_hkcu_enabled() {
+                if legacy {
+                    let _ = persist_os_turbo(true);
+                    log::info!("[os_turbo] restore: migrated legacy HKCU enabled state to HKLM");
+                }
+            }
+        }
         let status = match get_os_turbo() {
             Ok(s) => s,
             Err(e) => {
@@ -419,4 +431,28 @@ pub fn restore_os_turbo() {
             log::info!("[os_turbo] restore: throttle sweep done ({n} processes seen)");
         });
     }
+}
+
+/// Read the HKLM Enabled flag; `None` when the key/value does not exist.
+#[cfg(windows)]
+fn read_hklm_enabled() -> Option<bool> {
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, OS_TURBO_REG_KEY)
+        .ok()
+        .flatten()
+        .and_then(|k| k.read_u32("Enabled").ok().flatten())
+        .map(|v| v != 0)
+}
+
+/// Read the legacy HKCU flag written by pre-S50 builds.
+#[cfg(windows)]
+fn read_legacy_hkcu_enabled() -> Option<bool> {
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    RegKeyGuard::open_read(HKEY_CURRENT_USER, OS_TURBO_REG_KEY)
+        .ok()
+        .flatten()
+        .and_then(|k| k.read_u32("Enabled").ok().flatten())
+        .map(|v| v != 0)
 }

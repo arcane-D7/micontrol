@@ -100,14 +100,64 @@ static TRAY_SHOWN_AT_MS: AtomicU64 = AtomicU64::new(0);
 /// Open (or show) the main application window.
 #[tauri::command]
 async fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    // S55 FIX 13 (root cause found): window operations (show/set_focus/
+    // set_always_on_top) MUST run on the process main thread on Windows.
+    // The context-menu path (`open_window_sync` via on_menu_event) already
+    // runs there, which is why "Open MiControl" from the right-click menu
+    // worked. This command, however, is invoked from the tray popup's
+    // WebView and lands on a tokio worker thread — calling win.show()/
+    // set_focus() from there silently no-ops (Win32 UI calls from the wrong
+    // thread), so the hidden/minimized main window never appeared.
+    // Fix: marshal the whole raise sequence onto the main thread.
+    //
+    // S55 FIX 15: do NOT hide the popup here. Hiding the popup from the
+    // backend can race the in-flight invoke (the popup's WebView gets torn
+    // down while the call is still pending, cancelling it — observed as
+    // "Open App does nothing"). The popup hides itself via its focus-loss
+    // handler as soon as the main window takes focus.
+    let app_for_main = app.clone();
+    app.run_on_main_thread(move || raise_main_window(&app_for_main))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Show, un-minimize and focus the main window. Handles the three failure
+/// modes reported by users: window minimized (show() alone does not restore
+/// it), window behind other windows (set_focus alone may not raise it) and
+/// WebView2 focus quirks (brief always-on-top forces the z-order).
+fn raise_main_window(app: &tauri::AppHandle) {
     match app.get_webview_window("main") {
         Some(win) => {
-            win.show().map_err(|e| e.to_string())?;
-            win.set_focus().map_err(|e| e.to_string())?;
+            // S55 FIX 16: call ShowWindow(SW_RESTORE) via Win32 FIRST. Tauri's
+            // `show()` consults its own visibility state and can no-op when
+            // that state is out of sync with reality (webview crash, external
+            // hide), leaving the window invisible while the app believes it is
+            // showing it. The raw Win32 call is unconditional and idempotent:
+            // it restores from minimized AND unhides in one step.
+            #[cfg(windows)]
+            unsafe {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_RESTORE};
+                if let Ok(hwnd) = win.hwnd() {
+                    let _ = ShowWindow(HWND(hwnd.0), SW_RESTORE);
+                }
+            }
+            let _ = win.show();
+            let _ = win.set_focus();
+            // Force-raise: always-on-top for an instant beats z-order races.
+            let _ = win.set_always_on_top(true);
+            let _ = win.set_focus();
+            let app2 = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(180));
+                if let Some(w) = app2.get_webview_window("main") {
+                    let _ = w.set_always_on_top(false);
+                }
+            });
         }
         None => {
-            tauri::WebviewWindowBuilder::new(
-                &app,
+            let _ = tauri::WebviewWindowBuilder::new(
+                app,
                 "main",
                 tauri::WebviewUrl::App("index.html?window=main".into()),
             )
@@ -115,11 +165,9 @@ async fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
             .inner_size(950.0, 660.0)
             .resizable(true)
             .decorations(true)
-            .build()
-            .map_err(|e| e.to_string())?;
+            .build();
         }
     }
-    Ok(())
 }
 
 // ── Data deletion (GDPR Art.17, S10-012) ─────────────────────────────────────
@@ -305,10 +353,20 @@ pub fn run() {
 
     // MCP Bridge plugin — enables AI assistants to inspect and interact
     // with the Tauri app (screenshots, DOM, IPC calls, console logs).
-    // Debug builds only (interactive debugging aid; not shipped to users
-    // unless they opt in via the Settings → "MCP Integration" toggle below).
+    // S55 FIX 20: enabled in ALL builds behind the user-facing Settings →
+    // "MCP Integration" toggle (persisted flag, OFF by default). It was
+    // previously `#[cfg(debug_assertions)]`-only, which made the installed
+    // release build impossible to debug remotely — exactly when we need it.
+    // The toggle gate (`start_socket_server`/bridge init) is the security
+    // boundary, not the build profile.
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    #[cfg(not(debug_assertions))]
+    let builder = if crate::util::mcp_config::is_enabled() {
+        builder.plugin(tauri_plugin_mcp_bridge::init())
+    } else {
+        builder
+    };
 
     // P3GLEG tauri-plugin-mcp — MCP server (screenshots, DOM access,
     // input simulation, IPC inspection, log querying). TCP localhost:4000.
@@ -801,7 +859,16 @@ pub fn run() {
 
             // S53: re-apply enabled System Optimization tweaks (feature
             // updates and Windows servicing reset HKLM policies).
-            std::thread::spawn(crate::hw::sys_opt::restore_all);
+            // S55 FIX 17: the automatic boot re-apply is DISABLED. It was the
+            // trigger of a service crash-loop: app boot → restore_sys_opt_all
+            // → bridge spawns restore threads → bridge crashes (0xc0000005)
+            // → SCM restarts → app health check sees pipe down → dispatches
+            // again → crash again, indefinitely. Every tweak is already
+            // persisted in the registry and the user can re-apply any of them
+            // individually from the Debloater UI, so the boot-time sweep adds
+            // risk without benefit. If an automatic re-apply is wanted later,
+            // it must first be made crash-proof (the restore path panics under
+            // concurrency inside the SYSTEM service).
 
             // Give the gesture thread access to the app handle so it can show the OSD.
             crate::hw::touchpad::set_app_handle(app.handle().clone());
@@ -1057,9 +1124,10 @@ fn now_ms() -> u64 {
 }
 
 fn open_window_sync(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
+    // S55 FIX 10: same robustness as raise_main_window (unminimize + forced
+    // z-order raise). Reuses the helper, rebuilding the window when absent.
+    if app.get_webview_window("main").is_some() {
+        raise_main_window(app);
     } else {
         let _ = tauri::WebviewWindowBuilder::new(
             app,
