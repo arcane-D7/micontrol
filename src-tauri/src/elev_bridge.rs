@@ -688,6 +688,13 @@ fn pipe_request(body: &str) -> Result<String, String> {
     // through to the scheduled-task path (which spawns 3-4 failing schtasks
     // processes and 4 WARN log lines). A short bounded retry is correct:
     // the service accepts the next client within milliseconds.
+    //
+    // S55 FIX 22: ERROR_FILE_NOT_FOUND (0x2) is equally transient. The
+    // accept loop hands a connected instance to a client thread and then
+    // recreates the listener; in that sub-millisecond window NO instance
+    // exists and CreateFileW returns 0x2. Retrying is correct — the next
+    // listener appears immediately. Without this, the first elevated call
+    // after boot periodically fell back to the (missing) scheduled task.
     const PIPE_BUSY_RETRIES: u32 = 20;
     const PIPE_BUSY_BACKOFF_MS: u32 = 50;
 
@@ -715,8 +722,10 @@ fn pipe_request(body: &str) -> Result<String, String> {
                 break;
             }
             Err(e) => {
-                let busy = e.code() == windows::core::HRESULT(0x8007_00E7_u32 as i32);
-                if busy && attempt < PIPE_BUSY_RETRIES {
+                let code = e.code();
+                let busy = code == windows::core::HRESULT(0x8007_00E7_u32 as i32);
+                let transient_absent = code == windows::core::HRESULT(0x8007_0002_u32 as i32);
+                if (busy || transient_absent) && attempt < PIPE_BUSY_RETRIES {
                     std::thread::sleep(std::time::Duration::from_millis(
                         PIPE_BUSY_BACKOFF_MS as u64,
                     ));

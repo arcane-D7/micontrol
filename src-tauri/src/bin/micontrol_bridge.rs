@@ -779,7 +779,7 @@ mod pipe_server {
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
         PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
-    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
     use windows::Win32::System::IO::CancelIoEx;
 
     /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
@@ -910,8 +910,31 @@ mod pipe_server {
                 }
             };
 
+            // S55 FIX 21: the previous loop waited only 500 ms for a client and
+            // CANCELLED + destroyed the instance on timeout. A client that
+            // connected inside that tiny window could be orphaned — its
+            // CreateFileW succeeded, but the instance (and its pending
+            // ConnectNamedPipe I/O) was destroyed before handle_client could
+            // run. The client then saw read=0/EOF with no response, which the
+            // app logged as "No response from bridge service (timed out or
+            // empty)" and fell back to the (broken) scheduled-task path.
+            // Observed empirically: the FIRST request after an idle period hit
+            // the race consistently, so every tab's first elevated call failed.
+            //
+            // FIX: wait on the overlapped event INDEFINITELY instead of 500 ms.
+            // ConnectNamedPipe with FILE_FLAG_OVERLAPPED returns immediately
+            // (ERROR_IO_PENDING); the event fires when a client connects. A
+            // client connection IS the wake-up, so blocking forever is correct:
+            // each loop iteration parks until a real client arrives, then the
+            // instance is handed to a dedicated client thread and the loop
+            // immediately creates the next listening instance. Service stop
+            // still works because the SCM stop path terminates the process.
             let _ = unsafe { ConnectNamedPipe(handle, Some(&mut overlapped)) };
-            let wait_result = unsafe { WaitForSingleObject(event, 500) };
+            // ERROR_IO_PENDING (997) is the expected overlapped result; any
+            // other hard failure (or ERROR_PIPE_CONNECTED, where a client
+            // connected before ConnectNamedPipe was called and the event is
+            // already/signalled) is handled below.
+            let wait_result = unsafe { WaitForSingleObject(event, INFINITE) };
 
             if wait_result != WAIT_OBJECT_0 {
                 unsafe {
