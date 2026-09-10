@@ -79,12 +79,13 @@
 
 ### miControl Audit Sprints (from `Audit_Report_miControl.md`) — ✅ COMPLETE
 
-| Sprint | Priority    | Focus                           | Tickets | Effort     | Status       | File                                             |
-| ------ | ----------- | ------------------------------- | ------- | ---------- | ------------ | ------------------------------------------------ |
-| 34     | P0 CRITICAL | Auth Bridge UAC + Quick Wins    | 7       | ~2–3 days  | ✅ `309bfa3` | `sprint-34-p0-critical-auth-bridge/plan.md`      |
-| 35     | P1 HIGH     | Temperature, Volume, Tray, WiFi | 7       | ~3–4 days  | ✅ `45b0d5a` | `sprint-35-p1-high-temperature-volume/plan.md`   |
-| 36     | P2 MEDIUM   | Security Hardening              | 4       | ~2–3 days  | ✅ `0a67897` | `sprint-36-p2-medium-security-hardening/plan.md` |
-| 37     | P1 HIGH     | Audio Switching + WiFi WlanAPI  | 5       | ~5–10 days | ✅ `10af034` | `sprint-37-p1-high-audio-wifi-features/plan.md`  |
+| Sprint | Priority    | Focus                            | Tickets | Effort     | Status       | File                                             |
+| ------ | ----------- | -------------------------------- | ------- | ---------- | ------------ | ------------------------------------------------ |
+| 34     | P0 CRITICAL | Auth Bridge UAC + Quick Wins     | 7       | ~2–3 days  | ✅ `309bfa3` | `sprint-34-p0-critical-auth-bridge/plan.md`      |
+| 35     | P1 HIGH     | Temperature, Volume, Tray, WiFi  | 7       | ~3–4 days  | ✅ `45b0d5a` | `sprint-35-p1-high-temperature-volume/plan.md`   |
+| 36     | P2 MEDIUM   | Security Hardening               | 4       | ~2–3 days  | ✅ `0a67897` | `sprint-36-p2-medium-security-hardening/plan.md` |
+| 37     | P1 HIGH     | Audio Switching + WiFi WlanAPI   | 5       | ~5–10 days | ✅ `b47dea0` | `sprint-37-p1-high-audio-wifi-features/plan.md`  |
+| S55    | P0 CRITICAL | Stability: crash-loop, UAC, tray | —       | —          | ✅ `6e645c9` | (stabilization round, no plan file)              |
 
 **miControl Audit totals:** 7 (S34) + 7 (S35) + 4 (S36) + 5 (S37) = 23 tickets, ~12–19 days effort
 
@@ -94,6 +95,7 @@
 - **S35:** Fixes temperature sensors (remove 50°C fallback, use Option<f32>), volume slider dirty flag, tray CSS verification, WiFi delay increase
 - **S36:** Security hardening (atomic result write, directory ACL, diag_ps gate, USERNAME→GetUserNameW)
 - **S37:** New features (IPolicyConfig audio device switching, WlanAPI replacing netsh for WiFi)
+- **S55:** Service crash-loop fix (watchdog off by default, catch_unwind on poll/restore), no boot re-apply, heartbeat on dedicated OS thread, tray Open App via run_on_main_thread + SW_RESTORE, OS Turbo HKCU→HKLM migration, debloater UI/i18n polish, mcp-bridge enabled in release behind HKCU toggle
 
 ---
 
@@ -252,6 +254,7 @@ Sprint 34 (P0) ──► Sprint 35 (P1) ──► Sprint 36 (P2) ──► Sprin
 **Sprint 36** fixes 4 security issues (atomic writes, directory ACL, diag_ps gate, USERNAME spoofing).
 **Sprint 37** implements audio device switching (IPolicyConfig COM) and replaces netsh with WlanAPI for locale-independent WiFi.
 **After S37:** All 6 user-reported bugs fixed. All 4 security issues resolved. Zero UAC prompts in production.
+**After S55 (stabilization round):** Bridge service crash-loop eliminated (fix17–fix19), UAC storm on power-profile change eliminated (stable pipe), tray Open App restored (fix13/16), debloater UI released with tiered removal + state badges.
 
 ---
 
