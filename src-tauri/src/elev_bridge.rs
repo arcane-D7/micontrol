@@ -681,7 +681,15 @@ fn pipe_request(body: &str) -> Result<String, String> {
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
     use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult};
 
-    const PIPE_OP_TIMEOUT_MS: u32 = 8_000; // per read/write wait
+    // S55 FIX 25c: was 8s. `ensure_ecram_service` legitimately takes ~10.4s
+    // (pipe probe + DriverStore check + service restart retries — measured in
+    // bridge.log), which exceeded the old per-op wait: the app cancelled the
+    // read, logged "No response from bridge service" and fell back to the
+    // missing scheduled task every ~2.5 min, even though the service answered
+    // fine 2s later. 30s still bounds a wedged service well below the
+    // scheduled-task round-trip (~15s+), and slow commands keep their own
+    // larger budgets in timeout_for_cmd.
+    const PIPE_OP_TIMEOUT_MS: u32 = 30_000; // per read/write wait
     const MAX_RESPONSE_BYTES: usize = 16_384;
     // S32-005c: ERROR_PIPE_BUSY (0xE7 / 231) means the service's listener had
     // no free instance at this instant. Previously this immediately fell

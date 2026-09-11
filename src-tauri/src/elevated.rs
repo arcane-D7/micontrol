@@ -1871,6 +1871,48 @@ fn install_bridge_service() -> Result<Value, String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
+    // S55 FIX 25: if the bridge service is ALREADY installed and running, do
+    // nothing. This command can arrive through the pipe itself (the app's
+    // thermal poller calls ensure_bridge_service whenever a transient
+    // ERROR_PIPE_BUSY makes `is_bridge_service_available` return false).
+    // Without this guard the running service would run `micontrol_bridge.exe
+    // install`, whose first step is remove_service_wait — stopping and
+    // DELETING the very service executing it. The pipe dies mid-request, the
+    // app logs "No response from bridge service" every ~2.5 min, and the
+    // service only recovers via its SCM failure actions. A no-op here is
+    // always correct: the caller's goal (a running service) is already met.
+    {
+        use windows::Win32::System::Services;
+        unsafe {
+            if let Ok(scm) = Services::OpenSCManagerW(None, None, Services::SC_MANAGER_CONNECT) {
+                let name: Vec<u16> = "MiControlBridge\0".encode_utf16().collect();
+                if let Ok(svc) = Services::OpenServiceW(
+                    scm,
+                    windows::core::PCWSTR(name.as_ptr()),
+                    Services::SERVICE_QUERY_STATUS,
+                ) {
+                    let mut status: Services::SERVICE_STATUS = std::mem::zeroed();
+                    let running = Services::QueryServiceStatus(svc, &mut status).is_ok()
+                        && status.dwCurrentState == Services::SERVICE_RUNNING;
+                    let _ = Services::CloseServiceHandle(svc);
+                    let _ = Services::CloseServiceHandle(scm);
+                    if running {
+                        log::info!(
+                            "install_bridge_service: service already running — no-op (S55 FIX 25)"
+                        );
+                        return Ok(json!({
+                            "service_installed": true,
+                            "already_running": true,
+                            "output": "service already running; nothing to do",
+                        }));
+                    }
+                } else {
+                    let _ = Services::CloseServiceHandle(scm);
+                }
+            }
+        }
+    }
+
     // Find the bridge executable.
     let bridge_exe = find_bridge_exe().ok_or_else(|| {
         "micontrol_bridge.exe not found (not bundled with this installation)".to_string()

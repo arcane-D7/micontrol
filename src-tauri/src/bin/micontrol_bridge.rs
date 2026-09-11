@@ -1036,7 +1036,30 @@ mod pipe_server {
         }
     }
 
+    /// S55 FIX 25b: service-side request log (ProgramData\MiControl\logs\
+    /// bridge.log). eprintln is invisible for a windowed service, and without
+    /// this there was NO way to see whether a client request even reached the
+    /// worker — the recurring "No response" loop was undiagnosable.
+    fn bridge_log(msg: &str) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let dir = std::path::Path::new("C:\\ProgramData\\MiControl\\logs");
+        let _ = std::fs::create_dir_all(dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("bridge.log"))
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{ts} {msg}");
+        }
+    }
+
     fn handle_client(handle: windows::Win32::Foundation::HANDLE) {
+        let t0 = std::time::Instant::now();
+        bridge_log("client connected");
         // S55 FIX 24d: the pipe instance was created with FILE_FLAG_OVERLAPPED
         // (required by the async accept). Doing SYNCHRONOUS ReadFile/WriteFile
         // (overlapped=None) on an async handle is invalid: the call starts the
@@ -1113,6 +1136,7 @@ mod pipe_server {
         }
 
         if total_read == 0 {
+            bridge_log("read 0 bytes (client closed before sending)");
             unsafe {
                 CloseHandle(io_event).ok();
             }
@@ -1120,11 +1144,25 @@ mod pipe_server {
         }
 
         let request_str = String::from_utf8_lossy(&read_buf[..total_read]).to_string();
+        let cmd_desc = serde_json::from_str::<serde_json::Value>(&request_str)
+            .ok()
+            .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| "<unparseable>".to_string());
+        bridge_log(&format!("request received: cmd={cmd_desc}"));
         let response = process_request(&request_str);
+        bridge_log(&format!(
+            "dispatch done: cmd={cmd_desc} elapsed_ms={}",
+            t0.elapsed().as_millis()
+        ));
 
         // ── Write the response (overlapped, bounded) ────
         let mut resp_bytes = response.into_bytes();
-        let _ = do_io(&mut resp_bytes, true);
+        let wrote = do_io(&mut resp_bytes, true);
+        bridge_log(&format!(
+            "response written: cmd={cmd_desc} ok={} total_elapsed_ms={}",
+            wrote.is_some(),
+            t0.elapsed().as_millis()
+        ));
 
         unsafe {
             // Push the response fully to the client before tearing the pipe
