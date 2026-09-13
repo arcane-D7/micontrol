@@ -109,6 +109,14 @@ pub async fn read_ai_perf_logs(
     let cap = limit.unwrap_or(100).min(500) as usize;
     let dir = log_dir(&app)?;
 
+    // S55: log_dir() already creates the dir, but if it somehow vanished
+    // (cleanup between install/update), read_dir would error and the UI's
+    // "View Logs" button would silently show an empty list. Recreate
+    // defensively so the read always succeeds.
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create log dir: {e}"))?;
+    }
+
     // Collect all .jsonl files, sorted by name descending (newest first by YYYY-MM-DD)
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|e| format!("Cannot list log dir: {e}"))?
