@@ -2043,8 +2043,12 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
     // `spawn()` returns in a few milliseconds → we answer the bridge request
     // immediately → the app shows "installing…" → the installer replaces the
     // binaries and /R relaunches the new version (~2–5 s later).
+    // S55 FIX 26: /P (passive) makes the reinstall page auto-resolve instead
+    // of leaving the same-version reinstall dialog in an undefined state in
+    // silent mode — the observed cause of "installer kills the app, updates
+    // nothing, aborts silently" on same-version update attempts.
     let child = Command::new(&installer_exe)
-        .args(["/S", "/UPDATE", "/R"])
+        .args(["/S", "/P", "/UPDATE", "/R"])
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("Failed to launch installer {installer_exe}: {e}"))?;

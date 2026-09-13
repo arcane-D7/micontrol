@@ -239,10 +239,45 @@
   ${If} $0 = 0
     DetailPrint "  MiControlBridge service installed: $0 (OK)"
   ${Else}
-    DetailPrint "  ERROR: MiControlBridge service install failed with code $0"
-    ; Abort cancels the install with a message — the user sees why instead
-    ; of a "successful" install with services missing.
-    Abort "Failed to install the MiControlBridge service (code $0). Make sure the installer was run as Administrator and try again."
+    DetailPrint "  WARNING: MiControlBridge install returned code $0 — attempting direct sc.exe fallback."
+    ; S55 FIX 26: `install` can fail on upgrades when the old service entry is
+    ; stuck marked-for-delete (stale SCM handles held by the dying parent
+    ; service that spawned this installer) — a plain `Abort` here left the
+    ; machine with NO service and NO self-heal path for regular users.
+    ; Fallback chain, all best-effort:
+    ;   1. wait up to 30s for the pending delete to settle
+    ;   2. `sc create` + failure-actions + `sc start` directly
+    ; The app ALSO self-heals at next start (ensure_bridge_service), so a
+    ; worst-case failure here is recoverable, not fatal.
+    StrCpy $1 0
+    bridge_retry_wait:
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" query MiControlBridge'
+      Pop $2
+      ${If} $2 <> 0
+        Goto bridge_retry_create   ; 1060 = entry gone → create now
+      ${EndIf}
+      Sleep 1000
+      IntOp $1 $1 + 1
+      ${If} $1 < 30
+        Goto bridge_retry_wait
+      ${EndIf}
+    bridge_retry_create:
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" create MiControlBridge binPath= "\"$INSTDIR\micontrol_bridge.exe\" service" start= auto DisplayName= "MiControl Bridge Service"'
+      Pop $2
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" failure MiControlBridge reset= 86400 actions= restart/5000/restart/10000/restart/30000'
+      Pop $2
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" start MiControlBridge'
+      Pop $2
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" query MiControlBridge'
+      Pop $2
+      ${If} $2 = 0
+        DetailPrint "  MiControlBridge service created via direct sc.exe fallback."
+      ${Else}
+        DetailPrint "  WARNING: MiControlBridge could not be created — the app will self-heal on next start (elevated path)."
+      ${EndIf}
+    ; S55 FIX 26: never Abort the whole installer for the bridge service.
+    ; Files are already in place; the app itself works without the service
+    ; (elevated ops degrade gracefully) and self-heals on next start.
   ${EndIf}
 
   ; ── Face Unlock (Windows Hello-style, RGB webcam) ──────────────────────────
