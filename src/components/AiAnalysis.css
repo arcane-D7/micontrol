@@ -426,7 +426,7 @@
   padding: 10px 14px;
   background: color-mix(in srgb, var(--error, #f44336) 12%, transparent);
   border-radius: var(--r-sm);
-  border-left: 3px solid var(--error, #f44336);
+  border: 1px solid color-mix(in srgb, var(--error, #f44336) 45%, transparent);
   font-size: 12px;
   color: var(--error, #f44336);
   margin-bottom: 12px;
@@ -455,7 +455,7 @@
   padding: 14px 16px;
   background: var(--surface-2);
   border-radius: var(--r-sm);
-  border-left: 3px solid var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .ai-analysis-empty {

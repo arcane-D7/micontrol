@@ -123,12 +123,35 @@ export default function AudioControl({
         </span>
       </div>
 
-      {/* Device List — loading state */}
+      {/* Device List — loading state (skeleton rows, product pattern) */}
       {devices === null && (
-        <div className="loading-container" role="status" aria-live="polite">
-          <span className="spinner" />
-          <span>{t('audio.loadingDevices')}</span>
+        <div role="status" aria-live="polite" aria-busy="true">
           <span className="sr-only">{t('common.loading')}</span>
+          {[0, 1, 2].map((row) => (
+            <div
+              key={row}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 0',
+              }}
+            >
+              <span
+                className="skeleton"
+                style={{ width: 18, height: 18, borderRadius: '50%', flexShrink: 0 }}
+              />
+              <span
+                className="skeleton"
+                style={{
+                  flex: 1,
+                  height: 12,
+                  borderRadius: 6,
+                  opacity: 1 - row * 0.25,
+                }}
+              />
+            </div>
+          ))}
         </div>
       )}
 

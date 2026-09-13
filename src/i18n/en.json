@@ -578,7 +578,25 @@
   },
   "system": {
     "title": "System & Drivers",
-    "subtitle": "Hardware discovery, driver details, and IoT module access"
+    "subtitle": "Hardware discovery, driver details, and IoT module access",
+    "ac_connected": "AC connected",
+    "adapter_power": "Adapter power",
+    "battery_current": "Battery current",
+    "battery_voltage": "Battery voltage",
+    "battery_capacity": "Battery capacity",
+    "charge_limit": "Charge limit",
+    "battery_temp": "Battery temp",
+    "cpu_temp": "CPU temp",
+    "cpu_power": "CPU power",
+    "fan_1_rpm": "Fan 1 RPM",
+    "fan_2_rpm": "Fan 2 RPM",
+    "performance_profile": "Performance profile",
+    "tdp_override": "TDP override",
+    "smart_profile": "Smart profile",
+    "ai_limit_ailm": "AI limit (AILM)",
+    "long_battery_limit": "Long battery limit",
+    "display_brightness": "Display brightness",
+    "kb_backlight": "KB backlight"
   },
   "updates": {
     "title": "Drivers & BIOS",
@@ -1378,5 +1396,16 @@
     "nothingFound": "No junk files found. Your system is clean!",
     "about": "About System Cleanup",
     "aboutDesc": "Safely removes temporary files, update caches, browser caches, and other unnecessary files. Locked files are skipped automatically. Browser caches require browsers to be closed for complete removal."
+  },
+  "face": {
+    "single_rgb_camera": "single RGB camera",
+    "diagnostics": "Diagnostics",
+    "diagnostics_error": "Diagnostics error",
+    "unsaved_changes": "Unsaved changes",
+    "similarity_threshold": "Similarity threshold",
+    "show_tile_at_sign_in": "Show tile at sign-in",
+    "re_enrollment_reminder": "Re-enrollment reminder",
+    "anti_spoof_threshold": "Anti-spoof threshold",
+    "face_unlock_power": "Face Unlock power"
   }
 }

@@ -379,17 +379,13 @@ body {
   line-height: 1.05;
   letter-spacing: -0.03em;
   margin: 0 0 1.5rem;
-  background: linear-gradient(135deg, #fff 0%, #c4c8d8 50%, #8b8fa3 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  /* Impeccable ban: no background-clip:text gradient. Solid tinted near-white
+     preserves the depth cue the gradient tried to fake. */
+  color: var(--lp-text, #e8eaf2);
 }
 
 .hero-title-accent {
-  background: linear-gradient(135deg, var(--lp-accent) 0%, var(--lp-cyan) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--lp-accent);
 }
 
 .hero-subtitle {
@@ -1028,10 +1024,8 @@ body {
   font-weight: 700;
   letter-spacing: -0.02em;
   margin: 0 0 1.5rem;
-  background: linear-gradient(135deg, #fff 0%, var(--lp-accent) 50%, var(--lp-cyan) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  /* Impeccable ban: no gradient text. Accent carries the emphasis. */
+  color: var(--lp-accent);
 }
 
 .download-section p {

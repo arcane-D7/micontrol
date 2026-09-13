@@ -578,7 +578,25 @@
   },
   "system": {
     "title": "Système et Pilotes",
-    "subtitle": "Détection matérielle, détails des pilotes et accès au module IoT"
+    "subtitle": "Détection matérielle, détails des pilotes et accès au module IoT",
+    "ac_connected": "Secteur connecté",
+    "adapter_power": "Puissance de l’adaptateur",
+    "battery_current": "Courant de la batterie",
+    "battery_voltage": "Tension de la batterie",
+    "battery_capacity": "Capacité de la batterie",
+    "charge_limit": "Limite de charge",
+    "battery_temp": "Temp. de la batterie",
+    "cpu_temp": "Temp. du CPU",
+    "cpu_power": "Puissance du CPU",
+    "fan_1_rpm": "RPM ventilateur 1",
+    "fan_2_rpm": "RPM ventilateur 2",
+    "performance_profile": "Profil de performance",
+    "tdp_override": "Dérogation TDP",
+    "smart_profile": "Profil intelligent",
+    "ai_limit_ailm": "Limite IA (AILM)",
+    "long_battery_limit": "Limite de batterie prolongée",
+    "display_brightness": "Luminosité de l’écran",
+    "kb_backlight": "Rétroéclairage du clavier"
   },
   "updates": {
     "title": "Pilotes et BIOS",
@@ -1378,5 +1396,16 @@
     "nothingFound": "Aucun fichier inutile trouvé. Votre système est propre !",
     "about": "À propos du Nettoyage Système",
     "aboutDesc": "Supprime en toute sécurité les fichiers temporaires, caches de mise à jour, caches de navigateur et autres fichiers inutiles. Les fichiers verrouillés sont ignorés automatiquement. Les caches de navigateur nécessitent que les navigateurs soient fermés pour une suppression complète."
+  },
+  "face": {
+    "single_rgb_camera": "caméra RGB unique",
+    "diagnostics": "Diagnostic",
+    "diagnostics_error": "Erreur de diagnostic",
+    "unsaved_changes": "Modifications non enregistrées",
+    "similarity_threshold": "Seuil de similarité",
+    "show_tile_at_sign_in": "Afficher la tuile à l’ouverture de session",
+    "re_enrollment_reminder": "Rappel de réinscription",
+    "anti_spoof_threshold": "Seuil anti-usurpation",
+    "face_unlock_power": "Activer/désactiver Face Unlock"
   }
 }

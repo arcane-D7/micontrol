@@ -578,7 +578,25 @@
   },
   "system": {
     "title": "Sistema y Controladores",
-    "subtitle": "Detección de hardware, detalles de controladores y acceso al módulo IoT"
+    "subtitle": "Detección de hardware, detalles de controladores y acceso al módulo IoT",
+    "ac_connected": "AC conectado",
+    "adapter_power": "Potencia del adaptador",
+    "battery_current": "Corriente de la batería",
+    "battery_voltage": "Voltaje de la batería",
+    "battery_capacity": "Capacidad de la batería",
+    "charge_limit": "Límite de carga",
+    "battery_temp": "Temp. de la batería",
+    "cpu_temp": "Temp. de la CPU",
+    "cpu_power": "Potencia de la CPU",
+    "fan_1_rpm": "RPM ventilador 1",
+    "fan_2_rpm": "RPM ventilador 2",
+    "performance_profile": "Perfil de rendimiento",
+    "tdp_override": "Anulación de TDP",
+    "smart_profile": "Perfil inteligente",
+    "ai_limit_ailm": "Límite IA (AILM)",
+    "long_battery_limit": "Límite de batería prolongada",
+    "display_brightness": "Brillo de la pantalla",
+    "kb_backlight": "Retroiluminación del teclado"
   },
   "updates": {
     "title": "Controladores y BIOS",
@@ -1378,5 +1396,16 @@
     "nothingFound": "No se encontraron archivos basura. ¡Tu sistema está limpio!",
     "about": "Acerca de la Limpieza del Sistema",
     "aboutDesc": "Elimina de forma segura archivos temporales, cachés de actualización, cachés de navegador y otros archivos innecesarios. Los archivos bloqueados se omiten automáticamente. Las cachés de navegador requieren que los navegadores estén cerrados para su eliminación completa."
+  },
+  "face": {
+    "single_rgb_camera": "cámara RGB única",
+    "diagnostics": "Diagnóstico",
+    "diagnostics_error": "Error de diagnóstico",
+    "unsaved_changes": "Cambios sin guardar",
+    "similarity_threshold": "Umbral de similitud",
+    "show_tile_at_sign_in": "Mostrar mosaico en el inicio de sesión",
+    "re_enrollment_reminder": "Recordatorio de reregistro",
+    "anti_spoof_threshold": "Umbral antifalsificación",
+    "face_unlock_power": "Activar/desactivar Face Unlock"
   }
 }

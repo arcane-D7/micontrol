@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import InfoModal from '../../components/InfoModal';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import { PageHeader } from './PageHeader';
+import { t } from '../../hooks/useI18n';
 
 interface FaceStatus {
   service_installed: boolean;
@@ -1210,17 +1211,17 @@ export default function FaceUnlockTab() {
             <circle cx="8" cy="11.1" r="0.9" fill="var(--warning)" />
           </svg>
           <p className="page-subtitle" style={{ margin: 0, maxWidth: '78ch' }}>
-            Face Unlock here uses a <b>single RGB camera</b>, which is far less secure than the
-            infrared sensor of Windows Hello. A high-quality photo or video may bypass it, so avoid
-            enabling it on machines storing sensitive data. A restore point is recommended before
-            using the lock-screen provider.
+            Face Unlock here uses a <b>{t('face.single_rgb_camera')}</b>, which is far less secure
+            than the infrared sensor of Windows Hello. A high-quality photo or video may bypass it,
+            so avoid enabling it on machines storing sensitive data. A restore point is recommended
+            before using the lock-screen provider.
           </p>
         </div>
       )}
 
       {diagnostics && (
         <div className="card">
-          <div className="card-title">Diagnostics</div>
+          <div className="card-title">{t('face.diagnostics')}</div>
           <div
             style={{
               display: 'grid',
@@ -1283,7 +1284,7 @@ export default function FaceUnlockTab() {
       )}
       {diagnosticsError && (
         <div className="card">
-          <div className="card-title">Diagnostics error</div>
+          <div className="card-title">{t('face.diagnostics_error')}</div>
           <p style={{ margin: 0, fontSize: 13, color: 'var(--error)' }}>{diagnosticsError}</p>
         </div>
       )}
@@ -1308,7 +1309,9 @@ export default function FaceUnlockTab() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             {dirty && (
-              <span style={{ fontSize: 12, color: 'var(--warning)' }}>Unsaved changes</span>
+              <span style={{ fontSize: 12, color: 'var(--warning)' }}>
+                {t('face.unsaved_changes')}
+              </span>
             )}
             <button
               className="btn btn-primary"
@@ -1345,7 +1348,9 @@ export default function FaceUnlockTab() {
             </div>
             <div style={{ display: 'grid', gap: 12 }}>
               <label style={{ display: 'grid', gap: 5 }}>
-                <span style={{ fontSize: 13, color: 'var(--text)' }}>Similarity threshold</span>
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  {t('face.similarity_threshold')}
+                </span>
                 <input
                   type="range"
                   min={0.4}
@@ -1442,7 +1447,9 @@ export default function FaceUnlockTab() {
                   gap: 12,
                 }}
               >
-                <span style={{ fontSize: 13, color: 'var(--text)' }}>Show tile at sign-in</span>
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  {t('face.show_tile_at_sign_in')}
+                </span>
                 <ToggleSwitch
                   checked={settings.face_unlock_logon_enabled}
                   onChange={(v) => set({ face_unlock_logon_enabled: v })}
@@ -1467,7 +1474,9 @@ export default function FaceUnlockTab() {
                 />
               </label>
               <label style={{ display: 'grid', gap: 5 }}>
-                <span style={{ fontSize: 13, color: 'var(--text)' }}>Re-enrollment reminder</span>
+                <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                  {t('face.re_enrollment_reminder')}
+                </span>
                 <input
                   type="range"
                   min={0}
@@ -1566,7 +1575,9 @@ export default function FaceUnlockTab() {
                 gap: 12,
               }}
             >
-              <span style={{ fontSize: 13, color: 'var(--text)' }}>Anti-spoof threshold</span>
+              <span style={{ fontSize: 13, color: 'var(--text)' }}>
+                {t('face.anti_spoof_threshold')}
+              </span>
               <input
                 className="text-input"
                 type="number"
@@ -1592,7 +1603,7 @@ export default function FaceUnlockTab() {
           className="card-title"
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
         >
-          <span>Face Unlock power</span>
+          <span>{t('face.face_unlock_power')}</span>
           <ToggleSwitch
             checked={settings.face_unlock_enabled}
             onChange={(v) => void toggleMaster(v)}

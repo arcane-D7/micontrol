@@ -754,6 +754,17 @@ input[type='range']:active::-webkit-slider-thumb {
   cursor: grabbing;
   transform: scale(1.1);
 }
+/* WCAG 2.4.7: keyboard focus ring on the slider thumb (the global
+   *:focus-visible outline is hidden by `outline: none` above). */
+input[type='range']:focus-visible {
+  outline: none;
+}
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 4px var(--accent-glow),
+    0 0 0 2px var(--accent),
+    var(--shadow-sm);
+}
 .slider-value {
   min-width: 46px;
   text-align: right;

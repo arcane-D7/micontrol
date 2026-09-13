@@ -208,48 +208,48 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
                 System State
               </div>
               <div className="stat-row">
-                <span className="stat-label">AC connected</span>
+                <span className="stat-label">{t('system.ac_connected')}</span>
                 <span className="stat-value">{ecramMap.ac_connected ? 'Yes' : 'No'}</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Adapter power</span>
+                <span className="stat-label">{t('system.adapter_power')}</span>
                 <span className="stat-value">{ecramMap.ac_adapter_w} W</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Battery current</span>
+                <span className="stat-label">{t('system.battery_current')}</span>
                 <span className="stat-value">{ecramMap.battery_current_ma} mA</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Battery voltage</span>
+                <span className="stat-label">{t('system.battery_voltage')}</span>
                 <span className="stat-value">{ecramMap.battery_voltage_mv} mV</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Battery capacity</span>
+                <span className="stat-label">{t('system.battery_capacity')}</span>
                 <span className="stat-value">{ecramMap.battery_capacity_mah} mAh</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Charge limit</span>
+                <span className="stat-label">{t('system.charge_limit')}</span>
                 <span className="stat-value">{ecramMap.charge_threshold_pct} %</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Battery temp</span>
+                <span className="stat-label">{t('system.battery_temp')}</span>
                 <span className="stat-value">{ecramMap.battery_temp_c} °C</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">CPU temp</span>
+                <span className="stat-label">{t('system.cpu_temp')}</span>
                 <span className="stat-value">{ecramMap.cpu_temp_c} °C</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">CPU power</span>
+                <span className="stat-label">{t('system.cpu_power')}</span>
                 <span className="stat-value">{ecramMap.cpu_power_w} W</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Fan 1 RPM</span>
+                <span className="stat-label">{t('system.fan_1_rpm')}</span>
                 <span className="stat-value">{ecramMap.fan_rpm}</span>
               </div>
               {ecramMap.fan2_rpm > 0 && (
                 <div className="stat-row">
-                  <span className="stat-label">Fan 2 RPM</span>
+                  <span className="stat-label">{t('system.fan_2_rpm')}</span>
                   <span className="stat-value">{ecramMap.fan2_rpm}</span>
                 </div>
               )}
@@ -259,18 +259,18 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
                 Mode / Limits (decoded)
               </div>
               <div className="stat-row">
-                <span className="stat-label">Performance profile</span>
+                <span className="stat-label">{t('system.performance_profile')}</span>
                 <span className="stat-value">
                   {formatPerfProfile(ecramMap.perf_profile)} (0x
                   {ecramMap.perf_profile.toString(16).toUpperCase()})
                 </span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">TDP override</span>
+                <span className="stat-label">{t('system.tdp_override')}</span>
                 <span className="stat-value">{ecramMap.tdp_w} W</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Smart profile</span>
+                <span className="stat-label">{t('system.smart_profile')}</span>
                 <span className="stat-value">{ecramMap.smart_mode_profile ?? '—'}</span>
               </div>
               <div className="stat-row">
@@ -292,23 +292,23 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
                 </span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">AI limit (AILM)</span>
+                <span className="stat-label">{t('system.ai_limit_ailm')}</span>
                 <span className="stat-value">
                   {ecramMap.ai_limit_enabled ? 'Enabled' : 'Disabled'}
                 </span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Long battery limit</span>
+                <span className="stat-label">{t('system.long_battery_limit')}</span>
                 <span className="stat-value">
                   {ecramMap.long_battery_limit_enabled ? 'Enabled' : 'Disabled'}
                 </span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">Display brightness</span>
+                <span className="stat-label">{t('system.display_brightness')}</span>
                 <span className="stat-value">{ecramMap.display_brightness_level}</span>
               </div>
               <div className="stat-row">
-                <span className="stat-label">KB backlight</span>
+                <span className="stat-label">{t('system.kb_backlight')}</span>
                 <span className="stat-value">{ecramMap.keyboard_backlight_level}</span>
               </div>
               <div className="stat-row">

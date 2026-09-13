@@ -547,7 +547,25 @@
   },
   "system": {
     "title": "Sistema e Drivers",
-    "subtitle": "Detecção de hardware, detalhes de drivers e acesso ao módulo IoT"
+    "subtitle": "Detecção de hardware, detalhes de drivers e acesso ao módulo IoT",
+    "ac_connected": "AC conectado",
+    "adapter_power": "Potência do adaptador",
+    "battery_current": "Corrente da bateria",
+    "battery_voltage": "Tensão da bateria",
+    "battery_capacity": "Capacidade da bateria",
+    "charge_limit": "Limite de carga",
+    "battery_temp": "Temp. da bateria",
+    "cpu_temp": "Temp. da CPU",
+    "cpu_power": "Potência da CPU",
+    "fan_1_rpm": "RPM ventilador 1",
+    "fan_2_rpm": "RPM ventilador 2",
+    "performance_profile": "Perfil de desempenho",
+    "tdp_override": "Override de TDP",
+    "smart_profile": "Perfil inteligente",
+    "ai_limit_ailm": "Limite IA (AILM)",
+    "long_battery_limit": "Limite de bateria prolongada",
+    "display_brightness": "Brilho da tela",
+    "kb_backlight": "Retroiluminação do teclado"
   },
   "updates": {
     "title": "Drivers & BIOS",
@@ -1378,5 +1396,16 @@
     "nothingFound": "Nenhum arquivo lixo encontrado. Seu sistema está limpo!",
     "about": "Sobre Limpeza do Sistema",
     "aboutDesc": "Remove com segurança arquivos temporários, caches de atualização, caches de navegador e outros arquivos desnecessários. Arquivos bloqueados são ignorados automaticamente. Caches de navegador requerem que os navegadores estejam fechados para remoção completa."
+  },
+  "face": {
+    "single_rgb_camera": "câmera RGB única",
+    "diagnostics": "Diagnóstico",
+    "diagnostics_error": "Erro do diagnóstico",
+    "unsaved_changes": "Alterações não salvas",
+    "similarity_threshold": "Limiar de similaridade",
+    "show_tile_at_sign_in": "Mostrar bloco na tela de login",
+    "re_enrollment_reminder": "Lembrete de recadastramento",
+    "anti_spoof_threshold": "Limiar antifalsificação",
+    "face_unlock_power": "Ligar/desligar Face Unlock"
   }
 }
