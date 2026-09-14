@@ -36,7 +36,15 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Overview',
     title: 'Full System Overview',
     description:
-      'A real-time dashboard showing CPU, GPU, memory, and storage at a glance. Hardware sensors stream live data through the Rust backend with sub-millisecond latency.',
+      'A real-time dashboard showing CPU, GPU, memory, and storage at a glance, with readings supplied by the local hardware service.',
+  },
+  {
+    id: 'taskmgr',
+    icon: '📈',
+    label: 'Task Manager',
+    title: 'Task Manager',
+    description:
+      'Inspect process CPU, GPU, NPU, memory, and network usage, then filter or sort the list when you need to find a busy process.',
   },
   {
     id: 'performance',
@@ -44,7 +52,15 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Performance',
     title: 'Performance Monitoring',
     description:
-      'Track CPU frequencies, core utilization, and thermal throttling in real time. Identify bottlenecks and optimize your workflow with detailed per-core metrics.',
+      'Track CPU frequencies, utilization, temperatures, and power information in real time to understand the current workload.',
+  },
+  {
+    id: 'sysopt',
+    icon: '🚀',
+    label: 'System Optimization',
+    title: 'System Optimization',
+    description:
+      'Review the system optimization and debloating tools available in miControl before applying changes to Windows.',
   },
   {
     id: 'battery',
@@ -52,7 +68,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Battery',
     title: 'Battery Health & Stats',
     description:
-      'Monitor charge cycles, wear level, and power draw. Smart charging thresholds extend your battery lifespan with configurable start and stop limits.',
+      'Monitor battery level, health information, power draw, and charging protection settings from one focused view.',
   },
   {
     id: 'display',
@@ -60,7 +76,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Display',
     title: 'Display Calibration',
     description:
-      'Fine-tune brightness, color temperature, and refresh rate. Night light scheduling and per-profile display presets adapt your screen to any environment.',
+      'Adjust brightness, HDR, refresh rate, adaptive refresh, and supported display options from the control center.',
   },
   {
     id: 'fan',
@@ -68,7 +84,15 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Fan Control',
     title: 'Custom Fan Curves',
     description:
-      'Create custom fan curves with temperature-triggered speed profiles. Silent, balanced, or performance modes — your Xiaomi Notebook stays cool under any load.',
+      'Read fan speed and select the cooling profile that fits the current workload, with hardware-aware controls.',
+  },
+  {
+    id: 'faceUnlock',
+    icon: '😀',
+    label: 'Face Unlock',
+    title: 'Face Unlock',
+    description:
+      'Set up and manage the face unlock workflow when the required camera, Windows account, and local configuration are available.',
   },
   {
     id: 'audio',
@@ -76,7 +100,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Audio',
     title: 'Audio Enhancement',
     description:
-      'Equalizer presets, spatial audio tuning, and device-specific output profiles. Enhance your listening experience with real-time audio processing.',
+      'Keep audio controls close to the rest of your notebook settings, with the available device controls in one place.',
   },
   {
     id: 'cast',
@@ -84,7 +108,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Cast',
     title: 'Screen Casting',
     description:
-      'Wireless display casting with Miracast support. Configure resolution, latency mode, and multi-monitor setups directly from the app.',
+      'Open the screen-casting controls alongside the rest of your notebook tools, without leaving the control center.',
   },
   {
     id: 'touchpad',
@@ -92,7 +116,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Touchpad',
     title: 'Touchpad Settings',
     description:
-      'Adjust sensitivity, palm rejection, and gesture mappings. Multi-finger swipe and tap configurations tailored to your Xiaomi touchpad hardware.',
+      'Configure the touchpad options exposed by your Xiaomi notebook and keep everyday input settings in one place.',
   },
   {
     id: 'iot',
@@ -100,7 +124,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'IoT',
     title: 'IoT Device Hub',
     description:
-      'Connect and manage smart home devices. Monitor sensors, control actuators, and automate routines — all integrated into your notebook control center.',
+      'Inspect compatible IoT hardware and device status from the same control center used for your notebook.',
   },
   {
     id: 'wifi',
@@ -108,7 +132,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'WiFi',
     title: 'WiFi Management',
     description:
-      'Scan networks, analyze signal strength, and manage saved profiles. Advanced diagnostics help you find the best channel and optimize your connection.',
+      'Inspect WiFi adapter information and use the network controls available on the current Windows system.',
   },
   {
     id: 'startup',
@@ -124,7 +148,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'System',
     title: 'System & Drivers',
     description:
-      'Hardware discovery, driver details, BIOS info, and IoT module access. Full ECRAM read/write controls for advanced configuration.',
+      'Review hardware discovery, driver details, BIOS information, and the system controls exposed by the connected notebook.',
   },
   {
     id: 'keyboard',
@@ -132,7 +156,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Keyboard',
     title: 'Keyboard Customization',
     description:
-      'Remap keys, configure backlight brightness, and set up macro profiles. Per-application keyboard layouts switch automatically as you work.',
+      'Configure supported keyboard and backlight settings for a more comfortable Xiaomi notebook setup.',
   },
   {
     id: 'ai_analysis',
@@ -140,7 +164,39 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'AI Analysis',
     title: 'AI-Powered Diagnostics',
     description:
-      'Machine learning models analyze hardware patterns to predict failures and suggest optimizations. Proactive alerts keep your system healthy.',
+      'Review hardware information and available AI-assisted analysis workflows when the feature is configured.',
+  },
+  {
+    id: 'security',
+    icon: '🛡️',
+    label: 'Security',
+    title: 'Security Tools',
+    description:
+      'Open the local security tools and review the checks available for the current Windows installation.',
+  },
+  {
+    id: 'crossDevice',
+    icon: '📱',
+    label: 'Cross Device',
+    title: 'Cross Device',
+    description:
+      'Keep the available phone and notebook integration tools close to the hardware controls in one app.',
+  },
+  {
+    id: 'color',
+    icon: '🎨',
+    label: 'Color',
+    title: 'Color Controls',
+    description:
+      'Review the color and display profile controls exposed by the connected notebook and Windows.',
+  },
+  {
+    id: 'cleanup',
+    icon: '🧹',
+    label: 'Cleanup',
+    title: 'System Cleanup',
+    description:
+      'Review cleanup actions designed to help remove selected system clutter before applying any change.',
   },
   {
     id: 'settings',
@@ -148,7 +204,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'Settings',
     title: 'App Settings',
     description:
-      'Configure telemetry, appearance, language, and notifications. Export and import profiles to sync your preferences across devices.',
+      'Configure appearance, language, telemetry consent, notifications, and other preferences for the desktop app.',
   },
   {
     id: 'about',
@@ -156,7 +212,7 @@ export const PREVIEW_TABS: PreviewTab[] = [
     label: 'About',
     title: 'About miControl',
     description:
-      'Version info, changelog, and credits. Built with Tauri 2 and React — open source and community-driven for Xiaomi Notebook owners.',
+      'Review version information, changelog, and credits for the Tauri 2 and React application built for Xiaomi Notebook owners.',
   },
 ];
 

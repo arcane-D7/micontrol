@@ -10,32 +10,32 @@ const features = [
   {
     icon: Gauge,
     title: 'Performance Modes',
-    desc: 'Switch between Balanced, Performance, and Turbo modes with a single click. Custom TDP profiles per mode.',
+    desc: 'Switch between the performance profiles supported by your notebook and keep everyday tuning in one place.',
   },
   {
     icon: Thermometer,
     title: 'Thermal Monitoring',
-    desc: 'Real-time CPU, GPU, and SSD temperature tracking with historical graphs and threshold alerts.',
+    desc: 'Monitor the hardware readings exposed by the embedded controller, including temperatures and power information.',
   },
   {
     icon: Fan,
     title: 'Fan Control',
-    desc: 'Custom fan curves with silent mode support. Set minimum RPM, maximum temperature, and ramp-up speed.',
+    desc: 'Read fan RPM in real time and choose the available cooling profile for the current workload.',
   },
   {
     icon: Battery,
-    title: 'Battery Insights',
-    desc: 'Detailed battery health, wear level, charge cycles, and estimated time remaining at current usage.',
+    title: 'Battery Care',
+    desc: 'Set a supported charge limit to reduce time spent at full charge during long plugged-in sessions.',
   },
   {
     icon: Monitor,
     title: 'Display Control',
-    desc: 'Brightness, refresh rate, and color profile management. Automatic adjustment based on ambient light.',
+    desc: 'Adjust brightness, HDR, adaptive refresh, and other display controls when they are supported by the hardware.',
   },
   {
     icon: Lock,
     title: 'Privacy First',
-    desc: 'No telemetry, no cloud sync, no data collection. Everything runs locally on your machine.',
+    desc: 'Control telemetry consent in the app settings. Hardware controls run locally, and the project source is available on GitHub.',
   },
 ];
 
@@ -74,10 +74,15 @@ export function FeaturesSection() {
   );
 
   return (
-    <section ref={sectionRef} className="features-section" id="features">
+    <section
+      ref={sectionRef}
+      className="features-section"
+      id="features"
+      aria-labelledby="features-title"
+    >
       <div className="features-header">
         <span className="lp-section-tag">Features</span>
-        <h2>
+        <h2 id="features-title">
           Everything You Need,
           <br />
           Nothing You Don&apos;t

@@ -1,58 +1,7 @@
 /* ─────────────────────────────────────────────────────────────────────────────
    MiControl — Silken Hardware Design System
-   Outfit × JetBrains Mono · OKLCH · Pastel Glass · Auto / Light / Dark
+   System UI × Cascadia Code · OKLCH · Pastel Glass · Auto / Light / Dark
    ──────────────────────────────────────────────────────────────────────────── */
-
-/* ── Locally bundled fonts (privacy & perf) ──────────────────────────────── */
-@font-face {
-  font-family: 'Outfit';
-  font-style: normal;
-  font-weight: 300;
-  font-display: swap;
-  src: url('/fonts/Outfit-300.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Outfit';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('/fonts/Outfit-400.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Outfit';
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url('/fonts/Outfit-500.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Outfit';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url('/fonts/Outfit-600.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Outfit';
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url('/fonts/Outfit-700.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'JetBrains Mono';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('/fonts/JetBrainsMono-400.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'JetBrains Mono';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url('/fonts/JetBrainsMono-600.woff2') format('woff2');
-}
 
 /* ── Light mode tokens (default) ─────────────────────────────────────────── */
 :root {

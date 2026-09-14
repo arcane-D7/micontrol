@@ -1,15 +1,6 @@
-# Local Font Files
+# Optional Local Fonts
 
-Place the following .woff2 font files here:
-
-- Outfit-300.woff2
-- Outfit-400.woff2
-- Outfit-500.woff2
-- Outfit-600.woff2
-- Outfit-700.woff2
-- JetBrainsMono-400.woff2
-- JetBrainsMono-600.woff2
-
-Download from: https://fonts.google.com/specimen/Outfit and https://www.jetbrains.com/lp/mono/
-
-These fonts are bundled locally to avoid sending user IP addresses to Google (privacy) and to avoid render-blocking external requests (performance).
+The application currently uses local Windows/system font fallbacks, so no WOFF2 files are required
+for the landing page or desktop build. Keep any future font files in this directory and add matching
+`@font-face` declarations only after verifying that the files are committed and resolve in both Vite
+entrypoints.

@@ -38,13 +38,19 @@ export function DownloadSection() {
   );
 
   return (
-    <section ref={sectionRef} className="download-section" id="download">
+    <section
+      ref={sectionRef}
+      className="download-section"
+      id="download"
+      aria-labelledby="download-title"
+    >
       <div className="download-glow" />
       <div className="download-container">
         <span className="lp-section-tag">Get Started</span>
-        <h2>Take Control Today</h2>
+        <h2 id="download-title">Take Control Today</h2>
         <p>
-          Download miControl for free. Open source, no ads, no tracking. Just pure hardware control.
+          Download miControl for free. Open source, no ads, and built around local hardware control.
+          The latest Windows release is published on GitHub.
         </p>
         <div className="download-buttons">
           <a
@@ -66,7 +72,7 @@ export function DownloadSection() {
             View on GitHub
           </a>
         </div>
-        <div className="download-meta">v0.1.4 · Windows 10/11 x64 · 5.3 MB · MIT License</div>
+        <div className="download-meta">v0.2.16-beta · Windows 10/11 x64 · 87 MB · MIT License</div>
       </div>
     </section>
   );

@@ -1,6 +1,6 @@
-import { useRef, Suspense, useEffect } from 'react';
+import { useRef, Suspense, useEffect, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { useGLTF, Environment, ContactShadows, Float } from '@react-three/drei';
+import { useGLTF, Environment, ContactShadows, Float, Html } from '@react-three/drei';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { useGSAP } from '@gsap/react';
@@ -8,6 +8,17 @@ import * as THREE from 'three';
 import { Cpu, Thermometer, Zap, Fan } from 'lucide-react';
 
 gsap.registerPlugin(ScrollTrigger, useGSAP);
+
+function ModelLoader({ label }: { label: string }) {
+  return (
+    <Html center>
+      <div className="model-loader" role="status" aria-live="polite">
+        <span className="model-loader-spinner" aria-hidden="true" />
+        <span>{label}</span>
+      </div>
+    </Html>
+  );
+}
 
 function GearModel() {
   const groupRef = useRef<THREE.Group>(null);
@@ -65,11 +76,32 @@ function GearModel() {
   return <group ref={groupRef} />;
 }
 
-// Preload model
-useGLTF.preload(`${import.meta.env.BASE_URL}landing/models/gear.glb`);
-
 export function GearSection() {
   const sectionRef = useRef<HTMLElement>(null);
+  const [isNearViewport, setIsNearViewport] = useState(false);
+
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!section) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setIsNearViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsNearViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '600px 0px' },
+    );
+    observer.observe(section);
+
+    return () => observer.disconnect();
+  }, []);
 
   useGSAP(
     () => {
@@ -105,7 +137,7 @@ export function GearSection() {
   );
 
   return (
-    <section ref={sectionRef} className="gear-section">
+    <section ref={sectionRef} className="gear-section" aria-labelledby="gear-title">
       <div className="gear-stage">
         <div className="gear-visual">
           <Canvas
@@ -123,28 +155,30 @@ export function GearSection() {
               intensity={1}
               color="#6c5ce7"
             />
-            <Suspense fallback={null}>
-              <Float speed={2} rotationIntensity={0.5} floatIntensity={0.8}>
-                <GearModel />
-              </Float>
-              <Environment preset="city" />
-              {}
-              <ContactShadows position={[0, -2, 0]} opacity={0.4} scale={8} blur={2} far={4} />
-            </Suspense>
+            {isNearViewport ? (
+              <Suspense fallback={<ModelLoader label="Loading hardware view" />}>
+                <Float speed={2} rotationIntensity={0.5} floatIntensity={0.8}>
+                  <GearModel />
+                </Float>
+                <Environment preset="city" />
+                <ContactShadows position={[0, -2, 0]} opacity={0.4} scale={8} blur={2} far={4} />
+              </Suspense>
+            ) : (
+              <ModelLoader label="Hardware view loads as you scroll" />
+            )}
           </Canvas>
         </div>
 
         <div className="gear-content">
           <span className="lp-section-tag">Hardware Control</span>
-          <h2>
+          <h2 id="gear-title">
             Every Component,
             <br />
             Under Your Command
           </h2>
           <p>
-            miControl taps directly into your hardware&apos;s ACPI and WMI interfaces, giving you
-            granular control over performance, thermals, and power delivery — all from a single,
-            elegant interface.
+            miControl connects to the hardware interfaces available on your notebook, giving you
+            focused control over performance, thermals, and power delivery from a single interface.
           </p>
           <ul className="gear-feature-list">
             <li className="gear-feature-item">

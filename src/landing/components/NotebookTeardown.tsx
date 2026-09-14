@@ -1,12 +1,23 @@
-import { useRef, Suspense, useEffect } from 'react';
+import { useRef, Suspense, useEffect, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { useGLTF, Environment, ContactShadows, Float } from '@react-three/drei';
+import { useGLTF, Environment, ContactShadows, Float, Html } from '@react-three/drei';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { useGSAP } from '@gsap/react';
 import * as THREE from 'three';
 
 gsap.registerPlugin(ScrollTrigger, useGSAP);
+
+function ModelLoader({ label }: { label: string }) {
+  return (
+    <Html center>
+      <div className="model-loader" role="status" aria-live="polite">
+        <span className="model-loader-spinner" aria-hidden="true" />
+        <span>{label}</span>
+      </div>
+    </Html>
+  );
+}
 
 // ── 3D Model components ─────────────────────────────────────────────────────
 
@@ -163,6 +174,30 @@ export function NotebookTeardown() {
   const pinRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef(0);
   const progressTextRef = useRef<HTMLDivElement>(null);
+  const [isNearViewport, setIsNearViewport] = useState(false);
+
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!section) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setIsNearViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsNearViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '700px 0px' },
+    );
+    observer.observe(section);
+
+    return () => observer.disconnect();
+  }, []);
 
   useGSAP(
     () => {
@@ -235,15 +270,24 @@ export function NotebookTeardown() {
                 intensity={1}
                 color="#6c5ce7"
               />
-              <Suspense fallback={null}>
-                <Float speed={1.5} rotationIntensity={0.3} floatIntensity={0.5}>
-                  <LaptopModel progressRef={progressRef} />
-                </Float>
-                <MotherboardModel />
-                <Environment preset="city" />
-                {}
-                <ContactShadows position={[0, -2.5, 0]} opacity={0.4} scale={10} blur={2} far={4} />
-              </Suspense>
+              {isNearViewport ? (
+                <Suspense fallback={<ModelLoader label="Loading notebook model" />}>
+                  <Float speed={1.5} rotationIntensity={0.3} floatIntensity={0.5}>
+                    <LaptopModel progressRef={progressRef} />
+                  </Float>
+                  <MotherboardModel />
+                  <Environment preset="city" />
+                  <ContactShadows
+                    position={[0, -2.5, 0]}
+                    opacity={0.4}
+                    scale={10}
+                    blur={2}
+                    far={4}
+                  />
+                </Suspense>
+              ) : (
+                <ModelLoader label="Notebook view loads as you scroll" />
+              )}
             </Canvas>
           </div>
 
@@ -262,7 +306,3 @@ export function NotebookTeardown() {
     </section>
   );
 }
-
-// Preload models
-useGLTF.preload(`${import.meta.env.BASE_URL}landing/models/laptop.glb`);
-useGLTF.preload(`${import.meta.env.BASE_URL}landing/models/motherboard.glb`);

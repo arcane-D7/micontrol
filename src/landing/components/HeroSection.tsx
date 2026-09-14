@@ -23,7 +23,7 @@ export function HeroSection() {
         yPercent: 30,
         ease: 'none',
         scrollTrigger: {
-          trigger: '.hero-section',
+          trigger: ref.current,
           start: 'top top',
           end: 'bottom top',
           scrub: 1,
@@ -34,21 +34,21 @@ export function HeroSection() {
   );
 
   return (
-    <section ref={ref} className="hero-section" id="top">
+    <section ref={ref} className="hero-section" id="top" aria-labelledby="hero-title">
       <div className="hero-bg-glow" />
       <div className="hero-content">
         <div className="hero-badge">
           <span className="hero-badge-dot" />
-          Open Source · Tauri 2 · Windows
+          Open Source | Tauri 2 | Windows
         </div>
-        <h1 className="hero-title">
+        <h1 id="hero-title" className="hero-title">
           <span className="hero-title-line">Take Control of</span>
           <br />
           <span className="hero-title-line hero-title-accent">Your Xiaomi Notebook</span>
         </h1>
         <p className="hero-subtitle">
-          miControl unlocks the full potential of your Xiaomi Notebook Pro — performance modes, fan
-          control, battery insights, and hardware diagnostics in one beautiful desktop app.
+          miControl brings performance modes, fan control, battery insights, and hardware
+          diagnostics into one desktop control center for Xiaomi Notebooks.
         </p>
         <div className="hero-cta-group">
           <a href="#download" className="hero-cta-primary">

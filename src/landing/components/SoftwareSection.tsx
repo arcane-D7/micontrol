@@ -246,7 +246,12 @@ export function SoftwareSection() {
   );
 
   return (
-    <section ref={sectionRef} className="software-section" id="software">
+    <section
+      ref={sectionRef}
+      className="software-section"
+      id="software"
+      aria-labelledby="software-title"
+    >
       <div ref={stickyRef} className="software-sticky">
         <div ref={mockupRef} className="software-mockup">
           <LiveAppPreview activeTab={activeTabId} onTabChange={handleTabChange} />
@@ -254,7 +259,7 @@ export function SoftwareSection() {
 
         <div className="software-info">
           <span className="lp-section-tag">The Software</span>
-          <h2>{activeTab.title}</h2>
+          <h2 id="software-title">{activeTab.title}</h2>
           <p>{activeTab.description}</p>
         </div>
       </div>

@@ -144,9 +144,9 @@ body {
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(ellipse 80% 60% at 20% 0%, rgba(108, 92, 231, 0.12) 0%, transparent 50%),
-    radial-gradient(ellipse 60% 50% at 80% 100%, rgba(0, 212, 255, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(255, 107, 53, 0.04) 0%, transparent 60%);
+    linear-gradient(115deg, rgba(108, 92, 231, 0.11), transparent 34%),
+    linear-gradient(300deg, rgba(0, 212, 255, 0.07), transparent 28%),
+    linear-gradient(180deg, transparent 65%, rgba(255, 107, 53, 0.035));
   pointer-events: none;
   z-index: 0;
 }
@@ -207,7 +207,7 @@ body {
   gap: 0.625rem;
   font-weight: 700;
   font-size: 1.25rem;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   color: var(--lp-text);
   text-decoration: none;
 }
@@ -283,10 +283,88 @@ body {
   box-shadow: 0 6px 28px var(--lp-accent-glow);
 }
 
+.lp-navbar-menu-toggle {
+  display: none;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--lp-border-strong);
+  border-radius: 8px;
+  background: var(--lp-surface);
+  color: var(--lp-text);
+  cursor: pointer;
+}
+
+.lp-navbar-menu-toggle:focus-visible,
+.lp-navbar-links a:focus-visible,
+.lp-navbar-logo:focus-visible,
+.lp-navbar-cta:focus-visible,
+.hero-cta-primary:focus-visible,
+.hero-cta-secondary:focus-visible,
+.download-btn:focus-visible {
+  outline: 2px solid var(--lp-cyan);
+  outline-offset: 3px;
+}
+
+.skip-link {
+  position: fixed;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 1100;
+  padding: 0.65rem 0.9rem;
+  border-radius: 8px;
+  background: var(--lp-text);
+  color: var(--lp-bg);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-decoration: none;
+  transform: translateY(-160%);
+  transition: transform 0.2s var(--lp-ease);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
 @media (max-width: 768px) {
+  .lp-navbar-menu-toggle {
+    display: inline-flex;
+    margin-left: auto;
+    margin-right: 0.75rem;
+  }
+
   .lp-navbar-links {
     display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 0.5rem 1.25rem 1rem;
+    background: rgba(5, 6, 10, 0.96);
+    border-bottom: 1px solid var(--lp-border);
   }
+
+  .lp-navbar-links.is-open {
+    display: flex;
+  }
+
+  .lp-navbar-links li {
+    border-bottom: 1px solid var(--lp-border);
+  }
+
+  .lp-navbar-links li:last-child {
+    border-bottom: 0;
+  }
+
+  .lp-navbar-links a {
+    display: block;
+    padding: 0.85rem 0;
+  }
+
   .lp-navbar {
     padding: 1rem 1.25rem;
   }
@@ -309,12 +387,16 @@ body {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 800px;
-  height: 800px;
-  border-radius: 50%;
-  background: radial-gradient(circle, var(--lp-accent-glow) 0%, transparent 60%);
-  filter: blur(80px);
-  opacity: 0.6;
+  width: min(70vw, 760px);
+  height: min(70vw, 760px);
+  border: 1px solid rgba(108, 92, 231, 0.24);
+  border-radius: 24px;
+  background:
+    linear-gradient(rgba(108, 92, 231, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(108, 92, 231, 0.08) 1px, transparent 1px);
+  background-size: 56px 56px;
+  opacity: 0.45;
+  mask-image: radial-gradient(ellipse 75% 75% at 50% 50%, black 20%, transparent 78%);
   pointer-events: none;
   animation: pulse-glow 4s ease-in-out infinite;
 }
@@ -323,11 +405,11 @@ body {
   0%,
   100% {
     opacity: 0.4;
-    transform: translate(-50%, -50%) scale(1);
+    transform: translate(-50%, -50%) rotate(-3deg) scale(1);
   }
   50% {
     opacity: 0.7;
-    transform: translate(-50%, -50%) scale(1.1);
+    transform: translate(-50%, -50%) rotate(3deg) scale(1.04);
   }
 }
 
@@ -377,7 +459,7 @@ body {
   font-size: clamp(2.5rem, 7vw, 5.5rem);
   font-weight: 700;
   line-height: 1.05;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   margin: 0 0 1.5rem;
   /* Impeccable ban: no background-clip:text gradient. Solid tinted near-white
      preserves the depth cue the gradient tried to fake. */
@@ -666,10 +748,10 @@ body {
 }
 
 .gear-content h2 {
-  font-size: clamp(2rem, 4vw, 3.5rem);
+  font-size: 3.25rem;
   font-weight: 700;
   line-height: 1.1;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   margin: 0 0 1.5rem;
 }
 
@@ -796,10 +878,10 @@ body {
 
 /* Animate title + description when tab changes */
 .software-info h2 {
-  font-size: clamp(1.25rem, 2.5vw, 2rem);
+  font-size: 1.75rem;
   font-weight: 700;
   line-height: 1.1;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   margin: 0 0 0.5rem;
   animation: software-info-in 0.4s var(--lp-ease) both;
 }
@@ -907,9 +989,9 @@ body {
 }
 
 .features-header h2 {
-  font-size: clamp(2rem, 4vw, 3.5rem);
+  font-size: 3.25rem;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   margin: 0 0 1rem;
 }
 
@@ -1010,19 +1092,23 @@ body {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 600px;
-  height: 600px;
-  border-radius: 50%;
-  background: radial-gradient(circle, var(--lp-accent-glow) 0%, transparent 60%);
-  filter: blur(60px);
+  width: min(78vw, 720px);
+  height: 240px;
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(108, 92, 231, 0.14), transparent 55%),
+    repeating-linear-gradient(90deg, rgba(0, 212, 255, 0.06) 0 1px, transparent 1px 44px);
+  transform: translate(-50%, -50%) rotate(-4deg);
+  opacity: 0.8;
   pointer-events: none;
   z-index: -1;
 }
 
 .download-section h2 {
-  font-size: clamp(2.5rem, 5vw, 4rem);
+  font-size: 3.5rem;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   margin: 0 0 1.5rem;
   /* Impeccable ban: no gradient text. Accent carries the emphasis. */
   color: var(--lp-accent);
@@ -1149,13 +1235,23 @@ body {
 
 /* ── Loading state for 3D models ────────────────────────────────────────── */
 .model-loader {
-  position: absolute;
-  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--lp-bg);
-  z-index: 10;
+  gap: 0.75rem;
+  min-width: 220px;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--lp-border);
+  border-radius: 8px;
+  background: rgba(5, 6, 10, 0.82);
+  color: var(--lp-text-muted);
+  font-family: var(--lp-font-mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .model-loader-spinner {
@@ -1165,6 +1261,34 @@ body {
   border-top-color: var(--lp-accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+.deferred-scene {
+  position: relative;
+  z-index: 1;
+}
+
+.deferred-scene-teardown {
+  min-height: 400vh;
+}
+
+.deferred-scene-gear {
+  min-height: 500px;
+}
+
+.scene-placeholder {
+  min-height: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  color: var(--lp-text-muted);
+  font-family: var(--lp-font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
 }
 
 @keyframes spin {
@@ -1186,4 +1310,145 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 1rem;
+}
+
+@media (max-width: 968px) {
+  .hero-title {
+    font-size: 4rem;
+  }
+
+  .gear-content h2,
+  .features-header h2 {
+    font-size: 2.75rem;
+  }
+
+  .download-section h2 {
+    font-size: 3rem;
+  }
+}
+
+@media (max-width: 600px) {
+  .hero-section {
+    min-height: 760px;
+  }
+
+  .hero-content {
+    padding: 0 1.25rem;
+  }
+
+  .hero-title {
+    font-size: 2.65rem;
+    line-height: 1.08;
+  }
+
+  .hero-title br {
+    display: none;
+  }
+
+  .hero-subtitle {
+    font-size: 1rem;
+  }
+
+  .hero-cta-primary,
+  .hero-cta-secondary,
+  .download-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .hero-scroll-hint {
+    bottom: 1.25rem;
+  }
+
+  .teardown-label {
+    padding: 0.4rem 0.65rem;
+    font-size: 0.68rem;
+  }
+
+  .teardown-label.label-tl,
+  .teardown-label.label-bl {
+    left: 5%;
+  }
+
+  .teardown-label.label-tr,
+  .teardown-label.label-br {
+    right: 5%;
+  }
+
+  .teardown-progress-text {
+    width: calc(100% - 2rem);
+    font-size: 0.65rem;
+    text-align: center;
+  }
+
+  .gear-section,
+  .features-section,
+  .download-section {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+
+  .gear-stage {
+    padding: 0;
+  }
+
+  .gear-content h2,
+  .features-header h2 {
+    font-size: 2.25rem;
+  }
+
+  .gear-content p,
+  .features-header p,
+  .download-section p {
+    font-size: 1rem;
+  }
+
+  .software-section {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  .software-sticky {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  .software-mockup {
+    height: 320px;
+    border-radius: 10px;
+  }
+
+  .software-info h2 {
+    font-size: 1.35rem;
+  }
+
+  .download-section h2 {
+    font-size: 2.4rem;
+  }
+
+  .download-meta {
+    line-height: 1.7;
+  }
+
+  .lp-footer {
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+  }
+
+  .lp-footer-links {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

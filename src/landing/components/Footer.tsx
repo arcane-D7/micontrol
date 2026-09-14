@@ -2,7 +2,7 @@ import { Heart } from 'lucide-react';
 
 export function Footer() {
   return (
-    <footer className="lp-footer">
+    <footer className="lp-footer" aria-label="Footer">
       <div className="lp-footer-container">
         <div className="lp-footer-brand">
           <span
@@ -33,7 +33,7 @@ export function Footer() {
           </li>
         </ul>
         <div className="lp-footer-copy">
-          © 2026 miControl · MIT License · Made with{' '}
+          Copyright 2026 miControl | MIT License | Made with{' '}
           <Heart size={12} style={{ display: 'inline', color: 'var(--lp-orange)' }} /> in Portugal
         </div>
       </div>
