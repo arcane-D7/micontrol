@@ -1104,7 +1104,6 @@ Function KillBridgeProcess
       Goto bridge_delete_wait
     ${EndIf}
     DetailPrint "Warning: MiControlBridge entry still visible in SCM (delete pending). Continuing — the Rust install retries sc create on 1072."
-    Goto bridge_kill_loop_exit
   bridge_deleted:
 
   StrCpy $0 0  ; retry counter
