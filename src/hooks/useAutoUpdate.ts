@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { check } from '@tauri-apps/plugin-updater';
+import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
 
 export type AppUpdateState =
@@ -68,7 +69,16 @@ export function useAutoUpdate() {
       let total = 0;
       let downloaded = 0;
 
-      await update.downloadAndInstall((event) => {
+      // S57 FIX: download via the Tauri updater plugin (signature-verified),
+      // then install via the MiControlBridge SYSTEM service (`install_update`)
+      // instead of the plugin's own `install()`. The plugin launches the NSIS
+      // installer with ShellExecuteW verb "open" — NO elevation — so on this
+      // perMachine install (RequestExecutionLevel admin + service hooks) every
+      // `sc` command failed with "OpenService FAILED 5: Access is denied", the
+      // visible wizard was shown, and the update was never applied. The bridge
+      // launches the same installer silently (/S /P /UPDATE /R) with SYSTEM
+      // privileges, which is the only correct path for a perMachine install.
+      await update.download((event) => {
         if (!mountedRef.current) return;
         switch (event.event) {
           case 'Started':
@@ -88,11 +98,29 @@ export function useAutoUpdate() {
 
       if (!mountedRef.current) return;
 
+      setState('installing');
+
+      // Locate the installer the plugin just wrote to its temp directory and
+      // hand it to the bridge. The temp dir is named
+      // "<app>-<version>-updater-" + random, and the file is
+      // "<app>-<version>-installer.exe".
+      const installerPath = await invoke<string | null>('find_latest_downloaded_installer');
+      if (!installerPath) {
+        throw new Error(
+          'Downloaded installer not found after update download — cannot install via bridge.',
+        );
+      }
+
+      await invoke('install_update', { installerPath });
+
+      if (!mountedRef.current) return;
+
       setState('ready');
-      // Auto-relaunch after a short delay
+      // The installer's /R flag relaunches the app for us; relaunch() here is
+      // a safety net in case /R is skipped (e.g. installer launched late).
       setTimeout(() => {
         void relaunch();
-      }, 1500);
+      }, 4000);
     } catch (e) {
       if (!mountedRef.current) return;
       setErrorMsg(String(e));
