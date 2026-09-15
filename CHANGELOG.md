@@ -15,6 +15,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A poisoned mutex (panicked holder) is recovered via `into_inner()` instead of poisoning IGCL permanently.
 - **Watchdog now detects runtime starvation.** The heartbeat's `ui_ok` flag previously only checked that the main window existed — a frozen runtime with a live window looked perfectly healthy. The heartbeat now also probes the async runtime (a trivial task must complete within 5 s); two consecutive misses flip `ui_ok=0` and the existing bridge watchdog force-restarts the app.
 
+## [0.2.16-beta] - 2026-09-13
+
+### Fixed
+
+- **Installer never aborts on a slow SCM delete.** `POSTINSTALL` no longer calls `Abort` when the bridge service entry lingers in the Service Control Manager: the removal wait is best-effort and the `sc create` retry loop (up to 30 attempts for transient 1072/1073) is the real wait mechanism. A direct `sc.exe` fallback chain recreates the service even when the Rust installer path fails, and the update installer runs in passive `/P` mode so same-version silent updates no longer destroy the service entry.
+- **Bridge operation timeout raised to 30 s** (`elev_bridge.rs`) so slower elevated operations (driver scans, service installs) complete instead of being cancelled mid-flight.
+- **AI logs tab never fails on a vanished directory** — `ai_perf_logs` is recreated on read.
+
+## [0.2.5-beta] - 2026-09-04
+
+### Added
+
+- **Global Task Manager tab.** Live per-process CPU / GPU / NPU / RAM / network columns, filter box, click-to-sort on every column, and kill-process with confirmation, plus a summary strip (CPU/GPU/NPU %, total network).
+- **Battery care improvements.** Elevated AC-power fallback when the EC read is unavailable, slow-charger alert, and removal of the false cycle-count readout (health gauge now re-learns instead of showing fabricated numbers).
+- **Consent & support.** Clear crash-report consent modal, live Sentry toggle in settings, and a Buy-me-a-coffee link.
+
+### Fixed
+
+- **Overview values no longer freeze** — CPU/GPU polling is decoupled from the slow `get_fan_info` call.
+- **Dark-mode contrast pass** (WCAG AA on essential text).
+- **Elevated infrastructure hardened.** Session circuit breaker for degraded elevated infrastructure (S51); bridge self-update restricted to genuine MiControl installers (S50).
+- **Touchpad & OS Turbo.** Real HID payloads with repress control; OS Turbo persistence across restarts.
+
+## [0.2.2-beta] - 2026-09-02
+
+### Added
+
+- **Cross-Device tab (MIOT-38).** Real Phone Link pairing detection (via `DeviceMetadataStorage.json`, not the unreliable registry keys), BLE presence scanning and advertising, NFC pairing deep links (`ms-phone-link:pairing`), LocalSend receiver, scrcpy install bridge, KDE Connect discovery, Syncthing config, and transcription model download.
+- **Auto-update system (S45-002).** Opt-in toggle with a hidden dev beta feed (CLI/MCP), plus bridge silent self-update (S45-001).
+- **System Optimization tab (early).** Safe, reversible debloating with risk tiers.
+
+### Fixed
+
+- **Watchdog relaunch repaired.** The SYSTEM service now passes a real user environment block (`CreateEnvironmentBlock` + `CREATE_UNICODE_ENVIRONMENT`) when relaunching the app, so the child no longer inherits `systemprofile` paths and starts as a half-initialized zombie.
+- **IGCL crashes stopped.** Persistent IGCL session — ControlLib.dll is loaded once and never unloaded (its internal threads keep executing mapped code), ending the BEX64 `ControlLib.dll_unloaded` crash cycle; all IGCL access serialized behind a global lock.
+- **UAC prompt storm stopped.** The `MCElev_heal.bat` scheduled-task self-heal no longer fires repeated elevation prompts.
+- **BLE modal and NFC guidance fixed** (discovery list display, paired detection, version guidance).
+
+## [0.2.1-beta] - 2026-08-29
+
+### Added
+
+- **Cross-Device tab (initial).** Phone Link status card, BLE presence, LocalSend receiver, scrcpy/transcription install bridges, KDE Connect, NFC pairing, Syncthing.
+
+### Fixed
+
+- **Real Phone Link pairing detection** via `DeviceMetadataStorage.json` (`IsLinked` + `ClientType` LTW/WEA) instead of `HKCU\Software\Microsoft\YourPhone` registry keys, which do not exist even when paired.
+
+## [0.2.0-beta] - 2026-08-29
+
+### Changed
+
+- First 0.2.x beta line cut from the 0.1.x stable series (local test builds). See 0.2.1-beta and above for the features that landed in this line.
+
 ## [0.1.25] - 2026-08-28
 
 ### Added
