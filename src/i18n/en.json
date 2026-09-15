@@ -173,7 +173,7 @@
       "turbo": "Short bursts of extra speed for launches and quick jobs, then settles back to stay cool.",
       "smart": "AI learns your routine and adjusts power automatically throughout the day.",
       "longBattery": "Stretches battery life on the go. Gentle performance with the fan barely audible.",
-      "decepticon": "Steady, even power with no spikes — consistent speed at moderate temperatures.",
+      "decepticon": "Unlocked firmware mode. Steady ~40 W with no throttling dips — cooler and more consistent than Turbo.",
       "smartAcceleration": "AI that reacts to sudden demand: instant boost when you need it, calm when you don't.",
       "overdrive": "Experimental. High sustained power for demanding games and renders — runs hot and loud.",
       "overdriveHigh": "Experimental. Near-maximum sustained power with cooling at full speed.",

@@ -36,13 +36,6 @@ const MODE_GROUPS: Array<{ category: ModeCategory; modes: typeof MODES }> = [
         descKey: 'longBattery',
         detailKey: 'longBattery',
       },
-      {
-        key: 'decepticon',
-        icon: '🌡️',
-        labelKey: 'decepticon',
-        descKey: 'decepticon',
-        detailKey: 'decepticon',
-      },
     ],
   },
   {
@@ -50,6 +43,13 @@ const MODE_GROUPS: Array<{ category: ModeCategory; modes: typeof MODES }> = [
     modes: [
       { key: 'balance', icon: '⚖️', labelKey: 'balance', descKey: 'balance', detailKey: 'balance' },
       { key: 'turbo', icon: '⚡', labelKey: 'turbo', descKey: 'turbo', detailKey: 'turbo' },
+      {
+        key: 'decepticon',
+        icon: '🌡️',
+        labelKey: 'decepticon',
+        descKey: 'decepticon',
+        detailKey: 'decepticon',
+      },
       { key: 'smart', icon: '🧠', labelKey: 'smart', descKey: 'smart', detailKey: 'smart' },
       {
         key: 'smart_acceleration',
