@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A poisoned mutex (panicked holder) is recovered via `into_inner()` instead of poisoning IGCL permanently.
 - **Watchdog now detects runtime starvation.** The heartbeat's `ui_ok` flag previously only checked that the main window existed — a frozen runtime with a live window looked perfectly healthy. The heartbeat now also probes the async runtime (a trivial task must complete within 5 s); two consecutive misses flip `ui_ok=0` and the existing bridge watchdog force-restarts the app.
 
+## [0.2.18-beta] - 2026-09-15
+
+### Fixed
+
+- **Updater installed without elevation — "OpenService FAILED 5: Access is denied".** The Tauri updater plugin launches the downloaded NSIS installer with `ShellExecuteW(verb="open")`, which does NOT trigger UAC. On this perMachine install (`RequestExecutionLevel admin` + service hooks) every `sc` command in the POSTINSTALL hook failed with access denied, the full wizard appeared instead of the silent passive flow, and the update was never applied (app stayed on the old version with the service untouched).
+  - The in-app update flow now downloads the installer through the plugin (minisign-verified), locates it, and installs it **via the SYSTEM bridge** (`install_update`), which launches the same installer silently (`/S /P /UPDATE /R`) with SYSTEM privileges — the correct path for a perMachine install with Windows services.
+  - New `find_latest_downloaded_installer` command scans the plugin's updater temp directories, copies the verified file to the canonical `MiControl_<version>_x64-setup.exe` name under `%LOCALAPPDATA%\MiControl` (the S50 anti-arbitrary-exe gate requires this pattern), cleans stale copies, and returns the path for the bridge hand-off.
+
 ## [0.2.16-beta] - 2026-09-13
 
 ### Fixed
