@@ -186,6 +186,17 @@ fn remove_service_wait(name: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
+    // S58 FIX: disable SCM crash auto-restart BEFORE stopping. The service is
+    // installed with `restart/5000` — on a degraded SCM (1061 busy, 1072
+    // delete-pending) the stop request may be delayed or ignored, and the SCM
+    // revives the process between our stop and the binary overwrite, re-locking
+    // the exe ("Error opening file for writing"). A stopped service must STAY
+    // stopped until the install finishes; the fresh failure actions are
+    // re-applied by install_service() after `sc create`.
+    let _ = Command::new("sc")
+        .args(["failure", name, "reset=", "0", "actions=", ""])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
     let _ = Command::new("sc")
         .args(["stop", name])
         .creation_flags(CREATE_NO_WINDOW)

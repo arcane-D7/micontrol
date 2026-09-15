@@ -1030,6 +1030,16 @@ FunctionEnd
 ; release it before overwriting that binary, otherwise NSIS fails with
 ; "Error opening file for writing ... micontrol_bridge.exe".
 Function KillBridgeProcess
+  ; Disable SCM crash auto-restart (failure actions) BEFORE stopping. The
+  ; service is installed with `restart/5000` — if the SCM auto-restarts it
+  ; between our stop and the `File` overwrite, the process re-locks
+  ; micontrol_bridge.exe and the copy fails with "Error opening file for
+  ; writing". This is the exact race from the v0.2.18-beta update report.
+  ; A stopped service must STAY stopped until the installer finishes.
+  ; Runs unconditionally: `sc failure` on a missing service just logs an
+  ; error line and moves on (harmless in a fresh install).
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" failure MiControlBridge reset= 0 actions= ""'
+  Pop $1
   ; Stop the service gracefully ONLY if it is RUNNING — `sc stop` on a
   ; service that exists but is STOPPED prints "[SC] ControlService FAILED
   ; 1062" (ERROR_SERVICE_NOT_ACTIVE). Guard with a RUNNING check (not mere
@@ -1043,7 +1053,26 @@ Function KillBridgeProcess
   ${EndIf}
   nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlBridge'
   Pop $1
-  Sleep 1000
+  ; Wait until the service is actually STOPPED (not just "stop pending"),
+  ; up to ~10 s. On a degraded SCM (1061 busy) the stop request may be
+  ; ignored; proceeding blindly then leaves a live process holding the
+  ; binary lock. The delete + kill loop below is the backstop, but a
+  ; confirmed stop avoids the race entirely.
+  StrCpy $0 0
+  bridge_stop_wait:
+    nsExec::ExecToStack '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlBridge | "$SYSDIR\findstr.exe" /i "STOPPED" > NUL 2>&1"'
+    Pop $1
+    Pop $7
+    ${If} $1 = 0
+      Goto bridge_stopped
+    ${EndIf}
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 20
+      Goto bridge_stop_wait
+    ${EndIf}
+    DetailPrint "Warning: MiControlBridge did not reach STOPPED within 10 s — continuing to delete + kill."
+  bridge_stopped:
 
   bridge_no_stop:
   ; Delete the service entry from the SCM and WAIT until it is actually gone.
@@ -1237,6 +1266,11 @@ Function un.KillBridgeProcess
   ; RUNNING guard: `sc stop` on a STOPPED/absent service prints "[SC]
   ; ControlService FAILED 1062" — skip it; the process kill loop still
   ; handles a stray micontrol_bridge.exe.
+  ; Disable SCM crash auto-restart (failure actions) BEFORE stopping — same
+  ; race as the install path: with `restart/5000` the SCM revives the process
+  ; between stop and file removal and the uninstall cannot delete the binary.
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" failure MiControlBridge reset= 0 actions= ""'
+  Pop $1
   nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlBridge | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
   Pop $1
   ${If} $1 <> 0
@@ -1244,6 +1278,24 @@ Function un.KillBridgeProcess
   ${EndIf}
   nsExec::ExecToLog '"$SYSDIR\sc.exe" stop MiControlBridge'
   Pop $1
+  ; Wait for a confirmed STOPPED state (~10 s). On a degraded SCM the stop
+  ; request may be ignored (1061 busy); continuing blindly leaves a live
+  ; process holding the binary lock.
+  StrCpy $0 0
+  un_bridge_stop_wait:
+    nsExec::ExecToStack '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlBridge | "$SYSDIR\findstr.exe" /i "STOPPED" > NUL 2>&1"'
+    Pop $1
+    Pop $7
+    ${If} $1 = 0
+      Goto un_bridge_stopped
+    ${EndIf}
+    Sleep 500
+    IntOp $0 $0 + 1
+    ${If} $0 < 20
+      Goto un_bridge_stop_wait
+    ${EndIf}
+    DetailPrint "Warning: MiControlBridge did not reach STOPPED within 10 s — continuing to delete + kill."
+  un_bridge_stopped:
   Sleep 1000
 
   un_bridge_no_stop:
