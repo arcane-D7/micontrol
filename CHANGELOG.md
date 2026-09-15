@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The in-app update flow now downloads the installer through the plugin (minisign-verified), locates it, and installs it **via the SYSTEM bridge** (`install_update`), which launches the same installer silently (`/S /P /UPDATE /R`) with SYSTEM privileges — the correct path for a perMachine install with Windows services.
   - New `find_latest_downloaded_installer` command scans the plugin's updater temp directories, copies the verified file to the canonical `MiControl_<version>_x64-setup.exe` name under `%LOCALAPPDATA%\MiControl` (the S50 anti-arbitrary-exe gate requires this pattern), cleans stale copies, and returns the path for the bridge hand-off.
 
+## [0.2.19-beta] - 2026-09-15
+
+### Fixed
+
+- **Update installer failed mid-upgrade: `ControlService FAILED 1061` + `DeleteService FAILED 1072`, then "Error opening file for writing: micontrol_bridge.exe".** The bridge service's SCM failure actions (`restart/5000`) were never disabled before the installer stopped it: on a degraded SCM the stop request was ignored (1061), the delete stayed pending (1072), and the SCM revived the bridge process between the kill and the binary overwrite — re-locking the exe.
+  - `KillBridgeProcess` (install AND uninstall) now runs `sc failure MiControlBridge reset= 0 actions= ""` BEFORE `sc stop`, and waits for a confirmed `STOPPED` state (up to ~10 s) instead of a blind 1 s sleep.
+  - The Rust `remove_service_wait` applies the same discipline (`failure` reset before stop); the fresh failure actions are re-applied by `install_service()` after `sc create`.
+
 ## [0.2.16-beta] - 2026-09-13
 
 ### Fixed
