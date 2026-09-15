@@ -5,6 +5,16 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.17-beta] - 2026-09-15
+
+### Fixed
+
+- **UI freeze (async runtime starvation) via stuck IGCL call — root-caused.** A hung Intel ControlLib (IGCL) driver call used to hold the global IGCL mutex forever: every brightness/display/fan poll and every UI command touching them then blocked its worker in cascade, starving the whole tokio runtime. The UI stopped answering every `invoke` (window visible, hotkeys alive — they run on a plain OS thread) while the heartbeat stayed fresh, so the watchdog never restarted it. Evidence trail: `smart_brightness.json` writes stopped 2 min after launch, `bridge.log` went silent (`client connected / read 0 bytes`), and `tauri-app.log` showed only hotkey WMI lines for 2 days.
+  - IGCL lock acquisition is now **bounded** (3 s); a caller that cannot take the lock returns an error instead of blocking forever.
+  - Any IGCL operation taking ≥10 s (healthy ops are single-digit ms) arms a **60 s poison window**: further callers fail fast instead of piling up behind the stuck holder, then probe the driver again in case it recovered.
+  - A poisoned mutex (panicked holder) is recovered via `into_inner()` instead of poisoning IGCL permanently.
+- **Watchdog now detects runtime starvation.** The heartbeat's `ui_ok` flag previously only checked that the main window existed — a frozen runtime with a live window looked perfectly healthy. The heartbeat now also probes the async runtime (a trivial task must complete within 5 s); two consecutive misses flip `ui_ok=0` and the existing bridge watchdog force-restarts the app.
+
 ## [0.1.25] - 2026-08-28
 
 ### Added

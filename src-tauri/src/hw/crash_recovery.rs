@@ -424,16 +424,69 @@ pub fn set_app_handle(app: tauri::AppHandle) {
     let _ = APP_HANDLE.set(app);
 }
 
-/// Is the UI (main window) currently alive? Probing the WebviewWindow is
-/// cheap (a handle + visibility check) and fails fast when the window was
-/// destroyed by a WebView2 runtime crash — the exact "zombie" state that
-/// previously kept the process alive with a fresh heartbeat but no UI.
+/// Result of the last async-runtime probe (set by the probe task itself).
+static ASYNC_PROBE_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Consecutive async-probe failures. ui_ok flips to 0 only after two probes
+/// in a row fail (~20 s of starvation at the 10 s heartbeat cadence), so a
+/// brief worker-thread spike does not trigger a watchdog restart.
+static ASYNC_PROBE_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Is the tokio runtime (the one Tauri commands and poll loops run on) still
+/// scheduling tasks? S56 FIX (2026-09-13 UI freeze): the async runtime can
+/// starve — e.g. every worker parked behind a stuck IGCL mutex — while the
+/// process, this heartbeat thread (plain OS thread) and even the main window
+/// all look perfectly healthy. The watchdog then sees heartbeat=fresh,
+/// ui_ok=1 and never restarts a UI that no longer responds to any invoke.
+/// A trivial spawned task that must flip a flag proves the runtime still
+/// schedules; two consecutive misses (~20 s) report the runtime as dead.
+#[cfg(windows)]
+fn async_runtime_alive() -> bool {
+    ASYNC_PROBE_DONE.store(false, std::sync::atomic::Ordering::SeqCst);
+    let spawned = tauri::async_runtime::spawn(async {
+        ASYNC_PROBE_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    drop(spawned);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if ASYNC_PROBE_DONE.load(std::sync::atomic::Ordering::SeqCst) {
+            ASYNC_PROBE_FAILS.store(0, std::sync::atomic::Ordering::SeqCst);
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let fails = ASYNC_PROBE_FAILS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    if fails == 1 {
+        log::warn!(
+            target: "hw::crash_recovery",
+            "async runtime probe failed once (workers may be starved)"
+        );
+    } else {
+        log::error!(
+            target: "hw::crash_recovery",
+            "async runtime probe failed {fails} consecutive times — runtime starved"
+        );
+    }
+    fails >= 2
+}
+
+/// Is the UI (main window) currently alive AND is the async runtime still
+/// scheduling? Probing the WebviewWindow is cheap (a handle + visibility
+/// check) and fails fast when the window was destroyed by a WebView2 runtime
+/// crash — the exact "zombie" state that previously kept the process alive
+/// with a fresh heartbeat but no UI. The runtime probe (S56) covers the other
+/// freeze mode: window alive but every invoke stuck on starved workers.
 #[cfg(windows)]
 fn ui_is_alive() -> bool {
     let Some(app) = APP_HANDLE.get() else {
         return false;
     };
-    app.get_webview_window("main").is_some()
+    if app.get_webview_window("main").is_none() {
+        return false;
+    }
+    async_runtime_alive()
 }
 
 /// Mark the app's liveness for the watchdog. Called AFTER WebView2 setup

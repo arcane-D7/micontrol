@@ -235,15 +235,103 @@ where
     // may query brightness simultaneously. Hold the lock for the whole
     // session-open + op sequence so each IGCL operation is atomic.
     static IGCL_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _igcl_guard = IGCL_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
 
-    let (lib, device) = igcl_session::get_session()
-        .map_err(|e| HardwareError::Display(format!("IGCL session: {e}")))?;
+    // S56 FIX (2026-09-13 UI freeze): a hung ControlLib call used to hold this
+    // mutex forever. Every later brightness/display/fan call then blocked its
+    // thread indefinitely, starving the poll loops and every UI command that
+    // touched them — the whole app froze while hotkeys (a plain OS thread)
+    // kept working. Two guards now bound the damage:
+    //   1. Fail fast while a recent hang is suspected (poison window).
+    //   2. Bound lock acquisition; a caller that cannot get the lock returns
+    //      an error instead of blocking forever behind the stuck holder.
+    if igcl_poisoned() {
+        return Err(HardwareError::Display(
+            "IGCL unavailable: a previous ControlLib call hung; failing fast".into(),
+        ));
+    }
 
-    f(device, &lib)
+    let mutex = IGCL_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    let Some(_igcl_guard) = acquire_igcl_lock(mutex) else {
+        arm_igcl_poison();
+        log::error!(
+            target: "hw::display",
+            "IGCL lock not acquired within {IGCL_LOCK_WAIT:?} — another \
+             ControlLib call appears stuck; arming poison window"
+        );
+        return Err(HardwareError::Display(
+            "IGCL busy: another ControlLib call is stuck; failing fast".into(),
+        ));
+    };
+
+    let started = std::time::Instant::now();
+    let result = (|| {
+        let (lib, device) = igcl_session::get_session()
+            .map_err(|e| HardwareError::Display(format!("IGCL session: {e}")))?;
+        f(device, &lib)
+    })();
+
+    // A healthy IGCL op takes single-digit milliseconds. If one took longer
+    // than the watchdog threshold, the driver stalled inside the call — arm
+    // the poison window so subsequent callers fail fast instead of piling up
+    // behind the (possibly still hung) mutex holder.
+    let elapsed = started.elapsed();
+    if elapsed >= IGCL_OP_WATCHDOG {
+        arm_igcl_poison();
+        log::error!(
+            target: "hw::display",
+            "IGCL call took {elapsed:?} (threshold {IGCL_OP_WATCHDOG:?}) — \
+             arming poison window"
+        );
+    }
+
+    result
+}
+
+/// How long a caller waits for the IGCL mutex before giving up (error).
+const IGCL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// A healthy IGCL op is single-digit ms; anything at or above this is a stall.
+const IGCL_OP_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(10);
+/// After a detected stall, callers fail fast (no lock wait) for this long,
+/// then probe the driver again in case it recovered.
+const IGCL_POISON_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Unix ms until which IGCL callers should fail fast (0 = healthy).
+static IGCL_POISONED_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+fn igcl_poisoned() -> bool {
+    IGCL_POISONED_UNTIL.load(Ordering::Relaxed) > now_ms()
+}
+
+#[cfg(windows)]
+fn arm_igcl_poison() {
+    IGCL_POISONED_UNTIL.store(
+        now_ms() + IGCL_POISON_WINDOW.as_millis() as u64,
+        Ordering::Relaxed,
+    );
+}
+
+/// Try to acquire the IGCL mutex with a bounded wait. Never panics on mutex
+/// poisoning (a panicked holder must not take IGCL down permanently).
+#[cfg(windows)]
+fn acquire_igcl_lock(mutex: &std::sync::Mutex<()>) -> Option<std::sync::MutexGuard<'_, ()>> {
+    use std::sync::TryLockError;
+
+    let deadline = std::time::Instant::now() + IGCL_LOCK_WAIT;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => {
+                return Some(poisoned.into_inner());
+            }
+            Err(TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
 }
 
 /// S32-003: Set while the Windows display color calibration wizard (dccw.exe)
