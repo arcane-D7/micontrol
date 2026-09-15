@@ -1040,6 +1040,12 @@ Function KillBridgeProcess
   ; error line and moves on (harmless in a fresh install).
   nsExec::ExecToLog '"$SYSDIR\sc.exe" failure MiControlBridge reset= 0 actions= ""'
   Pop $1
+  ; S59: also DISABLE the start type. A disabled service cannot be started by
+  ; the SCM failure-restart logic even if the failure reset above was ignored
+  ; on a degraded SCM — belt and suspenders so the process stays dead until we
+  ; re-create the service (install_service sets start= auto again).
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" config MiControlBridge start= disabled'
+  Pop $1
   ; Stop the service gracefully ONLY if it is RUNNING — `sc stop` on a
   ; service that exists but is STOPPED prints "[SC] ControlService FAILED
   ; 1062" (ERROR_SERVICE_NOT_ACTIVE). Guard with a RUNNING check (not mere
@@ -1106,9 +1112,16 @@ Function KillBridgeProcess
     nsis_tauri_utils::FindProcess "micontrol_bridge.exe"
     Pop $1
     ${If} $1 <> 0
-      Return  ; process not found — safe to proceed
+      Goto bridge_kill_done  ; process not found — proceed to rename check
     ${EndIf}
+    ; S59: dual kill — the plugin's KillProcess has been observed failing
+    ; silently on a degraded SCM service process (v0.2.18/19 update reports:
+    ; 5 attempts, process survived, binary stayed locked). taskkill /F uses
+    ; the same TerminateProcess path but a different handle-opening route;
+    ; running both maximizes the chance of success.
     nsis_tauri_utils::KillProcess "micontrol_bridge.exe"
+    Pop $1
+    nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /IM micontrol_bridge.exe'
     Pop $1
     Sleep 500
     IntOp $0 $0 + 1
@@ -1116,7 +1129,25 @@ Function KillBridgeProcess
       Goto bridge_kill_loop
     ${EndIf}
     DetailPrint "Warning: micontrol_bridge.exe could not be killed after 5 attempts."
-  bridge_kill_loop_exit:
+  bridge_kill_done:
+  ; S59 RENAME FALLBACK (the actual fix for "Error opening file for writing"):
+  ; NTFS allows RENAMING an executable that is currently running, even when
+  ; overwriting it is impossible. Rename the old binary out of the way so the
+  ; `File` overwrite of micontrol_bridge.exe succeeds; the zombie (if any)
+  ; keeps running from the renamed path and dies on the next service stop /
+  ; reboot, and the fresh service entry created below points at the canonical
+  ; path again. Stale .locked files from prior runs are cleaned first (the
+  ; del with a wildcard is a no-op when none exist).
+  nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c "del /f /q ""$INSTDIR\micontrol_bridge.exe.locked-*"" > NUL 2>&1"'
+  Pop $1
+  ClearErrors
+  Rename "$INSTDIR\micontrol_bridge.exe" "$INSTDIR\micontrol_bridge.exe.locked-$PID"
+  ${If} ${Errors}
+    ClearErrors
+    DetailPrint "  micontrol_bridge.exe not present (clean install) or rename failed — File section reports if the path is truly locked."
+  ${Else}
+    DetailPrint "  Renamed in-use micontrol_bridge.exe to .locked-$PID — new binary written in its place."
+  ${EndIf}
 FunctionEnd
 
 ; ── IoTService stopper ────────────────────────────────────────────────────────
@@ -1270,6 +1301,9 @@ Function un.KillBridgeProcess
   ; race as the install path: with `restart/5000` the SCM revives the process
   ; between stop and file removal and the uninstall cannot delete the binary.
   nsExec::ExecToLog '"$SYSDIR\sc.exe" failure MiControlBridge reset= 0 actions= ""'
+  Pop $1
+  ; S59: disable start type too — see the install-path comment.
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" config MiControlBridge start= disabled'
   Pop $1
   nsExec::ExecToLog '"$SYSDIR\cmd.exe" /c ""$SYSDIR\sc.exe" query MiControlBridge | "$SYSDIR\findstr.exe" /i "RUNNING" > NUL 2>&1"'
   Pop $1
