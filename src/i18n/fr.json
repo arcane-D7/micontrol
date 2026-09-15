@@ -212,6 +212,9 @@
     "techDetails": {
       "title": "Détails techniques",
       "tdp": "TDP",
+      "peak": "Pic",
+      "sustained": "Soutenu",
+      "temp": "Temp. pic",
       "fanBehavior": "Ventilateur",
       "windowsOverlay": "Énergie Windows",
       "overlayNote": "Le mode d'alimentation Windows change automatiquement — comportement attendu.",

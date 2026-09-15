@@ -208,6 +208,9 @@
     "techDetails": {
       "title": "Technical Details",
       "tdp": "TDP",
+      "peak": "Peak",
+      "sustained": "Sustained",
+      "temp": "Peak temp",
       "fanBehavior": "Fan",
       "windowsOverlay": "Windows Power",
       "overlayNote": "Windows power mode changes automatically — this is expected behavior.",

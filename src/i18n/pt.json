@@ -212,6 +212,9 @@
     "techDetails": {
       "title": "Detalhes Técnicos",
       "tdp": "TDP",
+      "peak": "Pico",
+      "sustained": "Sustentado",
+      "temp": "Temp. pico",
       "fanBehavior": "Ventoinha",
       "windowsOverlay": "Energia Windows",
       "overlayNote": "O modo de energia do Windows muda automaticamente — comportamento esperado.",

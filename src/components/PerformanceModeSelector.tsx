@@ -104,76 +104,121 @@ const MODES: Array<{
   requiresAi?: true;
 }> = MODE_GROUPS.flatMap((g) => g.modes);
 
-/** Hardware constants per mode (not translated — numbers / proper nouns) */
+/** Hardware constants per mode (not translated — numbers / proper nouns).
+ *  S60b: `peakW` / `sustW` / `tempC` are the measured power and thermal
+ *  profile shown inside every mode button (peak TDP, sustained TDP, expected
+ *  peak temperature). They come from the measured profiles documented in the
+ *  techDetails i18n strings (same machine, EC-read). */
 const MODE_SPECS: Record<
   PerformanceMode,
-  { tdp: string; fan: string; windowsOverlay: string; accentColor: string }
+  {
+    tdp: string;
+    fan: string;
+    windowsOverlay: string;
+    accentColor: string;
+    peakW: string;
+    sustW: string;
+    tempC: string;
+  }
 > = {
   silence: {
     tdp: '~65 W burst (~34 s) / ~35 W sust.',
     fan: 'Max RPM (thermal)',
     windowsOverlay: 'Power Saver',
     accentColor: 'var(--info)',
+    peakW: '~65 W',
+    sustW: '~35 W',
+    tempC: '99°C',
   },
   balance: {
     tdp: '~60 W burst (~11 s) / ~35 W sust.',
     fan: 'Adaptive 2 000–4 500 RPM',
     windowsOverlay: 'Balanced',
     accentColor: 'var(--success)',
+    peakW: '~60 W',
+    sustW: '~35 W',
+    tempC: '~90°C',
   },
   turbo: {
     tdp: '~62 W burst (~5 s) / ~15 W sust.',
     fan: 'Aggressive 4 000–5 500 RPM',
     windowsOverlay: 'Best Performance',
     accentColor: 'var(--warning)',
+    peakW: '~62 W',
+    sustW: '~15 W',
+    tempC: '95°C',
   },
   smart: {
     tdp: '~62 W burst (~5 s) / ~15 W sust. (AI)',
     fan: 'Variable — follows load',
     windowsOverlay: 'Balanced',
     accentColor: 'var(--accent)',
+    peakW: '~62 W',
+    sustW: '~15 W',
+    tempC: '95°C',
   },
   long_battery: {
     tdp: '~60 W burst (~2 s) / ~42 W sust.',
     fan: 'Moderate 2 000–3 500 RPM',
     windowsOverlay: 'Power Saver',
     accentColor: 'var(--success)',
+    peakW: '~60 W',
+    sustW: '~42 W',
+    tempC: '91°C',
   },
   decepticon: {
     tdp: '~35-40 W flat (no burst phase)',
     fan: 'Steady ~3 500 RPM',
     windowsOverlay: 'Best Performance',
     accentColor: 'var(--error)',
+    peakW: '~40 W',
+    sustW: '~35-40 W',
+    tempC: '88°C',
   },
   smart_acceleration: {
     tdp: '~65 W burst (~12 s) / ~38 W sust. (AI)',
     fan: 'Reactive — spikes on demand',
     windowsOverlay: 'Balanced',
     accentColor: 'var(--accent)',
+    peakW: '~65 W',
+    sustW: '~38 W',
+    tempC: '~95°C',
   },
   overdrive: {
     tdp: '~65-83 W burst (~17 s) / ~50 W sust.',
     fan: 'Max 5 000–5 500 RPM',
     windowsOverlay: 'Best Performance',
     accentColor: '#ff6a00',
+    peakW: '~83 W',
+    sustW: '~50 W',
+    tempC: '100°C',
   },
   overdrive_high: {
     tdp: '~62-67 W sustained (uncapped PL1)',
     fan: 'Max 5 000–5 500 RPM',
     windowsOverlay: 'Best Performance',
     accentColor: '#ff3300',
+    peakW: '~67 W',
+    sustW: '~62-67 W',
+    tempC: '99°C',
   },
   overdrive_max: {
     tdp: '~60-77 W sustained (uncapped PL1)',
     fan: 'Max 5 000–5 500+ RPM',
     windowsOverlay: 'Best Performance',
     accentColor: '#cc0000',
+    peakW: '~77 W',
+    sustW: '~60-77 W',
+    tempC: '100°C',
   },
   smart_adaptive: {
     tdp: '~65-73 W burst (~13 s) / ~35 W sust.',
     fan: 'Variable — EC-controlled',
     windowsOverlay: 'Balanced',
     accentColor: '#00b4d8',
+    peakW: '~73 W',
+    sustW: '~35 W',
+    tempC: '~99°C',
   },
 };
 
@@ -284,6 +329,28 @@ export default function PerformanceModeSelector({
                         🔒
                       </span>
                     )}
+                  </span>
+                  {/* S60b: measured power/thermal spec row — peak TDP,
+                      sustained TDP and expected peak temperature. */}
+                  <span className="mode-btn-specs">
+                    <span className="mode-btn-spec">
+                      <span className="mode-btn-spec-label">
+                        {t('performance.techDetails.peak')}
+                      </span>
+                      <span className="mode-btn-spec-value">{MODE_SPECS[m.key].peakW}</span>
+                    </span>
+                    <span className="mode-btn-spec">
+                      <span className="mode-btn-spec-label">
+                        {t('performance.techDetails.sustained')}
+                      </span>
+                      <span className="mode-btn-spec-value">{MODE_SPECS[m.key].sustW}</span>
+                    </span>
+                    <span className="mode-btn-spec">
+                      <span className="mode-btn-spec-label">
+                        {t('performance.techDetails.temp')}
+                      </span>
+                      <span className="mode-btn-spec-value">{MODE_SPECS[m.key].tempC}</span>
+                    </span>
                   </span>
                   <span className="mode-btn-desc">
                     {aiLocked
