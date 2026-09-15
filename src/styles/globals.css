@@ -578,6 +578,24 @@ body {
 }
 
 /* ── Performance mode buttons ────────────────────────────────────────────── */
+/* S60: category grouping — Economy, Performance, Overpower (experimental) */
+.mode-group-header {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin: 14px 2px 8px;
+}
+.mode-grid:first-of-type,
+div > .mode-grid:first-child {
+  margin-top: 0;
+}
+.mode-group-divider {
+  height: 1px;
+  margin: 18px 0 4px;
+  background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
+}
 .mode-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -653,6 +671,109 @@ body {
   font-size: 0.6875rem;
   color: var(--text-muted);
   line-height: 1.35;
+}
+/* Overpower modes: warm warning tint so the risk is visible at a glance */
+.mode-btn.overpower {
+  border-color: oklch(from var(--warning) l c h / 0.4);
+}
+.mode-btn.overpower:hover:not(:disabled) {
+  border-color: var(--warning);
+  background: oklch(from var(--warning) l c h / 0.08);
+}
+.mode-btn.overpower.active {
+  border-color: var(--warning);
+  box-shadow:
+    0 0 0 3px oklch(from var(--warning) l c h / 0.25),
+    var(--shadow-sm);
+}
+
+/* ── Overpower confirmation modal ────────────────────────────────────────── */
+.overpower-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: oklch(from var(--bg) l c h / 0.72);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  animation: mode-applying-fade-in 160ms var(--ease);
+}
+@keyframes mode-applying-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.overpower-modal {
+  width: min(420px, calc(100vw - 48px));
+  padding: 24px;
+  border-radius: var(--r-md);
+  background: var(--surface-solid);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-md);
+}
+.overpower-modal-icon {
+  font-size: 1.75rem;
+  margin-bottom: 10px;
+}
+.overpower-modal h2 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.overpower-modal-mode {
+  margin: 0 0 10px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--warning);
+}
+.overpower-modal-spec {
+  font-weight: 500;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+.overpower-modal p:not(.overpower-modal-mode) {
+  margin: 0 0 18px;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.overpower-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.overpower-modal-cancel,
+.overpower-modal-confirm {
+  padding: 8px 18px;
+  border-radius: var(--r-xs);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  transition:
+    background var(--t-fast) var(--ease),
+    border-color var(--t-fast) var(--ease);
+}
+.overpower-modal-cancel:hover {
+  background: var(--surface-hover);
+}
+.overpower-modal-confirm {
+  background: var(--warning);
+  border-color: var(--warning);
+  color: oklch(0% 0 0 / 0.9);
+}
+.overpower-modal-confirm:hover {
+  background: oklch(from var(--warning) calc(l - 6%) c h);
+  border-color: oklch(from var(--warning) calc(l - 6%) c h);
 }
 
 /* ── Sliders ─────────────────────────────────────────────────────────────── */

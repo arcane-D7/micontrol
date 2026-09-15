@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { t } from '../hooks/useI18n';
 import type { PerformanceMode } from '../types/hardware';
 import { useToast } from '../contexts/ToastContext';
@@ -18,6 +19,82 @@ interface Props {
   applying?: boolean;
 }
 
+type ModeCategory = 'economy' | 'performance' | 'overpower';
+
+/** Modes grouped by category, in the display order the user requested:
+ *  Economy (battery-saving) first, then Performance, then Overpower
+ *  (experimental, hardware-stressing — gated behind a confirmation modal). */
+const MODE_GROUPS: Array<{ category: ModeCategory; modes: typeof MODES }> = [
+  {
+    category: 'economy',
+    modes: [
+      { key: 'silence', icon: '🔇', labelKey: 'silence', descKey: 'silence', detailKey: 'silence' },
+      {
+        key: 'long_battery',
+        icon: '🍃',
+        labelKey: 'longBattery',
+        descKey: 'longBattery',
+        detailKey: 'longBattery',
+      },
+      {
+        key: 'decepticon',
+        icon: '🌡️',
+        labelKey: 'decepticon',
+        descKey: 'decepticon',
+        detailKey: 'decepticon',
+      },
+    ],
+  },
+  {
+    category: 'performance',
+    modes: [
+      { key: 'balance', icon: '⚖️', labelKey: 'balance', descKey: 'balance', detailKey: 'balance' },
+      { key: 'turbo', icon: '⚡', labelKey: 'turbo', descKey: 'turbo', detailKey: 'turbo' },
+      { key: 'smart', icon: '🧠', labelKey: 'smart', descKey: 'smart', detailKey: 'smart' },
+      {
+        key: 'smart_acceleration',
+        icon: '🚀',
+        labelKey: 'smartAcceleration',
+        descKey: 'smartAcceleration',
+        detailKey: 'smartAcceleration',
+      },
+      {
+        key: 'smart_adaptive',
+        icon: '🎯',
+        labelKey: 'smartAdaptive',
+        descKey: 'smartAdaptive',
+        detailKey: 'smartAdaptive',
+      },
+    ],
+  },
+  {
+    category: 'overpower',
+    modes: [
+      {
+        key: 'overdrive',
+        icon: '🔥',
+        labelKey: 'overdrive',
+        descKey: 'overdrive',
+        detailKey: 'overdrive',
+      },
+      {
+        key: 'overdrive_high',
+        icon: '🌋',
+        labelKey: 'overdriveHigh',
+        descKey: 'overdriveHigh',
+        detailKey: 'overdriveHigh',
+      },
+      {
+        key: 'overdrive_max',
+        icon: '☠️',
+        labelKey: 'overdriveMax',
+        descKey: 'overdriveMax',
+        detailKey: 'overdriveMax',
+      },
+    ],
+  },
+];
+
 const MODES: Array<{
   key: PerformanceMode;
   icon: string;
@@ -25,61 +102,7 @@ const MODES: Array<{
   descKey: keyof (typeof import('../i18n/en.json'))['performance']['descriptions'];
   detailKey: keyof (typeof import('../i18n/en.json'))['performance']['techDetails']['modes'];
   requiresAi?: true;
-}> = [
-  { key: 'silence', icon: '🔇', labelKey: 'silence', descKey: 'silence', detailKey: 'silence' },
-  { key: 'balance', icon: '⚖️', labelKey: 'balance', descKey: 'balance', detailKey: 'balance' },
-  { key: 'turbo', icon: '⚡', labelKey: 'turbo', descKey: 'turbo', detailKey: 'turbo' },
-  {
-    key: 'decepticon',
-    icon: '💥',
-    labelKey: 'decepticon',
-    descKey: 'decepticon',
-    detailKey: 'decepticon',
-  },
-  { key: 'smart', icon: '🧠', labelKey: 'smart', descKey: 'smart', detailKey: 'smart' },
-  {
-    key: 'long_battery',
-    icon: '🍃',
-    labelKey: 'longBattery',
-    descKey: 'longBattery',
-    detailKey: 'longBattery',
-  },
-  {
-    key: 'smart_acceleration',
-    icon: '🚀',
-    labelKey: 'smartAcceleration',
-    descKey: 'smartAcceleration',
-    detailKey: 'smartAcceleration',
-  },
-  {
-    key: 'overdrive',
-    icon: '🔥',
-    labelKey: 'overdrive',
-    descKey: 'overdrive',
-    detailKey: 'overdrive',
-  },
-  {
-    key: 'overdrive_high',
-    icon: '🌋',
-    labelKey: 'overdriveHigh',
-    descKey: 'overdriveHigh',
-    detailKey: 'overdriveHigh',
-  },
-  {
-    key: 'overdrive_max',
-    icon: '☠️',
-    labelKey: 'overdriveMax',
-    descKey: 'overdriveMax',
-    detailKey: 'overdriveMax',
-  },
-  {
-    key: 'smart_adaptive',
-    icon: '🎯',
-    labelKey: 'smartAdaptive',
-    descKey: 'smartAdaptive',
-    detailKey: 'smartAdaptive',
-  },
-];
+}> = MODE_GROUPS.flatMap((g) => g.modes);
 
 /** Hardware constants per mode (not translated — numbers / proper nouns) */
 const MODE_SPECS: Record<
@@ -165,8 +188,11 @@ export default function PerformanceModeSelector({
   const spec = MODE_SPECS[current];
   const showSmartDiff = current === 'smart' || current === 'smart_acceleration';
   const { addToast } = useToast();
+  // S60: overpower modes require an explicit confirmation modal — they run
+  // the hardware at its limits and can shorten its useful life.
+  const [pendingOverpower, setPendingOverpower] = useState<PerformanceMode | null>(null);
 
-  async function handleModeChange(key: PerformanceMode) {
+  async function applyMode(key: PerformanceMode) {
     try {
       await onChange(key);
       addToast({ message: t('performance.applied'), type: 'success' });
@@ -174,74 +200,102 @@ export default function PerformanceModeSelector({
       addToast({
         message: `${t('performance.error')}: ${String(e)}`,
         type: 'error',
-        onRetry: () => handleModeChange(key),
+        onRetry: () => applyMode(key),
       });
     }
   }
 
+  async function handleModeChange(key: PerformanceMode) {
+    if (MODE_GROUPS.find((g) => g.category === 'overpower')!.modes.some((m) => m.key === key)) {
+      setPendingOverpower(key);
+      return;
+    }
+    await applyMode(key);
+  }
+
+  function confirmOverpower() {
+    const key = pendingOverpower;
+    setPendingOverpower(null);
+    if (key) void applyMode(key);
+  }
+
+  const pendingSpec = pendingOverpower ? MODE_SPECS[pendingOverpower] : null;
+  const pendingMode = MODES.find((m) => m.key === pendingOverpower);
+
   return (
     <div>
-      <div className="mode-grid">
-        {MODES.map((m) => {
-          const aiLocked = !!m.requiresAi && !aiApiKeySet;
-          const isCurrent = current === m.key;
-          const showPending = applying && isCurrent;
-          return (
-            <button
-              key={m.key}
-              className={`mode-btn ${isCurrent ? 'active' : ''} ${showPending ? 'applying' : ''} ${aiLocked ? 'ai-locked' : ''}`}
-              onClick={() => {
-                if (aiLocked) {
-                  onOpenSettings?.();
-                  return;
-                }
-                void handleModeChange(m.key);
-              }}
-              disabled={(disabled || applying) && !aiLocked}
-              title={
-                aiLocked
-                  ? t('performance.techDetails.aiLockedMsg')
-                  : t(`performance.descriptions.${m.descKey}` as Parameters<typeof t>[0])
-              }
-            >
-              <span className="mode-btn-icon">{showPending ? '⏳' : m.icon}</span>
-              <span className="mode-btn-name">
-                {t(`performance.modes.${m.labelKey}` as Parameters<typeof t>[0])}
-                {showPending && (
-                  <span
-                    style={{
-                      marginLeft: 4,
-                      fontSize: 10,
-                      color: 'var(--text-dim)',
-                      verticalAlign: 'middle',
-                    }}
-                  >
-                    …
+      {MODE_GROUPS.map((group, gi) => (
+        <div key={group.category}>
+          {gi > 0 && (
+            <div className="mode-group-divider" role="separator" aria-orientation="horizontal" />
+          )}
+          <div className="mode-group-header">
+            {t(`performance.groups.${group.category}` as Parameters<typeof t>[0])}
+          </div>
+          <div className="mode-grid">
+            {group.modes.map((m) => {
+              const aiLocked = !!m.requiresAi && !aiApiKeySet;
+              const isCurrent = current === m.key;
+              const showPending = applying && isCurrent;
+              const isOverpower = group.category === 'overpower';
+              return (
+                <button
+                  key={m.key}
+                  className={`mode-btn ${isCurrent ? 'active' : ''} ${showPending ? 'applying' : ''} ${aiLocked ? 'ai-locked' : ''} ${isOverpower ? 'overpower' : ''}`}
+                  onClick={() => {
+                    if (aiLocked) {
+                      onOpenSettings?.();
+                      return;
+                    }
+                    void handleModeChange(m.key);
+                  }}
+                  disabled={(disabled || applying) && !aiLocked}
+                  title={
+                    aiLocked
+                      ? t('performance.techDetails.aiLockedMsg')
+                      : t(`performance.descriptions.${m.descKey}` as Parameters<typeof t>[0])
+                  }
+                >
+                  <span className="mode-btn-icon">{showPending ? '⏳' : m.icon}</span>
+                  <span className="mode-btn-name">
+                    {t(`performance.modes.${m.labelKey}` as Parameters<typeof t>[0])}
+                    {showPending && (
+                      <span
+                        style={{
+                          marginLeft: 4,
+                          fontSize: 10,
+                          color: 'var(--text-dim)',
+                          verticalAlign: 'middle',
+                        }}
+                      >
+                        …
+                      </span>
+                    )}
+                    {aiLocked && (
+                      <span
+                        style={{
+                          marginLeft: 4,
+                          fontSize: 10,
+                          color: 'var(--text-dim)',
+                          verticalAlign: 'middle',
+                        }}
+                        title={t('performance.techDetails.aiLockedMsg')}
+                      >
+                        🔒
+                      </span>
+                    )}
                   </span>
-                )}
-                {aiLocked && (
-                  <span
-                    style={{
-                      marginLeft: 4,
-                      fontSize: 10,
-                      color: 'var(--text-dim)',
-                      verticalAlign: 'middle',
-                    }}
-                    title={t('performance.techDetails.aiLockedMsg')}
-                  >
-                    🔒
+                  <span className="mode-btn-desc">
+                    {aiLocked
+                      ? t('performance.techDetails.requiresApiKey')
+                      : t(`performance.descriptions.${m.descKey}` as Parameters<typeof t>[0])}
                   </span>
-                )}
-              </span>
-              <span className="mode-btn-desc">
-                {aiLocked
-                  ? t('performance.techDetails.requiresApiKey')
-                  : t(`performance.descriptions.${m.descKey}` as Parameters<typeof t>[0])}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
 
       {/* Technical details for the active mode */}
       {spec && (
@@ -353,6 +407,49 @@ export default function PerformanceModeSelector({
               {t('performance.techDetails.smartDiff')}
             </div>
           )}
+        </div>
+      )}
+
+      {/* S60: overpower confirmation modal — experimental modes that push the
+          hardware to its limits and can shorten its useful life. */}
+      {pendingOverpower && pendingMode && (
+        <div
+          className="overpower-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="overpower-modal-title"
+          onClick={() => setPendingOverpower(null)}
+        >
+          <div
+            className="overpower-modal"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setPendingOverpower(null);
+            }}
+          >
+            <div className="overpower-modal-icon" aria-hidden="true">
+              ⚠️
+            </div>
+            <h2 id="overpower-modal-title">{t('performance.overpowerModal.title')}</h2>
+            <p className="overpower-modal-mode">
+              {pendingMode.icon}{' '}
+              {t(`performance.modes.${pendingMode.labelKey}` as Parameters<typeof t>[0])}
+              {pendingSpec && <span className="overpower-modal-spec"> · {pendingSpec.tdp}</span>}
+            </p>
+            <p>{t('performance.overpowerModal.body')}</p>
+            <div className="overpower-modal-actions">
+              <button
+                type="button"
+                className="overpower-modal-cancel"
+                onClick={() => setPendingOverpower(null)}
+              >
+                {t('performance.overpowerModal.cancel')}
+              </button>
+              <button type="button" className="overpower-modal-confirm" onClick={confirmOverpower}>
+                {t('performance.overpowerModal.confirm')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

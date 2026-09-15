@@ -143,6 +143,17 @@
   "performance": {
     "title": "Modo de Rendimiento",
     "subtitle": "Elige cómo el portátil equilibra energía y rendimiento",
+    "groups": {
+      "economy": "Ahorro de energía",
+      "performance": "Modos de rendimiento",
+      "overpower": "Modos Overpower"
+    },
+    "overpowerModal": {
+      "title": "¿Activar un modo overpower experimental?",
+      "body": "Los modos overpower llevan la CPU, la entrega de energía y la refrigeración a los límites del hardware. Se calientan mucho, hacen ruido, y el uso prolongado puede acortar la vida útil de la batería, los ventiladores y el procesador. Úsalos solo con el cargador conectado y vuelve a un modo estándar al terminar.",
+      "cancel": "Cancelar",
+      "confirm": "Lo entiendo, activar"
+    },
     "modes": {
       "silence": "Silencio",
       "balance": "Equilibrio",
@@ -157,17 +168,17 @@
       "smartAdaptive": "Smart Adaptativo"
     },
     "descriptions": {
-      "silence": "~65 W burst (~34 s) / ~35 W sostenido. Ventana PL2 más larga de todos los modos. Ventilador al máximo durante el burst.",
-      "balance": "~60 W burst (~11 s) / ~35 W sostenido. Ventilador adaptativo. Recomendado para uso general.",
-      "turbo": "~62 W burst (~5 s) / ~15 W sostenido. Pico PL2 corto, luego PL1 conservador.",
-      "smart": "IA adaptativa. ~62 W burst (~5 s) / ~15 W base. Aprende patrones de carga.",
-      "longBattery": "~60 W pico burst / ~42 W sostenido. Consumo moderado para sesiones largas.",
-      "decepticon": "~35-40 W plano (sin fase de burst, estable a 88°C). Requiere desbloqueo de firmware.",
-      "smartAcceleration": "IA + detección de picos. ~65 W burst (~12 s) / ~38 W base.",
-      "overdrive": "Modo oculto del firmware (ODV1=4). Medido: ~65-83 W burst (~17 s) / ~50 W sostenido. Experimental.",
-      "overdriveHigh": "Modo oculto del firmware (ODV1=5). Medido: ~62-67 W sostenido (PL1 sin límite). Experimental.",
-      "overdriveMax": "Modo oculto del firmware (ODV1=6). Medido: ~60-77 W sostenido (PL1 sin límite). Experimental.",
-      "smartAdaptive": "Autoescalado por el EC. ~65-73 W burst (~13 s) / ~35 W base. Ajusta TDP dinámicamente."
+      "silence": "Uso diario silencioso. Fresco y eficiente — ideal para leer, navegar y trabajar.",
+      "balance": "El valor de todos los días. Rendimiento fluido con calor y ruido equilibrados.",
+      "turbo": "Ráfaga corta de velocidad extra para abrir apps y tareas rápidas, luego se enfría.",
+      "smart": "La IA aprende tu rutina y ajusta la energía automáticamente durante el día.",
+      "longBattery": "Alarga la batería en movimiento. Rendimiento suave con el ventilador casi inaudible.",
+      "decepticon": "Potencia estable y uniforme, sin picos — velocidad constante a temperaturas moderadas.",
+      "smartAcceleration": "IA que reacciona a picos de carga: impulso inmediato cuando la necesitas, calma cuando no.",
+      "overdrive": "Experimental. Potencia alta y sostenida para juegos y renders exigentes — caliente y ruidoso.",
+      "overdriveHigh": "Experimental. Potencia sostenida casi máxima con refrigeración al máximo.",
+      "overdriveMax": "Experimental. Potencia máxima que permite el firmware — más caliente, más ruidoso, menor vida útil.",
+      "smartAdaptive": "El controlador ajusta la potencia solo para equilibrar velocidad y eficiencia."
     },
     "applying": "Aplicando modo...",
     "applied": "Modo aplicado",

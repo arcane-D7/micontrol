@@ -143,6 +143,17 @@
   "performance": {
     "title": "Performance Mode",
     "subtitle": "Choose how the laptop balances power and performance",
+    "groups": {
+      "economy": "Energy Saving",
+      "performance": "Performance Modes",
+      "overpower": "Overpower Modes"
+    },
+    "overpowerModal": {
+      "title": "Enable an experimental overpower mode?",
+      "body": "Overpower modes push the CPU, power delivery and cooling to their hardware limits. They run hot and loud, and sustained use can shorten the lifespan of your battery, fans and processor. Only use them while plugged in, and switch back to a standard mode when you are done.",
+      "cancel": "Cancel",
+      "confirm": "I understand, enable"
+    },
     "modes": {
       "silence": "Silence",
       "balance": "Balance",
@@ -157,17 +168,17 @@
       "smartAdaptive": "Smart Adaptive"
     },
     "descriptions": {
-      "silence": "~65 W burst (~34 s) / ~35 W sustained. Longest PL2 window of all modes. Fan at max during burst.",
-      "balance": "~60 W burst (~11 s) / ~35 W sustained. Adaptive fan. Recommended for most workloads.",
-      "turbo": "~62 W burst (~5 s) / ~15 W sustained. Short PL2 spike, then conservative PL1.",
-      "smart": "AI-adaptive. ~62 W burst (~5 s) / ~15 W base. Learns workload patterns over time.",
-      "longBattery": "~60 W peak burst / ~42 W sustained. Moderate long-session power. Fan stays quiet.",
-      "decepticon": "~35-40 W flat (no burst phase, stable 88°C). Requires firmware unlock.",
-      "smartAcceleration": "AI + burst detection. ~65 W burst (~12 s) / ~38 W base. Reacts to sudden load spikes.",
-      "overdrive": "Hidden firmware mode (ODV1=4). Measured: ~65-83 W burst (~17 s) / ~50 W sustained. Experimental.",
-      "overdriveHigh": "Hidden firmware mode (ODV1=5). Measured: ~62-67 W sustained (uncapped PL1). Experimental.",
-      "overdriveMax": "Hidden firmware mode (ODV1=6). Measured: ~60-77 W sustained (uncapped PL1). Experimental.",
-      "smartAdaptive": "EC-driven auto-scaling. ~65-73 W burst (~13 s) / ~35 W base. The embedded controller adjusts TDP dynamically."
+      "silence": "Whisper-quiet daily use. Cool and efficient — best for reading, browsing and office work.",
+      "balance": "The everyday default. Smooth performance with sensible heat and noise for most tasks.",
+      "turbo": "Short bursts of extra speed for launches and quick jobs, then settles back to stay cool.",
+      "smart": "AI learns your routine and adjusts power automatically throughout the day.",
+      "longBattery": "Stretches battery life on the go. Gentle performance with the fan barely audible.",
+      "decepticon": "Steady, even power with no spikes — consistent speed at moderate temperatures.",
+      "smartAcceleration": "AI that reacts to sudden demand: instant boost when you need it, calm when you don't.",
+      "overdrive": "Experimental. High sustained power for demanding games and renders — runs hot and loud.",
+      "overdriveHigh": "Experimental. Near-maximum sustained power with cooling at full speed.",
+      "overdriveMax": "Experimental. Maximum power the firmware allows — hottest, loudest, shortest hardware life.",
+      "smartAdaptive": "The embedded controller tunes power on the fly for a balance of speed and efficiency."
     },
     "monitor": {
       "title": "Live Monitor",

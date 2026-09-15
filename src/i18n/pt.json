@@ -143,6 +143,17 @@
   "performance": {
     "title": "Modo de Desempenho",
     "subtitle": "Escolha como o laptop equilibra energia e desempenho",
+    "groups": {
+      "economy": "Economia de energia",
+      "performance": "Modos de desempenho",
+      "overpower": "Modos Overpower"
+    },
+    "overpowerModal": {
+      "title": "Ativar um modo overpower experimental?",
+      "body": "Os modos overpower levam CPU, entrega de energia e refrigeração aos limites do hardware. Esquentam muito, fazem barulho, e o uso prolongado pode reduzir a vida útil da bateria, das ventoinhas e do processador. Use apenas com o carregador ligado e volte a um modo padrão quando terminar.",
+      "cancel": "Cancelar",
+      "confirm": "Entendi, ativar"
+    },
     "modes": {
       "silence": "Silêncio",
       "balance": "Equilíbrio",
@@ -157,17 +168,17 @@
       "smartAdaptive": "Smart Adaptativo"
     },
     "descriptions": {
-      "silence": "Funcionamento silencioso, desempenho reduzido. Ideal para tarefas leves.",
-      "balance": "Equilíbrio entre desempenho e bateria. Recomendado para uso geral.",
-      "turbo": "Desempenho máximo. Temperaturas e ruído de ventilação mais elevados.",
-      "smart": "Ajusta automaticamente com base na carga de trabalho.",
-      "longBattery": "Aumenta significativamente a duração da bateria com desempenho reduzido.",
-      "decepticon": "Requer desbloqueio de firmware. Desempenho máximo sem limites.",
-      "smartAcceleration": "Aumenta temporariamente o desempenho quando necessário.",
-      "overdrive": "~65-83 W burst (~17 s) / ~50 W sustentado. Experimental.",
-      "overdriveHigh": "~62-67 W sustentado (PL1 sem limite). Experimental.",
-      "overdriveMax": "~60-77 W sustentado (PL1 sem limite). Experimental.",
-      "smartAdaptive": "Auto-escalonamento pelo EC. ~65-73 W burst (~13 s) / ~35 W base. Ajusta TDP dinamicamente."
+      "silence": "Uso diário silencioso. Fresco e eficiente — ideal para leitura, navegação e escritório.",
+      "balance": "O padrão de todos os dias. Desempenho suave com calor e ruído equilibrados.",
+      "turbo": "Rajada curta de velocidade extra para abrir apps e tarefas rápidas, depois arrefece.",
+      "smart": "A IA aprende a sua rotina e ajusta a energia automaticamente ao longo do dia.",
+      "longBattery": "Estica a bateria em viagem. Desempenho suave com a ventoinha quase inaudível.",
+      "decepticon": "Potência estável e uniforme, sem picos — velocidade consistente a temperaturas moderadas.",
+      "smartAcceleration": "IA que reage a picos de carga: impulso imediato quando precisa, calma quando não.",
+      "overdrive": "Experimental. Potência alta e sustentada para jogos e renders exigentes — quente e barulhento.",
+      "overdriveHigh": "Experimental. Potência sustentada quase máxima com refrigeração no máximo.",
+      "overdriveMax": "Experimental. Potência máxima que o firmware permite — mais quente, mais barulhento, menor vida útil.",
+      "smartAdaptive": "O controlador ajusta a potência sozinho para equilibrar velocidade e eficiência."
     },
     "applying": "A aplicar modo...",
     "applied": "Modo aplicado",
