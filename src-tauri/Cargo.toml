@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "micontrol"
-version = "0.2.16-beta"
+version = "0.2.17-beta"
 edition = "2021"
 default-run = "micontrol"
 
