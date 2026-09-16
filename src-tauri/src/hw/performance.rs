@@ -44,8 +44,16 @@ pub struct PerformanceResult {
     pub mode: PerformanceMode,
 }
 
-/// Set the performance mode via WMI (HQWmiCommonInterface) + registry + Windows power overlay.
+/// Set the performance mode via WMI (HQWmiCommonInterface) + EC (MiInterface) + registry + overlay.
 /// Falls back to VHF, then registry-only if WMI is unavailable.
+///
+/// S61 FIX (2026-09-16): the HQ WMI `SetPerformanceMode` call alone changes
+/// the FAN CURVE but NOT the actual PL1/PL2 power limit. Measured live:
+/// after switching Decepticon → Balance the fans slowed immediately while
+/// package power stayed at 41 W (ESIF P_0). The real EC power limit lives on
+/// the MiInterface WMAA channel (`wmi_ec`), which `set_fan_mode` already
+/// writes — the two channels were writing different subsystems. We now write
+/// BOTH: HQ WMI (fan curve + DPTF table) AND the EC power mode (PL1/PL2).
 pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<PerformanceResult> {
     // Always persist to registry
     persist_to_registry(mode)?;
@@ -54,13 +62,26 @@ pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<Performance
     // slider reflects the change (requires this process to be elevated).
     set_windows_power_overlay(mode);
 
-    // Attempt WMI HQWmiCommonInterface first (real TDP control on Xiaomi Book Pro 14)
+    // S61: sync the EC power limit (PL1/PL2) via the MiInterface WMAA channel.
+    // This is what actually caps the sustained package power. Without it the
+    // fan curve changes but the CPU keeps drawing the previous mode's power.
+    #[cfg(windows)]
+    {
+        let ec_mode = mode.to_ec_mode();
+        if let Err(e) = crate::hw::wmi_ec::set_performance_mode(ec_mode) {
+            log::warn!(
+                "EC WMAA set_performance_mode({ec_mode:?}) failed — power limit unchanged: {e}"
+            );
+        }
+    }
+
+    // Attempt WMI HQWmiCommonInterface next (fan curve + DPTF table)
     #[cfg(windows)]
     match send_via_hq_wmi(mode) {
         Ok(()) => {
             return Ok(PerformanceResult {
                 success: true,
-                method: "hq_wmi+registry+overlay".to_string(),
+                method: "hq_wmi+ec_wmaa+registry+overlay".to_string(),
                 mode,
             })
         }
@@ -71,7 +92,7 @@ pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<Performance
     match send_via_vhf(mode) {
         Ok(()) => Ok(PerformanceResult {
             success: true,
-            method: "vhf+registry+overlay".to_string(),
+            method: "vhf+ec_wmaa+registry+overlay".to_string(),
             mode,
         }),
         Err(e) => {

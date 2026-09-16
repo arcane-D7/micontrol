@@ -73,4 +73,24 @@ impl PerformanceMode {
             Self::SmartAcceleration => 14,
         }
     }
+
+    /// S61: returns the EC power-limit mode (MiInterface WMAA FUN3 code) that
+    /// matches this UI mode. The HQ WMI channel used by `set_performance_mode`
+    /// drives the fan curve, but the actual PL1/PL2 package power limit lives
+    /// on this EC channel — writing only HQ WMI left users on the previous
+    /// mode's power draw (measured: fans slowed to Balance while the package
+    /// stayed at 41 W). Mapping follows the documented EC profiles:
+    /// Performance=5, Balanced=6, Quiet=7, SuperQuiet=8, UltraPerformance=9.
+    pub fn to_ec_mode(self) -> crate::hw::wmi_ec::EcPerformanceMode {
+        use crate::hw::wmi_ec::EcPerformanceMode as Ec;
+        match self {
+            Self::Silence => Ec::Quiet,
+            Self::LongBattery => Ec::SuperQuiet,
+            Self::Balance | Self::Smart | Self::SmartAcceleration | Self::SmartAdaptive => {
+                Ec::Balanced
+            }
+            Self::Turbo | Self::Decepticon => Ec::Performance,
+            Self::Overdrive | Self::OverdriveHigh | Self::OverdriveMax => Ec::UltraPerformance,
+        }
+    }
 }
