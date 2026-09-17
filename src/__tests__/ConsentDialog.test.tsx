@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ConsentDialog } from '../components/ConsentDialog';
 
@@ -47,7 +47,9 @@ describe('ConsentDialog', () => {
 
     await user.click(allowButton);
 
-    expect(mockOnAllow).toHaveBeenCalledTimes(1);
+    // S49 refactor: the choice commits after a 140ms fade-out, so the spy
+    // fires asynchronously — wait for it instead of asserting immediately.
+    await waitFor(() => expect(mockOnAllow).toHaveBeenCalledTimes(1));
   });
 
   it('clicking "Deny" calls onDeny', async () => {
@@ -57,16 +59,16 @@ describe('ConsentDialog', () => {
     const denyButton = screen.getByText('consent.dialog.deny');
     await user.click(denyButton);
 
-    expect(mockOnDeny).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockOnDeny).toHaveBeenCalledTimes(1));
   });
 
-  it('pressing Escape calls onDeny', () => {
+  it('pressing Escape calls onDeny', async () => {
     renderDialog();
 
     const dialog = screen.getByRole('dialog');
     fireEvent.keyDown(dialog, { key: 'Escape' });
 
-    expect(mockOnDeny).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mockOnDeny).toHaveBeenCalledTimes(1));
   });
 
   it('clicking privacy link calls onOpenPrivacy', async () => {
