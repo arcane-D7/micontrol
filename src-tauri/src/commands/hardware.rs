@@ -47,9 +47,17 @@ pub async fn set_performance_mode(
     mode: PerformanceMode,
     state: State<'_, AppState>,
 ) -> Result<PerformanceResult, ErrorResponse> {
-    let raw =
-        elev_bridge::run_elevated("set_performance_mode", serde_json::json!({ "mode": mode }))
-            .await?;
+    // S62: mode switching from the UI must NEVER trigger a UAC prompt. The
+    // user-visible contract is "profile changes are silent" — if the bridge
+    // and the scheduled task are both unavailable, we return an error (the UI
+    // shows the toast with retry) instead of popping a UAC dialog out of a
+    // background action. run_elevated's UAC fallback is reserved for explicit
+    // user-initiated installer/driver operations.
+    let raw = elev_bridge::run_elevated_no_prompt(
+        "set_performance_mode",
+        serde_json::json!({ "mode": mode }),
+    )
+    .await?;
     let result: PerformanceResult =
         serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
     *lock_or_recover(&state.performance_mode) = result.mode;
