@@ -37,6 +37,7 @@ pub mod os_turbo;
 pub mod os_turbo_log;
 pub mod os_turbo_policy;
 pub mod os_turbo_stats;
+pub mod os_turbo_suggest;
 #[cfg(windows)]
 pub mod osd;
 pub mod performance;
