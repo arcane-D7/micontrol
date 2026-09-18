@@ -1113,9 +1113,16 @@ async fn resize_tray_popup(app: tauri::AppHandle, height: f64) -> Result<(), Str
         let bottom_phys = pos.y + cur.height as i32;
         let new_h_phys = (height * scale).round() as u32;
         let new_y = (bottom_phys - new_h_phys as i32).max(0);
+        // S63: never trust the current width. A hidden/pre-created popup window can
+        // report (or get clamped to) a wrong inner_size — observed live as a width
+        // collapse from 300 to 171 px, which this resizer then preserved forever,
+        // clipping the right side of the popup. The CSS content width is fixed at
+        // POPUP_W, so enforce it on every resize. This also self-heals a corrupted
+        // window on the first ResizeObserver tick after show.
+        let new_w_phys = (POPUP_W * scale).round() as u32;
         // Apply — size first, then position so there's no flicker
         window
-            .set_size(tauri::PhysicalSize::new(cur.width, new_h_phys))
+            .set_size(tauri::PhysicalSize::new(new_w_phys, new_h_phys))
             .map_err(|e| e.to_string())?;
         window
             .set_position(tauri::PhysicalPosition::new(pos.x, new_y))
@@ -1250,6 +1257,23 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
 fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosition<f64>) {
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
+    // S63: heal width corruption on every show. A previously shown popup can carry a
+    // collapsed width (observed 300 → 171 px); enforce the design width before
+    // measuring, so positioning and the visible popup both use the real geometry.
+    {
+        let want_w = (POPUP_W * scale).round() as u32;
+        let cur = window
+            .inner_size()
+            .map(|s| (s.width, s.height))
+            .unwrap_or((0, 0));
+        if cur.0 != want_w {
+            log::warn!(
+                "[tray] popup width drifted ({} px, expected {want_w}) — healing",
+                cur.0
+            );
+            let _ = window.set_size(tauri::PhysicalSize::new(want_w, cur.1));
+        }
+    }
     // Guard: a hidden window may report height=0 before first render; fall back to default.
     let ph = window
         .inner_size()
@@ -1311,6 +1335,21 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
 fn position_popup_at_tray(window: &tauri::WebviewWindow) {
     let scale = window.scale_factor().unwrap_or(1.0);
     let pw = POPUP_W * scale;
+    // S63: same width-heal as position_popup — see the note there.
+    {
+        let want_w = (POPUP_W * scale).round() as u32;
+        let cur = window
+            .inner_size()
+            .map(|s| (s.width, s.height))
+            .unwrap_or((0, 0));
+        if cur.0 != want_w {
+            log::warn!(
+                "[tray] popup width drifted ({} px, expected {want_w}) — healing",
+                cur.0
+            );
+            let _ = window.set_size(tauri::PhysicalSize::new(want_w, cur.1));
+        }
+    }
     // Guard: a hidden window may report height=0 before first render; fall back to default.
     let ph = window
         .inner_size()
