@@ -191,6 +191,39 @@ fn set_power_plan_balanced() -> HardwareResult<String> {
     }
 }
 
+#[cfg(windows)]
+fn execution_speed_throttling_state(
+) -> windows::Win32::System::Threading::PROCESS_POWER_THROTTLING_STATE {
+    use windows::Win32::System::Threading::{
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    };
+
+    PROCESS_POWER_THROTTLING_STATE {
+        Version: 1,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    }
+}
+
+#[cfg(windows)]
+fn enable_execution_speed_throttling(
+    handle: windows::Win32::Foundation::HANDLE,
+) -> Result<(), i32> {
+    use windows::Win32::System::Threading::{ProcessPowerThrottling, SetProcessInformation};
+
+    let state = execution_speed_throttling_state();
+    unsafe {
+        SetProcessInformation(
+            handle,
+            ProcessPowerThrottling,
+            &state as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<windows::Win32::System::Threading::PROCESS_POWER_THROTTLING_STATE>()
+                as u32,
+        )
+        .map_err(|error| error.code().0)
+    }
+}
+
 /// Get the active power plan name.
 fn get_active_power_plan() -> HardwareResult<String> {
     #[cfg(windows)]
@@ -277,56 +310,23 @@ fn throttle_background_processes() -> u32 {
                 };
 
                 if let Ok(handle) = handle {
-                    // Apply EcoQoS throttling via SetProcessInformation.
-                    // The windows 0.58 crate does not expose SetProcessInformation,
-                    // so we use NtSetInformationProcess via FFI.
-                    //
-                    // ProcessPowerThrottlingVal = 4 (PROCESS_POWER_THROTTLING_STATE)
-                    // We set ControlMask = EXECUTION_SPEED (1) and StateMask = EXECUTION_SPEED (1)
-                    // to enable EcoQoS.
-                    #[repr(C)]
-                    #[derive(Default, Clone, Copy)]
-                    struct ProcessPowerThrottlingState {
-                        version: u32,
-                        control_mask: u32,
-                        state_mask: u32,
-                    }
-
-                    let mut state = ProcessPowerThrottlingState {
-                        version: 1,
-                        control_mask: 1, // PROCESS_POWER_THROTTLING_EXECUTION_SPEED
-                        state_mask: 1,   // EcoQoS enabled
-                    };
-
-                    // NtSetInformationProcess is the lower-level call behind
-                    // SetProcessInformation.  We link it directly.
-                    windows_targets::link!(
-                        "ntdll.dll"
-                        "system"
-                        fn NtSetInformationProcess(
-                            process_handle: windows::Win32::Foundation::HANDLE,
-                            info_class: u32,
-                            info: *mut std::ffi::c_void,
-                            info_len: u32,
-                        ) -> i32
-                    );
-
-                    let status = unsafe {
-                        NtSetInformationProcess(
-                            handle,
-                            4, // ProcessPowerThrottlingVal
-                            &mut state as *mut _ as *mut std::ffi::c_void,
-                            std::mem::size_of::<ProcessPowerThrottlingState>() as u32,
-                        )
-                    };
-
-                    if status >= 0 {
-                        log::debug!(
-                            target: "hw::os_turbo",
-                            "Throttled {} (PID={})",
-                            name, pid
-                        );
-                        count += 1;
+                    match enable_execution_speed_throttling(handle) {
+                        Ok(()) => {
+                            log::debug!(
+                                target: "hw::os_turbo",
+                                "Throttled {} (PID={})",
+                                name, pid
+                            );
+                            count += 1;
+                        }
+                        Err(error_code) => {
+                            log::debug!(
+                                target: "hw::os_turbo",
+                                "SetProcessInformation failed for {} (error_code=0x{:08X})",
+                                name,
+                                error_code as u32
+                            );
+                        }
                     }
 
                     let _ = unsafe { windows::Win32::Foundation::CloseHandle(handle) };
@@ -455,4 +455,95 @@ fn read_legacy_hkcu_enabled() -> Option<bool> {
         .flatten()
         .and_then(|k| k.read_u32("Enabled").ok().flatten())
         .map(|v| v != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn execution_speed_state_enables_only_execution_speed_throttling() {
+        use windows::Win32::System::Threading::PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+
+        let state = super::execution_speed_throttling_state();
+        assert_eq!(state.Version, 1);
+        assert_eq!(state.ControlMask, PROCESS_POWER_THROTTLING_EXECUTION_SPEED);
+        assert_eq!(state.StateMask, PROCESS_POWER_THROTTLING_EXECUTION_SPEED);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn public_api_updates_a_disposable_child_state() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            GetProcessInformation, OpenProcess, ProcessPowerThrottling,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+        };
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping", "127.0.0.1", "-n", "30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("spawn disposable Windows child");
+
+        let result = (|| -> Result<(), String> {
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION,
+                    false,
+                    child.id(),
+                )
+            }
+            .map_err(|error| format!("OpenProcess failed: 0x{:08X}", error.code().0 as u32))?;
+
+            let set_result =
+                super::enable_execution_speed_throttling(handle).map_err(|error_code| {
+                    format!("SetProcessInformation failed: 0x{:08X}", error_code as u32)
+                });
+
+            let mut observed = PROCESS_POWER_THROTTLING_STATE {
+                Version: 1,
+                ControlMask: 0,
+                StateMask: 0,
+            };
+            let query_result = unsafe {
+                GetProcessInformation(
+                    handle,
+                    ProcessPowerThrottling,
+                    &mut observed as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+                )
+            }
+            .map_err(|error| {
+                format!(
+                    "GetProcessInformation failed: 0x{:08X}",
+                    error.code().0 as u32
+                )
+            });
+
+            unsafe {
+                CloseHandle(handle).ok();
+            }
+
+            set_result?;
+            query_result?;
+            assert_eq!(observed.Version, 1);
+            assert_eq!(
+                observed.ControlMask,
+                PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            );
+            assert_eq!(observed.StateMask, PROCESS_POWER_THROTTLING_EXECUTION_SPEED);
+            Ok(())
+        })();
+
+        let _ = child.kill();
+        let _ = child.wait();
+        result.expect("public process-power API should update disposable child");
+    }
 }

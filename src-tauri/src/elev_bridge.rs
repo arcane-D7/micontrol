@@ -201,6 +201,16 @@ pub async fn run_elevated_no_prompt(cmd: &'static str, args: Value) -> Result<Va
     run_elevated_impl(cmd, args, false).await
 }
 
+/// Dispatch a command exclusively through the authenticated bridge service.
+///
+/// This deliberately does not use direct elevated dispatch, the scheduled
+/// task, or the UAC fallback. Feature-specific administrator writes that need
+/// the autonomous service boundary must call this helper instead of the
+/// generic elevation ladder.
+pub async fn run_elevated_bridge_only(cmd: &'static str, args: Value) -> Result<Value, String> {
+    run_via_service_pipe(cmd, args).await
+}
+
 // ── S51: session circuit breaker for a degraded elevated infrastructure ─────
 //
 // When neither the bridge service NOR the scheduled task is available (e.g.

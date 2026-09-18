@@ -535,8 +535,11 @@ pub async fn get_os_turbo() -> Result<crate::hw::os_turbo::OsTurboStatus, ErrorR
 pub async fn set_os_turbo(
     enabled: bool,
 ) -> Result<crate::hw::os_turbo::OsTurboStatus, ErrorResponse> {
-    let raw = elev_bridge::run_elevated("set_os_turbo", serde_json::json!({ "enabled": enabled }))
-        .await?;
+    let raw = elev_bridge::run_elevated_bridge_only(
+        "set_os_turbo",
+        serde_json::json!({ "enabled": enabled }),
+    )
+    .await?;
     let result: crate::hw::os_turbo::OsTurboStatus =
         serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
     Ok(result)

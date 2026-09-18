@@ -1,7 +1,7 @@
 # Sprint Plan Overview — Stability Report Remediation (v1 + v2) + Audit_Final
 
 **Created:** 2026-06-25
-**Last Updated:** 2026-06-27 (Sprints 30–33 planned from Audit_Final.md)
+**Last Updated:** 2026-09-18 (Sprint 39 planned from the OS Turbo redesign scope)
 **Sources:**
 
 - v1: `docs/stability-report-2026-06-24-post-sprints-13-15.md` (Sprints 16–19)
@@ -86,6 +86,7 @@
 | 36     | P2 MEDIUM   | Security Hardening               | 4       | ~2–3 days  | ✅ `0a67897` | `sprint-36-p2-medium-security-hardening/plan.md` |
 | 37     | P1 HIGH     | Audio Switching + WiFi WlanAPI   | 5       | ~5–10 days | ✅ `b47dea0` | `sprint-37-p1-high-audio-wifi-features/plan.md`  |
 | S55    | P0 CRITICAL | Stability: crash-loop, UAC, tray | —       | —          | ✅ `6e645c9` | (stabilization round, no plan file)              |
+| 39     | P1 HIGH     | Measured adaptive OS Turbo       | 9       | ~2–3 weeks | ⏳ Planned   | [sprint](sprint-39-p1-os-turbo/sprint.md)        |
 
 **miControl Audit totals:** 7 (S34) + 7 (S35) + 4 (S36) + 5 (S37) = 23 tickets, ~12–19 days effort
 
@@ -255,6 +256,22 @@ Sprint 34 (P0) ──► Sprint 35 (P1) ──► Sprint 36 (P2) ──► Sprin
 **Sprint 37** implements audio device switching (IPolicyConfig COM) and replaces netsh with WlanAPI for locale-independent WiFi.
 **After S37:** All 6 user-reported bugs fixed. All 4 security issues resolved. Zero UAC prompts in production.
 **After S55 (stabilization round):** Bridge service crash-loop eliminated (fix17–fix19), UAC storm on power-profile change eliminated (stable pipe), tray Open App restored (fix13/16), debloater UI released with tiered removal + state badges.
+
+**Sprint 39:** Replaces the undocumented OS Turbo process call with the public Windows API, enforces the authenticated bridge-only write boundary, and sequences reversible state, measured statistics, bounded policy, anonymous logs, optional BYOK approval, UI integration, and runtime audit. Sprint 39 remains planned until every ticket, full health check, and runtime gate is complete.
+
+### OS Turbo Redesign (Sprint 39)
+
+| Requirement / finding                                       | Sprint | Ticket  | Coverage statement                                                                |
+| ----------------------------------------------------------- | ------ | ------- | --------------------------------------------------------------------------------- |
+| Public EcoQoS API and authenticated bridge-only admin write | S39    | S39-001 | Public `SetProcessInformation` API; no OS Turbo UAC or scheduled-task fallback    |
+| Reversible process and power state                          | S39    | S39-002 | Versioned process identity snapshot and prior power scheme restoration            |
+| Measured bounded status and worker                          | S39    | S39-003 | Bounded periodic worker with measured action outcomes                             |
+| Deterministic statistical learner                           | S39    | S39-004 | Welford windows, minimum samples, matched controls, confidence and effect sizes   |
+| Safe adaptive policy                                        | S39    | S39-005 | Allowlist, fixed bounds, cooldown, rollback, and no thermal/EC writes             |
+| Anonymous before/after logs                                 | S39    | S39-006 | Privacy filters, retention caps, byte caps, and privacy tests                     |
+| Optional BYOK suggestions                                   | S39    | S39-007 | Structured validation and explicit approval, independent of deterministic control |
+| Four-locale integrated UI                                   | S39    | S39-008 | Localized status and approval/error workflows with frontend tests                 |
+| Runtime and full-gate verification                          | S39    | S39-009 | Disposable-child smoke test, bridge boundary audit, and complete health gates     |
 
 ---
 
