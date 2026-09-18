@@ -396,6 +396,14 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        // S39-003: drift re-apply, dispatched only from the bounded periodic
+        // worker through the authenticated bridge. Never reachable from UAC or
+        // scheduled-task paths (`run_elevated_bridge_only` only uses the pipe).
+        "refresh_os_turbo" => match crate::hw::os_turbo::refresh_os_turbo() {
+            Ok(r) => make_ok(serde_json::to_value(r).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
+
         // S53: System Optimization tweaks (debloat/telemetry) — HKLM writes,
         // services and scheduled tasks need the SYSTEM context.
         "set_sys_opt_tweak" => {

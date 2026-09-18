@@ -159,6 +159,7 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "set_battery_care"
         | "set_eye_protection"
         | "set_os_turbo"
+        | "refresh_os_turbo"
         | "set_function_key"
         | "set_mic_noise_canceling"
         | "set_speaker_noise_canceling"

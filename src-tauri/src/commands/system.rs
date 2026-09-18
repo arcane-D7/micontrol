@@ -542,6 +542,18 @@ pub async fn set_os_turbo(
     .await?;
     let result: crate::hw::os_turbo::OsTurboStatus =
         serde_json::from_value(raw).map_err(|e| format!("Unexpected elevated result: {e}"))?;
+    // S39-003: the enable path is authoritative and measured. Transfer it into
+    // the worker's measured slot so the periodic worker and reads agree, then
+    // ensure the worker is running (disabled-state no-op on disable). On
+    // disable, cancel the worker: the loop observes the stop flag at its next
+    // tick and a running sweep finishes its bounded work first — no overlap,
+    // no leaked tasks.
+    crate::hw::os_turbo::note_user_action(&result);
+    if enabled {
+        crate::hw::os_turbo::start_worker();
+    } else {
+        crate::hw::os_turbo::stop_worker();
+    }
     Ok(result)
 }
 

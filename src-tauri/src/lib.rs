@@ -907,6 +907,13 @@ pub fn run() {
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
 
+            // S39-003: bounded periodic OS Turbo measurement worker. Idempotent;
+            // the worker self-gates on the persisted enabled flag, so starting it
+            // while OS Turbo is disabled is a no-op. It only reads back process
+            // state and, on drift, dispatches a bridge-only reapply — never EC/
+            // fan/power-limit writes, never UAC or scheduled-task fallback.
+            crate::hw::os_turbo::start_worker();
+
             // S32-005: Heartbeat — the SYSTEM bridge watchdog uses this to
             // distinguish a healthy UI from a frozen zombie. Write the first
             // one NOW (setup has finished, tray+main window exist) and keep
@@ -938,6 +945,10 @@ pub fn run() {
                         // knows this exit was intentional and does NOT relaunch.
                         crate::hw::crash_recovery::mark_clean_exit();
                         crate::hw::crash_recovery::mark_user_quit();
+                        // S39-003: cancel the bounded OS Turbo worker (the
+                        // loop exits at its next tick; a running sweep finishes
+                        // its bounded work first).
+                        crate::hw::os_turbo::stop_worker();
                         app.exit(0);
                     }
                     "open" => {
@@ -994,6 +1005,8 @@ pub fn run() {
                             // S26-005: Mark clean exit + user-quit before shutting down.
                             crate::hw::crash_recovery::mark_clean_exit();
                             crate::hw::crash_recovery::mark_user_quit();
+                            // S39-003: cancel the bounded OS Turbo worker.
+                            crate::hw::os_turbo::stop_worker();
                             window.app_handle().exit(0);
                         }
                     } else {

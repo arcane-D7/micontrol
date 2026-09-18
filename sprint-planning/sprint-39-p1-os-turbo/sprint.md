@@ -12,7 +12,7 @@
 | **Primary Owner**     | miControl desktop team                                                                                                           |
 | **Source**            | User-requested OS Turbo redesign, 2026-09-18                                                                                     |
 | **Depends On**        | Sprint 37 and the existing authenticated bridge service                                                                          |
-| **Status**            | 🔄 In progress — S39-002 implemented, validation pending                                                                         |
+| **Status**            | 🔄 In progress — S39-003 implemented, validation pending (sprint incomplete)                                                     |
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
 
@@ -102,7 +102,9 @@ The current implementation identifies targets only by process name and restores 
 - [x] Implemented bounded versioned recovery snapshots with PID plus creation-time validation.
 - [x] Captured and conditionally restored the prior active power scheme without overwriting external scheme changes.
 - [x] Preserved snapshots across partial failures and removed the startup reapply sweep until S39-003.
-- [ ] Focused Rust tests and health check pending.
+- [x] Focused Rust tests passed (identity mismatch, disable ordering, missing prior state).
+- [x] Commit `3cefcc1` created with message `feat(s39-002): reversible OS Turbo state with identity-checked restore`.
+- [ ] Full health check (node scripts/health-check.mjs) pending for S39-002 as a standalone gate.
 
 ### S39-003 — Add measured status and a bounded periodic worker
 
@@ -114,7 +116,7 @@ The current implementation identifies targets only by process name and restores 
 | **Type**             | Feature                                                                   |
 | **Estimated Effort** | L                                                                         |
 | **Source Finding**   | User request: OS Turbo needs measured status and periodic bounded control |
-| **Status**           | ⏳ Planned                                                                |
+| **Status**           | 🔄 Implemented — awaiting focused validation                              |
 
 #### Context
 
@@ -122,12 +124,20 @@ The current restore path launches an unbounded background sweep and reports a pl
 
 #### Acceptance Criteria
 
-- [ ] Expose measured status for inspected, successfully changed, skipped, failed, and restored allowlisted processes without exposing identifying process data to the UI.
-- [ ] Implement one cancellable periodic worker with fixed interval, work-item, queue, and duration bounds.
-- [ ] Ensure worker restart, disable, shutdown, and bridge failure paths are deterministic and do not leak threads or duplicate actions.
-- [ ] Keep status reads separate from administrator writes and preserve the bridge-only write boundary from S39-001.
+- [x] Expose measured status for inspected, successfully changed, skipped, failed, and restored allowlisted processes without exposing identifying process data to the UI.
+- [x] Implement one cancellable periodic worker with fixed interval, work-item, queue, and duration bounds.
+- [x] Ensure worker restart, disable, shutdown, and bridge failure paths are deterministic and do not leak threads or duplicate actions.
+- [x] Keep status reads separate from administrator writes and preserve the bridge-only write boundary from S39-001.
 - [ ] Add tests for worker cadence, cancellation, bounded batches, duplicate suppression, and bridge unavailability.
 - [ ] Run the health check command successfully.
+
+#### Execution Evidence — 2026-09-18
+
+- [x] Real measured status (inspected/applied/restored/skipped/failures/last_sweep_ms/worker_active) derived from `GetProcessInformation` readback; no fabricated counts.
+- [x] Single-flight cancellable worker: `AtomicBool` busy gate, stop flag honored at each tick, fixed 30 s interval, batch ≤ 64, sweep ≤ 5 s, backoff after 3 consecutive bridge/API failures for 300 s.
+- [x] Worker is a no-op while OS Turbo is disabled; writes only via authenticated bridge (`refresh_os_turbo`), never UAC/scheduled-task; read-only `open_process_for_read` on the measure path.
+- [x] Focused unit tests added: single-flight, cancellation, disabled-state no-op, bounded batch, truthful counts, backoff open/close/expiry.
+- [ ] Health check (node scripts/health-check.mjs) and commit pending validation.
 
 ### S39-004 — Implement deterministic windowed statistics
 

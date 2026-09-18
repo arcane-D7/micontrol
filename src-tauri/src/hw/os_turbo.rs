@@ -13,10 +13,23 @@
 
 use crate::hw::errors::{HardwareError, HardwareResult};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 
 const HIGH_PERFORMANCE_SCHEME: u128 = 0x8c5e7fda_e8bf_4a96_9a85_a6e23a8c635c;
 const SNAPSHOT_VERSION: u32 = 1;
 const MAX_SNAPSHOT_PROCESSES: usize = 64;
+/// Fixed interval between periodic worker sweeps (S39-003).
+const WORKER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Maximum candidates inspected per sweep. The recovery snapshot is already
+/// bounded by `MAX_SNAPSHOT_PROCESSES`; this is a hard cap on per-sweep work
+/// regardless of snapshot growth.
+const WORKER_MAX_BATCH: usize = MAX_SNAPSHOT_PROCESSES;
+/// Wall-clock budget per sweep; stops opening further candidates when spent.
+const WORKER_MAX_SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
+/// Consecutive bridge/API failures before the worker opens a backoff window.
+const WORKER_FAILURE_THRESHOLD: u32 = 3;
+/// How long the worker skips sweeps after repeated failures.
+const WORKER_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
 const THROTTLE_TARGETS: &[&str] = &["SearchIndexer.exe", "backgroundTaskHost.exe"];
 const PROTECTED_PROCESS_NAMES: &[&str] = &[
     "MsMpEng.exe",
@@ -122,10 +135,38 @@ fn disable_has_recovery_state(enabled: bool, snapshot: Option<&OsTurboRecoverySn
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OsTurboStatus {
     pub enabled: bool,
-    /// Number of background processes throttled.
+    /// Number of background processes verified throttled by readback
+    /// (from `GetProcessInformation`, never guessed).
     pub throttled_processes: u32,
     /// Current power plan GUID.
     pub power_plan: String,
+    /// S39-003 measured sweep data — truthful readback counts.
+    pub measured: OsTurboMeasuredStatus,
+}
+
+/// Measured results of the most recent OS Turbo sweep or user action.
+///
+/// S39-003: every count is derived from an actual `GetProcessInformation`
+/// readback; no field is synthesized, extrapolated, or guessed.
+/// `last_sweep_ms == 0` means no sweep has ever completed.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct OsTurboMeasuredStatus {
+    /// Allowlisted candidates examined during the last sweep.
+    pub inspected: u32,
+    /// Candidates verified in the throttled state (readback-verified).
+    pub applied: u32,
+    /// Candidates verified in their original (pre-enable) state.
+    pub restored: u32,
+    /// Candidates skipped: exited, PID reused (identity mismatch), or in a
+    /// state OS Turbo does not own.
+    pub skipped: u32,
+    /// Open/read/write/bridge errors encountered during the last sweep.
+    pub failures: u32,
+    /// Wall-clock milliseconds (UNIX epoch) of the last completed sweep;
+    /// 0 when no sweep has completed.
+    pub last_sweep_ms: u64,
+    /// Whether the periodic worker loop is currently alive.
+    pub worker_active: bool,
 }
 
 /// Enable or disable OS Turbo.
@@ -144,12 +185,21 @@ pub fn get_os_turbo() -> HardwareResult<OsTurboStatus> {
         let enabled = read_enabled_compat();
 
         let power_plan = get_active_power_plan()?;
-        let throttled = count_throttled_processes()?;
+        let mut measured = last_measured_status();
+        measured.worker_active = worker().started.load(Ordering::Acquire);
+        // Prefer the worker's last truthful measured sweep; fall back to a
+        // fresh readback when no sweep has completed yet. Never guessed.
+        let throttled = if measured.last_sweep_ms != 0 {
+            measured.applied
+        } else {
+            count_throttled_processes()?
+        };
 
         Ok(OsTurboStatus {
             enabled,
             throttled_processes: throttled,
             power_plan,
+            measured,
         })
     }
     #[cfg(not(windows))]
@@ -158,6 +208,7 @@ pub fn get_os_turbo() -> HardwareResult<OsTurboStatus> {
             enabled: false,
             throttled_processes: 0,
             power_plan: String::new(),
+            measured: OsTurboMeasuredStatus::default(),
         })
     }
 }
@@ -188,29 +239,53 @@ fn enable_os_turbo() -> HardwareResult<OsTurboStatus> {
         let power_plan = set_power_plan_best_performance()?;
         let desired = throttling_state_snapshot(true);
         let mut write_failed = false;
+        let mut counts = SweepCounts {
+            inspected: snapshot.processes.len() as u32,
+            ..SweepCounts::default()
+        };
 
         for process in &snapshot.processes {
             let handle = match open_process_for_turbo(process.identity.pid) {
                 Ok(handle) => handle,
-                Err(_) => continue,
+                Err(_) => {
+                    counts.failures = counts.failures.saturating_add(1);
+                    continue;
+                }
             };
 
             let identity_matches = match get_process_creation_time(handle) {
                 Ok(creation_time) => {
                     process_identity_matches(&process.identity, process.identity.pid, creation_time)
                 }
-                Err(_) => false,
-            };
-            if identity_matches {
-                match read_process_power_state(handle) {
-                    Ok(current) if current == desired => {}
-                    Ok(_) => {
-                        if set_process_power_state(handle, &desired).is_err() {
-                            write_failed = true;
-                        }
+                Err(_) => {
+                    counts.failures = counts.failures.saturating_add(1);
+                    unsafe {
+                        windows::Win32::Foundation::CloseHandle(handle).ok();
                     }
-                    Err(_) => {}
+                    continue;
                 }
+            };
+            if !identity_matches {
+                counts.skipped = counts.skipped.saturating_add(1);
+                unsafe {
+                    windows::Win32::Foundation::CloseHandle(handle).ok();
+                }
+                continue;
+            }
+            match read_process_power_state(handle) {
+                Ok(current) if current == desired => {
+                    counts.applied = counts.applied.saturating_add(1);
+                }
+                Ok(_) => {
+                    // set_process_power_state re-verifies by readback.
+                    if set_process_power_state(handle, &desired).is_ok() {
+                        counts.applied = counts.applied.saturating_add(1);
+                    } else {
+                        counts.failures = counts.failures.saturating_add(1);
+                        write_failed = true;
+                    }
+                }
+                Err(_) => counts.failures = counts.failures.saturating_add(1),
             }
 
             unsafe {
@@ -224,11 +299,19 @@ fn enable_os_turbo() -> HardwareResult<OsTurboStatus> {
             ));
         }
 
-        let throttled = count_throttled_processes()?;
         Ok(OsTurboStatus {
             enabled: true,
-            throttled_processes: throttled,
+            throttled_processes: counts.applied,
             power_plan,
+            measured: OsTurboMeasuredStatus {
+                inspected: counts.inspected,
+                applied: counts.applied,
+                restored: counts.restored,
+                skipped: counts.skipped,
+                failures: counts.failures,
+                last_sweep_ms: sweep_timestamp_ms(),
+                worker_active: false,
+            },
         })
     }
     #[cfg(not(windows))]
@@ -237,6 +320,7 @@ fn enable_os_turbo() -> HardwareResult<OsTurboStatus> {
             enabled: false,
             throttled_processes: 0,
             power_plan: String::new(),
+            measured: OsTurboMeasuredStatus::default(),
         })
     }
 }
@@ -257,10 +341,19 @@ fn disable_os_turbo() -> HardwareResult<OsTurboStatus> {
         };
 
         let mut process_restore_failed = false;
+        let mut counts = SweepCounts {
+            inspected: snapshot.processes.len() as u32,
+            ..SweepCounts::default()
+        };
         for process in &snapshot.processes {
             let handle = match open_process_for_turbo(process.identity.pid) {
                 Ok(handle) => handle,
-                Err(_) => continue,
+                Err(_) => {
+                    // Exited/unopenable: skipped, not a failure (S39-002
+                    // restore contract: skip exited or unverifiable).
+                    counts.skipped = counts.skipped.saturating_add(1);
+                    continue;
+                }
             };
 
             let identity_matches = match get_process_creation_time(handle) {
@@ -268,20 +361,38 @@ fn disable_os_turbo() -> HardwareResult<OsTurboStatus> {
                     process_identity_matches(&process.identity, process.identity.pid, creation_time)
                 }
                 Err(_) => {
+                    // Cannot verify identity — treat as restore incomplete.
                     process_restore_failed = true;
-                    false
+                    counts.skipped = counts.skipped.saturating_add(1);
+                    unsafe {
+                        windows::Win32::Foundation::CloseHandle(handle).ok();
+                    }
+                    continue;
                 }
             };
-            if identity_matches {
-                match read_process_power_state(handle) {
-                    Ok(current) if current == process.original_state => {}
-                    Ok(current) if current == throttling_state_snapshot(true) => {
-                        if set_process_power_state(handle, &process.original_state).is_err() {
-                            process_restore_failed = true;
-                        }
+            if !identity_matches {
+                counts.skipped = counts.skipped.saturating_add(1);
+                unsafe {
+                    windows::Win32::Foundation::CloseHandle(handle).ok();
+                }
+                continue;
+            }
+            match read_process_power_state(handle) {
+                Ok(current) if current == process.original_state => {
+                    counts.restored = counts.restored.saturating_add(1);
+                }
+                Ok(current) if current == throttling_state_snapshot(true) => {
+                    if set_process_power_state(handle, &process.original_state).is_ok() {
+                        counts.restored = counts.restored.saturating_add(1);
+                    } else {
+                        counts.failures = counts.failures.saturating_add(1);
+                        process_restore_failed = true;
                     }
-                    Ok(_) => {}
-                    Err(_) => process_restore_failed = true,
+                }
+                Ok(_) => counts.skipped = counts.skipped.saturating_add(1),
+                Err(_) => {
+                    counts.failures = counts.failures.saturating_add(1);
+                    process_restore_failed = true;
                 }
             }
 
@@ -310,7 +421,21 @@ fn disable_os_turbo() -> HardwareResult<OsTurboStatus> {
 
         persist_os_turbo(false)?;
         remove_recovery_snapshot()?;
-        get_os_turbo()
+        let power_plan = get_active_power_plan()?;
+        Ok(OsTurboStatus {
+            enabled: false,
+            throttled_processes: 0,
+            power_plan,
+            measured: OsTurboMeasuredStatus {
+                inspected: counts.inspected,
+                applied: 0,
+                restored: counts.restored,
+                skipped: counts.skipped,
+                failures: counts.failures,
+                last_sweep_ms: sweep_timestamp_ms(),
+                worker_active: false,
+            },
+        })
     }
     #[cfg(not(windows))]
     {
@@ -318,6 +443,7 @@ fn disable_os_turbo() -> HardwareResult<OsTurboStatus> {
             enabled: false,
             throttled_processes: 0,
             power_plan: String::new(),
+            measured: OsTurboMeasuredStatus::default(),
         })
     }
 }
@@ -799,6 +925,499 @@ fn read_enabled_compat() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(windows))]
+fn read_enabled_compat() -> bool {
+    false
+}
+
+// ── S39-003: measured status + bounded periodic worker ───────────────────────
+
+/// Class of a per-process readback outcome during a sweep.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadbackOutcome {
+    /// Verified in the throttled state.
+    Applied,
+    /// Verified in the original (pre-enable) state.
+    Restored,
+    /// Valid identity but in a state Turbo does not own (foreign mask).
+    Other,
+    /// Exited or PID reused — cannot be attributed.
+    Skipped,
+    /// Open/read/set error.
+    Failed,
+}
+
+/// Truthful, per-sweep aggregate of readback outcomes.
+///
+/// `inspected` equals `applied + restored + other + skipped + failures`
+/// (saturated); no field is guessed or extrapolated, and a disabled Turbo
+/// produces an all-default aggregate (no work, no fabricated counts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SweepCounts {
+    inspected: u32,
+    applied: u32,
+    restored: u32,
+    other: u32,
+    skipped: u32,
+    failures: u32,
+}
+
+impl SweepCounts {
+    /// Identity-valid processes that should be throttled but are not.
+    fn driftable(&self) -> u32 {
+        self.restored.saturating_add(self.other)
+    }
+
+    fn drift_detected(&self) -> bool {
+        self.driftable() > 0
+    }
+}
+
+impl OsTurboMeasuredStatus {
+    /// Collapse a measured status back into sweep counts (used by the worker
+    /// after a bridge reapply response).
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    fn as_counts(&self) -> SweepCounts {
+        SweepCounts {
+            inspected: self.inspected,
+            applied: self.applied,
+            restored: self.restored,
+            other: 0,
+            skipped: self.skipped,
+            failures: self.failures,
+        }
+    }
+}
+
+/// Aggregate readback outcomes into counts, capped at `limit` items.
+fn aggregate_counts(items: impl IntoIterator<Item = ReadbackOutcome>, limit: usize) -> SweepCounts {
+    let mut counts = SweepCounts::default();
+    for item in items.into_iter().take(limit) {
+        counts.inspected = counts.inspected.saturating_add(1);
+        match item {
+            ReadbackOutcome::Applied => counts.applied = counts.applied.saturating_add(1),
+            ReadbackOutcome::Restored => counts.restored = counts.restored.saturating_add(1),
+            ReadbackOutcome::Other => counts.other = counts.other.saturating_add(1),
+            ReadbackOutcome::Skipped => counts.skipped = counts.skipped.saturating_add(1),
+            ReadbackOutcome::Failed => counts.failures = counts.failures.saturating_add(1),
+        }
+    }
+    counts
+}
+
+/// Single-owner state for the periodic worker.
+struct WorkerState {
+    /// True while the worker loop task is alive.
+    started: std::sync::atomic::AtomicBool,
+    /// Set to cancel the loop (disable / shutdown).
+    stop: std::sync::atomic::AtomicBool,
+    /// Single-flight gate: at most one sweep at a time.
+    busy: std::sync::atomic::AtomicBool,
+    /// Consecutive bridge/API failures feeding the backoff decision.
+    consecutive_failures: std::sync::atomic::AtomicU32,
+    /// When set, sweeps are skipped (bounded backoff window).
+    backoff_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Latest truthful measured status.
+    measured: std::sync::Mutex<OsTurboMeasuredStatus>,
+}
+
+impl Default for WorkerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkerState {
+    fn new() -> Self {
+        Self {
+            started: std::sync::atomic::AtomicBool::new(false),
+            stop: std::sync::atomic::AtomicBool::new(false),
+            busy: std::sync::atomic::AtomicBool::new(false),
+            consecutive_failures: std::sync::atomic::AtomicU32::new(0),
+            backoff_until: std::sync::Mutex::new(None),
+            measured: std::sync::Mutex::new(OsTurboMeasuredStatus::default()),
+        }
+    }
+    /// Claims the single-flight gate. `false` means a sweep is already running.
+    fn try_begin_sweep(&self) -> bool {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn end_sweep(&self) {
+        self.busy.store(false, Ordering::Release);
+    }
+
+    /// Record a failure; repeated failures open a bounded backoff window.
+    fn note_failure(&self) {
+        let streak = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
+        if streak >= WORKER_FAILURE_THRESHOLD {
+            *self.backoff_until.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(std::time::Instant::now() + WORKER_BACKOFF);
+        }
+    }
+
+    fn note_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+        *self.backoff_until.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    fn backoff_active(&self) -> bool {
+        self.backoff_active_at(std::time::Instant::now())
+    }
+
+    fn backoff_active_at(&self, now: std::time::Instant) -> bool {
+        self.backoff_until
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .map(|until| until > now)
+            .unwrap_or(false)
+    }
+
+    fn record(&self, sweep: &SweepCounts, worker_active: bool) {
+        *self.measured.lock().unwrap_or_else(|p| p.into_inner()) = OsTurboMeasuredStatus {
+            inspected: sweep.inspected,
+            applied: sweep.applied,
+            restored: sweep.restored,
+            skipped: sweep.skipped,
+            failures: sweep.failures,
+            last_sweep_ms: sweep_timestamp_ms(),
+            worker_active,
+        };
+    }
+
+    /// Adopt a status computed by an authoritative user action. Truthful
+    /// because `set_os_turbo` (bridge) and `refresh_os_turbo` (bridge) both
+    /// derive counts from real readback.
+    fn record_user_action(&self, status: &OsTurboStatus, worker_active: bool) {
+        *self.measured.lock().unwrap_or_else(|p| p.into_inner()) = OsTurboMeasuredStatus {
+            inspected: status.measured.inspected,
+            applied: status.measured.applied,
+            restored: status.measured.restored,
+            skipped: status.measured.skipped,
+            failures: status.measured.failures,
+            last_sweep_ms: status.measured.last_sweep_ms,
+            worker_active,
+        };
+    }
+
+    fn measured(&self) -> OsTurboMeasuredStatus {
+        self.measured
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_active(&self, active: bool) {
+        if let Ok(mut value) = self.measured.lock() {
+            value.worker_active = active;
+        }
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+static WORKER: std::sync::OnceLock<WorkerState> = std::sync::OnceLock::new();
+
+fn worker() -> &'static WorkerState {
+    WORKER.get_or_init(WorkerState::new)
+}
+
+/// Whether the periodic worker loop is currently alive.
+pub fn worker_active() -> bool {
+    worker().started.load(Ordering::Acquire)
+}
+
+/// Latest truthful measured status from the worker (default when none yet).
+pub fn last_measured_status() -> OsTurboMeasuredStatus {
+    worker().measured()
+}
+
+/// Adopt a status returned by an authoritative user action (enable/disable
+/// via the bridge) into the worker's measured slot. Truthful by construction:
+/// `set_os_turbo` computes counts from real readback in the bridge.
+pub fn note_user_action(status: &OsTurboStatus) {
+    worker().record_user_action(status, worker().started.load(Ordering::Acquire));
+}
+
+/// Wall-clock milliseconds (UNIX epoch) for `last_sweep_ms`.
+fn sweep_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Pure gate: may a sweep begin right now?
+fn sweep_may_begin(disabled: bool, stop: bool, busy: bool, backoff_active: bool) -> bool {
+    !disabled && !stop && !busy && !backoff_active
+}
+
+/// Start the bounded periodic worker. Idempotent; safe to call while OS Turbo
+/// is disabled (the sweep self-gates on the persisted enabled flag).
+pub fn start_worker() {
+    let state = worker();
+    state.stop.store(false, Ordering::Release);
+    if state.started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        // First sweep immediately so measured status exists right after enable.
+        run_sweep().await;
+        let mut interval = tokio::time::interval(WORKER_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if worker().stop_requested() {
+                worker().started.store(false, Ordering::Release);
+                worker().set_active(false);
+                return;
+            }
+            run_sweep().await;
+        }
+    });
+}
+
+/// Cancel the periodic worker (disable / shutdown). The loop observes the flag
+/// at its next tick and exits within one interval; a running sweep finishes its
+/// bounded work first and no thread leaks.
+pub fn stop_worker() {
+    worker().request_stop();
+}
+
+/// Run one bounded measurement sweep (plus a bounded bridge reapply on drift).
+async fn run_sweep() {
+    let state = worker();
+    if !sweep_may_begin(
+        !read_enabled_compat(),
+        state.stop_requested(),
+        state.busy.load(Ordering::Acquire),
+        state.backoff_active(),
+    ) {
+        // Must not run while OS Turbo is disabled (no work, no new timestamp),
+        // cancelled, already busy (single-flight), or in backoff.
+        return;
+    }
+    // Atomic claim after the cheap gate — guarantees no overlapping sweeps.
+    if !state.try_begin_sweep() {
+        return;
+    }
+
+    let mut sweep = measure_sweep();
+    #[cfg(windows)]
+    {
+        if sweep.drift_detected() && crate::elev_bridge::is_bridge_service_available() {
+            // Privileged writes go through the authenticated bridge ONLY —
+            // never UAC, never a scheduled-task fallback.
+            let refreshed = crate::elev_bridge::run_elevated_bridge_only(
+                "refresh_os_turbo",
+                serde_json::json!({}),
+            )
+            .await
+            .and_then(|data| {
+                serde_json::from_value::<OsTurboStatus>(data).map_err(|e| e.to_string())
+            });
+            match refreshed {
+                Ok(status) => {
+                    state.note_success();
+                    sweep = status.measured.as_counts();
+                }
+                Err(_) => {
+                    // Repeated bridge failures open a bounded backoff window.
+                    sweep.failures = sweep.failures.saturating_add(1);
+                    state.note_failure();
+                }
+            }
+        } else {
+            state.note_success();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        state.note_success();
+    }
+
+    state.end_sweep();
+    state.record(&sweep, true);
+}
+
+/// Measure allowlisted candidates strictly by readback. Read-only — never
+/// writes, never dispatches; bounded by batch and sweep duration.
+#[cfg(windows)]
+fn measure_sweep() -> SweepCounts {
+    let Some(snapshot) = read_recovery_snapshot().ok().flatten() else {
+        // Enabled without recovery state: nothing to measure truthfully.
+        return SweepCounts::default();
+    };
+    let desired = throttling_state_snapshot(true);
+    let deadline = std::time::Instant::now() + WORKER_MAX_SWEEP;
+    let mut outcomes = Vec::with_capacity(snapshot.processes.len().min(WORKER_MAX_BATCH));
+    for process in snapshot.processes.iter().take(WORKER_MAX_BATCH) {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        outcomes.push(readback_outcome(
+            process.identity.pid,
+            &process.identity,
+            &process.original_state,
+            &desired,
+        ));
+    }
+    aggregate_counts(outcomes, WORKER_MAX_BATCH)
+}
+
+#[cfg(not(windows))]
+fn measure_sweep() -> SweepCounts {
+    SweepCounts::default()
+}
+
+/// Open a process with read-only rights (`PROCESS_QUERY_LIMITED_INFORMATION`).
+/// The worker never requests write/set access — measurement only.
+#[cfg(windows)]
+fn open_process_for_read(pid: u32) -> Result<windows::Win32::Foundation::HANDLE, i32> {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|error| error.code().0)
+    }
+}
+
+/// Read-only per-process readback used by the measure sweep.
+#[cfg(windows)]
+fn readback_outcome(
+    pid: u32,
+    identity: &ProcessIdentitySnapshot,
+    original: &ProcessPowerStateSnapshot,
+    desired: &ProcessPowerStateSnapshot,
+) -> ReadbackOutcome {
+    let handle = match open_process_for_read(pid) {
+        Ok(handle) => handle,
+        Err(_) => return ReadbackOutcome::Failed,
+    };
+    let creation_time = match get_process_creation_time(handle) {
+        Ok(creation_time) => creation_time,
+        Err(_) => {
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(handle).ok();
+            }
+            return ReadbackOutcome::Failed;
+        }
+    };
+    if !process_identity_matches(identity, pid, creation_time) {
+        unsafe {
+            windows::Win32::Foundation::CloseHandle(handle).ok();
+        }
+        return ReadbackOutcome::Skipped;
+    }
+    let outcome = match read_process_power_state(handle) {
+        Ok(state) if state == *desired => ReadbackOutcome::Applied,
+        Ok(state) if state == *original => ReadbackOutcome::Restored,
+        Ok(_) => ReadbackOutcome::Other,
+        Err(_) => ReadbackOutcome::Failed,
+    };
+    unsafe {
+        windows::Win32::Foundation::CloseHandle(handle).ok();
+    }
+    outcome
+}
+
+/// Re-apply throttling to recovery-snapshot processes. Runs only inside the
+/// authenticated bridge (no UAC, no scheduled-task fallback). Bounded by the
+/// snapshot size, the batch cap and the per-sweep duration budget. Only
+/// touches allowlisted, identity-verified processes — never protected,
+/// security or update processes, and never EC/fan/power-limit registers.
+pub fn refresh_os_turbo() -> HardwareResult<OsTurboStatus> {
+    #[cfg(windows)]
+    {
+        if !read_enabled_compat() {
+            return get_os_turbo();
+        }
+        let snapshot = read_recovery_snapshot()?.ok_or_else(|| {
+            HardwareError::Other("OS Turbo is enabled but its recovery state is missing".into())
+        })?;
+        let desired = throttling_state_snapshot(true);
+        let deadline = std::time::Instant::now() + WORKER_MAX_SWEEP;
+        let mut outcomes = Vec::with_capacity(snapshot.processes.len().min(WORKER_MAX_BATCH));
+        for process in snapshot.processes.iter().take(WORKER_MAX_BATCH) {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            outcomes.push(throttle_readback(process, &desired));
+        }
+        let counts = aggregate_counts(outcomes, WORKER_MAX_BATCH);
+        let power_plan = get_active_power_plan()?;
+        Ok(OsTurboStatus {
+            enabled: true,
+            throttled_processes: counts.applied,
+            power_plan,
+            measured: OsTurboMeasuredStatus {
+                inspected: counts.inspected,
+                applied: counts.applied,
+                restored: counts.restored,
+                skipped: counts.skipped,
+                failures: counts.failures,
+                last_sweep_ms: sweep_timestamp_ms(),
+                worker_active: false,
+            },
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        get_os_turbo()
+    }
+}
+
+/// Bridge-side per-process throttle-with-readback-verify helper.
+#[cfg(windows)]
+fn throttle_readback(
+    process: &ProcessRecoverySnapshot,
+    desired: &ProcessPowerStateSnapshot,
+) -> ReadbackOutcome {
+    let handle = match open_process_for_turbo(process.identity.pid) {
+        Ok(handle) => handle,
+        Err(_) => return ReadbackOutcome::Failed,
+    };
+    let creation_time = match get_process_creation_time(handle) {
+        Ok(creation_time) => creation_time,
+        Err(_) => {
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(handle).ok();
+            }
+            return ReadbackOutcome::Failed;
+        }
+    };
+    if !process_identity_matches(&process.identity, process.identity.pid, creation_time) {
+        unsafe {
+            windows::Win32::Foundation::CloseHandle(handle).ok();
+        }
+        return ReadbackOutcome::Skipped;
+    }
+    let outcome = match read_process_power_state(handle) {
+        Ok(current) if current == *desired => ReadbackOutcome::Applied,
+        Ok(_) => {
+            // set_process_power_state re-verifies by readback.
+            if set_process_power_state(handle, desired).is_ok() {
+                ReadbackOutcome::Applied
+            } else {
+                ReadbackOutcome::Failed
+            }
+        }
+        Err(_) => ReadbackOutcome::Failed,
+    };
+    unsafe {
+        windows::Win32::Foundation::CloseHandle(handle).ok();
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     fn sample_snapshot() -> super::OsTurboRecoverySnapshot {
@@ -982,5 +1601,139 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         result.expect("public process-power API should update disposable child");
+    }
+
+    // ── S39-003: measured status + bounded periodic worker ───────────────────
+
+    #[test]
+    fn sweep_batch_is_bounded() {
+        use super::{aggregate_counts, ReadbackOutcome as Outcome, WORKER_MAX_BATCH};
+
+        let items = std::iter::repeat_n(Outcome::Applied, WORKER_MAX_BATCH + 512);
+        let counts = aggregate_counts(items, WORKER_MAX_BATCH);
+        assert_eq!(counts.inspected, WORKER_MAX_BATCH as u32);
+        assert_eq!(counts.applied, WORKER_MAX_BATCH as u32);
+        assert_eq!(counts.failures, 0);
+    }
+
+    #[test]
+    fn counts_are_truthful_readback_aggregates() {
+        use super::{aggregate_counts, ReadbackOutcome as Outcome, SweepCounts};
+
+        let items = [
+            Outcome::Applied,
+            Outcome::Applied,
+            Outcome::Restored,
+            Outcome::Other,
+            Outcome::Skipped,
+            Outcome::Failed,
+            Outcome::Restored,
+        ];
+        let counts = aggregate_counts(items, items.len());
+        assert_eq!(counts.inspected, 7);
+        assert_eq!(counts.applied, 2);
+        assert_eq!(counts.restored, 2);
+        assert_eq!(counts.skipped, 1);
+        assert_eq!(counts.failures, 1);
+        assert_eq!(counts.other, 1);
+        // Every inspected candidate lands in exactly one bucket.
+        assert_eq!(
+            counts.applied + counts.restored + counts.other + counts.skipped + counts.failures,
+            counts.inspected
+        );
+        // Identity-valid processes not in the throttled state → drift.
+        assert!(counts.drift_detected());
+
+        let no_drift = SweepCounts {
+            applied: 5,
+            ..SweepCounts::default()
+        };
+        assert!(!no_drift.drift_detected());
+    }
+
+    #[test]
+    fn sweep_start_is_single_flight() {
+        let state = super::WorkerState::new();
+        assert!(state.try_begin_sweep());
+        assert!(
+            !state.try_begin_sweep(),
+            "overlapping sweeps must be rejected"
+        );
+        state.end_sweep();
+        assert!(state.try_begin_sweep());
+        state.end_sweep();
+    }
+
+    #[test]
+    fn worker_cancellation_stops_future_sweeps() {
+        use super::sweep_may_begin;
+
+        let state = super::WorkerState::new();
+        assert!(!state.stop_requested());
+        state.request_stop();
+        assert!(state.stop_requested());
+
+        assert!(!sweep_may_begin(true, false, false, false)); // disabled
+        assert!(!sweep_may_begin(false, true, false, false)); // stop requested
+        assert!(!sweep_may_begin(false, false, true, false)); // busy
+        assert!(!sweep_may_begin(false, false, false, true)); // backoff
+        assert!(sweep_may_begin(false, false, false, false));
+    }
+
+    #[test]
+    fn disabled_state_performs_no_sweep_work() {
+        use super::{aggregate_counts, SweepCounts};
+
+        // A disabled Turbo must not begin a sweep and must not fabricate
+        // counts: the no-work aggregate is all-default.
+        assert!(!super::sweep_may_begin(true, false, false, false));
+        assert!(!super::sweep_may_begin(true, true, true, true));
+        let counts = aggregate_counts(std::iter::empty(), 64);
+        assert_eq!(counts, SweepCounts::default());
+    }
+
+    #[test]
+    fn repeated_failures_open_bounded_backoff() {
+        use super::WORKER_FAILURE_THRESHOLD;
+
+        let state = super::WorkerState::new();
+        for _ in 0..(WORKER_FAILURE_THRESHOLD - 1) {
+            state.note_failure();
+        }
+        assert!(!state.backoff_active(), "below threshold no backoff");
+        state.note_failure();
+        assert!(state.backoff_active(), "backoff opens at the threshold");
+        state.note_success();
+        assert!(!state.backoff_active(), "success closes the backoff");
+    }
+
+    #[test]
+    fn backoff_expires_after_its_window() {
+        use std::time::{Duration, Instant};
+
+        let state = super::WorkerState::new();
+        *state.backoff_until.lock().unwrap() = Some(Instant::now() + Duration::from_secs(60));
+        assert!(state.backoff_active_at(Instant::now()));
+        *state.backoff_until.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
+        assert!(!state.backoff_active_at(Instant::now()));
+    }
+
+    #[test]
+    fn measured_status_round_trips_to_sweep_counts() {
+        let status = super::OsTurboMeasuredStatus {
+            inspected: 4,
+            applied: 2,
+            restored: 1,
+            skipped: 0,
+            failures: 1,
+            last_sweep_ms: 123,
+            worker_active: true,
+        };
+        let counts = status.as_counts();
+        assert_eq!(counts.inspected, 4);
+        assert_eq!(counts.applied, 2);
+        assert_eq!(counts.restored, 1);
+        assert_eq!(counts.failures, 1);
+        assert!(counts.drift_detected());
     }
 }
