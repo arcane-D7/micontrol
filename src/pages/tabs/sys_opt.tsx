@@ -11,10 +11,22 @@ interface SysOptStatus {
   tier: string;
 }
 
+interface OsTurboMeasuredStatus {
+  inspected: number;
+  applied: number;
+  restored: number;
+  skipped: number;
+  failures: number;
+  last_sweep_ms: number;
+  worker_active: boolean;
+}
+
 interface OsTurboStatus {
   enabled: boolean;
   throttled_processes: number;
   power_plan: string;
+  /** S39-003: truthful readback counts from the last sweep. */
+  measured?: OsTurboMeasuredStatus;
 }
 
 /**
@@ -140,6 +152,85 @@ function SystemOptimizationTab() {
             {t('sysOpt.osTurboHow')}
           </p>
         </details>
+
+        {/* S39-008: measured status — every number comes from a real
+            GetProcessInformation readback, never a guess. */}
+        {osTurbo?.measured && (
+          <div
+            style={{
+              marginTop: 14,
+              paddingTop: 12,
+              borderTop: '1px solid var(--border)',
+            }}
+          >
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--text-dim)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                marginBottom: 8,
+              }}
+            >
+              {t('sysOpt.osTurboMeasuredTitle')}
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+                gap: '8px 14px',
+              }}
+            >
+              {(
+                [
+                  ['osTurboMeasuredInspected', osTurbo.measured.inspected],
+                  ['osTurboMeasuredApplied', osTurbo.measured.applied],
+                  ['osTurboMeasuredRestored', osTurbo.measured.restored],
+                  ['osTurboMeasuredSkipped', osTurbo.measured.skipped],
+                  ['osTurboMeasuredFailures', osTurbo.measured.failures],
+                ] as const
+              ).map(([key, value]) => (
+                <div key={key}>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                    {t(`sysOpt.${key}` as Parameters<typeof t>[0])}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 15,
+                      fontWeight: 600,
+                      fontVariantNumeric: 'tabular-nums',
+                      color: 'var(--text)',
+                    }}
+                  >
+                    {value}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 11,
+                color: 'var(--text-dim)',
+                display: 'flex',
+                gap: 12,
+                flexWrap: 'wrap',
+              }}
+            >
+              <span>
+                {osTurbo.measured.worker_active
+                  ? t('sysOpt.osTurboWorkerActive')
+                  : t('sysOpt.osTurboWorkerIdle')}
+              </span>
+              <span>
+                {osTurbo.measured.last_sweep_ms > 0
+                  ? t('sysOpt.osTurboSweepDone')
+                  : t('sysOpt.osTurboSweepNever')}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── S55: Windows Debloater card ── */}
