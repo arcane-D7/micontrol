@@ -1,7 +1,7 @@
 # Sprint Plan Overview — Stability Report Remediation (v1 + v2) + Audit_Final
 
 **Created:** 2026-06-25
-**Last Updated:** 2026-09-18 (Sprint 39 planned from the OS Turbo redesign scope)
+**Last Updated:** 2026-09-18 (Sprint 39 complete — OS Turbo measured adaptive control, 11/11 gates, local commits only)
 **Sources:**
 
 - v1: `docs/stability-report-2026-06-24-post-sprints-13-15.md` (Sprints 16–19)
@@ -257,9 +257,9 @@ Sprint 34 (P0) ──► Sprint 35 (P1) ──► Sprint 36 (P2) ──► Sprin
 **After S37:** All 6 user-reported bugs fixed. All 4 security issues resolved. Zero UAC prompts in production.
 **After S55 (stabilization round):** Bridge service crash-loop eliminated (fix17–fix19), UAC storm on power-profile change eliminated (stable pipe), tray Open App restored (fix13/16), debloater UI released with tiered removal + state badges.
 
-**Sprint 39:** Replaces the undocumented OS Turbo process call with the public Windows API, enforces the authenticated bridge-only write boundary, and sequences reversible state, measured statistics, bounded policy, anonymous logs, optional BYOK approval, UI integration, and runtime audit. Sprint 39 remains planned until every ticket, full health check, and runtime gate is complete.
+**Sprint 39:** Replaces the undocumented OS Turbo process call with the public Windows API, enforces the authenticated bridge-only write boundary, and sequences reversible state, measured statistics, bounded policy, anonymous logs, optional BYOK approval, UI integration, and runtime audit. **Sprint 39 is complete** — all 9 tickets implemented and validated, 11/11 health gates passed, commits local only (not published).
 
-### OS Turbo Redesign (Sprint 39)
+### OS Turbo Redesign (Sprint 39) — ✅ Complete
 
 | Requirement / finding                                       | Sprint | Ticket  | Coverage statement                                                                |
 | ----------------------------------------------------------- | ------ | ------- | --------------------------------------------------------------------------------- |
@@ -272,6 +272,10 @@ Sprint 34 (P0) ──► Sprint 35 (P1) ──► Sprint 36 (P2) ──► Sprin
 | Optional BYOK suggestions                                   | S39    | S39-007 | Structured validation and explicit approval, independent of deterministic control |
 | Four-locale integrated UI                                   | S39    | S39-008 | Localized status and approval/error workflows with frontend tests                 |
 | Runtime and full-gate verification                          | S39    | S39-009 | Disposable-child smoke test, bridge boundary audit, and complete health gates     |
+
+**Sprint 39 validation:** 83 `hw::os_turbo` tests + 67 module tests (stats 18, policy 18, log 14, suggest 17) pass with 0 failures; `node scripts/health-check.mjs` reports 11/11. Sprint commit `a9ad6ce`.
+
+**Sprint 39 follow-up (not blocking):** the statistics, policy, log, and BYOK modules are implemented and unit-tested but not yet wired into the live sweep loop or surfaced in the UI.
 
 ---
 
