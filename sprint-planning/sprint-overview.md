@@ -86,7 +86,7 @@
 | 36     | P2 MEDIUM   | Security Hardening               | 4       | ~2–3 days  | ✅ `0a67897` | `sprint-36-p2-medium-security-hardening/plan.md` |
 | 37     | P1 HIGH     | Audio Switching + WiFi WlanAPI   | 5       | ~5–10 days | ✅ `b47dea0` | `sprint-37-p1-high-audio-wifi-features/plan.md`  |
 | S55    | P0 CRITICAL | Stability: crash-loop, UAC, tray | —       | —          | ✅ `6e645c9` | (stabilization round, no plan file)              |
-| 39     | P1 HIGH     | Measured adaptive OS Turbo       | 9       | ~2–3 weeks | ⏳ Planned   | [sprint](sprint-39-p1-os-turbo/sprint.md)        |
+| 39     | P1 HIGH     | Measured adaptive OS Turbo       | 9       | ~2–3 weeks | ✅ `a9ad6ce` | [sprint](sprint-39-p1-os-turbo/sprint.md)        |
 
 **miControl Audit totals:** 7 (S34) + 7 (S35) + 4 (S36) + 5 (S37) = 23 tickets, ~12–19 days effort
 
