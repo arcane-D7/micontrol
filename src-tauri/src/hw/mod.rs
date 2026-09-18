@@ -34,6 +34,7 @@ pub mod localsend;
 pub mod mic;
 pub mod nfc_pairing;
 pub mod os_turbo;
+pub mod os_turbo_stats;
 #[cfg(windows)]
 pub mod osd;
 pub mod performance;
