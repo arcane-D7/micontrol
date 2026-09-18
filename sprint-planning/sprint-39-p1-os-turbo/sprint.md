@@ -12,7 +12,7 @@
 | **Primary Owner**     | miControl desktop team                                                                                                           |
 | **Source**            | User-requested OS Turbo redesign, 2026-09-18                                                                                     |
 | **Depends On**        | Sprint 37 and the existing authenticated bridge service                                                                          |
-| **Status**            | ⏳ Planned                                                                                                                       |
+| **Status**            | 🔄 In progress — S39-002 implemented, validation pending                                                                         |
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
 
@@ -50,7 +50,7 @@ Tickets are intentionally sequential because each ticket writes data or policy c
 | **Type**             | Fix                                                                                                                   |
 | **Estimated Effort** | M                                                                                                                     |
 | **Source Finding**   | User request: wrong `NtSetInformationProcess` class 4 call and OS Turbo writes must use the authenticated bridge only |
-| **Status**           | ⏳ Planned                                                                                                            |
+| **Status**           | ✅ Complete                                                                                                           |
 
 #### Context
 
@@ -58,19 +58,19 @@ Tickets are intentionally sequential because each ticket writes data or policy c
 
 #### Acceptance Criteria
 
-- [ ] Replace the raw native call with the Windows crate's public `SetProcessInformation` using `ProcessPowerThrottling` and `PROCESS_POWER_THROTTLING_STATE`.
-- [ ] Preserve the official state contract: `Version = 1`, `ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED`, and `StateMask` set only for the enable operation.
-- [ ] Record numeric, safe Windows error codes for failed process actions without treating a failed action as successful; the returned action count includes successful calls only.
-- [ ] Route `set_os_turbo` through an authenticated bridge-only helper that does not use direct dispatch, scheduled-task fallback, or UAC fallback.
-- [ ] Add focused state/API tests and, where supported by the Windows test environment, a disposable-child smoke test that never targets an existing user process.
-- [ ] Run the health check command successfully.
+- [x] Replace the raw native call with the Windows crate's public `SetProcessInformation` using `ProcessPowerThrottling` and `PROCESS_POWER_THROTTLING_STATE`.
+- [x] Preserve the official state contract: `Version = 1`, `ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED`, and `StateMask` set only for the enable operation.
+- [x] Record numeric, safe Windows error codes for failed process actions without treating a failed action as successful; the returned action count includes successful calls only.
+- [x] Route `set_os_turbo` through an authenticated bridge-only helper that does not use direct dispatch, scheduled-task fallback, or UAC fallback.
+- [x] Add focused state/API tests and, where supported by the Windows test environment, a disposable-child smoke test that never targets an existing user process.
+- [x] Run the health check command successfully.
 
 #### Execution Evidence — 2026-09-18
 
 - [x] Public EcoQoS API disposable-child readback verified: 2/2.
 - [x] `node scripts/health-check.mjs` passed all 11/11 checks on September 18, 2026.
 - [x] `git diff --check` passed.
-- [ ] Commit pending.
+- [x] Commit `13a7009` created with message `feat(s39-001): correct EcoQoS API and require authenticated bridge`.
 
 ### S39-002 — Capture reversible process identity and the prior power scheme
 
@@ -82,7 +82,7 @@ Tickets are intentionally sequential because each ticket writes data or policy c
 | **Type**             | Feature                                                               |
 | **Estimated Effort** | M                                                                     |
 | **Source Finding**   | User request: OS Turbo must be reversible and preserve original state |
-| **Status**           | ⏳ Planned                                                            |
+| **Status**           | 🔄 Implemented — awaiting focused validation                          |
 
 #### Context
 
@@ -96,6 +96,13 @@ The current implementation identifies targets only by process name and restores 
 - [ ] Make enable/disable idempotent and ensure partial failures do not erase the last known reversible state.
 - [ ] Add tests for snapshot creation, process identity mismatch, restore ordering, and missing prior-state data.
 - [ ] Run the health check command successfully.
+
+#### Execution Evidence — 2026-09-18
+
+- [x] Implemented bounded versioned recovery snapshots with PID plus creation-time validation.
+- [x] Captured and conditionally restored the prior active power scheme without overwriting external scheme changes.
+- [x] Preserved snapshots across partial failures and removed the startup reapply sweep until S39-003.
+- [ ] Focused Rust tests and health check pending.
 
 ### S39-003 — Add measured status and a bounded periodic worker
 

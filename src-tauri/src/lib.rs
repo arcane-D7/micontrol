@@ -854,10 +854,6 @@ pub fn run() {
             // Start touchpad gesture listener (5-finger screenshot, edge slide volume/brightness)
             crate::hw::touchpad::start_gesture_listener();
 
-            // S50: re-apply OS Turbo if it was enabled in the previous session
-            // (EcoQoS throttling is per-process one-shot; Windows forgets it).
-            crate::hw::os_turbo::restore_os_turbo();
-
             // S53: re-apply enabled System Optimization tweaks (feature
             // updates and Windows servicing reset HKLM policies).
             // S55 FIX 17: the automatic boot re-apply is DISABLED. It was the
