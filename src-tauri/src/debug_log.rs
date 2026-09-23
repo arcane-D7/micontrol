@@ -70,7 +70,10 @@ fn init_dev_file_logger() -> Result<()> {
     }
 
     let log_path = log_dir.join("tauri-dev-trace.log");
-    let log_file = match fern::log_file(&log_path) {
+    // S64: same size-based rotation as the release logger — the trace log was
+    // the file called out by `docs/stability-report-2026-06-24.md` as growing
+    // without bound (it reached 39 MB in one dev cycle).
+    let log_file = match open_rotating_log(&log_path) {
         Ok(f) => Some(f),
         Err(e) => {
             eprintln!(
@@ -136,14 +139,18 @@ fn init_release_file_logger() -> Result<()> {
     }
 
     let log_path = log_dir.join("tauri-app.log");
-    let log_file = match fern::log_file(&log_path) {
+    // S64: the log used to be a plain unbounded append file (77 MB in one
+    // release cycle). `docs/stability-report-2026-06-24.md` lists the missing
+    // rotation as a MEDIUM finding. Rotate at 8 MiB keeping 3 files, so the
+    // live log is always small enough to ship with a bug report.
+    let log_file = match open_rotating_log(&log_path) {
         Ok(f) => Some(f),
         Err(e) => {
             // The file cannot be created — the dir may exist with a broken
             // ACL (e.g. created long ago by an elevated instance). Repair the
             // ACL if possible, then retry once.
             let _ = repair_log_dir_acl(&log_dir);
-            match fern::log_file(&log_path) {
+            match open_rotating_log(&log_path) {
                 Ok(f) => Some(f),
                 Err(_) => {
                     eprintln!(
@@ -184,10 +191,32 @@ fn init_release_file_logger() -> Result<()> {
 
     log::info!(
         target: "applog",
-        "persistent app logging enabled at {}",
-        log_path.display()
+        "persistent app logging enabled at {} (rotation: {} MiB x {} files)",
+        log_path.display(),
+        crate::util::log_rotation::DEFAULT_MAX_BYTES / (1024 * 1024),
+        crate::util::log_rotation::DEFAULT_MAX_FILES
     );
     Ok(())
+}
+
+/// Open the persistent app log with size-based rotation (S64).
+///
+/// Returns a boxed writer so the `fern` chain keeps working unchanged while
+/// the file is rotated before it can grow past the cap. `fern::Output` only
+/// accepts `File`, `Stderr`/`Stdout` or `Box<dyn Write + Send>`, hence the box.
+fn open_rotating_log(path: &std::path::Path) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+    use crate::util::log_rotation::{RotatingFile, DEFAULT_MAX_BYTES, DEFAULT_MAX_FILES};
+    // Touch the file so a permission problem surfaces here (and can trigger the
+    // ACL repair path) rather than on the first log record.
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    Ok(Box::new(RotatingFile::new(
+        path.to_path_buf(),
+        DEFAULT_MAX_BYTES,
+        DEFAULT_MAX_FILES,
+    )))
 }
 
 /// Ensure the log directory exists and is writable. Returns false if it

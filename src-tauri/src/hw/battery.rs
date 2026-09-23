@@ -96,6 +96,37 @@ const BATTERY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 static LAST_GOOD_BATTERY: Mutex<Option<BatteryInfo>> = Mutex::new(None);
 
+/// S64: minimum interval between two *real* WMI battery queries.
+///
+/// Battery state changes slowly, but `get_battery_info` is called every 5 s by
+/// the IoT event listener and every 15 s by the frontend. Each call spawns a
+/// thread that runs a WMI query; when the battery driver is slow (observed
+/// 4669 "exceeded 5000 ms" warnings in one log) those threads stay stuck in COM
+/// and pile up — the process reached 134 threads / 291 617 handles after two
+/// days. Inside this window we serve the cached snapshot immediately and never
+/// spawn a query thread, so the effective query rate is bounded regardless of
+/// how many callers poll.
+#[cfg(windows)]
+const BATTERY_QUERY_MIN_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Timestamp of the last query that actually spawned a WMI thread.
+#[cfg(windows)]
+static LAST_BATTERY_QUERY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Returns true when enough time has passed since the last real query. Marks
+/// the timestamp on success so concurrent callers cannot both start a query.
+#[cfg(windows)]
+fn should_query_battery_now() -> bool {
+    let mut guard = crate::util::panic::lock_or_recover(&LAST_BATTERY_QUERY_AT);
+    match *guard {
+        Some(last) if last.elapsed() < BATTERY_QUERY_MIN_INTERVAL => false,
+        _ => {
+            *guard = Some(Instant::now());
+            true
+        }
+    }
+}
+
 /// Fetch battery info without blocking the caller for longer than
 /// [`BATTERY_QUERY_TIMEOUT`].
 ///
@@ -104,9 +135,19 @@ static LAST_GOOD_BATTERY: Mutex<Option<BatteryInfo>> = Mutex::new(None);
 /// exists yet do we fail with a `Timeout` error. Every successful read refreshes
 /// the snapshot cache. The `AC_PROBE_MIN_INTERVAL` throttle inside
 /// `probe_ac_input_power_throttled` is preserved unchanged.
+///
+/// S64: calls inside [`BATTERY_QUERY_MIN_INTERVAL`] are served from the cached
+/// snapshot without spawning a thread (see that constant).
 #[cfg(windows)]
 pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
     use std::sync::mpsc;
+
+    if !should_query_battery_now() {
+        if let Some(info) = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone() {
+            return Ok(info);
+        }
+        // No snapshot yet (first call of the session) — fall through and query.
+    }
 
     let (tx, rx) = mpsc::channel::<HardwareResult<BatteryInfo>>();
     std::thread::Builder::new()

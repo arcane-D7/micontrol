@@ -30,6 +30,38 @@ This is a **Tauri v2 + React/TypeScript desktop application** with Rust backend 
 | Named pipe (`\\.\pipe\ecram_service`)        | IPC between MiControl and custom IoTService.exe          | ✅ Working                             |
 | ERAM/SMA2 regions (via IoTDriver)            | AC adapter wattage, additional EC data                   | ⚠️ Not via driver — WMI fallback works |
 
+### Logging
+
+All file logs are **size-rotated** by `src-tauri/src/util/log_rotation.rs`
+(8 MiB per file, 3 rotated files kept). Never open a log file with a plain
+`OpenOptions::append` — use `log_rotation::append_line` (service logs) or the
+`RotatingFile` sink (the `fern` logger in `debug_log.rs`).
+
+| Log file                                            | Written by                           | Level |
+| --------------------------------------------------- | ------------------------------------ | ----- |
+| `%LOCALAPPDATA%\MiControl\logs\tauri-app.log`       | `debug_log.rs` (installed app)       | Info  |
+| `%LOCALAPPDATA%\MiControl\logs\tauri-dev-trace.log` | `debug_log.rs` (dev)                 | Trace |
+| `C:\ProgramData\MiControl\logs\bridge.log`          | `micontrol_bridge.rs` (`bridge_log`) | —     |
+| `C:\ProgramData\MiControl\logs\watchdog.log`        | `micontrol_bridge.rs` (`write_log`)  | —     |
+
+Background pollers must **throttle repeated warnings**: a permanently absent
+service or a slow WMI provider must not log on every tick (see
+`hw/iot_watchdog.rs` `RECOVERY_COOLDOWN` and `elev_bridge.rs`
+`ensure_task_correct_path` cooldown).
+
+### Hardware poll cadence
+
+| Source                                 | Interval | Throttle inside the reader        |
+| -------------------------------------- | -------- | --------------------------------- |
+| `get_battery_info` (IoT events)        | 5 s      | `BATTERY_QUERY_MIN_INTERVAL` 15 s |
+| `get_battery_info` (frontend slowPoll) | 15 s     | same 15 s throttle                |
+| IoT watchdog pipe probe                | 30 s     | `RECOVERY_COOLDOWN` 300 s         |
+| Health supervisor                      | 30 s     | —                                 |
+
+`hw/battery.rs` serves the cached snapshot inside the throttle window instead
+of spawning a WMI thread, so the query rate is bounded regardless of how many
+callers poll (unbounded polling previously accumulated hung COM threads).
+
 ### Reverse Engineering Documentation
 
 - `docs/RE_ANALYSIS_REPORT.md` — Complete RE report (IoTDriver.sys IOCTLs, buffer layout, security check, allowed address ranges, custom replacement binary)

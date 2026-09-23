@@ -1051,20 +1051,24 @@ mod pipe_server {
     /// bridge.log). eprintln is invisible for a windowed service, and without
     /// this there was NO way to see whether a client request even reached the
     /// worker — the recurring "No response" loop was undiagnosable.
+    ///
+    /// S64: size-based rotation (8 MiB x 3) — this file reached 18 MB in one
+    /// release cycle with no cap.
     fn bridge_log(msg: &str) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let dir = std::path::Path::new("C:\\ProgramData\\MiControl\\logs");
-        let _ = std::fs::create_dir_all(dir);
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("bridge.log"))
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "{ts} {msg}");
+        let path = dir.join("bridge.log");
+        if let Err(e) = micontrol_lib::util::log_rotation::append_line(
+            &path,
+            &format!("{ts} {msg}"),
+            micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
+            micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
+        ) {
+            // Never let logging break the service; surface it on stderr only.
+            eprintln!("[bridge_log] write failed: {e}");
         }
     }
 
@@ -1455,17 +1459,16 @@ mod watchdog {
             .unwrap_or_default()
             .as_secs();
         eprintln!("[{ts}] [watchdog] {msg}");
-        // Optional: persist to a rotating log under ProgramData.
+        // S64: persist with size-based rotation (the previous comment said
+        // "rotating log" but the implementation was a plain unbounded append).
         let dir = marker_dir().join("logs");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("watchdog.log"))
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(format!("{ts} {msg}\n").as_bytes())
-            });
+        let path = dir.join("watchdog.log");
+        let _ = micontrol_lib::util::log_rotation::append_line(
+            &path,
+            &format!("{ts} {msg}"),
+            micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
+            micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
+        );
     }
 
     /// True if the user has explicitly quit the app since it last started.

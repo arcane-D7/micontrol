@@ -178,6 +178,15 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         // SCM query + start is quick (~1-2 s), but `sc failure` may hit a
         // busy SCM on cold boot — give it the medium timeout.
         "ensure_face_service" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
+        // S64: `ensure_ecram_service` legitimately takes ~15.2 s (it probes the
+        // pipe, compares the DriverStore binary, may copy ~500 KB and run
+        // `sc stop/delete/create/failure`, then waits up to 10 s for the pipe).
+        // The 15 s default made the client give up while the bridge was still
+        // working: bridge.log shows `ok=true total_elapsed_ms=15174` for a call
+        // the client reported as failed, so every watchdog tick logged
+        // "service recovery failed" and the recovery never registered as
+        // successful. Give it the slow budget.
+        "ensure_ecram_service" => Duration::from_secs(ELEV_TIMEOUT_SLOW_SECS),
         _ => Duration::from_secs(ELEV_TIMEOUT_SECS),
     }
 }

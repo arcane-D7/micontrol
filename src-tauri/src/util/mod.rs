@@ -12,6 +12,7 @@ pub mod consent_audit;
 pub mod crash_report;
 pub mod data_deletion;
 pub mod error_log;
+pub mod log_rotation;
 pub mod mcp_config;
 pub mod panic;
 pub mod registry;

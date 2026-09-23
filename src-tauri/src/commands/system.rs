@@ -229,9 +229,17 @@ pub async fn set_fan_mode(mode: FanMode, speed_percent: u8) -> Result<(), ErrorR
 pub async fn get_touchpad_info() -> Result<TouchpadInfo, ErrorResponse> {
     let started = std::time::Instant::now();
     log::debug!(target: "cmd::system", "get_touchpad_info: start");
-    let result = run_blocking(hw_get_touchpad)
-        .await
-        .map_err(ErrorResponse::from);
+    // S64: this read is registry-only (HKCU\SOFTWARE\MI\Touchpad) plus an
+    // in-memory profile lookup, so it can never legitimately need 15 s. A
+    // timeout here means the blocking pool itself is saturated by hung WMI
+    // tasks (the battery/WMI contention), not that this read is slow — the
+    // default 15 s budget only made the UI wait for a slot. A short budget
+    // surfaces the real cause quickly and lets the next poll succeed.
+    const TOUCHPAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let result =
+        crate::util::blocking::run_blocking_timeout(TOUCHPAD_READ_TIMEOUT, hw_get_touchpad)
+            .await
+            .map_err(ErrorResponse::from);
     match &result {
         Ok(info) => log::debug!(
             target: "cmd::system",
