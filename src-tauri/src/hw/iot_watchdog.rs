@@ -90,11 +90,17 @@ pub fn check_once() {
         return;
     }
 
-    log::warn!("[iot_watchdog] IoT pipe unavailable — attempting service recovery");
+    // S64: only emit the WARN once per recovery window. Previously the WARN
+    // fired on EVERY 30 s tick regardless of the cooldown (the cooldown only
+    // gated the recovery call below), producing thousands of identical lines
+    // for a permanently absent service. Check the cooldown first and log at
+    // debug level when we are merely waiting it out.
     if !watchdog().recovery_allowed() {
-        log::debug!("[iot_watchdog] recovery on cooldown, skipping");
+        log::debug!("[iot_watchdog] IoT pipe unavailable — recovery on cooldown, skipping");
         return;
     }
+
+    log::warn!("[iot_watchdog] IoT pipe unavailable — attempting service recovery");
 
     // Route the recovery through the elevated chain (MiControlBridge SYSTEM
     // service pipe, else the scheduled task). Creating/replacing the
@@ -140,5 +146,14 @@ mod tests {
         assert!(w.recovery_allowed());
         // Immediately after a recorded recovery, no new attempt.
         assert!(!w.recovery_allowed());
+    }
+
+    #[test]
+    fn recovery_cooldown_is_long_enough_to_avoid_log_spam() {
+        // S64: the WARN is now gated by this cooldown. A permanently absent
+        // service must not produce more than a handful of lines per hour, so
+        // the cooldown has to stay well above the 30 s probe interval.
+        assert!(RECOVERY_COOLDOWN >= Duration::from_secs(300));
+        assert!(RECOVERY_COOLDOWN > WATCHDOG_INTERVAL * 5);
     }
 }

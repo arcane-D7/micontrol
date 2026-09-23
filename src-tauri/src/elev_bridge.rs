@@ -1127,6 +1127,30 @@ fn ensure_task_correct_path() -> TaskHealResult {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+    // S64: throttle the self-heal. This runs on the elevated dispatch chain,
+    // which background polls (thermal/battery) trigger every few seconds. When
+    // the task is genuinely missing and the non-elevated re-register keeps
+    // failing (standard user session), every call re-ran `schtasks /query`
+    // plus a failed `/create` and emitted 4 WARN lines — observed 2823
+    // repetitions in one log. A cooldown keeps the diagnostic value (we retry
+    // eventually, e.g. after a reinstall) without spamming.
+    const HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(900);
+    static LAST_HEAL_ATTEMPT: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    {
+        let lock = LAST_HEAL_ATTEMPT.get_or_init(|| std::sync::Mutex::new(None));
+        let mut guard = match lock.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match *guard {
+            Some(last) if last.elapsed() < HEAL_COOLDOWN => {
+                return TaskHealResult::AlreadyCorrect;
+            }
+            _ => *guard = Some(std::time::Instant::now()),
+        }
+    }
+
     // Get the current executable path.
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,

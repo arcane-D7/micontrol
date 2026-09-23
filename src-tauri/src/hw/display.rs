@@ -1668,6 +1668,17 @@ fn get_brightness_igcl() -> HardwareResult<u8> {
 fn set_brightness_igcl(level: u8) -> HardwareResult<()> {
     use igcl::*;
     with_igcl_device_pub(|device, lib| unsafe {
+        // S64: a null device makes EVERY IGCL call a silent no-op. Intel
+        // returns a warning HRESULT with the severity bit CLEAR (observed
+        // 0x40000001) and writes nothing — the old code treated that as
+        // success, so brightness never changed and the WMI fallback was never
+        // reached. That is the "brightness control does nothing" regression.
+        // Fail loudly instead so the caller falls back to WMI.
+        if device.is_null() {
+            return Err(HardwareError::Display(
+                "IGCL device unavailable (null device) — brightness not applied".into(),
+            ));
+        }
         // SAFETY: device is a valid IGCL device handle. The brightness args struct is sized
         // correctly and both target_brightness and smooth_target_brightness are initialized.
         let set_brightness: libloading::Symbol<FnCtlSetBrightnessSetting> = lib

@@ -1067,7 +1067,9 @@ async fn resize_tray_popup(app: tauri::AppHandle, height: f64) -> Result<(), Str
     const MAX_H: f64 = 780.0;
     let height = height.clamp(MIN_H, MAX_H);
     if let Some(window) = app.get_webview_window("tray") {
-        let scale = window.scale_factor().map_err(|e| e.to_string())?;
+        // S64: resolve the scale from the window's monitor, not from
+        // `window.scale_factor()` — the latter is stale for a hidden window.
+        let scale = popup_scale(&window, None);
         let pos = window.outer_position().map_err(|e| e.to_string())?;
         let cur = window.inner_size().map_err(|e| e.to_string())?;
 
@@ -1138,6 +1140,71 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// S64: authoritative DPI scale for the tray popup.
+///
+/// `window.scale_factor()` is unreliable for a HIDDEN or just-shown popup: it
+/// caches the scale from the monitor the window was last associated with, so a
+/// display-scaling change (or a move between monitors with different DPI) makes
+/// it report a stale value — observed live as `scale=1.75` on one call and
+/// `scale=1.00` on the very next call within the same show, with a physical
+/// size (525x1365) left over from the 1.75 era. The resulting mismatch put the
+/// popup at the top of the screen (`y≈19`) with a stale physical size.
+///
+/// Resolve the scale from the monitor that actually contains the tray click
+/// (or the window, for the hotkey path) via `GetDpiForMonitor`, and fall back
+/// to the window value only if the Win32 query fails.
+#[cfg(windows)]
+fn popup_scale(window: &tauri::WebviewWindow, probe: Option<tauri::PhysicalPosition<f64>>) -> f64 {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+
+    let pt = match probe {
+        Some(p) => POINT {
+            x: p.x as i32,
+            y: p.y as i32,
+        },
+        None => {
+            // Hotkey path: derive a point from the window's own rect.
+            let (pos, size) = match (window.outer_position(), window.inner_size()) {
+                (Ok(pos), Ok(size)) => (pos, size),
+                _ => return window.scale_factor().unwrap_or(1.0),
+            };
+            POINT {
+                x: pos.x + size.width as i32 / 2,
+                y: pos.y + size.height as i32 / 2,
+            }
+        }
+    };
+
+    unsafe {
+        // SAFETY: read-only Win32 monitor/DPI queries on POD stack values.
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        // Validate the monitor handle by asking for its work area; a failed
+        // lookup means we should trust the window instead.
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..std::mem::zeroed()
+        };
+        if !GetMonitorInfoW(hmon, &mut info).as_bool() {
+            return window.scale_factor().unwrap_or(1.0);
+        }
+        let mut dpi_x: u32 = 96;
+        let mut dpi_y: u32 = 96;
+        if GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() && dpi_x > 0 {
+            return dpi_x as f64 / 96.0;
+        }
+    }
+    window.scale_factor().unwrap_or(1.0)
+}
+
+#[cfg(not(windows))]
+fn popup_scale(window: &tauri::WebviewWindow, _probe: Option<tauri::PhysicalPosition<f64>>) -> f64 {
+    window.scale_factor().unwrap_or(1.0)
 }
 
 fn open_window_sync(app: &tauri::AppHandle) {
@@ -1255,36 +1322,42 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
 /// just above the taskbar regardless of taskbar height, size, or DPI.
 /// Uses the window's CURRENT height so that a previous dynamic resize is honoured.
 fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosition<f64>) {
-    let scale = window.scale_factor().unwrap_or(1.0);
+    // S64: resolve the scale from the monitor under the click, not from the
+    // window (which caches a stale value for a hidden/just-shown popup).
+    let scale = popup_scale(window, Some(*click_pos));
     let pw = POPUP_W * scale;
-    // S63: heal width corruption on every show. A previously shown popup can carry a
-    // collapsed width (observed 300 → 171 px); enforce the design width before
-    // measuring, so positioning and the visible popup both use the real geometry.
-    {
-        let want_w = (POPUP_W * scale).round() as u32;
-        let cur = window
-            .inner_size()
-            .map(|s| (s.width, s.height))
-            .unwrap_or((0, 0));
-        if cur.0 != want_w {
-            log::warn!(
-                "[tray] popup width drifted ({} px, expected {want_w}) — healing",
-                cur.0
-            );
-            let _ = window.set_size(tauri::PhysicalSize::new(want_w, cur.1));
-        }
-    }
-    // Guard: a hidden window may report height=0 before first render; fall back to default.
-    let ph = window
+    // S63/S64: heal a stale physical size on every show. A previously shown
+    // popup can carry a width collapsed to 171 px, or a size left over from a
+    // previous display scale (observed 525x1365 from a 1.75 era while the
+    // current scale was 1.00). A stale physical size makes the Y math place the
+    // popup at the top of the screen (`y≈19`). Enforce the design width and
+    // fall back to the default height when the stored size is inconsistent.
+    let cur = window
         .inner_size()
-        .map(|s| {
-            if s.height > 0 {
-                s.height as f64
-            } else {
-                POPUP_H_DEFAULT * scale
-            }
-        })
-        .unwrap_or(POPUP_H_DEFAULT * scale);
+        .map(|s| (s.width, s.height))
+        .unwrap_or((0, 0));
+    let want_w = (POPUP_W * scale).round() as u32;
+    let stale = cur.0 != want_w;
+    if stale {
+        log::warn!(
+            "[tray] popup physical size looks stale ({}x{} px, expected width {want_w}) — healing",
+            cur.0,
+            cur.1
+        );
+        let healed_h = if cur.1 > 0 {
+            cur.1
+        } else {
+            (POPUP_H_DEFAULT * scale).round() as u32
+        };
+        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
+    }
+    // Guard: a hidden window may report height=0 before first render, and a
+    // stale physical height must never drive the Y math — fall back to default.
+    let ph = if stale || cur.1 == 0 {
+        POPUP_H_DEFAULT * scale
+    } else {
+        cur.1 as f64
+    };
     let gap = POPUP_GAP * scale;
 
     // Get the work area (screen minus taskbar) in physical pixels for the
@@ -1333,34 +1406,37 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
 /// Position the tray popup at the bottom-right of the work area (near system tray).
 /// Used when toggling via hotkey where there is no tray-icon click position.
 fn position_popup_at_tray(window: &tauri::WebviewWindow) {
-    let scale = window.scale_factor().unwrap_or(1.0);
+    // S64: resolve the scale from the window's monitor (the hotkey path has no
+    // click point) instead of the stale `window.scale_factor()`.
+    let scale = popup_scale(window, None);
     let pw = POPUP_W * scale;
-    // S63: same width-heal as position_popup — see the note there.
-    {
-        let want_w = (POPUP_W * scale).round() as u32;
-        let cur = window
-            .inner_size()
-            .map(|s| (s.width, s.height))
-            .unwrap_or((0, 0));
-        if cur.0 != want_w {
-            log::warn!(
-                "[tray] popup width drifted ({} px, expected {want_w}) — healing",
-                cur.0
-            );
-            let _ = window.set_size(tauri::PhysicalSize::new(want_w, cur.1));
-        }
-    }
-    // Guard: a hidden window may report height=0 before first render; fall back to default.
-    let ph = window
+    // S63/S64: same stale-size heal as position_popup — see the note there.
+    let cur = window
         .inner_size()
-        .map(|s| {
-            if s.height > 0 {
-                s.height as f64
-            } else {
-                POPUP_H_DEFAULT * scale
-            }
-        })
-        .unwrap_or(POPUP_H_DEFAULT * scale);
+        .map(|s| (s.width, s.height))
+        .unwrap_or((0, 0));
+    let want_w = (POPUP_W * scale).round() as u32;
+    let stale = cur.0 != want_w;
+    if stale {
+        log::warn!(
+            "[tray] popup physical size looks stale ({}x{} px, expected width {want_w}) — healing",
+            cur.0,
+            cur.1
+        );
+        let healed_h = if cur.1 > 0 {
+            cur.1
+        } else {
+            (POPUP_H_DEFAULT * scale).round() as u32
+        };
+        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
+    }
+    // Guard: a hidden window may report height=0 before first render, and a
+    // stale physical height must never drive the Y math — fall back to default.
+    let ph = if stale || cur.1 == 0 {
+        POPUP_H_DEFAULT * scale
+    } else {
+        cur.1 as f64
+    };
     let gap = POPUP_GAP * scale;
 
     #[cfg(windows)]
