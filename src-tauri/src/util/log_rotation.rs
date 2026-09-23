@@ -269,4 +269,70 @@ mod tests {
         assert!(path.exists());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// S64 audit: prove the SHIPPING configuration rotates. The other tests use
+    /// tiny caps for speed; this one uses `DEFAULT_MAX_BYTES` (8 MiB) so the
+    /// values actually wired into `debug_log.rs` and the bridge loggers are
+    /// exercised. The oversize file is created sparsely with `set_len`, so the
+    /// test stays fast and does not write 8 MiB to disk.
+    #[test]
+    fn production_defaults_rotate_a_sparse_oversize_log() {
+        let dir = temp_dir("proddefaults");
+        let path = dir.join("tauri-app.log");
+
+        // A log just over the production cap.
+        {
+            let file = fs::File::create(&path).unwrap();
+            file.set_len(DEFAULT_MAX_BYTES + 1024).unwrap();
+        }
+        assert_eq!(fs::metadata(&path).unwrap().len(), DEFAULT_MAX_BYTES + 1024);
+        assert!(!rotated_path(&path, 1).exists());
+
+        // The very next append must rotate the oversize file away.
+        append_line(
+            &path,
+            "after-rotation",
+            DEFAULT_MAX_BYTES,
+            DEFAULT_MAX_FILES,
+        )
+        .unwrap();
+
+        assert!(
+            rotated_path(&path, 1).exists(),
+            "production defaults must rotate a log over DEFAULT_MAX_BYTES"
+        );
+        let live_len = fs::metadata(&path).unwrap().len();
+        assert!(
+            live_len < DEFAULT_MAX_BYTES,
+            "live log must be back under the cap, got {live_len} bytes"
+        );
+        let live = fs::read_to_string(&path).unwrap();
+        assert!(live.contains("after-rotation"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// S64 audit: `DEFAULT_MAX_FILES` rotated files are kept, and older ones are
+    /// dropped, so disk usage is bounded at roughly `MAX_BYTES * (1 + MAX_FILES)`.
+    #[test]
+    fn production_defaults_bound_total_disk_usage() {
+        let dir = temp_dir("prodbound");
+        let path = dir.join("bridge.log");
+        // Two rotations is enough to prove the cascade with the real file count.
+        for round in 0..(DEFAULT_MAX_FILES + 1) {
+            fs::write(&path, vec![b'z'; 2048]).unwrap();
+            assert!(rotate_if_needed(&path, 1024, DEFAULT_MAX_FILES));
+            let _ = round;
+        }
+        for index in 1..=DEFAULT_MAX_FILES {
+            assert!(
+                rotated_path(&path, index).exists(),
+                "rotated file .{index} should exist with DEFAULT_MAX_FILES"
+            );
+        }
+        assert!(
+            !rotated_path(&path, DEFAULT_MAX_FILES + 1).exists(),
+            "no file beyond DEFAULT_MAX_FILES may be kept"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
