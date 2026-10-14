@@ -258,9 +258,19 @@ body,
 }
 
 /* Tray popup window — webview background must be transparent */
-.tray-window,
-.tray-window body,
-.tray-window #root {
+/* S63: the selector is deliberately over-qualified so it outranks BOTH theme
+   blocks: [data-theme='dark'] (0,1,0) and the prefers-color-scheme rule
+   ':root:not([data-theme=light])' (0,2,0). Specificity math:
+     html:root.tray-window:not([data-theme='light'])
+       = 2 pseudo-classes/classes on :root + :not(attr) + html type = (0,3,1)
+     > (0,2,0) media-query rule and > (0,1,0) explicit dark rule.
+   A bare `.tray-window` (0,1,0) LOSES to that media-query rule even though it
+   comes later in the file, because specificity beats source order. Losing
+   meant translucent surfaces (--surface-2 alpha 0.52) composited over the
+   transparent window — the popup rendered "ghosted"/broken. */
+html:root.tray-window:not([data-theme='light']),
+html:root.tray-window:not([data-theme='light']) body,
+html:root.tray-window:not([data-theme='light']) #root {
   background: transparent !important;
   background-image: none !important;
   /* backdrop-filter inside a transparent WebView2 window can cause elements to
