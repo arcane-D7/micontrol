@@ -362,6 +362,112 @@ async fn scan_for_device(needle: &str) -> Result<Option<i32>, String> {
 mod tests {
     use super::*;
 
+    /// Temporarily hide `HKCU\SOFTWARE\MiControl\BlePresence` for the duration
+    /// of a test so registry-based assertions observe a "fresh machine". On
+    /// dev machines MiControl is installed and the real key exists, which
+    /// would otherwise make "key missing" assumptions false. The original key
+    /// is captured up front and restored on drop (including panics), so the
+    /// developer's real configuration survives the test.
+    ///
+    /// Uses RAII via a `Drop` impl: hide in `new()`, restore in `drop()`.
+    struct HiddenBlePresenceKey {
+        /// Original values read before deletion. `None` entries mark values
+        /// that did not exist — restoring means simply not writing them back.
+        enabled: Option<u32>,
+        phone_mac: Option<String>,
+        phone_name: Option<String>,
+        rssi_lock_dbm: Option<u32>,
+        lock_enabled: Option<u32>,
+        /// `true` when the real key existed and values were captured.
+        had_real_key: bool,
+    }
+
+    impl HiddenBlePresenceKey {
+        fn new() -> Self {
+            use crate::util::registry::RegKeyGuard;
+            use windows::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
+
+            let mut enabled: Option<u32> = None;
+            let mut phone_mac: Option<String> = None;
+            let mut phone_name: Option<String> = None;
+            let mut rssi_lock_dbm: Option<u32> = None;
+            let mut lock_enabled: Option<u32> = None;
+            let mut had_real_key = false;
+
+            if let Ok(Some(key)) = RegKeyGuard::open_read(HKEY_CURRENT_USER, CONFIG_KEY) {
+                had_real_key = true;
+                enabled = key.read_u32(K_ENABLED).ok().flatten();
+                phone_mac = key.read_string(K_PHONE_MAC).ok().flatten();
+                phone_name = key.read_string(K_PHONE_NAME).ok().flatten();
+                rssi_lock_dbm = key.read_u32(K_RSSI_LOCK_DBM).ok().flatten();
+                lock_enabled = key.read_u32(K_LOCK_ENABLED).ok().flatten();
+            }
+
+            // 2. Delete the real key so the test sees a "missing" state.
+            let subkey_w: Vec<u16> = CONFIG_KEY
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let _ = unsafe {
+                RegDeleteTreeW(HKEY_CURRENT_USER, windows::core::PCWSTR(subkey_w.as_ptr()))
+            };
+            if had_real_key {
+                log::debug!("[ble_presence.test] hid BlePresence registry key");
+            } else {
+                log::debug!("[ble_presence.test] ensured BlePresence registry key absent");
+            }
+
+            Self {
+                enabled,
+                phone_mac,
+                phone_name,
+                rssi_lock_dbm,
+                lock_enabled,
+                had_real_key,
+            }
+        }
+    }
+
+    impl Drop for HiddenBlePresenceKey {
+        /// Best-effort restore of the developer's real configuration.
+        fn drop(&mut self) {
+            if !self.had_real_key {
+                return; // Nothing to restore — the key was already absent.
+            }
+
+            use crate::util::registry::RegKeyGuard;
+            use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+
+            let guard = match RegKeyGuard::create_write(HKEY_CURRENT_USER, CONFIG_KEY) {
+                Ok(g) => g,
+                Err(e) => {
+                    log::warn!(
+                        "[ble_presence.test] failed to open BlePresence registry key for \
+                         restore: {e} — developer config NOT restored, re-set manually"
+                    );
+                    return;
+                }
+            };
+
+            if let Some(v) = self.enabled {
+                let _ = guard.write_u32(K_ENABLED, v);
+            }
+            if let Some(v) = &self.phone_mac {
+                let _ = guard.write_string(K_PHONE_MAC, v);
+            }
+            if let Some(v) = &self.phone_name {
+                let _ = guard.write_string(K_PHONE_NAME, v);
+            }
+            if let Some(v) = self.rssi_lock_dbm {
+                let _ = guard.write_u32(K_RSSI_LOCK_DBM, v);
+            }
+            if let Some(v) = self.lock_enabled {
+                let _ = guard.write_u32(K_LOCK_ENABLED, v);
+            }
+            log::debug!("[ble_presence.test] restored original BlePresence registry values");
+        }
+    }
+
     #[test]
     fn normalize_mac_handles_colons_and_case() {
         assert_eq!(normalize_mac("aa:bb:cc:dd:ee:ff"), "AA-BB-CC-DD-EE-FF");
@@ -380,6 +486,7 @@ mod tests {
 
     #[test]
     fn load_returns_defaults_when_registry_missing() {
+        let _hidden = HiddenBlePresenceKey::new();
         let c = PresenceConfig::load();
         assert!(!c.enabled);
         assert_eq!(c.rssi_lock_dbm, -70);
