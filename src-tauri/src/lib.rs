@@ -3,6 +3,7 @@
 //! Sets up Tauri commands, application state, menu, tray, and event handling.
 //! This is the main entry point for the Tauri application runtime.
 
+mod bootstrap;
 mod commands;
 mod debug_log;
 pub mod elev_bridge;

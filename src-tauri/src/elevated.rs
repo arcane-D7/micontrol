@@ -2017,8 +2017,10 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
     // ── SECURITY (S50): only a genuine MiControl installer may be launched ──
     // This runs as SYSTEM. Accepting an arbitrary .exe would let a malicious
     // user gain privileged execution by pointing the bridge at any binary.
-    // We therefore require the file to exist, end in .exe, AND match the
-    // MiControl release pattern `MiControl_<version>[-<channel>]_x64-setup.exe`
+    // We therefore require the file to exist, end in .exe or .zip, AND match
+    // the MiControl release patterns
+    //   installer: `MiControl_<version>[-<channel>]_x64-setup.exe`
+    //   payload:   `MiControl_<version>[-<channel>]_payload.zip`
     // (case-insensitive). The name check is the authoritative gate.
     let installer_exe = candidates
         .iter()
@@ -2028,15 +2030,71 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
                 && path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map(is_micontrol_installer_name)
+                    .map(|n| is_micontrol_installer_name(n) || is_micontrol_payload_name(n))
                     .unwrap_or(false)
         })
         .ok_or_else(|| {
             "No valid MiControl installer provided (must be a file named \
-             MiControl_<version>[-<channel>]_x64-setup.exe)"
+             MiControl_<version>[-<channel>]_x64-setup.exe or ..._payload.zip)"
                 .to_string()
         })?
         .clone();
+
+    // ── DECOUPLED INSTALLER: a .zip payload is applied by the static setup ──
+    // shell (`<appdir>\setup\micontrol_setup.exe`). The shell is a permanent,
+    // version-independent component: it kills the app + services, extracts
+    // the payload, re-applies every install point and relaunches the app —
+    // WITHOUT ever replacing itself (the old NSIS flow had to kill the very
+    // bridge service that launched it; that race class is now impossible).
+    if installer_exe.to_ascii_lowercase().ends_with("_payload.zip") {
+        let app_dir = current_app_dir();
+        let shell = app_dir.join("setup").join("micontrol_setup.exe");
+
+        // ── S65-002: legacy installs (NSIS) have no shell — bootstrap it ──
+        // Download + Authenticode-verify the static shell binary from the
+        // latest GitHub release before writing it into the install dir.
+        // Config, user data, services and registry entries are all preserved;
+        // the shell only re-applies install points (see bootstrap.rs docs).
+        // The response includes `bootstrapped: true` and `sig_verified` so
+        // the app UI can report the migration outcome to the user.
+        let boot_result = if !shell.is_file() {
+            let result = crate::bootstrap::ensure_shell(&app_dir, None).map_err(|e| {
+                format!(
+                    "Bootstrap of the setup shell failed ({e}). \
+                     Legacy installation cannot apply the payload update. \
+                     Reinstall MiControl manually to deploy the decoupled installer."
+                )
+            })?;
+            log::info!(
+                "S65-002: bootstrapped setup shell to {} (downloaded={}, sig_verified={})",
+                result.shell_path.display(),
+                result.downloaded,
+                result.sig_verified,
+            );
+            Some(result)
+        } else {
+            None
+        };
+
+        let child = Command::new(&shell)
+            .args(["update", "--payload", &installer_exe])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to launch setup shell {shell:?}: {e}"))?;
+        let pid = child.id();
+        let resp = match boot_result {
+            Some(r) => crate::bootstrap::bootstrap_response(&r, &installer_exe, pid),
+            None => json!({
+                "launched": true,
+                "installer": installer_exe,
+                "pid": pid,
+                "shell": shell.display().to_string(),
+                "command": "micontrol_setup.exe update --payload <zip>",
+                "note": "Decoupled installer: the static shell applies the payload detached (fire-and-forget). It never replaces itself, so no self-kill is involved.",
+            }),
+        };
+        return Ok(resp);
+    }
 
     // ── Fire the NSIS installer: silent + update-mode + relaunch ────────────
     // /S   silent
@@ -2705,9 +2763,40 @@ pub fn is_micontrol_installer_name(name: &str) -> bool {
         && lower.ends_with("-setup.exe")
 }
 
+/// S50 SECURITY (decoupled installer): returns true only for a genuine
+/// MiControl payload archive name, `MiControl_<version>[-<channel>]_payload.zip`.
+/// Applied by the SYSTEM bridge before handing the file to the static setup
+/// shell (`micontrol_setup.exe update --payload <zip>`).
+pub fn is_micontrol_payload_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let Some(version) = lower
+        .strip_prefix("micontrol_")
+        .and_then(|rest| rest.strip_suffix("_payload.zip"))
+    else {
+        return false;
+    };
+    // A version segment is REQUIRED between the markers (e.g. `0.2.20-beta`);
+    // versions never contain underscores, which keeps `MiControl_payload.zip`
+    // and similar look-alikes rejected.
+    !version.is_empty() && !version.contains('_')
+}
+
+/// Directory of the running MiControl executable (dev: target dir; installed:
+/// the Program Files install dir).
+fn current_app_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| {
+            std::env::var("ProgramFiles")
+                .map(|pf| PathBuf::from(pf).join("miControl"))
+                .unwrap_or_default()
+        })
+}
+
 #[cfg(test)]
 mod install_update_name_tests {
-    use super::is_micontrol_installer_name;
+    use super::{is_micontrol_installer_name, is_micontrol_payload_name};
 
     #[test]
     fn accepts_release_bundle() {
@@ -2748,6 +2837,31 @@ mod install_update_name_tests {
         ));
         assert!(!is_micontrol_installer_name(
             "MiControl_0.2.9-beta_x64-setup.exe "
+        ));
+    }
+
+    #[test]
+    fn accepts_payload_zip() {
+        assert!(is_micontrol_payload_name(
+            "MiControl_0.2.20-beta_payload.zip"
+        ));
+        assert!(is_micontrol_payload_name("MiControl_0.2.20_payload.zip"));
+        assert!(is_micontrol_payload_name(
+            "micontrol_0.2.20-beta_payload.zip"
+        ));
+    }
+
+    #[test]
+    fn rejects_arbitrary_zip() {
+        assert!(!is_micontrol_payload_name("payload.zip"));
+        assert!(!is_micontrol_payload_name("MiControl_payload.zip"));
+        assert!(!is_micontrol_payload_name(
+            "MiControl_0.2.20_payload.zip.sig"
+        ));
+        assert!(!is_micontrol_payload_name("MiControl_0.2.20_payload.rar"));
+        assert!(!is_micontrol_installer_name("MiControl_0.2.20_payload.zip"));
+        assert!(!is_micontrol_payload_name(
+            "MiControl_0.2.9-beta_x64-setup.exe"
         ));
     }
 }

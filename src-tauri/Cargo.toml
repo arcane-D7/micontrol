@@ -1,6 +1,15 @@
 [workspace]
-members = ["cp"]
+members = ["cp", "shell"]
 resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+# Small, deterministic shell binary profile (must live at the workspace root).
+[profile.shell-release]
+inherits = "release"
+lto = "thin"
+strip = true
 
 [package]
 name = "micontrol"
@@ -137,6 +146,7 @@ windows = { version = "0.58", features = [
   "Win32_Security_Credentials",
   "Win32_Security_Authentication_Identity",
   "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
   "Win32_System_SystemInformation",
   "Win32_UI_Shell_Common",
   "Win32_System_WinRT",
