@@ -223,7 +223,7 @@ fn restore_backup(install_dir: &Path, backup: &Path) -> Result<usize, String> {
         if name_str.eq_ignore_ascii_case("setup") || name_str.starts_with(".mc-") {
             continue;
         }
-        let live = install_dir.join(&name);
+        let live = install_dir.join(name);
         if live.exists() {
             remove_tree(&live)?;
         }
@@ -249,7 +249,7 @@ fn swap_staged(install_dir: &Path, stage: &Path) -> Result<usize, String> {
         if name_str.eq_ignore_ascii_case("setup") || name_str.starts_with(".mc-") {
             continue;
         }
-        let live = install_dir.join(&name);
+        let live = install_dir.join(name);
         if live.exists() {
             remove_tree(&live)?;
         }
@@ -1108,6 +1108,34 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Serialize ALL tests in this module: they share the global SYSTEM_NOOP /
+    /// FAIL_POINTS hooks, so parallel execution leaks injected failures
+    /// between tests (observed: rollback tests failing only under the default
+    /// parallel runner). One lock, taken for the whole test body, makes the
+    /// suite deterministic under `cargo test` with any thread count.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that holds TEST_LOCK for the duration of a test.
+    /// The field is never read — the guard's mere existence (and its Drop)
+    /// is the whole point.
+    #[allow(dead_code)]
+    struct TestGuard<'a>(std::sync::MutexGuard<'a, ()>);
+
+    impl<'a> TestGuard<'a> {
+        fn acquire() -> Self {
+            Self(TEST_LOCK.lock().unwrap())
+        }
+    }
+
+    impl Drop for TestGuard<'_> {
+        fn drop(&mut self) {
+            // Reset the shared hooks so a panicking test cannot poison the
+            // next one's starting state.
+            set_system_noop(false);
+            clear_failures();
+        }
+    }
+
     static ZIP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn make_zip(dir: &Path, entries: &[(&str, &str)], manifest: Option<&str>) -> PathBuf {
@@ -1188,6 +1216,7 @@ mod tests {
 
     #[test]
     fn apply_success_swaps_staged_payload_and_keeps_shell_and_user_files() {
+        let _guard = TestGuard::acquire();
         set_system_noop(true);
         clear_failures();
         let td = temp_root("ok");
@@ -1230,6 +1259,7 @@ mod tests {
 
     #[test]
     fn required_step_failure_rolls_back_previous_binaries() {
+        let _guard = TestGuard::acquire();
         set_system_noop(true);
         clear_failures();
         inject_failure("bridge");
@@ -1267,6 +1297,7 @@ mod tests {
 
     #[test]
     fn verification_failure_rolls_back_previous_binaries() {
+        let _guard = TestGuard::acquire();
         set_system_noop(true);
         clear_failures();
         inject_failure("verify");
@@ -1290,6 +1321,7 @@ mod tests {
 
     #[test]
     fn optional_step_failure_does_not_fail_the_update() {
+        let _guard = TestGuard::acquire();
         set_system_noop(true);
         clear_failures();
         inject_failure("face");
@@ -1310,6 +1342,9 @@ mod tests {
 
     #[test]
     fn interrupted_update_recovery_restores_leftover_backup() {
+        let _guard = TestGuard::acquire();
+        set_system_noop(true);
+        clear_failures();
         let td = temp_root("rec");
         let install = old_install(&td);
         // Simulate a crash between swap and verification: the backup holds the
@@ -1341,6 +1376,9 @@ mod tests {
 
     #[test]
     fn abandoned_staging_directory_is_cleaned_up() {
+        let _guard = TestGuard::acquire();
+        set_system_noop(true);
+        clear_failures();
         let td = temp_root("ab");
         let install = old_install(&td);
         fs::create_dir_all(install.join(STAGE_DIR)).unwrap();
@@ -1356,6 +1394,7 @@ mod tests {
 
     #[test]
     fn staged_payload_without_micontrol_exe_is_rejected_before_any_disruption() {
+        let _guard = TestGuard::acquire();
         set_system_noop(true);
         clear_failures();
         let td = temp_root("noexe");
