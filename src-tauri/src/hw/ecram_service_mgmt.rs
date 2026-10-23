@@ -59,7 +59,29 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             .open(path)
             .is_ok()
     }
-    let pipe_available = pipe_usable(pipe_path);
+
+    // ── S66-005: confirm the pipe is REALLY absent before the destructive ──
+    // path. A single transient connect failure (busy instance mid-accept,
+    // ERROR_PIPE_BUSY) previously dropped the caller straight into
+    // stop/copy/recreate — observed 2-3 recreations/day (up to 37 on
+    // 2026-09-28), each disruptive (service downtime + 7045 events +
+    // DriverStore writes). Retry the probe once after a short settle delay.
+    let mut pipe_available = pipe_usable(pipe_path);
+    if !pipe_available {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        pipe_available = pipe_usable(pipe_path);
+    }
+
+    // ── S66-005: persistent cooldown between full recreations. The IoT ──────
+    // watchdog probes every 30 s (with its own 300 s recovery cooldown), but
+    // multiple callers (health supervisor, manual UI triggers) can still
+    // stack. One destructive recreation per 15 minutes is plenty for a
+    // genuinely-broken service and caps the churn at 4/hour worst case.
+    if !pipe_available {
+        if let Some(status) = recreation_cooldown_status() {
+            return Ok(status);
+        }
+    }
 
     let our_exe = exe_path
         .as_deref()
@@ -245,6 +267,10 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
     // Start the service
     start_service(SERVICE_NAME)?;
 
+    // S66-005: record the recreation timestamp so the cooldown above can
+    // suppress rapid follow-up recreations from stacked callers.
+    note_recreation();
+
     // Wait for the pipe to become usable (up to 10 seconds). We probe with
     // OPEN_EXISTING (works for named pipes) rather than std::fs::metadata,
     // which never resolves pipes.
@@ -275,6 +301,75 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             "ecram_service installed but pipe not yet available".to_string()
         },
     })
+}
+
+// ── S66-005: recreation cooldown ─────────────────────────────────────────────
+//
+// The destructive path (stop → copy into DriverStore → delete/recreate the
+// service → start) ran 2-3×/day on the live machine (up to 37× on 2026-09-28),
+// each producing service downtime + a 7045 event + DriverStore writes. The
+// cooldown is process-local (static) — the bridge service is the only caller
+// in practice, and it is long-lived.
+
+/// Minimum time between destructive recreations.
+#[cfg(windows)]
+const RECREATION_COOLDOWN_MS: u64 = 15 * 60 * 1000;
+
+/// Timestamp (ms since epoch) of the last destructive recreation; 0 = never.
+#[cfg(windows)]
+static LAST_RECREATION_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record that a destructive recreation just ran.
+#[cfg(windows)]
+fn note_recreation() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default();
+    LAST_RECREATION_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// When a destructive recreation ran recently, return a cooldown status the
+/// caller can surface instead of repeating the churn. `None` = proceed.
+#[cfg(windows)]
+fn recreation_cooldown_status() -> Option<ServiceStatus> {
+    let last = LAST_RECREATION_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if last == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default();
+    let elapsed = now.saturating_sub(last);
+    if elapsed < RECREATION_COOLDOWN_MS {
+        log::warn!(
+            "[ecram_service_mgmt] S66-005: pipe unusable but a destructive recreation \
+             ran {}s ago (cooldown {}s) — returning cooldown status",
+            elapsed / 1000,
+            RECREATION_COOLDOWN_MS / 1000
+        );
+        return Some(ServiceStatus {
+            installed: true,
+            running: false,
+            pipe_available: false,
+            exe_path: find_ecram_service_exe(),
+            message: format!(
+                "recreation cooldown: last attempt {}s ago (min {}s)",
+                elapsed / 1000,
+                RECREATION_COOLDOWN_MS / 1000
+            ),
+        });
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn note_recreation() {}
+
+#[cfg(not(windows))]
+fn recreation_cooldown_status() -> Option<ServiceStatus> {
+    None
 }
 
 /// Find the ecram_service.exe path.
