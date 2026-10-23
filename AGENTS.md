@@ -102,6 +102,18 @@ cargo build --manifest-path src-tauri/Cargo.toml
 cargo build --manifest-path src-tauri/Cargo.toml --release --bin ecram_service
 ```
 
+## Installer (decoupled shell + payload)
+
+- `src-tauri/shell/` — the STATIC setup shell (`micontrol-setup` crate,
+  separate workspace member, tiny dependency graph). See
+  `docs/installer-decoupling.md`.
+- `src-tauri/nsis/` — legacy NSIS template + hooks (still built as fallback;
+  the canonical install/update path is the shell).
+- Updates: payload zip applied by the shell via the SYSTEM bridge
+  (`elevated.rs::install_update` → `micontrol_setup.exe update --payload`).
+- Release: `scripts/publish-release.ps1` (payload + stable-hash shell +
+  latest.json).
+
 ## Validation
 
 Before finishing executable code changes:

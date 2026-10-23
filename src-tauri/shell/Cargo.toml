@@ -1,0 +1,41 @@
+[package]
+name = "micontrol-setup"
+version = "1.0.0"
+edition = "2021"
+description = "MiControl static setup shell — installs/updates/uninstalls MiControl from a versioned payload"
+publish = false
+
+# The shell is deliberately a TINY standalone crate (NOT part of the main
+# micontrol dependency graph). Its whole point is to be a static artifact:
+# it contains NO application payload and NO version-dependent metadata, so
+# its bytes — and therefore its hash — stay stable across releases. It is
+# rebuilt only when shell code itself changes.
+
+[[bin]]
+name = "micontrol_setup"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+minisign-verify = "0.2"
+base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+# Same `windows` version as the main crate → already present in Cargo.lock.
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Com",
+  "Win32_System_Registry",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.52"
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+
+# Build the shell with the workspace-level shell-release profile:
+#   cargo build -p micontrol-setup --profile shell-release

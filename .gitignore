@@ -13,6 +13,9 @@ assets-reference/
 src-tauri/target/
 src-tauri/bin/
 
+# Cached STATIC setup shell (stable-hash installer shell; never committed)
+setup-shell/
+
 # Vite cache
 .vite/
 

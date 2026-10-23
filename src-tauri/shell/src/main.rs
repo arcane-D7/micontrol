@@ -39,6 +39,10 @@ pub struct Options {
     pub no_relaunch: bool,
     /// Danger switch: apply a payload even without a .sig (dev only).
     pub allow_unsigned: bool,
+    /// S65-004: version the caller expects the payload manifest to declare
+    /// (e.g. from `MiControl_<ver>_payload.zip`). A disagreement aborts the
+    /// update before anything is stopped.
+    pub expect_version: Option<String>,
 }
 
 fn print_usage() {
@@ -50,9 +54,11 @@ USAGE:
       Elevates, copies this shell to <dir>\\setup\\, then applies the payload
       (downloads the latest signed payload when none is given).
 
-  micontrol_setup update    --payload <zip> [--dir <dir>] [--no-relaunch]
+  micontrol_setup update    --payload <zip> [--dir <dir>] [--no-relaunch] [--expect-version <v>]
       Applies a new payload over an existing installation (kills the app and
       the auxiliary services first, re-creates them afterwards).
+      --expect-version refuses to apply a payload whose manifest version
+      disagrees with <v> (S65-004 fail-closed guard).
 
   micontrol_setup uninstall [--dir <dir>] [--silent]
       Removes MiControl completely (relaunches itself from %TEMP% so the
@@ -117,6 +123,13 @@ fn run(args: &[String]) -> i32 {
             "/S" | "--silent" => opts.silent = true,
             "--no-relaunch" => opts.no_relaunch = true,
             "--allow-unsigned" => opts.allow_unsigned = true,
+            "--expect-version" => match it.next() {
+                Some(v) => opts.expect_version = Some(v.clone()),
+                None => {
+                    eprintln!("error: --expect-version requires a value");
+                    return EXIT_FAIL;
+                }
+            },
             other => {
                 eprintln!("error: unknown option '{other}'");
                 print_usage();
@@ -374,7 +387,7 @@ fn cmd_bootstrap_shell(opts: &Options) -> i32 {
     }
 
     let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-    if len < 500_000 || len > 16 * 1024 * 1024 {
+    if !(500_000..=16 * 1024 * 1024).contains(&len) {
         eprintln!(
             "error: downloaded shell is {len} bytes (expected 500000..16777216) — rejecting."
         );
@@ -452,12 +465,10 @@ fn verify_authenticode(path: &std::path::Path) -> bool {
     ]
     .iter()
     .find(|p| std::path::Path::new(p).is_file())
-    .cloned()
-    .unwrap_or_else(|| "signtool.exe".into());
-    let (code, out) = run_capture(
-        &signtool,
-        &["verify", "/pa", "/v", &path.display().to_string()],
-    );
+    .copied()
+    .unwrap_or("signtool.exe");
+    let path_str = path.display().to_string();
+    let (code, out) = run_capture(signtool, &["verify", "/pa", "/v", path_str.as_str()]);
     if code == 0 {
         println!("    signtool verify: OK");
         true
