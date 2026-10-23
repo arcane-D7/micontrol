@@ -48,6 +48,9 @@
       "bin/micontrol_face_svc.exe": "micontrol_face_svc.exe"
     },
     "windows": {
+      "certificateThumbprint": "4678FB4266F446C72CF4A181D6A348B9EE9C9661",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
       "nsis": {
         "installMode": "perMachine",
         "installerHooks": "./nsis/installer-hooks.nsi",

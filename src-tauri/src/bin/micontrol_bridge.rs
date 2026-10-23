@@ -596,9 +596,11 @@ fn relay_auto_update(url: Option<String>) -> Result<String, String> {
         .filter(|f| !f.is_empty())
         .ok_or_else(|| "auto-update: cannot derive installer filename from URL".to_string())?;
 
-    if !filename.to_lowercase().ends_with(".exe") {
+    if !filename.to_lowercase().ends_with(".exe")
+        && !filename.to_lowercase().ends_with("_payload.zip")
+    {
         return Err(format!(
-            "auto-update: downloaded file is not an .exe installer: {filename}"
+            "auto-update: downloaded file is not a MiControl installer (.exe) or payload (_payload.zip): {filename}"
         ));
     }
 

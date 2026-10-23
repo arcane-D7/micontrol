@@ -946,9 +946,11 @@ pub async fn install_update(installer_path: String) -> Result<serde_json::Value,
         )));
     }
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    if !crate::elevated::is_micontrol_installer_name(name) {
+    if !crate::elevated::is_micontrol_installer_name(name)
+        && !crate::elevated::is_micontrol_payload_name(name)
+    {
         return Err(ErrorResponse::from(anyhow::anyhow!(
-            "Not a MiControl installer (expected MiControl_<version>_x64-setup.exe): {installer_path}"
+            "Not a MiControl installer (expected MiControl_<version>_x64-setup.exe or MiControl_<version>_payload.zip): {installer_path}"
         )));
     }
 
@@ -960,20 +962,20 @@ pub async fn install_update(installer_path: String) -> Result<serde_json::Value,
     Ok(result)
 }
 
-/// S57: Locate the NSIS installer most recently downloaded by the Tauri
-/// updater plugin, so the UI can hand it to the bridge (`install_update`)
-/// instead of letting the plugin run it unelevated (the "Access is denied"
-/// perMachine update bug).
+/// S57 (extended for the DECOUPLED INSTALLER): locate the artifact most
+/// recently downloaded by the Tauri updater plugin, so the UI can hand it to
+/// the bridge (`install_update`) instead of letting the plugin run it
+/// unelevated (the "Access is denied" perMachine update bug).
 ///
-/// The plugin writes to
-/// `%TEMP%\<app>-<version>-updater-<random>\<app>-<version>-installer.exe`.
-/// That name does NOT match the S50 release-pattern gate
-/// (`MiControl_<version>_x64-setup.exe`) used by both the Tauri command and
-/// the SYSTEM bridge, so we COPY the signature-verified file to
-/// `%LOCALAPPDATA%\MiControl\MiControl_<version>_x64-setup.exe` and return
-/// that path. The bytes themselves were already minisign-verified by the
-/// plugin during download; the copy only gives the file a name that satisfies
-/// the anti-arbitrary-exe gate at every layer.
+/// The plugin writes to `%TEMP%\<app>-<version>-updater-<random>\` and the
+/// downloaded file name is the last URL segment — either the legacy NSIS
+/// setup (`<app>-<version>-installer.exe`) or the decoupled payload
+/// (`MiControl_<version>_payload.zip`). That name does NOT always match the
+/// S50 release-pattern gate, so we COPY the signature-verified file to
+/// `%LOCALAPPDATA%\MiControl\` under a canonical name and return that path.
+/// The bytes themselves were already minisign-verified by the plugin during
+/// download; the copy only gives the file a name that satisfies the
+/// anti-arbitrary-executable gate at every layer.
 #[tauri::command]
 pub async fn find_latest_downloaded_installer() -> Result<Option<String>, ErrorResponse> {
     let result = tokio::task::spawn_blocking(|| -> Option<String> {
@@ -994,17 +996,27 @@ pub async fn find_latest_downloaded_installer() -> Result<Option<String>, ErrorR
             };
             for file in files.flatten() {
                 let path = file.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("exe") {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase());
+                if !matches!(ext.as_deref(), Some("exe") | Some("zip")) {
                     continue;
                 }
-                // Plugin file name: "<app>-<version>-installer.exe".
                 let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_default();
-                let version = name
-                    .strip_prefix(&format!("{app_name}-"))
-                    .and_then(|rest| rest.strip_suffix("-installer.exe"));
+                let lower = name.to_ascii_lowercase();
+                let version = if lower.ends_with("-installer.exe") {
+                    name.strip_prefix(&format!("{app_name}-"))
+                        .and_then(|rest| rest.strip_suffix("-installer.exe"))
+                } else if lower.ends_with("_payload.zip") {
+                    name.strip_prefix("MiControl_")
+                        .and_then(|rest| rest.strip_suffix("_payload.zip"))
+                } else {
+                    None
+                };
                 let Some(version) = version else { continue };
                 if version.is_empty() || version.contains(['\\', '/']) {
                     continue;
@@ -1023,22 +1035,31 @@ pub async fn find_latest_downloaded_installer() -> Result<Option<String>, ErrorR
         }
 
         let (_, version, source) = best?;
+        let is_zip = source
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false);
 
-        // Copy to the canonical release-bundle name so the S50 gate passes at
-        // both the Tauri command and the SYSTEM bridge.
+        // Canonical release-artifact names so the S50 gate passes at both the
+        // Tauri command and the SYSTEM bridge.
+        let canonical = if is_zip {
+            format!("MiControl_{version}_payload.zip")
+        } else {
+            format!("MiControl_{version}_x64-setup.exe")
+        };
         let local_app = std::env::var_os("LOCALAPPDATA")?;
         let dest_dir = std::path::PathBuf::from(local_app).join("MiControl");
         std::fs::create_dir_all(&dest_dir).ok()?;
-        let dest = dest_dir.join(format!("MiControl_{version}_x64-setup.exe"));
+        let dest = dest_dir.join(&canonical);
         // Remove stale copies of previous versions so only the newest remains.
         if let Ok(old) = std::fs::read_dir(&dest_dir) {
             for entry in old.flatten() {
                 let n = entry.file_name();
-                let n = n.to_string_lossy();
-                if n.starts_with("MiControl_")
-                    && n.ends_with("_x64-setup.exe")
-                    && entry.path() != dest
-                {
+                let n = n.to_string_lossy().to_ascii_lowercase();
+                let stale = (n.starts_with("micontrol_") && n.ends_with("_x64-setup.exe"))
+                    || (n.starts_with("micontrol_") && n.ends_with("_payload.zip"));
+                if stale && entry.path() != dest {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }

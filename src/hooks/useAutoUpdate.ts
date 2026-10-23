@@ -76,8 +76,14 @@ export function useAutoUpdate() {
       // perMachine install (RequestExecutionLevel admin + service hooks) every
       // `sc` command failed with "OpenService FAILED 5: Access is denied", the
       // visible wizard was shown, and the update was never applied. The bridge
-      // launches the same installer silently (/S /P /UPDATE /R) with SYSTEM
-      // privileges, which is the only correct path for a perMachine install.
+      // launches the downloaded artifact silently with SYSTEM privileges,
+      // which is the only correct path for a perMachine install.
+      //
+      // DECOUPLED INSTALLER: since v0.2.20 the updater artifact is the
+      // versioned payload zip (`MiControl_<version>_payload.zip`) and the
+      // SYSTEM bridge hands it to the static setup shell
+      // (`<appdir>\setup\micontrol_setup.exe update --payload <zip>`), which
+      // applies every install point WITHOUT ever replacing itself.
       await update.download((event) => {
         if (!mountedRef.current) return;
         switch (event.event) {

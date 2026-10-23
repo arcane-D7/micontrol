@@ -2076,12 +2076,30 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
             None
         };
 
-        let child = Command::new(&shell)
-            .args(["update", "--payload", &installer_exe])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("Failed to launch setup shell {shell:?}: {e}"))?;
+        let child = {
+            // S65-004: hand the shell the version it should expect from the
+            // payload manifest (parsed from the archive name). A disagreement
+            // aborts the update in the shell BEFORE any process is stopped.
+            let mut cmdargs = vec![
+                "update".to_string(),
+                "--payload".to_string(),
+                installer_exe.clone(),
+            ];
+            if let Some(v) = payload_version_from_name(&installer_exe) {
+                cmdargs.push("--expect-version".to_string());
+                cmdargs.push(v);
+            }
+            Command::new(&shell)
+                .args(&cmdargs)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+        };
+        let child = child.map_err(|e| format!("Failed to launch setup shell {shell:?}: {e}"))?;
         let pid = child.id();
+        let command_line = match payload_version_from_name(&installer_exe) {
+            Some(v) => format!("micontrol_setup.exe update --payload <zip> --expect-version {v}"),
+            None => "micontrol_setup.exe update --payload <zip>".to_string(),
+        };
         let resp = match boot_result {
             Some(r) => crate::bootstrap::bootstrap_response(&r, &installer_exe, pid),
             None => json!({
@@ -2089,7 +2107,7 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
                 "installer": installer_exe,
                 "pid": pid,
                 "shell": shell.display().to_string(),
-                "command": "micontrol_setup.exe update --payload <zip>",
+                "command": command_line,
                 "note": "Decoupled installer: the static shell applies the payload detached (fire-and-forget). It never replaces itself, so no self-kill is involved.",
             }),
         };
@@ -2768,17 +2786,31 @@ pub fn is_micontrol_installer_name(name: &str) -> bool {
 /// Applied by the SYSTEM bridge before handing the file to the static setup
 /// shell (`micontrol_setup.exe update --payload <zip>`).
 pub fn is_micontrol_payload_name(name: &str) -> bool {
+    payload_version_from_name(name).is_some()
+}
+
+/// Version segment parsed from a payload archive name, e.g. `0.2.20-beta`
+/// from `MiControl_0.2.20-beta_payload.zip`. The SYSTEM bridge passes this to
+/// the setup shell via `--expect-version` so the payload manifest version is
+/// validated against it before anything is stopped (S65-004).
+pub fn payload_version_from_name(name: &str) -> Option<String> {
     let lower = name.to_ascii_lowercase();
-    let Some(version) = lower
-        .strip_prefix("micontrol_")
-        .and_then(|rest| rest.strip_suffix("_payload.zip"))
-    else {
-        return false;
-    };
     // A version segment is REQUIRED between the markers (e.g. `0.2.20-beta`);
     // versions never contain underscores, which keeps `MiControl_payload.zip`
     // and similar look-alikes rejected.
-    !version.is_empty() && !version.contains('_')
+    let version = lower
+        .strip_prefix("micontrol_")?
+        .strip_suffix("_payload.zip")?;
+    if version.is_empty() || version.contains('_') {
+        return None;
+    }
+    // Echo the ORIGINAL (title-case) version from the caller's name when it
+    // used the canonical spelling, falling back to the lowercased segment.
+    name.strip_prefix("MiControl_")
+        .and_then(|rest| rest.strip_suffix("_payload.zip"))
+        .filter(|v| !v.is_empty() && !v.contains('_'))
+        .map(String::from)
+        .or(Some(version.to_string()))
 }
 
 /// Directory of the running MiControl executable (dev: target dir; installed:
@@ -2796,7 +2828,9 @@ fn current_app_dir() -> PathBuf {
 
 #[cfg(test)]
 mod install_update_name_tests {
-    use super::{is_micontrol_installer_name, is_micontrol_payload_name};
+    use super::{
+        is_micontrol_installer_name, is_micontrol_payload_name, payload_version_from_name,
+    };
 
     #[test]
     fn accepts_release_bundle() {
@@ -2863,5 +2897,33 @@ mod install_update_name_tests {
         assert!(!is_micontrol_payload_name(
             "MiControl_0.2.9-beta_x64-setup.exe"
         ));
+    }
+
+    #[test]
+    fn parses_version_from_payload_name() {
+        // S65-004: the version parsed from the payload name is handed to the
+        // shell as --expect-version so the manifest version is validated.
+        assert_eq!(
+            payload_version_from_name("MiControl_0.2.20-beta_payload.zip"),
+            Some("0.2.20-beta".to_string())
+        );
+        assert_eq!(
+            payload_version_from_name("MiControl_0.2.20_payload.zip"),
+            Some("0.2.20".to_string())
+        );
+        assert_eq!(
+            payload_version_from_name("micontrol_0.2.20-beta_payload.zip"),
+            Some("0.2.20-beta".to_string())
+        );
+        assert_eq!(payload_version_from_name("MiControl_payload.zip"), None);
+        assert_eq!(payload_version_from_name("payload.zip"), None);
+        assert_eq!(
+            payload_version_from_name("MiControl_0.2.20_payload.zip.sig"),
+            None
+        );
+        assert_eq!(
+            payload_version_from_name("MiControl_0.2.20_x64-setup.exe"),
+            None
+        );
     }
 }

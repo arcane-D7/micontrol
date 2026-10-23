@@ -288,9 +288,14 @@ mod tests {
     #[test]
     fn size_sanity_bounds_are_sane() {
         // MIN must be below a real shell size (~2-3 MB) and MAX well above it.
-        assert!(MIN_SHELL_SIZE < MAX_SHELL_SIZE);
-        assert!(MIN_SHELL_SIZE >= 500_000);
-        assert!(MAX_SHELL_SIZE <= 16 * 1024 * 1024);
+        // These are documented constants (not runtime behavior), so the
+        // assertions are deliberately const-evaluable.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(MIN_SHELL_SIZE < MAX_SHELL_SIZE);
+            assert!(MIN_SHELL_SIZE >= 500_000);
+            assert!(MAX_SHELL_SIZE <= 16 * 1024 * 1024);
+        }
     }
 
     #[test]
