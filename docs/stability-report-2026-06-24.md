@@ -1,10 +1,10 @@
 # 📋 Relatório de Estabilidade — miPC/micontrol
 
-**Data:** 2026-06-24  
-**Versão:** 0.1.0  
-**Stack:** Tauri v2 (Rust backend) + React 19 (TypeScript frontend)  
-**Escopo:** Auditoria completa — Segurança, Arquitetura, Performance, RAI/Privacidade, DevOps/CI, UX, Qualidade de Código  
-**Modelo:** DeepSeek V4 Flash (7 subagentes especializados)  
+**Data:** 2026-06-24
+**Versão:** 0.1.0
+**Stack:** Tauri v2 (Rust backend) + React 19 (TypeScript frontend)
+**Escopo:** Auditoria completa — Segurança, Arquitetura, Performance, RAI/Privacidade, DevOps/CI, UX, Qualidade de Código
+**Modelo:** DeepSeek V4 Flash (7 subagentes especializados)
 **Testes:** 142 testes Rust passando, 9 health checks passando, 19 commits à frente de origin/master
 
 ---
