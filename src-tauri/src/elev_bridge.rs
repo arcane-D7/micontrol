@@ -319,7 +319,24 @@ async fn run_elevated_impl(
         note_elevated_success();
         return Ok(response);
     }
-    // Service pipe unavailable — fall through to the scheduled task.
+
+    // ── S66-002: retry the pipe once before escalating to the task path ────
+    // The bridge answers routine polls in ~14 ms average (47k ok responses
+    // over 4 days), yet transient pipe hiccups (ERROR_PIPE_BUSY, a busy
+    // worker, a slow HMAC read) dropped ~90-150 calls/hour into the
+    // scheduled-task path — each one spawning a full helper process that
+    // used to crash at exit (S66-001) and still costs a process spawn +
+    // WER report. A single short retry absorbs the transient failures
+    // without measurably delaying the genuine-failure fallback.
+    if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
+        note_elevated_success();
+        log::debug!(
+            target: "elev_bridge",
+            "Elevated command '{cmd}' succeeded on pipe retry (transient failure absorbed)"
+        );
+        return Ok(response);
+    }
+    // Service pipe unavailable after retry — fall through to the scheduled task.
 
     // ── S51 circuit breaker: short-circuit when the infra is known-degraded ─
     // Only for no-prompt calls: critical user-initiated writes (UAC allowed)
