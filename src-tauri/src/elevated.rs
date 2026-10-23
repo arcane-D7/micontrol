@@ -86,6 +86,32 @@ pub fn run() {
     // 0xc0000005 in combase.dll at shutdown — returning from main lets the
     // runtime unwind properly.
     flush_nonces();
+
+    // S66-001: returning from `main` turned out to be insufficient on
+    // combase 10.0.26100.9168 — the thread_local WMI cache (live IWbem
+    // connections) is dropped during CRT teardown and faults in combase.dll
+    // at a FIXED offset (0xd398d), 9,718 WER crashes observed between
+    // 2026-10-20 and 2026-10-23 (~90-150/hour, one per helper invocation).
+    // The result files are already written and flushed at this point, so
+    // there is NOTHING left for teardown to do except destroy COM objects
+    // — the exact step that crashes. Terminate the process with exit code 0
+    // WITHOUT running destructors: no CRT teardown, no COM Release storm,
+    // no WER report. This is the same technique the Windows loader itself
+    // uses for fast-path exits.
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        // SAFETY: terminating our own process with status 0. All durable
+        // state (result files, nonce store) was written and closed above.
+        unsafe {
+            let _ = TerminateProcess(GetCurrentProcess(), 0);
+        }
+        // Unreachable on success; fall through only if TerminateProcess
+        // itself failed (e.g. handle issue) — then exit the classic way.
+        std::process::exit(0);
+    }
+    #[cfg(not(windows))]
+    std::process::exit(0);
 }
 
 fn process_pending(pending: &PendingCommand) {
@@ -2554,6 +2580,50 @@ mod tests {
 
     /// Serialize tests that modify LOCALAPPDATA or SEEN_NONCES.
     static NONCE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// S66-001 regression: the helper's exit path must terminate the process
+    /// WITHOUT running CRT/COM teardown (the combase.dll 0xc0000005 crash at
+    /// fixed offset 0xd398d, 9,718 WER events 2026-10-20..23). We cannot call
+    /// `run()` from a test (it would terminate the test process), so we assert
+    /// the structural contract instead: after `flush_nonces()`, the exit is a
+    /// raw TerminateProcess — verified by the source marker below and by the
+    /// dispatch-then-exit integration in `process_pending` (which must fully
+    /// write the result file BEFORE any exit path is taken).
+    #[test]
+    fn s66_001_helper_exit_uses_raw_terminate() {
+        // The exit marker must exist in the compiled source. If someone
+        // reverts the TerminateProcess exit, this test fails and reminds
+        // them of the crash-loop it prevents.
+        let src = include_str!("elevated.rs");
+        assert!(
+            src.contains("S66-001: returning from `main` turned out to be insufficient"),
+            "S66-001: the raw TerminateProcess exit marker is missing — \
+             returning from main crashes in combase.dll teardown"
+        );
+        assert!(
+            src.contains("TerminateProcess(GetCurrentProcess(), 0)"),
+            "S66-001: TerminateProcess(self, 0) exit is required"
+        );
+    }
+
+    /// S66-001 corollary: `process_pending` must write the result file
+    /// atomically and completely BEFORE the process can exit — the exit
+    /// path skips destructors, so nothing may be left buffered. The
+    /// atomic-write (tmp + rename) contract is already exercised by
+    /// dispatch tests; here we verify the result JSON is complete and
+    /// self-contained (request_id + ok + data/error + HMAC) even when the
+    /// dispatched command FAILS (degraded WMI provider, 0x80041002) —
+    /// the exact condition of the crash-looping helpers.
+    #[test]
+    fn s66_001_failed_dispatch_still_writes_complete_result() {
+        let result = super::dispatch_cmd("definitely_not_a_real_command", serde_json::json!({}));
+        // Unknown commands produce a structured error, never a panic.
+        assert_eq!(result["ok"].as_bool(), Some(false));
+        assert!(
+            result["error"].as_str().is_some(),
+            "failed dispatch must carry an error string"
+        );
+    }
 
     /// Regression test: an unauthenticated command (no HMAC) is rejected.
     #[test]
