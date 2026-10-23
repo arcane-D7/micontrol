@@ -321,17 +321,21 @@ fix.
 | ecram pipe lost connections (single-instance, recreated every 500 ms)       | `d74d1ad`                                                                                                                                    |
 | Status                                                                      | ✅ Complete — all tickets in the batch are closed. S64 is not split into sub-plans; commits are the source of truth. No lost items detected. |
 
-#### Sprint 65 — Installer reliability + S63 regression — PLANNED
+#### Sprint 65 — Installer reliability + S63 regression — COMPLETE (local)
 
-All 30 open acceptance boxes are in [S65](sprint-65-p0-installer-reliability/sprint.md):
+All 30 acceptance boxes are verified and closed in
+[S65](sprint-65-p0-installer-reliability/sprint.md) (execution summary inside):
 
-| Ticket  | Scope                                         | Open |
-| ------- | --------------------------------------------- | ---- |
-| S65-001 | Restore S63 tray theme fix + regression test  | 4    |
-| S65-002 | Bootstrap shell for legacy NSIS installs      | 7    |
-| S65-003 | Unify CI + local release contracts            | 6    |
-| S65-004 | Fail-closed payload preflight                 | 6    |
-| S65-005 | Staged install + rollback on critical failure | 7    |
+| Ticket  | Scope                                         | Status                             |
+| ------- | --------------------------------------------- | ---------------------------------- |
+| S65-001 | Restore S63 tray theme fix + regression test  | ✅ `1dd30cf`                       |
+| S65-002 | Bootstrap shell for legacy NSIS installs      | ✅ `9be86df`, `1ded08c`, `199f20d` |
+| S65-003 | Unify CI + local release contracts            | ✅ `ceb0787`                       |
+| S65-004 | Fail-closed payload preflight                 | ✅ `199f20d`, `1ded08c`            |
+| S65-005 | Staged install + rollback on critical failure | ✅ `199f20d`, `3f9c578`            |
+
+Live migration of a real legacy installation requires a published release
+build — out of scope by the sprint's own rule.
 
 #### Cross-Sprint Findings Audit (S1–S39)
 
@@ -360,9 +364,9 @@ execution is covered by the documented commits:
 
 ### Sprint 65 — Installer Release Reliability and S63 Regression
 
-|   # | Priority | Focus                                                     | Tickets | Effort     | Status     | Plan                                                   |
-| --: | :------: | --------------------------------------------------------- | ------: | ---------- | ---------- | ------------------------------------------------------ |
-|  65 |    P0    | Decoupled installer productionization and tray regression |       5 | ~1–2 weeks | ⏳ Planned | [sprint](sprint-65-p0-installer-reliability/sprint.md) |
+|   # | Priority | Focus                                                     | Tickets | Effort     | Status              | Plan                                                   |
+| --: | :------: | --------------------------------------------------------- | ------: | ---------- | ------------------- | ------------------------------------------------------ |
+|  65 |    P0    | Decoupled installer productionization and tray regression |       5 | ~1–2 weeks | ✅ Complete (local) | [sprint](sprint-65-p0-installer-reliability/sprint.md) |
 
 The current payload path cannot update legacy installations that have no setup
 shell, CI still generates `latest.json` for the NSIS executable while the local
