@@ -30,7 +30,7 @@
  *         "offline release test" required by S65-003: it proves the
  *         staged set is complete and well-formed before any publication.
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, openSync, readSync, closeSync } from 'node:fs';
 import path from 'node:path';
 
 const PRODUCT = 'MiControl';
@@ -248,7 +248,8 @@ function cmdDryRun(version, payloadZip, payloadSig) {
   if (existsSync(payloadZip)) {
     const header = Buffer.alloc(4);
     try {
-      const { openSync, readSync, closeSync } = require('node:fs');
+      // ESM (.mjs) has no `require` — the fs functions are already imported
+      // at the top of this module (openSync/readSync/closeSync).
       const fd = openSync(payloadZip, 'r');
       readSync(fd, header, 0, 4, 0);
       closeSync(fd);
@@ -261,12 +262,26 @@ function cmdDryRun(version, payloadZip, payloadSig) {
   }
 
   // 4. Signature file should contain a minisign signature block.
+  //    `tauri signer sign` writes the signature BASE64-ENCODED (the format the
+  //    Tauri updater consumes — same as the NSIS bundle .sig); a raw minisign
+  //    `sign` tool writes plain text. Both are valid: accept either.
   if (existsSync(payloadSig)) {
-    const sigText = readFileSync(payloadSig, 'utf8').trim();
+    let sigText = readFileSync(payloadSig, 'utf8').trim();
+    // Base64 form: decode once and re-check the prefix.
+    if (!sigText.startsWith('untrusted comment:') && !sigText.startsWith('threshold=')) {
+      try {
+        const decoded = Buffer.from(sigText, 'base64').toString('utf8');
+        if (decoded.startsWith('untrusted comment:') || decoded.startsWith('threshold=')) {
+          sigText = decoded;
+        }
+      } catch {
+        // Not base64 either — fall through to the problem report below.
+      }
+    }
     if (!sigText.startsWith('untrusted comment:') && !sigText.startsWith('threshold=')) {
       problems.push(
         `${payloadSig} does not look like a minisign signature file ` +
-          `(expected 'untrusted comment:' or 'threshold=' prefix).`,
+          `(expected 'untrusted comment:' or 'threshold=' prefix, plain or base64).`,
       );
     }
   }
