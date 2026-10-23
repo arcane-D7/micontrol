@@ -1240,7 +1240,46 @@ mod pipe_server {
             .map_err(|e| format!("Bridge request authentication failed: {e}"))?;
 
         // ── Dispatch ───────────────────────────────────────────────────────
-        let result = micontrol_lib::elevated::dispatch_cmd(&cmd, args);
+        // S66-004: bound the dispatch wall-clock. One read_thermal_readings
+        // dispatch blocked a worker for 652 s (2026-10-21 17:42) when the
+        // ESIF/ACPI WMI provider hung — the client had timed out long before,
+        // and new requests piled up behind the stuck worker. A bounded wait
+        // returns an error response to the client instead of blocking the
+        // worker indefinitely. Healthy dispatches are single-digit ms, so
+        // 30 s is a generous ceiling that only trips on genuine hangs.
+        const DISPATCH_DEADLINE_SECS: u64 = 30;
+        let result = {
+            let cmd_for_thread = cmd.clone();
+            let args_for_thread = args.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            // Detached by design: on deadline timeout we deliberately do NOT
+            // join — the thread finishes on its own and its result is dropped.
+            let _detached_worker = std::thread::spawn(move || {
+                let r = micontrol_lib::elevated::dispatch_cmd(&cmd_for_thread, args_for_thread);
+                let _ = tx.send(r);
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(DISPATCH_DEADLINE_SECS)) {
+                Ok(r) => r,
+                Err(_) => {
+                    // The worker thread is still running the hung dispatch —
+                    // it will finish (or not) on its own; we do NOT join or
+                    // kill it (killing threads is unsafe; the WMI call may
+                    // still complete and its result is simply discarded).
+                    // Log throttled: one line per event, includes elapsed.
+                    bridge_log(&format!(
+                        "dispatch deadline exceeded ({DISPATCH_DEADLINE_SECS}s): cmd={cmd} — \
+                         returning error to client, worker continues in background"
+                    ));
+                    serde_json::json!({
+                        "ok": false,
+                        "error": format!(
+                            "Bridge dispatch for '{cmd}' exceeded the internal \
+                             {DISPATCH_DEADLINE_SECS}s deadline (hung WMI provider?)"
+                        ),
+                    })
+                }
+            }
+        };
         if result["ok"].as_bool().unwrap_or(false) {
             Ok(result["data"].clone())
         } else {
