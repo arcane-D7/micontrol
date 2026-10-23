@@ -387,9 +387,9 @@ the resulting artifacts without explicit authorization.
 
 ### Sprint 66 — Elevated Helper Crash-Loop and Face Service Recovery
 
-|   # | Priority | Focus                                                                                                                                                                         | Tickets | Effort  | Status    | Plan                                                     |
-| --: | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------: | ------- | --------- | -------------------------------------------------------- |
-|  66 |    P0    | `--elevated` helper combase crash-loop (9,718 WER crashes since 2026-10-20), task-path churn, face service self-heal, bridge latency bounds, IoTSvc churn, LocalDumps capture |       6 | ~1 week | 📌 Active | [sprint](sprint-66-p0-crashloop-face-recovery/sprint.md) |
+|   # | Priority | Focus                                                                                                                                                                         | Tickets | Effort  | Status              | Plan                                                     |
+| --: | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------: | ------- | ------------------- | -------------------------------------------------------- |
+|  66 |    P0    | `--elevated` helper combase crash-loop (9,718 WER crashes since 2026-10-20), task-path churn, face service self-heal, bridge latency bounds, IoTSvc churn, LocalDumps capture |       6 | ~1 week | ✅ Complete (local) | [sprint](sprint-66-p0-crashloop-face-recovery/sprint.md) |
 
 Live-machine log forensics (2026-10-23) found six issues not previously
 tracked: the scheduled-task elevated helper crashes at exit in `combase.dll`

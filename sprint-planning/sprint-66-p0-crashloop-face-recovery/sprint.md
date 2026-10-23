@@ -12,7 +12,26 @@
 | **Primary Owner**     | miControl desktop team                                                                                                                                                                                                                      |
 | **Source**            | Live log forensics on the user machine (2026-10-23): Windows Event Log (Application Error + WER), `%LOCALAPPDATA%\MiControl\logs\tauri-app.log*`, `C:\ProgramData\MiControl\logs\bridge.log*`, `C:\ProgramData\MiControl\face\face_svc.log` |
 | **Depends On**        | Sprint 65 (installer reliability) — independent code paths, can run in parallel                                                                                                                                                             |
-| **Status**            | 📌 Active                                                                                                                                                                                                                                   |
+| **Status**            | ✅ Complete                                                                                                                                                                                                                                 |
+
+## Execution Summary (2026-10-23)
+
+All 6 tickets implemented, health-checked (8/8 static gates + 524 Rust lib tests
+passing) and committed locally:
+
+| Ticket  | Commit    | Outcome                                                                                                                                                                                                |
+| ------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| S66-001 | `057cbe4` | Helper exits via `TerminateProcess(GetCurrentProcess(), 0)` after result files are written — no CRT/COM teardown, no combase crash. 2 regression tests (source marker + failed-dispatch completeness). |
+| S66-002 | `5b7916a` | `run_elevated_impl` retries the bridge pipe once before falling back to the scheduled task — transient hiccups no longer spawn helper processes.                                                       |
+| S66-003 | `bbd7e1b` | `ensure_face_service` reinstalls via `micontrol_face_svc.exe install` when the SCM entry is missing but the binary exists (rate-limited 1×/10 min). Regression test for wiring.                        |
+| S66-004 | `2507ef3` | Bridge dispatch bounded at 30 s (channel + `recv_timeout`); hung WMI provider returns an error response instead of blocking the worker 652 s.                                                          |
+| S66-005 | `4f22548` | `ensure_ecram_service`: pipe probe retried once (250 ms) before the destructive path + 15 min process-local cooldown between recreations.                                                              |
+| S66-006 | `8d5eb06` | LocalDumps registry key written for BOTH `micontrol.exe` (exact process name — the actual match) and legacy `MiControl.exe`; dump folder gets a user-grant ACL.                                        |
+
+**Live-machine validation pending**: the fixes require a new build installed on
+the user machine (WER event count delta over 24 h, face service state, IoTSvc
+7045 rate). Not published — per repo rule, publishing requires explicit
+approval.
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
 
