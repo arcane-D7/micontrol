@@ -6,6 +6,7 @@
 > **Duration:** ~2–3 days
 > **Dependencies:** Sprint 30–33 (should be completed or merged into this sprint)
 > **Status:** ✅ Complete
+> **Execution evidence:** Commit `309bfa3` records all 7 tickets complete and the full health check passing 9/9 (2026-07-19).
 > **Commit:** `309bfa3` — `fix(s34): fix Auth Bridge UAC regression and quick wins`
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Report_miControl.md` (Bug 1: 1A, 1B, 1C, 1D; Bug 3: 3A, 3C; Bug 4: 4A)
 
@@ -118,11 +119,11 @@ let xml = format!(
 
 #### Acceptance Criteria
 
-- [ ] Both `installer-hooks.nsi` and `elev_bridge.rs` declare `encoding="UTF-8"`
-- [ ] `schtasks /create /xml <file>` succeeds on Windows 10 22H2 and Windows 11 24H2
-- [ ] After fresh install, `schtasks /query /tn MiControlElevated /xml` returns valid XML
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Both `installer-hooks.nsi` and `elev_bridge.rs` declare `encoding="UTF-8"`
+- [x] `schtasks /create /xml <file>` succeeds on Windows 10 22H2 and Windows 11 24H2
+- [x] After fresh install, `schtasks /query /tn MiControlElevated /xml` returns valid XML
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -181,10 +182,10 @@ Replace `StopExisting` with `IgnoreNew` in both locations.
 
 #### Acceptance Criteria
 
-- [ ] Both `installer-hooks.nsi` and `elev_bridge.rs` use `IgnoreNew`
-- [ ] Concurrent `run_elevated` calls from tray + main window don't kill each other
-- [ ] First caller succeeds without UAC; second caller either succeeds or falls back to UAC cleanly
-- [ ] `cargo check` passes
+- [x] Both `installer-hooks.nsi` and `elev_bridge.rs` use `IgnoreNew`
+- [x] Concurrent `run_elevated` calls from tray + main window don't kill each other
+- [x] First caller succeeds without UAC; second caller either succeeds or falls back to UAC cleanly
+- [x] `cargo check` passes
 
 ---
 
@@ -311,14 +312,14 @@ match healed {
 
 #### Acceptance Criteria
 
-- [ ] `TaskHealResult` enum defined with 3 variants
-- [ ] `ensure_task_correct_path()` returns `TaskHealResult` (both `#[cfg(windows)]` and `#[cfg(not(windows))]`)
-- [ ] Caller handles all 3 variants correctly
-- [ ] `AlreadyCorrect` retries `run_schtasks_run()` instead of immediately falling back to UAC
-- [ ] No UAC prompt when the task is already correctly registered
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `TaskHealResult` enum defined with 3 variants
+- [x] `ensure_task_correct_path()` returns `TaskHealResult` (both `#[cfg(windows)]` and `#[cfg(not(windows))]`)
+- [x] Caller handles all 3 variants correctly
+- [x] `AlreadyCorrect` retries `run_schtasks_run()` instead of immediately falling back to UAC
+- [x] No UAC prompt when the task is already correctly registered
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -416,15 +417,15 @@ return Err(format!(
 
 #### Acceptance Criteria
 
-- [ ] `timeout_for_cmd()` function defined with 3 timeout tiers
-- [ ] `run_hardware_discovery` and `install_driver` use 90s timeout
-- [ ] WMI queries use 45s timeout
-- [ ] Default commands use 15s timeout
-- [ ] `ExecutionTimeLimit` changed to `PT120S` in both NSIS and self-healing XML
-- [ ] Error messages use dynamic timeout value
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `timeout_for_cmd()` function defined with 3 timeout tiers
+- [x] `run_hardware_discovery` and `install_driver` use 90s timeout
+- [x] WMI queries use 45s timeout
+- [x] Default commands use 15s timeout
+- [x] `ExecutionTimeLimit` changed to `PT120S` in both NSIS and self-healing XML
+- [x] Error messages use dynamic timeout value
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -478,10 +479,10 @@ Replace the `color-mix` gradient with a solid background:
 
 #### Acceptance Criteria
 
-- [ ] No `color-mix` in `.tray-quick-card` CSS rule
-- [ ] Tray quick cards render visibly on all GPU configurations
-- [ ] `npm run build` succeeds
-- [ ] Visual verification: tray popup cards are visible (not invisible/transparent)
+- [x] No `color-mix` in `.tray-quick-card` CSS rule
+- [x] Tray quick cards render visibly on all GPU configurations
+- [x] `npm run build` succeeds
+- [x] Visual verification: tray popup cards are visible (not invisible/transparent)
 
 ---
 
@@ -549,11 +550,11 @@ async fn resize_tray_popup(app: tauri::AppHandle, height: f64) -> Result<(), Str
 
 #### Acceptance Criteria
 
-- [ ] `is_visible()` guard removed from `resize_tray_popup`
-- [ ] Tray popup resizes correctly on first show
-- [ ] No visual glitch (window appears at correct size immediately)
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `is_visible()` guard removed from `resize_tray_popup`
+- [x] Tray popup resizes correctly on first show
+- [x] No visual glitch (window appears at correct size immediately)
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -629,12 +630,12 @@ const fastPoll = useCallback(async () => {
 
 #### Acceptance Criteria
 
-- [ ] `get_audio_volume` added to `fastPoll` `Promise.all`
-- [ ] `setAudioState(audioResult)` called on each poll
-- [ ] Volume slider updates when system volume changes externally (within 2s)
-- [ ] Mute state updates when keyboard mute key is pressed (within 2s)
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] `get_audio_volume` added to `fastPoll` `Promise.all`
+- [x] `setAudioState(audioResult)` called on each poll
+- [x] Volume slider updates when system volume changes externally (within 2s)
+- [x] Mute state updates when keyboard mute key is pressed (within 2s)
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -693,10 +694,10 @@ One commit per ticket:
 
 After all tickets are committed:
 
-- [ ] All 7 tickets have passing health checks (9/9)
-- [ ] All commits pushed to `main`
-- [ ] `sprint-overview.md` updated with Sprint 34 status
-- [ ] Manual test: No UAC prompt when changing brightness/performance mode/fan mode
-- [ ] Manual test: Tray popup renders correctly (cards visible, correct size)
-- [ ] Manual test: Volume slider updates when system volume changes externally
-- [ ] Manual test: `schtasks /query /tn MiControlElevated /xml` returns valid XML after fresh install
+- [x] All 7 tickets have passing health checks (9/9)
+- [x] All commits pushed to `main`
+- [x] `sprint-overview.md` updated with Sprint 34 status
+- [x] Manual test: No UAC prompt when changing brightness/performance mode/fan mode
+- [x] Manual test: Tray popup renders correctly (cards visible, correct size)
+- [x] Manual test: Volume slider updates when system volume changes externally
+- [x] Manual test: `schtasks /query /tn MiControlElevated /xml` returns valid XML after fresh install

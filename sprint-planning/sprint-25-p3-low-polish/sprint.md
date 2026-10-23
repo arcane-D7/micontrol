@@ -67,10 +67,10 @@ In `src-tauri/src/elevated.rs:108-117`, `save_nonces()` writes directly to the n
 
 #### Acceptance Criteria
 
-- [ ] `save_nonces()` writes to a temp file first, then renames to the final path
-- [ ] Temp file is in the same directory (for atomic rename on same filesystem)
-- [ ] Temp file is cleaned up on error
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `save_nonces()` writes to a temp file first, then renames to the final path
+- [x] Temp file is in the same directory (for atomic rename on same filesystem)
+- [x] Temp file is cleaned up on error
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -91,11 +91,11 @@ In `src-tauri/src/lib.rs:103-140`, the Sentry PII redaction covers IPv4 and `C:\
 
 #### Acceptance Criteria
 
-- [ ] IPv6 addresses are redacted (e.g., `2001:db8::1` → `[REDACTED_IP]`)
-- [ ] UNC paths are redacted (e.g., `\\server\share\` → `[REDACTED_PATH]`)
-- [ ] Drive letters `D:` through `Z:` are redacted (not just `C:`)
-- [ ] Unit test verifies all patterns are redacted
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] IPv6 addresses are redacted (e.g., `2001:db8::1` → `[REDACTED_IP]`)
+- [x] UNC paths are redacted (e.g., `\\server\share\` → `[REDACTED_PATH]`)
+- [x] Drive letters `D:` through `Z:` are redacted (not just `C:`)
+- [x] Unit test verifies all patterns are redacted
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -116,8 +116,8 @@ In `src-tauri/src/hw/iotservice.rs:343-352`, `derive_aes_key()` silently falls b
 
 #### Acceptance Criteria
 
-- [ ] `log::warn!("HKDF key derivation failed, falling back to legacy SHA-256: {e}")` added
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `log::warn!("HKDF key derivation failed, falling back to legacy SHA-256: {e}")` added
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -138,9 +138,9 @@ In `src-tauri/src/util/privacy.rs:30-35`, the export ZIP file is created without
 
 #### Acceptance Criteria
 
-- [ ] `restrict_file_acl` is called after the ZIP file is created
-- [ ] Log warning if ACL restriction fails (but don't crash)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `restrict_file_acl` is called after the ZIP file is created
+- [x] Log warning if ACL restriction fails (but don't crash)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -161,9 +161,9 @@ In `src-tauri/src/hw/display.rs:148-160`, `winreg::RegKey` is used directly inst
 
 #### Acceptance Criteria
 
-- [ ] All `winreg::RegKey` usage in `display.rs` replaced with `RegKeyGuard::open_read` / `RegKeyGuard::create_write`
-- [ ] No direct `winreg` imports remain in `display.rs`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] All `winreg::RegKey` usage in `display.rs` replaced with `RegKeyGuard::open_read` / `RegKeyGuard::create_write`
+- [x] No direct `winreg` imports remain in `display.rs`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -184,9 +184,9 @@ In `src-tauri/src/hw/charging.rs:170-195`, raw `RegOpenKeyExW`/`RegCloseKey` Win
 
 #### Acceptance Criteria
 
-- [ ] All raw registry API calls in `charging.rs` replaced with `RegKeyGuard`
-- [ ] No direct `RegOpenKeyExW`/`RegCloseKey` calls remain in `charging.rs`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] All raw registry API calls in `charging.rs` replaced with `RegKeyGuard`
+- [x] No direct `RegOpenKeyExW`/`RegCloseKey` calls remain in `charging.rs`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -207,8 +207,8 @@ In `src-tauri/src/hw/hotkeys.rs:1245-1250`, `winreg::RegKey` is used directly fo
 
 #### Acceptance Criteria
 
-- [ ] `winreg::RegKey` usage in `hotkeys.rs` replaced with `RegKeyGuard::open_read`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `winreg::RegKey` usage in `hotkeys.rs` replaced with `RegKeyGuard::open_read`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -229,9 +229,9 @@ In `src-tauri/src/hw/errors.rs:45-50`, WMI query strings are included in the `Di
 
 #### Acceptance Criteria
 
-- [ ] WMI query strings removed from `Display` impl (user-facing)
-- [ ] WMI query strings kept in `Debug` impl (developer-facing)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] WMI query strings removed from `Display` impl (user-facing)
+- [x] WMI query strings kept in `Debug` impl (developer-facing)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -252,9 +252,9 @@ In `src-tauri/src/hw/system.rs:210-213`, `get_available_refresh_rates` silently 
 
 #### Acceptance Criteria
 
-- [ ] Return type changed from `Vec<u32>` to `Result<Vec<u32>, ErrorResponse>`
-- [ ] Callers updated to handle the error
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Return type changed from `Vec<u32>` to `Result<Vec<u32>, ErrorResponse>`
+- [x] Callers updated to handle the error
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -275,8 +275,8 @@ In `src-tauri/src/util/retry.rs:73`, `unreachable!()` is used in a retry loop. I
 
 #### Acceptance Criteria
 
-- [ ] `unreachable!()` replaced with `return Err(anyhow::anyhow!("..."))` or appropriate error
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `unreachable!()` replaced with `return Err(anyhow::anyhow!("..."))` or appropriate error
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -299,8 +299,8 @@ In `tauri.conf.json:25`, the CSP is missing `form-action 'self'`, allowing forms
 
 #### Acceptance Criteria
 
-- [ ] `form-action 'self'` added to CSP in `tauri.conf.json`
-- [ ] `npm run build` passes
+- [x] `form-action 'self'` added to CSP in `tauri.conf.json`
+- [x] `npm run build` passes
 
 ---
 
@@ -321,8 +321,8 @@ In `tauri.conf.json:25`, `https://api.openai.com` is in the CSP `connect-src` al
 
 #### Acceptance Criteria
 
-- [ ] `https://api.openai.com` removed from CSP `connect-src`
-- [ ] `npm run build` passes
+- [x] `https://api.openai.com` removed from CSP `connect-src`
+- [x] `npm run build` passes
 
 ---
 
@@ -343,8 +343,8 @@ In `src/components/AiConfigForm.tsx:113-117`, the API key show/hide button uses 
 
 #### Acceptance Criteria
 
-- [ ] `aria-label="Show API key"` / `aria-label="Hide API key"` added (dynamic based on state)
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes
+- [x] `aria-label="Show API key"` / `aria-label="Hide API key"` added (dynamic based on state)
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes
 
 ---
 
@@ -365,8 +365,8 @@ In `src/components/OnboardingWizard.tsx:42-52`, progress dots are `<div>` elemen
 
 #### Acceptance Criteria
 
-- [ ] Progress dots container has `role="progressbar"` and `aria-label="Onboarding progress"`
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes
+- [x] Progress dots container has `role="progressbar"` and `aria-label="Onboarding progress"`
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes
 
 ---
 
@@ -387,9 +387,9 @@ In `src/components/AiAnalysis.tsx`, inline styles prevent `:hover` and `:focus` 
 
 #### Acceptance Criteria
 
-- [ ] All inline styles in `AiAnalysis.tsx` extracted to CSS classes
-- [ ] `:hover` and `:focus` styles added where appropriate
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] All inline styles in `AiAnalysis.tsx` extracted to CSS classes
+- [x] `:hover` and `:focus` styles added where appropriate
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -410,9 +410,9 @@ In `src-tauri/Cargo.toml:96`, `opt-level = "s"` optimizes for binary size, not e
 
 #### Acceptance Criteria
 
-- [ ] `opt-level` changed to `3` in `[profile.release]`
-- [ ] `cargo check` passes, `cargo test` passes
-- [ ] Binary size increase is acceptable (document if significant)
+- [x] `opt-level` changed to `3` in `[profile.release]`
+- [x] `cargo check` passes, `cargo test` passes
+- [x] Binary size increase is acceptable (document if significant)
 
 ---
 
@@ -433,9 +433,9 @@ In `src/components/AiAnalysis.tsx:131`, the LineChart SVG uses `preserveAspectRa
 
 #### Acceptance Criteria
 
-- [ ] `preserveAspectRatio` changed to `"xMidYMid meet"`
-- [ ] Chart still renders correctly
-- [ ] `npm run build` passes
+- [x] `preserveAspectRatio` changed to `"xMidYMid meet"`
+- [x] Chart still renders correctly
+- [x] `npm run build` passes
 
 ---
 
@@ -456,9 +456,9 @@ In `src-tauri/src/hw/display.rs:170-175`, `adaptive_brightness_loop` runs every 
 
 #### Acceptance Criteria
 
-- [ ] Display power state checked before polling
-- [ ] If display is off, skip the iteration (sleep and continue)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Display power state checked before polling
+- [x] If display is off, skip the iteration (sleep and continue)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 

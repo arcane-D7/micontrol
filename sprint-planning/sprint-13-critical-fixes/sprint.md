@@ -65,11 +65,11 @@ S12-015 claimed to pin GitHub Actions to commit SHAs but only added TODO comment
 
 #### Acceptance Criteria
 
-- [ ] Every `uses:` in `.github/workflows/ci.yml` uses full 40-char commit SHA with `# v4` comment
-- [ ] Every `uses:` in `.github/workflows/release.yml` uses full 40-char commit SHA with comment
-- [ ] Every `uses:` in `.github/workflows/driverstore-integrity.yml` uses full 40-char commit SHA with comment
-- [ ] No floating tags (`@v4`, `@stable`, `@latest`, `@main`) remain in any workflow file
-- [ ] All TODO comments from S12-015 are removed (replaced by actual SHAs)
+- [x] Every `uses:` in `.github/workflows/ci.yml` uses full 40-char commit SHA with `# v4` comment
+- [x] Every `uses:` in `.github/workflows/release.yml` uses full 40-char commit SHA with comment
+- [x] Every `uses:` in `.github/workflows/driverstore-integrity.yml` uses full 40-char commit SHA with comment
+- [x] No floating tags (`@v4`, `@stable`, `@latest`, `@main`) remain in any workflow file
+- [x] All TODO comments from S12-015 are removed (replaced by actual SHAs)
 
 ---
 
@@ -91,13 +91,13 @@ S12-015 claimed to pin GitHub Actions to commit SHAs but only added TODO comment
 
 #### Acceptance Criteria
 
-- [ ] `log_consent_granted()` is called when user grants consent (in the consent grant Tauri command)
-- [ ] `log_consent_revoked()` is called when user revokes consent (in the consent revoke Tauri command)
-- [ ] Audit log entries include: timestamp, user action (grant/revoke), policy version, consent scope
-- [ ] Audit log file is created at `%APPDATA%/miPC/consent_audit.log` on first write
-- [ ] Unit test verifies log entry is written when consent is granted
-- [ ] Unit test verifies log entry is written when consent is revoked
-- [ ] No clippy warnings introduced
+- [x] `log_consent_granted()` is called when user grants consent (in the consent grant Tauri command)
+- [x] `log_consent_revoked()` is called when user revokes consent (in the consent revoke Tauri command)
+- [x] Audit log entries include: timestamp, user action (grant/revoke), policy version, consent scope
+- [x] Audit log file is created at `%APPDATA%/miPC/consent_audit.log` on first write
+- [x] Unit test verifies log entry is written when consent is granted
+- [x] Unit test verifies log entry is written when consent is revoked
+- [x] No clippy warnings introduced
 
 ---
 
@@ -119,11 +119,11 @@ Rust backend uses `POLICY_VERSION = 2`, but frontend `setTelemetryConsent()` in 
 
 #### Acceptance Criteria
 
-- [ ] `useSettings.ts` imports or defines `POLICY_VERSION = 2` matching the Rust constant
-- [ ] `setTelemetryConsent()` uses the constant instead of hardcoded `1`
-- [ ] `npm run version:check` passes (all versions consistent)
-- [ ] No other hardcoded policy version values exist in the frontend
-- [ ] Unit test or type check confirms the value matches
+- [x] `useSettings.ts` imports or defines `POLICY_VERSION = 2` matching the Rust constant
+- [x] `setTelemetryConsent()` uses the constant instead of hardcoded `1`
+- [x] `npm run version:check` passes (all versions consistent)
+- [x] No other hardcoded policy version values exist in the frontend
+- [x] Unit test or type check confirms the value matches
 
 ---
 
@@ -144,12 +144,12 @@ The hotkey config file (`hotkeys.json`) stores `Script` and `LaunchApp` actions 
 
 #### Acceptance Criteria
 
-- [ ] `hotkeys.json` is created with ACL restricting write access to the current user only
-- [ ] ACL is applied on first write (not just on existing files)
-- [ ] If file already exists without ACL, it is upgraded on next load
-- [ ] Unit test verifies ACL is applied (or at least that the function is called)
-- [ ] Log warning if ACL cannot be applied (but don't crash)
-- [ ] No clippy warnings introduced
+- [x] `hotkeys.json` is created with ACL restricting write access to the current user only
+- [x] ACL is applied on first write (not just on existing files)
+- [x] If file already exists without ACL, it is upgraded on next load
+- [x] Unit test verifies ACL is applied (or at least that the function is called)
+- [x] Log warning if ACL cannot be applied (but don't crash)
+- [x] No clippy warnings introduced
 
 ---
 
@@ -170,12 +170,12 @@ WiFi passwords are transmitted in plaintext over the local named pipe between th
 
 #### Acceptance Criteria
 
-- [ ] WiFi passwords are encrypted before being written to the pipe
-- [ ] Decryption uses a session key established at pipe connection time
-- [ ] Plaintext password never appears in pipe payload
-- [ ] Unit test verifies password is encrypted in transit
-- [ ] Backward compatibility: if old format is received, handle gracefully (or reject with clear error)
-- [ ] No clippy warnings introduced
+- [x] WiFi passwords are encrypted before being written to the pipe
+- [x] Decryption uses a session key established at pipe connection time
+- [x] Plaintext password never appears in pipe payload
+- [x] Unit test verifies password is encrypted in transit
+- [x] Backward compatibility: if old format is received, handle gracefully (or reject with clear error)
+- [x] No clippy warnings introduced
 
 ---
 
@@ -196,9 +196,9 @@ WiFi passwords are transmitted in plaintext over the local named pipe between th
 
 #### Acceptance Criteria
 
-- [ ] `permissions: read-all` is set at the top level of `ci.yml`
-- [ ] Individual jobs that need write access (if any) have explicit `permissions:` overrides
-- [ ] CI workflow still passes after the change
+- [x] `permissions: read-all` is set at the top level of `ci.yml`
+- [x] Individual jobs that need write access (if any) have explicit `permissions:` overrides
+- [x] CI workflow still passes after the change
 
 ---
 
@@ -219,10 +219,10 @@ WiFi passwords are transmitted in plaintext over the local named pipe between th
 
 #### Acceptance Criteria
 
-- [ ] New `version-check` job added to `ci.yml`
-- [ ] Job runs `npm run version:check`
-- [ ] Job is required for branch protection (documented in PR template or CONTRIBUTING)
-- [ ] CI passes with the new job
+- [x] New `version-check` job added to `ci.yml`
+- [x] Job runs `npm run version:check`
+- [x] Job is required for branch protection (documented in PR template or CONTRIBUTING)
+- [x] CI passes with the new job
 
 ---
 
@@ -243,10 +243,10 @@ WiFi passwords are transmitted in plaintext over the local named pipe between th
 
 #### Acceptance Criteria
 
-- [ ] `@vitest/coverage-v8` version matches `vitest` major version (v3)
-- [ ] `npm install` completes without peer dependency warnings
-- [ ] `npm run build` passes
-- [ ] Coverage reporting works (if configured)
+- [x] `@vitest/coverage-v8` version matches `vitest` major version (v3)
+- [x] `npm install` completes without peer dependency warnings
+- [x] `npm run build` passes
+- [x] Coverage reporting works (if configured)
 
 ---
 
@@ -268,10 +268,10 @@ S11-024 claimed to remove `continue-on-error: true` from CI clippy, but the CI s
 
 #### Acceptance Criteria
 
-- [ ] CI clippy step uses `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings`
-- [ ] No `continue-on-error` on the clippy step
-- [ ] Local `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes with 0 warnings
-- [ ] CI passes with the stricter clippy
+- [x] CI clippy step uses `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings`
+- [x] No `continue-on-error` on the clippy step
+- [x] Local `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes with 0 warnings
+- [x] CI passes with the stricter clippy
 
 ---
 
@@ -292,11 +292,11 @@ There is no CI check for i18n completeness. Missing translations in PT/ES/FR sli
 
 #### Acceptance Criteria
 
-- [ ] A script (e.g., `scripts/check-i18n.mjs` or similar) compares all locale files against `en.json`
-- [ ] Script reports missing keys in any locale
-- [ ] CI job runs the script and fails if any keys are missing
-- [ ] Script is documented in CONTRIBUTING.md
-- [ ] CI passes with the new job
+- [x] A script (e.g., `scripts/check-i18n.mjs` or similar) compares all locale files against `en.json`
+- [x] Script reports missing keys in any locale
+- [x] CI job runs the script and fails if any keys are missing
+- [x] Script is documented in CONTRIBUTING.md
+- [x] CI passes with the new job
 
 ---
 
@@ -318,13 +318,13 @@ PT/ES/FR locales are missing entire sections: consent dialog, privacy policy, ke
 
 #### Acceptance Criteria
 
-- [ ] All keys in `en.json` have corresponding translations in `pt.json`, `es.json`, `fr.json`
-- [ ] Consent dialog strings are translated in all 4 locales
-- [ ] Privacy policy strings are translated in all 4 locales
-- [ ] AI analysis strings are translated in all 4 locales
-- [ ] Keyboard shortcut strings are translated in all 4 locales
-- [ ] i18n checker (S13-010) passes with 0 missing keys
-- [ ] No placeholder mismatches (`{{count}}`, `{{name}}`, etc.)
+- [x] All keys in `en.json` have corresponding translations in `pt.json`, `es.json`, `fr.json`
+- [x] Consent dialog strings are translated in all 4 locales
+- [x] Privacy policy strings are translated in all 4 locales
+- [x] AI analysis strings are translated in all 4 locales
+- [x] Keyboard shortcut strings are translated in all 4 locales
+- [x] i18n checker (S13-010) passes with 0 missing keys
+- [x] No placeholder mismatches (`{{count}}`, `{{name}}`, etc.)
 
 ---
 
@@ -345,11 +345,11 @@ When user revokes consent, `data_deletion.rs` does not clear the keyring consent
 
 #### Acceptance Criteria
 
-- [ ] `data_deletion.rs` clears the keyring consent entry when consent is revoked
-- [ ] `data_deletion.rs` purges the consent audit log file on full data deletion
-- [ ] Unit test verifies keyring consent is cleared
-- [ ] Unit test verifies audit log file is deleted
-- [ ] No clippy warnings introduced
+- [x] `data_deletion.rs` clears the keyring consent entry when consent is revoked
+- [x] `data_deletion.rs` purges the consent audit log file on full data deletion
+- [x] Unit test verifies keyring consent is cleared
+- [x] Unit test verifies audit log file is deleted
+- [x] No clippy warnings introduced
 
 ---
 
@@ -370,13 +370,13 @@ The consent audit log has no integrity protection. An attacker with file access 
 
 #### Acceptance Criteria
 
-- [ ] Each audit log entry is HMAC-signed with a dedicated key
-- [ ] HMAC key is stored separately from the log file (e.g., in keyring or OS credential store)
-- [ ] A verification function exists that can validate the entire log chain
-- [ ] Tampered entries are detected and logged as warnings
-- [ ] Unit test verifies HMAC is appended to each entry
-- [ ] Unit test verifies tampered entry is detected
-- [ ] No clippy warnings introduced
+- [x] Each audit log entry is HMAC-signed with a dedicated key
+- [x] HMAC key is stored separately from the log file (e.g., in keyring or OS credential store)
+- [x] A verification function exists that can validate the entire log chain
+- [x] Tampered entries are detected and logged as warnings
+- [x] Unit test verifies HMAC is appended to each entry
+- [x] Unit test verifies tampered entry is detected
+- [x] No clippy warnings introduced
 
 ---
 
@@ -397,11 +397,11 @@ The consent audit log has no integrity protection. An attacker with file access 
 
 #### Acceptance Criteria
 
-- [ ] Only `http://` and `https://` URL schemes are allowed
-- [ ] Invalid schemes are rejected with a clear error message
-- [ ] Unit test verifies `http://` and `https://` are accepted
-- [ ] Unit test verifies `file://`, `javascript:`, `data:` are rejected
-- [ ] No clippy warnings introduced
+- [x] Only `http://` and `https://` URL schemes are allowed
+- [x] Invalid schemes are rejected with a clear error message
+- [x] Unit test verifies `http://` and `https://` are accepted
+- [x] Unit test verifies `file://`, `javascript:`, `data:` are rejected
+- [x] No clippy warnings introduced
 
 ---
 
@@ -422,13 +422,13 @@ The consent audit log has no integrity protection. An attacker with file access 
 
 #### Acceptance Criteria
 
-- [ ] All functions in `commands/system.rs` return `Result<T, ErrorResponse>`
-- [ ] Error messages are user-friendly (not raw `anyhow` chains)
-- [ ] Frontend receives structured error responses with error codes
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
-- [ ] No frontend changes needed (error format is backward compatible)
+- [x] All functions in `commands/system.rs` return `Result<T, ErrorResponse>`
+- [x] Error messages are user-friendly (not raw `anyhow` chains)
+- [x] Frontend receives structured error responses with error codes
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
+- [x] No frontend changes needed (error format is backward compatible)
 
 ---
 
@@ -436,21 +436,21 @@ The consent audit log has no integrity protection. An attacker with file access 
 
 Before committing the sprint, verify ALL of the following:
 
-- [ ] All 15 tickets have their acceptance criteria fully met
-- [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` passes
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes (0 warnings)
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes (all tests green)
-- [ ] `npx tsc --noEmit` passes (0 errors)
-- [ ] `npm run lint` passes (0 warnings)
-- [ ] `npm run format:check` passes
-- [ ] `npm run build` passes
-- [ ] `npm run version:check` passes
-- [ ] No TODO comments left from S12-015 (replaced by actual SHAs)
-- [ ] No dead code from S11-014 (consent audit functions are now called)
-- [ ] No policy version mismatch (frontend uses v2)
-- [ ] i18n checker passes with 0 missing keys
-- [ ] Sprint commit message follows format: `feat(sprint-13): <summary>`
+- [x] All 15 tickets have their acceptance criteria fully met
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` passes
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes (0 warnings)
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes (all tests green)
+- [x] `npx tsc --noEmit` passes (0 errors)
+- [x] `npm run lint` passes (0 warnings)
+- [x] `npm run format:check` passes
+- [x] `npm run build` passes
+- [x] `npm run version:check` passes
+- [x] No TODO comments left from S12-015 (replaced by actual SHAs)
+- [x] No dead code from S11-014 (consent audit functions are now called)
+- [x] No policy version mismatch (frontend uses v2)
+- [x] i18n checker passes with 0 missing keys
+- [x] Sprint commit message follows format: `feat(sprint-13): <summary>`
 
 ---
 

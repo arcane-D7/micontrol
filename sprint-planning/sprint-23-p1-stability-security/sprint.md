@@ -84,13 +84,13 @@ No check for `bytes_read == 0` exists in either path.
 
 #### Acceptance Criteria
 
-- [ ] After both the synchronous and overlapped completion paths, check if `bytes_read == 0`
-- [ ] If `bytes_read == 0`, return `Err` with a descriptive message (e.g., `"Pipe closed by remote end (EOF)"`)
-- [ ] Use `anyhow::bail!` or return `Err(anyhow::anyhow!(...))` consistent with the function's error handling
-- [ ] Add a unit test that verifies the function returns an error when reading from a closed/empty pipe (similar to the existing `test_read_exact_timeout_zero_length` test)
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes
+- [x] After both the synchronous and overlapped completion paths, check if `bytes_read == 0`
+- [x] If `bytes_read == 0`, return `Err` with a descriptive message (e.g., `"Pipe closed by remote end (EOF)"`)
+- [x] Use `anyhow::bail!` or return `Err(anyhow::anyhow!(...))` consistent with the function's error handling
+- [x] Add a unit test that verifies the function returns an error when reading from a closed/empty pipe (similar to the existing `test_read_exact_timeout_zero_length` test)
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes
 
 ---
 
@@ -131,12 +131,12 @@ let offset = (addr - crate::hw::ecram::ERAM_BASE) as usize;
 
 #### Acceptance Criteria
 
-- [ ] `is_eram_range` uses `crate::hw::ecram::get_eram_base()` instead of `ERAM_BASE`
-- [ ] `is_known_safe_single_byte_write` uses `get_eram_base()` for the offset calculation
-- [ ] `get_eram_base()` is confirmed `pub` (it already is — `ecram.rs:102`)
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes
+- [x] `is_eram_range` uses `crate::hw::ecram::get_eram_base()` instead of `ERAM_BASE`
+- [x] `is_known_safe_single_byte_write` uses `get_eram_base()` for the offset calculation
+- [x] `get_eram_base()` is confirmed `pub` (it already is — `ecram.rs:102`)
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes
 
 ---
 
@@ -178,14 +178,14 @@ if result.is_err() {
 
 #### Acceptance Criteria
 
-- [ ] After `RegQueryValueExW` returns an error, check if the error code is `ERROR_MORE_DATA` (234)
-- [ ] If `ERROR_MORE_DATA`, read the required size from `buf_len`, allocate a new buffer of that size, and retry the query
-- [ ] Limit total buffer size to 64KB (prevent unbounded allocation from malicious registry values)
-- [ ] If retry fails or buffer exceeds 64KB, return `Ok(None)` (same as current behavior for missing values)
-- [ ] Add a unit test (or integration test) that verifies large registry values are read correctly (may require mocking or a test registry key)
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes
+- [x] After `RegQueryValueExW` returns an error, check if the error code is `ERROR_MORE_DATA` (234)
+- [x] If `ERROR_MORE_DATA`, read the required size from `buf_len`, allocate a new buffer of that size, and retry the query
+- [x] Limit total buffer size to 64KB (prevent unbounded allocation from malicious registry values)
+- [x] If retry fails or buffer exceeds 64KB, return `Ok(None)` (same as current behavior for missing values)
+- [x] Add a unit test (or integration test) that verifies large registry values are read correctly (may require mocking or a test registry key)
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes
 
 ---
 
@@ -206,17 +206,17 @@ The frontend has only 7 test files for 30+ components. The coverage threshold in
 
 #### Acceptance Criteria
 
-- [ ] Create `src/__tests__/useHardware.test.ts` — test hook initialization, error state, polling behavior
-- [ ] Create `src/__tests__/useSettings.test.ts` — test settings load/save, API key migration
-- [ ] Create `src/__tests__/ConsentDialog.test.tsx` — test consent grant/deny, focus trap, Escape key
-- [ ] Create `src/__tests__/AiConfigForm.test.tsx` — test API key input, show/hide toggle, validation
-- [ ] Create `src/__tests__/OnboardingWizard.test.tsx` — test step navigation, completion, skip
-- [ ] Mock Tauri `invoke` in all tests using `vi.mock('@tauri-apps/api/core')`
-- [ ] Raise coverage threshold in `vite.config.ts` from 40% to 50% (lines, functions, branches)
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
-- [ ] `npm run build` passes
-- [ ] All new tests pass
+- [x] Create `src/__tests__/useHardware.test.ts` — test hook initialization, error state, polling behavior
+- [x] Create `src/__tests__/useSettings.test.ts` — test settings load/save, API key migration
+- [x] Create `src/__tests__/ConsentDialog.test.tsx` — test consent grant/deny, focus trap, Escape key
+- [x] Create `src/__tests__/AiConfigForm.test.tsx` — test API key input, show/hide toggle, validation
+- [x] Create `src/__tests__/OnboardingWizard.test.tsx` — test step navigation, completion, skip
+- [x] Mock Tauri `invoke` in all tests using `vi.mock('@tauri-apps/api/core')`
+- [x] Raise coverage threshold in `vite.config.ts` from 40% to 50% (lines, functions, branches)
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
+- [x] `npm run build` passes
+- [x] All new tests pass
 
 ---
 
@@ -247,12 +247,12 @@ But `test_connection` at line 131 goes straight to reading the API key and makin
 
 #### Acceptance Criteria
 
-- [ ] `test_connection` checks telemetry consent before any network request
-- [ ] If consent is not granted, returns an error with a descriptive message (same pattern as `analyze_system`)
-- [ ] The consent check is placed before the `reqwest::Client` builder call
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes
+- [x] `test_connection` checks telemetry consent before any network request
+- [x] If consent is not granted, returns an error with a descriptive message (same pattern as `analyze_system`)
+- [x] The consent check is placed before the `reqwest::Client` builder call
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes
 
 ---
 

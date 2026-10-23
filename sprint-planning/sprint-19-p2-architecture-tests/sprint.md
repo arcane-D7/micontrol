@@ -24,7 +24,7 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/util/wmi_extract.rs` (new), `src-tauri/src/hw/{battery,display,fan,performance,processes,system_info,update,wmi_cache}.rs`
 **Tasks:**
 
-- [ ] Create `util/wmi_extract.rs` with helper functions:
+- [x] Create `util/wmi_extract.rs` with helper functions:
   - `extract_u32(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<u32>`
   - `extract_i32(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<i32>`
   - `extract_u64(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<u64>`
@@ -32,15 +32,15 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
   - `extract_bool(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<bool>`
   - `extract_u32_or(map: &HashMap<String, wmi::Variant>, key: &str, default: u32) -> u32`
   - `extract_string_or(map: &HashMap<String, wmi::Variant>, key: &str, default: &str) -> String`
-- [ ] Add unit tests for each helper
-- [ ] Refactor `battery.rs` to use the new utilities
-- [ ] Refactor `display.rs` to use the new utilities
-- [ ] Refactor `fan.rs` to use the new utilities
-- [ ] Refactor `performance.rs` to use the new utilities
-- [ ] Refactor `processes.rs` to use the new utilities
-- [ ] Refactor `system_info.rs` to use the new utilities
-- [ ] Refactor `update.rs` to use the new utilities
-- [ ] Refactor `wmi_cache.rs` to use the new utilities
+- [x] Add unit tests for each helper
+- [x] Refactor `battery.rs` to use the new utilities
+- [x] Refactor `display.rs` to use the new utilities
+- [x] Refactor `fan.rs` to use the new utilities
+- [x] Refactor `performance.rs` to use the new utilities
+- [x] Refactor `processes.rs` to use the new utilities
+- [x] Refactor `system_info.rs` to use the new utilities
+- [x] Refactor `update.rs` to use the new utilities
+- [x] Refactor `wmi_cache.rs` to use the new utilities
       **Acceptance:** No duplicated WMI field extraction logic. All hw modules use shared utilities.
 
 ---
@@ -52,16 +52,16 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/hw/touchpad/` (new directory)
 **Tasks:**
 
-- [ ] Create `hw/touchpad/mod.rs` — public API and re-exports
-- [ ] Create `hw/touchpad/hid.rs` — HID device communication
-- [ ] Create `hw/touchpad/gestures.rs` — gesture processing (swipe, edge-slide)
-- [ ] Create `hw/touchpad/hook.rs` — WH_MOUSE_LL low-level hook
-- [ ] Create `hw/touchpad/charger.rs` — charger detection
-- [ ] Create `hw/touchpad/registry.rs` — registry persistence
-- [ ] Create `hw/touchpad/state.rs` — global statics and state management
-- [ ] Move all code from `touchpad.rs` into appropriate submodules
-- [ ] Update imports in `commands/` and `lib.rs`
-- [ ] Verify all tests still pass
+- [x] Create `hw/touchpad/mod.rs` — public API and re-exports
+- [x] Create `hw/touchpad/hid.rs` — HID device communication
+- [x] Create `hw/touchpad/gestures.rs` — gesture processing (swipe, edge-slide)
+- [x] Create `hw/touchpad/hook.rs` — WH_MOUSE_LL low-level hook
+- [x] Create `hw/touchpad/charger.rs` — charger detection
+- [x] Create `hw/touchpad/registry.rs` — registry persistence
+- [x] Create `hw/touchpad/state.rs` — global statics and state management
+- [x] Move all code from `touchpad.rs` into appropriate submodules
+- [x] Update imports in `commands/` and `lib.rs`
+- [x] Verify all tests still pass
       **Acceptance:** `touchpad.rs` is split into focused submodules. No behavior changes.
 
 ---
@@ -73,12 +73,12 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/hw/errors.rs`
 **Tasks:**
 
-- [ ] Remove `impl From<String> for HardwareError`
-- [ ] Remove `impl From<&str> for HardwareError`
-- [ ] Update all call sites that relied on blanket conversion
-- [ ] Replace with explicit `HardwareError::Generic(format!(...))` or appropriate variant
-- [ ] Fix `ai.rs` and `hotkeys.rs` to return `HardwareResult<T>` instead of `Result<T, String>`
-- [ ] Add `HardwareError::AiRequest` and `HardwareError::HotkeyConfig` variants if needed
+- [x] Remove `impl From<String> for HardwareError`
+- [x] Remove `impl From<&str> for HardwareError`
+- [x] Update all call sites that relied on blanket conversion
+- [x] Replace with explicit `HardwareError::Generic(format!(...))` or appropriate variant
+- [x] Fix `ai.rs` and `hotkeys.rs` to return `HardwareResult<T>` instead of `Result<T, String>`
+- [x] Add `HardwareError::AiRequest` and `HardwareError::HotkeyConfig` variants if needed
       **Acceptance:** No blanket string-to-error conversions. All command functions return `HardwareResult<T>`.
 
 ---
@@ -90,11 +90,11 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/commands/ai.rs`
 **Tasks:**
 
-- [ ] Change `analyze_system` return type from `Result<String, String>` to `HardwareResult<String>`
-- [ ] Change `test_connection` return type from `Result<String, String>` to `HardwareResult<String>`
-- [ ] Add `HardwareError::AiConsentDenied`, `HardwareError::AiRequestFailed`, `HardwareError::AiResponseInvalid` variants
-- [ ] Update frontend to handle new error types
-- [ ] Add tests for each error path
+- [x] Change `analyze_system` return type from `Result<String, String>` to `HardwareResult<String>`
+- [x] Change `test_connection` return type from `Result<String, String>` to `HardwareResult<String>`
+- [x] Add `HardwareError::AiConsentDenied`, `HardwareError::AiRequestFailed`, `HardwareError::AiResponseInvalid` variants
+- [x] Update frontend to handle new error types
+- [x] Add tests for each error path
       **Acceptance:** `ai.rs` uses `HardwareResult<T>`. No `String` error returns.
 
 ---
@@ -106,10 +106,10 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/commands/hotkeys.rs`
 **Tasks:**
 
-- [ ] Change all command return types from `Result<T, String>` to `HardwareResult<T>`
-- [ ] Add `HardwareError::HotkeyConfigInvalid`, `HardwareError::HotkeyActionBlocked` variants if needed
-- [ ] Update frontend error handling
-- [ ] Add tests for error paths
+- [x] Change all command return types from `Result<T, String>` to `HardwareResult<T>`
+- [x] Add `HardwareError::HotkeyConfigInvalid`, `HardwareError::HotkeyActionBlocked` variants if needed
+- [x] Update frontend error handling
+- [x] Add tests for error paths
       **Acceptance:** `hotkeys.rs` commands use `HardwareResult<T>`.
 
 ---
@@ -121,7 +121,7 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/util/blocking.rs` (new), `src-tauri/src/commands/{system,hardware}.rs`
 **Tasks:**
 
-- [ ] Create `util/blocking.rs` with:
+- [x] Create `util/blocking.rs` with:
   ```rust
   pub async fn run_blocking<T, F>(f: F) -> HardwareResult<T>
   where
@@ -133,10 +133,10 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
           .map_err(|e| HardwareError::TaskJoin(e.to_string()))?
   }
   ```
-- [ ] Add `HardwareError::TaskJoin(String)` variant
-- [ ] Refactor `commands/system.rs` to use `run_blocking()`
-- [ ] Refactor `commands/hardware.rs` to use `run_blocking()`
-- [ ] Reduce boilerplate from ~25 sites to single-line calls
+- [x] Add `HardwareError::TaskJoin(String)` variant
+- [x] Refactor `commands/system.rs` to use `run_blocking()`
+- [x] Refactor `commands/hardware.rs` to use `run_blocking()`
+- [x] Reduce boilerplate from ~25 sites to single-line calls
       **Acceptance:** `spawn_blocking` boilerplate is extracted. Command functions are cleaner.
 
 ---
@@ -148,11 +148,11 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/hw/wmi_cache.rs`
 **Tasks:**
 
-- [ ] Add test for `with_wmi()` success path (mock WMI connection)
-- [ ] Add test for `with_wmi()` failure path
-- [ ] Add test for cache invalidation
-- [ ] Add test for `is_connection_error()` with various error types
-- [ ] Add test for thread_local initialization
+- [x] Add test for `with_wmi()` success path (mock WMI connection)
+- [x] Add test for `with_wmi()` failure path
+- [x] Add test for cache invalidation
+- [x] Add test for `is_connection_error()` with various error types
+- [x] Add test for thread_local initialization
       **Acceptance:** `wmi_cache.rs` has ≥5 unit tests.
 
 ---
@@ -164,11 +164,11 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/elev_bridge.rs` (or `elevated.rs`)
 **Tasks:**
 
-- [ ] Add test for HMAC signing/verification round-trip
-- [ ] Add test for nonce replay detection
-- [ ] Add test for invalid HMAC rejection
-- [ ] Add test for nonce persistence
-- [ ] Mock the subprocess communication for unit testing
+- [x] Add test for HMAC signing/verification round-trip
+- [x] Add test for nonce replay detection
+- [x] Add test for invalid HMAC rejection
+- [x] Add test for nonce persistence
+- [x] Mock the subprocess communication for unit testing
       **Acceptance:** `elev_bridge.rs` has ≥5 unit tests.
 
 ---
@@ -180,10 +180,10 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/util/ai_usage.rs`
 **Tasks:**
 
-- [ ] Add test for `record_usage()` — verify counters increment
-- [ ] Add test for `get_usage()` — verify correct stats returned
-- [ ] Add test for `reset_usage()` — verify counters reset to 0
-- [ ] Add test for concurrent access (thread safety)
+- [x] Add test for `record_usage()` — verify counters increment
+- [x] Add test for `get_usage()` — verify correct stats returned
+- [x] Add test for `reset_usage()` — verify counters reset to 0
+- [x] Add test for concurrent access (thread safety)
       **Acceptance:** `ai_usage.rs` has ≥4 unit tests.
 
 ---
@@ -195,9 +195,9 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/debug_log.rs`
 **Tasks:**
 
-- [ ] Add test for log initialization
-- [ ] Add test for log level filtering
-- [ ] Add test for log file creation
+- [x] Add test for log initialization
+- [x] Add test for log level filtering
+- [x] Add test for log file creation
       **Acceptance:** `debug_log.rs` has ≥3 unit tests.
 
 ---
@@ -209,16 +209,16 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src/__tests__/`
 **Tasks:**
 
-- [ ] Add test for `OverviewTab` — renders hardware data, updates on hardware change
-- [ ] Add test for `BatteryTab` — displays charge level, health, charging status
-- [ ] Add test for `FanTab` — mode switching, fan curve display
-- [ ] Add test for `DisplayTab` — brightness slider, HDR toggle
-- [ ] Add test for `SettingsTab` — language switching, theme toggle
-- [ ] Add test for `ConsentDialog` — grant/deny flow, focus trapping
-- [ ] Add test for `OnboardingWizard` — step navigation, completion
-- [ ] Add test for `ErrorBoundary` — error catching, reload button
-- [ ] Add test for `TrayPopup` — quick actions, volume slider
-- [ ] Add test for `WiFiManager` — password input, connection status
+- [x] Add test for `OverviewTab` — renders hardware data, updates on hardware change
+- [x] Add test for `BatteryTab` — displays charge level, health, charging status
+- [x] Add test for `FanTab` — mode switching, fan curve display
+- [x] Add test for `DisplayTab` — brightness slider, HDR toggle
+- [x] Add test for `SettingsTab` — language switching, theme toggle
+- [x] Add test for `ConsentDialog` — grant/deny flow, focus trapping
+- [x] Add test for `OnboardingWizard` — step navigation, completion
+- [x] Add test for `ErrorBoundary` — error catching, reload button
+- [x] Add test for `TrayPopup` — quick actions, volume slider
+- [x] Add test for `WiFiManager` — password input, connection status
       **Acceptance:** Frontend test count ≥ 13 files (3 existing + 10 new). All major components tested.
 
 ---
@@ -230,9 +230,9 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src/pages/MainWindow.tsx`
 **Tasks:**
 
-- [ ] Remove the duplicate `interface Props` declaration (lines 33 and 64)
-- [ ] Keep only one `Props` interface
-- [ ] Verify TypeScript compilation still passes
+- [x] Remove the duplicate `interface Props` declaration (lines 33 and 64)
+- [x] Keep only one `Props` interface
+- [x] Verify TypeScript compilation still passes
       **Acceptance:** Only one `Props` interface in `MainWindow.tsx`.
 
 ---
@@ -244,12 +244,12 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** Multiple
 **Tasks:**
 
-- [ ] Audit each `#[allow(dead_code)]` annotation
-- [ ] For truly unused code: remove the code
-- [ ] For code used only in tests: add `#[cfg(test)]` or `#[allow(dead_code)]` with a comment explaining why
-- [ ] For `RegKeyGuard`: either use it or remove it
-- [ ] For `from_display()`: either use it or remove it
-- [ ] Target: reduce from 21 to ≤5 annotations (with justified comments)
+- [x] Audit each `#[allow(dead_code)]` annotation
+- [x] For truly unused code: remove the code
+- [x] For code used only in tests: add `#[cfg(test)]` or `#[allow(dead_code)]` with a comment explaining why
+- [x] For `RegKeyGuard`: either use it or remove it
+- [x] For `from_display()`: either use it or remove it
+- [x] Target: reduce from 21 to ≤5 annotations (with justified comments)
       **Acceptance:** ≤5 `#[allow(dead_code)]` annotations remain, each with a justification comment.
 
 ---
@@ -261,12 +261,12 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/{startup.rs, performance.rs, touchpad.rs (or touchpad/)}`
 **Tasks:**
 
-- [ ] Audit all `unsafe` blocks in the codebase
-- [ ] Add `// SAFETY:` comment before each `unsafe` block explaining:
+- [x] Audit all `unsafe` blocks in the codebase
+- [x] Add `// SAFETY:` comment before each `unsafe` block explaining:
   - Why the operation is safe
   - What invariants are being upheld
   - What could go wrong if the unsafe block is misused
-- [ ] Verify all unsafe blocks have SAFETY comments
+- [x] Verify all unsafe blocks have SAFETY comments
       **Acceptance:** 100% of `unsafe` blocks have `// SAFETY:` comments.
 
 ---
@@ -278,10 +278,10 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src/components/ErrorBoundary.tsx`
 **Tasks:**
 
-- [ ] If not already fixed in S16-08, replace `APP_VERSION = '0.1.0'` with:
+- [x] If not already fixed in S16-08, replace `APP_VERSION = '0.1.0'` with:
   - `const APP_VERSION = import.meta.env.PACKAGE_VERSION ?? '1.0.0';`
   - Or read from `package.json` via Vite's `define` config
-- [ ] Verify version displays correctly in error report
+- [x] Verify version displays correctly in error report
       **Acceptance:** `APP_VERSION` is dynamically read, not hardcoded.
 
 ---
@@ -293,13 +293,13 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/commands/privacy.rs` (new or existing), `src/pages/PrivacySettings.tsx` (new or existing)
 **Tasks:**
 
-- [ ] Add `export_user_data` Tauri command that:
+- [x] Add `export_user_data` Tauri command that:
   - Collects all user data files (hardware profile, hotkeys, consent, AI logs, settings)
   - Bundles them into a ZIP archive
   - Returns the file path or saves to user-chosen location
-- [ ] Add "Download My Data" button in Settings → Privacy
-- [ ] Add file save dialog using Tauri's dialog API
-- [ ] Add test for export functionality
+- [x] Add "Download My Data" button in Settings → Privacy
+- [x] Add file save dialog using Tauri's dialog API
+- [x] Add test for export functionality
       **Acceptance:** Users can export all their data as a ZIP file. GDPR Art. 20 compliance.
 
 ---
@@ -311,15 +311,15 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Files:** `src-tauri/src/util/auth.rs`, `src-tauri/src/util/consent_audit.rs`, `src-tauri/src/hw/iotservice.rs`
 **Tasks:**
 
-- [ ] Add `hkdf` crate to `Cargo.toml`
-- [ ] In `auth.rs`, add `derive_subkey(purpose: &str) -> [u8; 32]` using HKDF-SHA256
-- [ ] Use separate sub-keys for:
+- [x] Add `hkdf` crate to `Cargo.toml`
+- [x] In `auth.rs`, add `derive_subkey(purpose: &str) -> [u8; 32]` using HKDF-SHA256
+- [x] Use separate sub-keys for:
   - HMAC signing (elevated bridge)
   - Audit log integrity
   - WiFi password encryption
-- [ ] Migrate existing code to use derived sub-keys
-- [ ] Add backward compatibility: if old key exists, use it directly (no sub-key derivation)
-- [ ] Add tests for key derivation
+- [x] Migrate existing code to use derived sub-keys
+- [x] Add backward compatibility: if old key exists, use it directly (no sub-key derivation)
+- [x] Add tests for key derivation
       **Acceptance:** Each cryptographic purpose uses a separate derived sub-key.
 
 ---
@@ -329,30 +329,30 @@ Address medium-term architectural debt: extract shared WMI utilities, split the 
 **Severity:** N/A (process)
 **Tasks:**
 
-- [ ] Run all 9 health checks
-- [ ] Fix any failures
-- [ ] Commit with message: `feat(sprint-19): architecture, code quality, and test coverage improvements (P2)`
-- [ ] Verify test count significantly increased (target: 230+ tests)
+- [x] Run all 9 health checks
+- [x] Fix any failures
+- [x] Commit with message: `feat(sprint-19): architecture, code quality, and test coverage improvements (P2)`
+- [x] Verify test count significantly increased (target: 230+ tests)
       **Acceptance:** 9/9 health checks pass. Test count ≥ 230.
 
 ---
 
 ## Sprint Exit Criteria
 
-- [ ] Shared WMI extraction utility exists and is used by all hw modules
-- [ ] `touchpad.rs` is split into a module directory
-- [ ] No blanket `From<String>`/`From<&str>` for `HardwareError`
-- [ ] `ai.rs` and `hotkeys.rs` use `HardwareResult<T>`
-- [ ] `spawn_blocking` boilerplate extracted into helper
-- [ ] `wmi_cache.rs` has ≥5 unit tests
-- [ ] `elev_bridge.rs` has ≥5 unit tests
-- [ ] `ai_usage.rs` has ≥4 unit tests
-- [ ] `debug_log.rs` has ≥3 unit tests
-- [ ] Frontend has ≥13 test files
-- [ ] No duplicate `Props` interface in `MainWindow.tsx`
-- [ ] ≤5 `#[allow(dead_code)]` annotations with justification
-- [ ] All `unsafe` blocks have SAFETY comments
-- [ ] Data export feature works
-- [ ] Separate sub-keys for each cryptographic purpose
-- [ ] 9/9 health checks pass
-- [ ] Test count ≥ 230
+- [x] Shared WMI extraction utility exists and is used by all hw modules
+- [x] `touchpad.rs` is split into a module directory
+- [x] No blanket `From<String>`/`From<&str>` for `HardwareError`
+- [x] `ai.rs` and `hotkeys.rs` use `HardwareResult<T>`
+- [x] `spawn_blocking` boilerplate extracted into helper
+- [x] `wmi_cache.rs` has ≥5 unit tests
+- [x] `elev_bridge.rs` has ≥5 unit tests
+- [x] `ai_usage.rs` has ≥4 unit tests
+- [x] `debug_log.rs` has ≥3 unit tests
+- [x] Frontend has ≥13 test files
+- [x] No duplicate `Props` interface in `MainWindow.tsx`
+- [x] ≤5 `#[allow(dead_code)]` annotations with justification
+- [x] All `unsafe` blocks have SAFETY comments
+- [x] Data export feature works
+- [x] Separate sub-keys for each cryptographic purpose
+- [x] 9/9 health checks pass
+- [x] Test count ≥ 230

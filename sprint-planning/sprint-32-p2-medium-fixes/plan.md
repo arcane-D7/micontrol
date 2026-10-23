@@ -5,7 +5,8 @@
 > **Theme:** Fix 7 medium-priority issues — adaptive brightness, device discovery, IoT elevation, battery cycles, diagnostics UX, IoT retry, credential security
 > **Duration:** ~3–4 days
 > **Dependencies:** Sprint 31 (all P1 high fixes)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete — commit `8918a9c`
+> **Execution evidence:** The commit records all seven S32 fixes. Repository-wide integration validation later passed all 11 health gates on 2026-09-18 (Sprint 39); this records the full gate, not a separate live-hardware run.
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Final.md` (M-1 through M-7)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
@@ -158,12 +159,12 @@ Ok(None) => {
 
 #### Acceptance Criteria
 
-- [ ] `get_ambient_lux()` logs at `debug` level when sensor is found and when lux is read
-- [ ] `set_ai_brightness()` logs at `error` level when config write fails
-- [ ] `set_ai_brightness()` logs at `info` level when enabled/disabled
-- [ ] No-sensor warning includes diagnostic hints
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `get_ambient_lux()` logs at `debug` level when sensor is found and when lux is read
+- [x] `set_ai_brightness()` logs at `error` level when config write fails
+- [x] `set_ai_brightness()` logs at `info` level when enabled/disabled
+- [x] No-sensor warning includes diagnostic hints
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -197,9 +198,7 @@ const [
   touchpadResult,
   perfMode,
   chargeThreshold,
-] = await Promise.all([
-  /* ... existing ... */
-]);
+] = await Promise.all([/* ... existing ... */]);
 
 // ... set all states ...
 
@@ -224,11 +223,11 @@ try {
 
 #### Acceptance Criteria
 
-- [ ] `doInitialLoad` calls `get_hardware_profile` after the main `Promise.all`
-- [ ] If profile is null, calls `run_hardware_discovery` automatically
-- [ ] Device model shows on first visit without manual scan
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] `doInitialLoad` calls `get_hardware_profile` after the main `Promise.all`
+- [x] If profile is null, calls `run_hardware_discovery` automatically
+- [x] Device model shows on first visit without manual scan
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -290,11 +289,11 @@ export default function IotModulePanel({ hw }: { hw: Hardware }) {
 
 #### Acceptance Criteria
 
-- [ ] No `isElevated()` check in IotModulePanel
-- [ ] No "Re-launch as Administrator" lock screen
-- [ ] EC RAM operations work without process elevation (via bridge)
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] No `isElevated()` check in IotModulePanel
+- [x] No "Re-launch as Administrator" lock screen
+- [x] EC RAM operations work without process elevation (via bridge)
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -387,12 +386,12 @@ fn get_cycle_count_powercfg() -> Option<u32> {
 
 #### Acceptance Criteria
 
-- [ ] `get_cycle_count_powercfg()` implemented with `CREATE_NO_WINDOW`
-- [ ] `get_battery_info()` uses powercfg fallback when WMI cycle_count is 0
-- [ ] Cycle count shows a non-zero value when the battery has been cycled
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `get_cycle_count_powercfg()` implemented with `CREATE_NO_WINDOW`
+- [x] `get_battery_info()` uses powercfg fallback when WMI cycle_count is 0
+- [x] Cycle count shows a non-zero value when the battery has been cycled
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -457,10 +456,10 @@ Add the translation key in each language file:
 
 #### Acceptance Criteria
 
-- [ ] Explanatory note appears below Channel Diagnostics when `debugInfo` is present
-- [ ] Note is translated in all 4 languages
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] Explanatory note appears below Channel Diagnostics when `debugInfo` is present
+- [x] Note is translated in all 4 languages
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -564,13 +563,13 @@ export default function IotDeviceCard() {
 
 #### Acceptance Criteria
 
-- [ ] Auto-retry every 5 seconds when `pipe_available` is false
-- [ ] Retry count displayed
-- [ ] Expected pipe path shown in diagnostic info
-- [ ] "Refresh now" button for manual retry
-- [ ] Auto-retry stops when pipe becomes available
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] Auto-retry every 5 seconds when `pipe_available` is false
+- [x] Retry count displayed
+- [x] Expected pipe path shown in diagnostic info
+- [x] "Refresh now" button for manual retry
+- [x] Auto-retry stops when pipe becomes available
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -658,15 +657,15 @@ pub fn delete_secret(key: String) -> Result<(), String> {
 
 #### Acceptance Criteria
 
-- [ ] `set_secret` rejects keys not in `ALLOWED_SECRET_KEYS`
-- [ ] `delete_secret` rejects keys not in `ALLOWED_SECRET_KEYS`
-- [ ] Error message includes the rejected key name
-- [ ] Existing functionality for `openai_api_key` and `telemetry_consent` still works
-- [ ] Unit test: `test_set_secret_rejects_unknown_key`
-- [ ] Unit test: `test_delete_secret_rejects_unknown_key`
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `set_secret` rejects keys not in `ALLOWED_SECRET_KEYS`
+- [x] `delete_secret` rejects keys not in `ALLOWED_SECRET_KEYS`
+- [x] Error message includes the rejected key name
+- [x] Existing functionality for `openai_api_key` and `telemetry_consent` still works
+- [x] Unit test: `test_set_secret_rejects_unknown_key`
+- [x] Unit test: `test_delete_secret_rejects_unknown_key`
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 

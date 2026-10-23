@@ -84,14 +84,14 @@ The following modules must be migrated to `HardwareResult<T>`:
 
 #### Acceptance Criteria
 
-- [ ] All `hw/*.rs` modules return `HardwareResult<T>` instead of `anyhow::Result`
-- [ ] `HardwareError` enum has appropriate variants for all error cases
-- [ ] No `anyhow::Result` remains in any `hw/*.rs` module (except `#[cfg(test)]` helpers if needed)
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes (all existing tests + any new tests)
-- [ ] Error messages are structured and user-friendly
-- [ ] No regressions in functionality
+- [x] All `hw/*.rs` modules return `HardwareResult<T>` instead of `anyhow::Result`
+- [x] `HardwareError` enum has appropriate variants for all error cases
+- [x] No `anyhow::Result` remains in any `hw/*.rs` module (except `#[cfg(test)]` helpers if needed)
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes (all existing tests + any new tests)
+- [x] Error messages are structured and user-friendly
+- [x] No regressions in functionality
 
 ---
 
@@ -112,11 +112,11 @@ Hardware profiles are stored in both `discovery.rs` and `state.rs`, with no sync
 
 #### Acceptance Criteria
 
-- [ ] Single source of truth for hardware profiles (either `discovery.rs` or `state.rs`, not both)
-- [ ] If both must exist, a synchronization function ensures consistency
-- [ ] Unit test verifies profile changes propagate correctly
-- [ ] No stale profile data after update
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Single source of truth for hardware profiles (either `discovery.rs` or `state.rs`, not both)
+- [x] If both must exist, a synchronization function ensures consistency
+- [x] Unit test verifies profile changes propagate correctly
+- [x] No stale profile data after update
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -137,12 +137,12 @@ Hardware profiles are stored in both `discovery.rs` and `state.rs`, with no sync
 
 #### Acceptance Criteria
 
-- [ ] `tokio` features are explicitly listed (e.g., `["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"]`)
-- [ ] Only features actually used by the codebase are included
-- [ ] `cargo check` passes
-- [ ] `cargo test` passes
-- [ ] Binary size does not increase
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `tokio` features are explicitly listed (e.g., `["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"]`)
+- [x] Only features actually used by the codebase are included
+- [x] `cargo check` passes
+- [x] `cargo test` passes
+- [x] Binary size does not increase
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -163,11 +163,11 @@ Key architectural functions in `state.rs`, `panic.rs`, and `wmi_cache.rs` are de
 
 #### Acceptance Criteria
 
-- [ ] Each dead code function is either wired into the codebase or removed
-- [ ] If removed, no references remain
-- [ ] If wired, unit test covers the new call path
-- [ ] `cargo clippy -- -D warnings` passes with no dead code warnings
-- [ ] `cargo check` passes
+- [x] Each dead code function is either wired into the codebase or removed
+- [x] If removed, no references remain
+- [x] If wired, unit test covers the new call path
+- [x] `cargo clippy -- -D warnings` passes with no dead code warnings
+- [x] `cargo check` passes
 
 ---
 
@@ -188,13 +188,13 @@ Key architectural functions in `state.rs`, `panic.rs`, and `wmi_cache.rs` are de
 
 #### Acceptance Criteria
 
-- [ ] `BatteryStaticData` (design capacity, design voltage, chemistry, etc.) is cached in `OnceLock` or `LazyLock`
-- [ ] `NumberOfLogicalProcessors` is cached in `OnceLock`
-- [ ] Dynamic data (current capacity, charge rate) is still queried on every poll
-- [ ] `battery.rs` issues at most 1 WMI query per poll (down from 3)
-- [ ] `processes.rs` issues at most 1 WMI query per call (down from 2)
-- [ ] Unit test verifies cache is populated on first call and reused on second
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `BatteryStaticData` (design capacity, design voltage, chemistry, etc.) is cached in `OnceLock` or `LazyLock`
+- [x] `NumberOfLogicalProcessors` is cached in `OnceLock`
+- [x] Dynamic data (current capacity, charge rate) is still queried on every poll
+- [x] `battery.rs` issues at most 1 WMI query per poll (down from 3)
+- [x] `processes.rs` issues at most 1 WMI query per call (down from 2)
+- [x] Unit test verifies cache is populated on first call and reused on second
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -215,13 +215,13 @@ Key architectural functions in `state.rs`, `panic.rs`, and `wmi_cache.rs` are de
 
 #### Acceptance Criteria
 
-- [ ] Google Fonts `@import` removed from `globals.css`
-- [ ] Font files (`.woff2`) are bundled locally in `src/assets/fonts/` or `public/fonts/`
-- [ ] `@font-face` declarations reference local files
-- [ ] No external font requests on app launch
-- [ ] `npm run build` passes
-- [ ] Visual appearance is unchanged (same font family and weights)
-- [ ] `npm run lint` passes
+- [x] Google Fonts `@import` removed from `globals.css`
+- [x] Font files (`.woff2`) are bundled locally in `src/assets/fonts/` or `public/fonts/`
+- [x] `@font-face` declarations reference local files
+- [x] No external font requests on app launch
+- [x] `npm run build` passes
+- [x] Visual appearance is unchanged (same font family and weights)
+- [x] `npm run lint` passes
 
 ---
 
@@ -242,12 +242,12 @@ Key architectural functions in `state.rs`, `panic.rs`, and `wmi_cache.rs` are de
 
 #### Acceptance Criteria
 
-- [ ] Sidebar component is wrapped in `React.memo`
-- [ ] Sidebar does not re-render when unrelated state changes
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
-- [ ] `npm run build` passes
-- [ ] No visual regressions
+- [x] Sidebar component is wrapped in `React.memo`
+- [x] Sidebar does not re-render when unrelated state changes
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
+- [x] `npm run build` passes
+- [x] No visual regressions
 
 ---
 
@@ -268,11 +268,11 @@ Vite's default chunking may create oversized bundles. Manual chunking can improv
 
 #### Acceptance Criteria
 
-- [ ] `build.rollupOptions.output.manualChunks` is configured in `vite.config.ts`
-- [ ] Vendor libraries (React, Tauri API, etc.) are in separate chunks
-- [ ] `npm run build` passes
-- [ ] Bundle analysis shows improved chunking
-- [ ] No runtime errors from chunk splitting
+- [x] `build.rollupOptions.output.manualChunks` is configured in `vite.config.ts`
+- [x] Vendor libraries (React, Tauri API, etc.) are in separate chunks
+- [x] `npm run build` passes
+- [x] Bundle analysis shows improved chunking
+- [x] No runtime errors from chunk splitting
 
 ---
 
@@ -293,12 +293,12 @@ Vite's default chunking may create oversized bundles. Manual chunking can improv
 
 #### Acceptance Criteria
 
-- [ ] Cache invalidation only triggers on `WMIConnectionError` (or equivalent connection-level error)
-- [ ] Transient query errors (class not found, property not found) do NOT invalidate the cache
-- [ ] Different error types are distinguished (ARCH-008)
-- [ ] Unit test verifies cache is NOT invalidated on transient error
-- [ ] Unit test verifies cache IS invalidated on connection error
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Cache invalidation only triggers on `WMIConnectionError` (or equivalent connection-level error)
+- [x] Transient query errors (class not found, property not found) do NOT invalidate the cache
+- [x] Different error types are distinguished (ARCH-008)
+- [x] Unit test verifies cache is NOT invalidated on transient error
+- [x] Unit test verifies cache IS invalidated on connection error
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -319,13 +319,13 @@ The HMAC key used for IPC authentication lives forever — there is no rotation 
 
 #### Acceptance Criteria
 
-- [ ] HMAC key has a configurable rotation period (default: 30 days)
-- [ ] Key rotation generates a new key and stores it in the keyring
-- [ ] Old key is accepted for a grace period (default: 7 days) during rotation
-- [ ] Key rotation is logged
-- [ ] Unit test verifies key rotation produces a new key
-- [ ] Unit test verifies old key is accepted during grace period
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] HMAC key has a configurable rotation period (default: 30 days)
+- [x] Key rotation generates a new key and stores it in the keyring
+- [x] Old key is accepted for a grace period (default: 7 days) during rotation
+- [x] Key rotation is logged
+- [x] Unit test verifies key rotation produces a new key
+- [x] Unit test verifies old key is accepted during grace period
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -347,13 +347,13 @@ Nonce anti-replay only lasts for the process lifetime. If the process restarts, 
 
 #### Acceptance Criteria
 
-- [ ] Nonces are persisted to disk (e.g., in a nonce store file)
-- [ ] Nonces have a TTL (default: 5 minutes) and are expired automatically
-- [ ] On process restart, persisted nonces are loaded
-- [ ] Expired nonces are purged on load
-- [ ] Unit test verifies nonce is rejected after process restart
-- [ ] Unit test verifies expired nonce is purged
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Nonces are persisted to disk (e.g., in a nonce store file)
+- [x] Nonces have a TTL (default: 5 minutes) and are expired automatically
+- [x] On process restart, persisted nonces are loaded
+- [x] Expired nonces are purged on load
+- [x] Unit test verifies nonce is rejected after process restart
+- [x] Unit test verifies expired nonce is purged
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -374,11 +374,11 @@ IoTService IPC writes are not rate-limited. A rogue process could flood the pipe
 
 #### Acceptance Criteria
 
-- [ ] IPC writes are rate-limited (e.g., max 100 writes/second)
-- [ ] Rate limit is configurable
-- [ ] Exceeded rate limit returns a clear error
-- [ ] Unit test verifies rate limiting triggers
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] IPC writes are rate-limited (e.g., max 100 writes/second)
+- [x] Rate limit is configurable
+- [x] Exceeded rate limit returns a clear error
+- [x] Unit test verifies rate limiting triggers
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -399,11 +399,11 @@ IoTService IPC writes are not rate-limited. A rogue process could flood the pipe
 
 #### Acceptance Criteria
 
-- [ ] `Cargo.toml` or `clippy.toml` has a curated set of lints
-- [ ] Actionable lints are set to `deny`
-- [ ] Non-actionable or opinionated lints are set to `allow` with a comment explaining why
-- [ ] `cargo clippy -- -D warnings` passes with 0 warnings
-- [ ] No new clippy warnings introduced
+- [x] `Cargo.toml` or `clippy.toml` has a curated set of lints
+- [x] Actionable lints are set to `deny`
+- [x] Non-actionable or opinionated lints are set to `allow` with a comment explaining why
+- [x] `cargo clippy -- -D warnings` passes with 0 warnings
+- [x] No new clippy warnings introduced
 
 ---
 
@@ -424,11 +424,11 @@ Hardware profile JSON is persisted to disk without integrity check. An attacker 
 
 #### Acceptance Criteria
 
-- [ ] Hardware profile JSON is signed with HMAC before persistence
-- [ ] On load, HMAC is verified before deserialization
-- [ ] Tampered profile is rejected with a clear error and falls back to discovery
-- [ ] Unit test verifies tampered profile is detected
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Hardware profile JSON is signed with HMAC before persistence
+- [x] On load, HMAC is verified before deserialization
+- [x] Tampered profile is rejected with a clear error and falls back to discovery
+- [x] Unit test verifies tampered profile is detected
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -449,10 +449,10 @@ Hardware profile JSON is persisted to disk without integrity check. An attacker 
 
 #### Acceptance Criteria
 
-- [ ] `thread::sleep` replaced with `tokio::time::sleep` (or equivalent async sleep)
-- [ ] Retry function is async or properly yields to the runtime
-- [ ] Unit test verifies retry still works correctly
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `thread::sleep` replaced with `tokio::time::sleep` (or equivalent async sleep)
+- [x] Retry function is async or properly yields to the runtime
+- [x] Unit test verifies retry still works correctly
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -460,21 +460,21 @@ Hardware profile JSON is persisted to disk without integrity check. An attacker 
 
 Before committing the sprint, verify ALL of the following:
 
-- [ ] All 15 tickets have their acceptance criteria fully met
-- [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` passes
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes (0 warnings)
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes (all tests green)
-- [ ] `npx tsc --noEmit` passes (0 errors)
-- [ ] `npm run lint` passes (0 warnings)
-- [ ] `npm run format:check` passes
-- [ ] `npm run build` passes
-- [ ] `npm run version:check` passes
-- [ ] ALL `hw/*.rs` modules use `HardwareResult<T>` (no `anyhow::Result` in hw layer)
-- [ ] No Google Fonts `@import` in CSS
-- [ ] No `tokio` `features = ["full"]` in Cargo.toml
-- [ ] No dead code warnings from clippy
-- [ ] Sprint commit message follows format: `feat(sprint-14): <summary>`
+- [x] All 15 tickets have their acceptance criteria fully met
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` passes
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes (0 warnings)
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes (all tests green)
+- [x] `npx tsc --noEmit` passes (0 errors)
+- [x] `npm run lint` passes (0 warnings)
+- [x] `npm run format:check` passes
+- [x] `npm run build` passes
+- [x] `npm run version:check` passes
+- [x] ALL `hw/*.rs` modules use `HardwareResult<T>` (no `anyhow::Result` in hw layer)
+- [x] No Google Fonts `@import` in CSS
+- [x] No `tokio` `features = ["full"]` in Cargo.toml
+- [x] No dead code warnings from clippy
+- [x] Sprint commit message follows format: `feat(sprint-14): <summary>`
 
 ---
 

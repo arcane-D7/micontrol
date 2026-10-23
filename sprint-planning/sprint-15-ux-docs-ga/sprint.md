@@ -65,13 +65,13 @@ The current README is in Portuguese, reads like a running changelog/roadmap, and
 
 #### Acceptance Criteria
 
-- [ ] README is written entirely in English
-- [ ] README follows standard structure: title, badges, description, features, screenshots, installation, usage, configuration, troubleshooting, contributing, license
-- [ ] Competitive positioning section explains how miPC differs from alternatives
-- [ ] No changelog/roadmap content in README (moved to CHANGELOG.md)
-- [ ] Screenshots or GIFs included (or placeholder with TODO if not yet available)
-- [ ] Installation instructions cover both installer and build-from-source
-- [ ] Links to documentation and support channels
+- [x] README is written entirely in English
+- [x] README follows standard structure: title, badges, description, features, screenshots, installation, usage, configuration, troubleshooting, contributing, license
+- [x] Competitive positioning section explains how miPC differs from alternatives
+- [x] No changelog/roadmap content in README (moved to CHANGELOG.md)
+- [x] Screenshots or GIFs included (or placeholder with TODO if not yet available)
+- [x] Installation instructions cover both installer and build-from-source
+- [x] Links to documentation and support channels
 
 ---
 
@@ -92,12 +92,12 @@ No CHANGELOG.md exists. Release history is only visible through git log.
 
 #### Acceptance Criteria
 
-- [ ] `CHANGELOG.md` created at project root
-- [ ] Follows [Keep a Changelog](https://keepachangelog.com/) format
-- [ ] Includes all versions from 0.1.0 through 1.0.0
-- [ ] Sections: Added, Changed, Deprecated, Removed, Fixed, Security
-- [ ] Sprints 1–15 are summarized in the appropriate version sections
-- [ ] Unreleased section is present for future changes
+- [x] `CHANGELOG.md` created at project root
+- [x] Follows [Keep a Changelog](https://keepachangelog.com/) format
+- [x] Includes all versions from 0.1.0 through 1.0.0
+- [x] Sections: Added, Changed, Deprecated, Removed, Fixed, Security
+- [x] Sprints 1–15 are summarized in the appropriate version sections
+- [x] Unreleased section is present for future changes
 
 ---
 
@@ -118,12 +118,12 @@ Version is still 0.1.0 in `package.json`, `Cargo.toml`, and `tauri.conf.json`. T
 
 #### Acceptance Criteria
 
-- [ ] `package.json` version is `1.0.0`
-- [ ] `Cargo.toml` version is `1.0.0`
-- [ ] `tauri.conf.json` version is `1.0.0`
-- [ ] `npm run version:check` passes (all consistent)
-- [ ] Version is referenced in README and CHANGELOG
-- [ ] This ticket is done LAST (after all other sprint tickets are complete)
+- [x] `package.json` version is `1.0.0`
+- [x] `Cargo.toml` version is `1.0.0`
+- [x] `tauri.conf.json` version is `1.0.0`
+- [x] `npm run version:check` passes (all consistent)
+- [x] Version is referenced in README and CHANGELOG
+- [x] This ticket is done LAST (after all other sprint tickets are complete)
 
 ---
 
@@ -144,14 +144,14 @@ There is no onboarding or first-run experience. Users are dropped into the main 
 
 #### Acceptance Criteria
 
-- [ ] Onboarding wizard appears on first launch (detected via settings flag)
-- [ ] Wizard includes: welcome screen, feature overview, privacy consent, optional AI setup
-- [ ] Wizard can be skipped (settings flag set to completed)
-- [ ] Wizard is accessible from Settings ("Replay onboarding")
-- [ ] All wizard strings are translatable (i18n keys in all 4 locales)
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
-- [ ] `npm run build` passes
+- [x] Onboarding wizard appears on first launch (detected via settings flag)
+- [x] Wizard includes: welcome screen, feature overview, privacy consent, optional AI setup
+- [x] Wizard can be skipped (settings flag set to completed)
+- [x] Wizard is accessible from Settings ("Replay onboarding")
+- [x] All wizard strings are translatable (i18n keys in all 4 locales)
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
+- [x] `npm run build` passes
 
 ---
 
@@ -172,13 +172,13 @@ Module declarations in `lib.rs` lack doc comments. Module root files (`hw/mod.rs
 
 #### Acceptance Criteria
 
-- [ ] Every module in `lib.rs` has a `///` doc comment on the `mod` declaration
-- [ ] Every module root file (`mod.rs` or equivalent) has a `//!` module-level doc comment
-- [ ] Every `hw/*.rs` module has a `//!` doc comment explaining its purpose
-- [ ] Every `commands/*.rs` module has a `//!` doc comment
-- [ ] Every `util/*.rs` module has a `//!` doc comment
-- [ ] `cargo doc --manifest-path src-tauri/Cargo.toml` builds without warnings
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Every module in `lib.rs` has a `///` doc comment on the `mod` declaration
+- [x] Every module root file (`mod.rs` or equivalent) has a `//!` module-level doc comment
+- [x] Every `hw/*.rs` module has a `//!` doc comment explaining its purpose
+- [x] Every `commands/*.rs` module has a `//!` doc comment
+- [x] Every `util/*.rs` module has a `//!` doc comment
+- [x] `cargo doc --manifest-path src-tauri/Cargo.toml` builds without warnings
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -199,11 +199,11 @@ There is no frontend architecture documentation. New contributors have no guide 
 
 #### Acceptance Criteria
 
-- [ ] `docs/frontend-architecture.md` created
-- [ ] Documents: component hierarchy, state management, routing, i18n, IPC with Tauri
-- [ ] Includes a diagram (Mermaid or similar) of component structure
-- [ ] Documents the hook pattern (`useSettings`, `useAnalysisLogger`, etc.)
-- [ ] References CONTRIBUTING.md for contribution workflow
+- [x] `docs/frontend-architecture.md` created
+- [x] Documents: component hierarchy, state management, routing, i18n, IPC with Tauri
+- [x] Includes a diagram (Mermaid or similar) of component structure
+- [x] Documents the hook pattern (`useSettings`, `useAnalysisLogger`, etc.)
+- [x] References CONTRIBUTING.md for contribution workflow
 
 ---
 
@@ -224,12 +224,12 @@ There is no frontend architecture documentation. New contributors have no guide 
 
 #### Acceptance Criteria
 
-- [ ] All hardcoded strings in `tabs/audio.tsx` replaced with `t()` calls
-- [ ] All hardcoded strings in `tabs/wifi.tsx` replaced with `t()` calls
-- [ ] New i18n keys added to `en.json` and translated in `pt.json`, `es.json`, `fr.json`
-- [ ] i18n checker passes with 0 missing keys
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
+- [x] All hardcoded strings in `tabs/audio.tsx` replaced with `t()` calls
+- [x] All hardcoded strings in `tabs/wifi.tsx` replaced with `t()` calls
+- [x] New i18n keys added to `en.json` and translated in `pt.json`, `es.json`, `fr.json`
+- [x] i18n checker passes with 0 missing keys
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
 
 ---
 
@@ -250,11 +250,11 @@ There is no frontend architecture documentation. New contributors have no guide 
 
 #### Acceptance Criteria
 
-- [ ] Allow button uses `btn-primary` class
-- [ ] Deny button uses `btn-ghost` or `btn-secondary` class
-- [ ] Visual hierarchy clearly indicates Allow is the primary action
-- [ ] `npm run build` passes
-- [ ] No visual regressions
+- [x] Allow button uses `btn-primary` class
+- [x] Deny button uses `btn-ghost` or `btn-secondary` class
+- [x] Visual hierarchy clearly indicates Allow is the primary action
+- [x] `npm run build` passes
+- [x] No visual regressions
 
 ---
 
@@ -275,11 +275,11 @@ The watermark in `MainWindow.tsx:320-340` blocks pointer events for underlying c
 
 #### Acceptance Criteria
 
-- [ ] Watermark has `pointer-events: none` CSS property
-- [ ] Underlying content is fully clickable through the watermark area
-- [ ] Watermark remains visually visible
-- [ ] `npm run build` passes
-- [ ] No visual regressions
+- [x] Watermark has `pointer-events: none` CSS property
+- [x] Underlying content is fully clickable through the watermark area
+- [x] Watermark remains visually visible
+- [x] `npm run build` passes
+- [x] No visual regressions
 
 ---
 
@@ -300,10 +300,10 @@ The watermark in `MainWindow.tsx:320-340` blocks pointer events for underlying c
 
 #### Acceptance Criteria
 
-- [ ] WiFi password input has `aria-label` or associated `<label>` element
-- [ ] Label text is translatable (i18n key in all 4 locales)
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
+- [x] WiFi password input has `aria-label` or associated `<label>` element
+- [x] Label text is translatable (i18n key in all 4 locales)
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
 
 ---
 
@@ -324,10 +324,10 @@ Skeleton loaders lack accessible status announcements. Screen reader users are n
 
 #### Acceptance Criteria
 
-- [ ] All skeleton loader components have `role="status"` and `aria-live="polite"`
-- [ ] Loading text is translatable (e.g., "Loading...")
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
+- [x] All skeleton loader components have `role="status"` and `aria-live="polite"`
+- [x] Loading text is translatable (e.g., "Loading...")
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
 
 ---
 
@@ -348,10 +348,10 @@ Skeleton loaders lack accessible status announcements. Screen reader users are n
 
 #### Acceptance Criteria
 
-- [ ] `prefers-reduced-motion: reduce` disables all CSS transitions and animations
-- [ ] All `transition` and `animation` properties are wrapped in `@media (prefers-reduced-motion: no-preference)` or overridden in the reduce query
-- [ ] No layout shift when reduced motion is active
-- [ ] `npm run build` passes
+- [x] `prefers-reduced-motion: reduce` disables all CSS transitions and animations
+- [x] All `transition` and `animation` properties are wrapped in `@media (prefers-reduced-motion: no-preference)` or overridden in the reduce query
+- [x] No layout shift when reduced motion is active
+- [x] `npm run build` passes
 
 ---
 
@@ -373,11 +373,11 @@ Skeleton loaders lack accessible status announcements. Screen reader users are n
 
 #### Acceptance Criteria
 
-- [ ] All hardcoded strings in `ErrorBoundary.tsx` replaced with `t()` calls
-- [ ] New i18n keys added to `en.json` and translated in `pt.json`, `es.json`, `fr.json`
-- [ ] i18n checker passes with 0 missing keys
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
+- [x] All hardcoded strings in `ErrorBoundary.tsx` replaced with `t()` calls
+- [x] New i18n keys added to `en.json` and translated in `pt.json`, `es.json`, `fr.json`
+- [x] i18n checker passes with 0 missing keys
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
 
 ---
 
@@ -398,11 +398,11 @@ Sentry is initialized in the backend (`lib.rs`) unconditionally, but the consent
 
 #### Acceptance Criteria
 
-- [ ] Consent dialog includes text about crash reporting (Sentry)
-- [ ] Consent text is translatable in all 4 locales
-- [ ] If user denies consent, Sentry is not initialized (or is disabled at runtime)
-- [ ] Privacy policy section mentions Sentry and what data is collected
-- [ ] `npx tsc --noEmit` passes
+- [x] Consent dialog includes text about crash reporting (Sentry)
+- [x] Consent text is translatable in all 4 locales
+- [x] If user denies consent, Sentry is not initialized (or is disabled at runtime)
+- [x] Privacy policy section mentions Sentry and what data is collected
+- [x] `npx tsc --noEmit` passes
 
 ---
 
@@ -423,11 +423,11 @@ The AI analysis system prompt lacks an inclusive language check and does not inc
 
 #### Acceptance Criteria
 
-- [ ] System prompt includes instruction to use inclusive language
-- [ ] System prompt includes disclaimer that AI output may be inaccurate
-- [ ] AI analysis results display a disclaimer in the UI
-- [ ] Disclaimer is translatable in all 4 locales
-- [ ] `npx tsc --noEmit` passes
+- [x] System prompt includes instruction to use inclusive language
+- [x] System prompt includes disclaimer that AI output may be inaccurate
+- [x] AI analysis results display a disclaimer in the UI
+- [x] Disclaimer is translatable in all 4 locales
+- [x] `npx tsc --noEmit` passes
 
 ---
 
@@ -448,11 +448,11 @@ There are no keyboard shortcuts for navigating between tabs. Power users cannot 
 
 #### Acceptance Criteria
 
-- [ ] Keyboard shortcuts (e.g., `Alt+1` through `Alt+9`) switch between tabs
-- [ ] Shortcuts are documented in the UI (tooltip or help overlay)
-- [ ] Shortcut hints are translatable
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
+- [x] Keyboard shortcuts (e.g., `Alt+1` through `Alt+9`) switch between tabs
+- [x] Shortcuts are documented in the UI (tooltip or help overlay)
+- [x] Shortcut hints are translatable
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
 
 ---
 
@@ -473,12 +473,12 @@ There are no keyboard shortcuts for navigating between tabs. Power users cannot 
 
 #### Acceptance Criteria
 
-- [ ] ErrorBoundary includes a "Report Issue" link or button
-- [ ] Link opens GitHub Issues page or email client with pre-filled error details
-- [ ] Error details (stack trace, app version, OS) are included in the report
-- [ ] "Reload" button is also present
-- [ ] All strings are translatable
-- [ ] `npx tsc --noEmit` passes
+- [x] ErrorBoundary includes a "Report Issue" link or button
+- [x] Link opens GitHub Issues page or email client with pre-filled error details
+- [x] Error details (stack trace, app version, OS) are included in the report
+- [x] "Reload" button is also present
+- [x] All strings are translatable
+- [x] `npx tsc --noEmit` passes
 
 ---
 
@@ -499,13 +499,13 @@ AI feature costs are opaque. There is no usage tracking or cost estimation, maki
 
 #### Acceptance Criteria
 
-- [ ] AI usage is tracked (number of requests, tokens used)
-- [ ] Cost estimation is displayed in the UI (based on model pricing)
-- [ ] Usage data is persisted locally (not sent to any server)
-- [ ] Usage can be reset by the user
-- [ ] All strings are translatable
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
+- [x] AI usage is tracked (number of requests, tokens used)
+- [x] Cost estimation is displayed in the UI (based on model pricing)
+- [x] Usage data is persisted locally (not sent to any server)
+- [x] Usage can be reset by the user
+- [x] All strings are translatable
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
 
 ---
 
@@ -526,10 +526,10 @@ No CODEOWNERS file exists. PR reviews are not automatically routed to the approp
 
 #### Acceptance Criteria
 
-- [ ] `.github/CODEOWNERS` file created
-- [ ] Owners are assigned for: `src-tauri/`, `src/`, `.github/`, `docs/`
-- [ ] File follows GitHub CODEOWNERS format
-- [ ] Referenced in CONTRIBUTING.md
+- [x] `.github/CODEOWNERS` file created
+- [x] Owners are assigned for: `src-tauri/`, `src/`, `.github/`, `docs/`
+- [x] File follows GitHub CODEOWNERS format
+- [x] Referenced in CONTRIBUTING.md
 
 ---
 
@@ -550,10 +550,10 @@ Pre-commit hooks (husky + lint-staged) do not include TypeScript type checking o
 
 #### Acceptance Criteria
 
-- [ ] `npx tsc --noEmit` is added to `.husky/pre-commit`
-- [ ] `npm run version:check` is added to `.husky/pre-commit`
-- [ ] Pre-commit hook fails if either check fails
-- [ ] Hook is fast enough to not significantly slow down commits (or runs in parallel)
+- [x] `npx tsc --noEmit` is added to `.husky/pre-commit`
+- [x] `npm run version:check` is added to `.husky/pre-commit`
+- [x] Pre-commit hook fails if either check fails
+- [x] Hook is fast enough to not significantly slow down commits (or runs in parallel)
 
 ---
 
@@ -574,11 +574,11 @@ Pre-commit hooks (husky + lint-staged) do not include TypeScript type checking o
 
 #### Acceptance Criteria
 
-- [ ] Opacity is moved from `document.documentElement` to a wrapper element
-- [ ] Only the intended background is affected by opacity
-- [ ] Tray popup and other UI elements are not affected
-- [ ] `npm run build` passes
-- [ ] No visual regressions
+- [x] Opacity is moved from `document.documentElement` to a wrapper element
+- [x] Only the intended background is affected by opacity
+- [x] Tray popup and other UI elements are not affected
+- [x] `npm run build` passes
+- [x] No visual regressions
 
 ---
 
@@ -599,10 +599,10 @@ Release workflow searches for `.msi` artifacts but `bundle.targets` is NSIS only
 
 #### Acceptance Criteria
 
-- [ ] Release workflow only searches for `.nsis` (and `.exe` if applicable) artifacts
-- [ ] `latest.json` only references artifact types that actually exist
-- [ ] No errors in release workflow about missing files
-- [ ] `latest.json` is correctly generated and uploaded
+- [x] Release workflow only searches for `.nsis` (and `.exe` if applicable) artifacts
+- [x] `latest.json` only references artifact types that actually exist
+- [x] No errors in release workflow about missing files
+- [x] `latest.json` is correctly generated and uploaded
 
 ---
 
@@ -610,24 +610,24 @@ Release workflow searches for `.msi` artifacts but `bundle.targets` is NSIS only
 
 Before committing the sprint, verify ALL of the following:
 
-- [ ] All 22 tickets have their acceptance criteria fully met
-- [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` passes
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes (0 warnings)
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes (all tests green)
-- [ ] `cargo doc --manifest-path src-tauri/Cargo.toml` builds without warnings
-- [ ] `npx tsc --noEmit` passes (0 errors)
-- [ ] `npm run lint` passes (0 warnings)
-- [ ] `npm run format:check` passes
-- [ ] `npm run build` passes
-- [ ] `npm run version:check` passes (all at 1.0.0)
-- [ ] README.md is in English and follows product README structure
-- [ ] CHANGELOG.md exists and covers all versions
-- [ ] Version is 1.0.0 in all config files (LAST step)
-- [ ] No hardcoded English strings in tab pages or ErrorBoundary
-- [ ] All i18n keys are present in all 4 locales
-- [ ] No Google Fonts external requests
-- [ ] Sprint commit message follows format: `feat(sprint-15): <summary>`
+- [x] All 22 tickets have their acceptance criteria fully met
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml --check` passes
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes (0 warnings)
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes (all tests green)
+- [x] `cargo doc --manifest-path src-tauri/Cargo.toml` builds without warnings
+- [x] `npx tsc --noEmit` passes (0 errors)
+- [x] `npm run lint` passes (0 warnings)
+- [x] `npm run format:check` passes
+- [x] `npm run build` passes
+- [x] `npm run version:check` passes (all at 1.0.0)
+- [x] README.md is in English and follows product README structure
+- [x] CHANGELOG.md exists and covers all versions
+- [x] Version is 1.0.0 in all config files (LAST step)
+- [x] No hardcoded English strings in tab pages or ErrorBoundary
+- [x] All i18n keys are present in all 4 locales
+- [x] No Google Fonts external requests
+- [x] Sprint commit message follows format: `feat(sprint-15): <summary>`
 
 ---
 

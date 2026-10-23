@@ -90,10 +90,10 @@ Hardcoded strings include: "🔧 EC Debug Panel", "Direct EC RAM access (advance
 
 #### Acceptance Criteria
 
-- [ ] `useI18n` imported and `t()` used for all user-visible strings
-- [ ] New i18n keys added to all 4 locale files (`en.json`, `pt.json`, `es.json`, `fr.json`)
-- [ ] `aria-label` added to all buttons and inputs
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] `useI18n` imported and `t()` used for all user-visible strings
+- [x] New i18n keys added to all 4 locale files (`en.json`, `pt.json`, `es.json`, `fr.json`)
+- [x] `aria-label` added to all buttons and inputs
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -117,10 +117,10 @@ Hardcoded strings include: "🔧 EC Debug Panel", "Direct EC RAM access (advance
 
 #### Acceptance Criteria
 
-- [ ] PRESET_MODELS labels use `t()` or i18n keys
-- [ ] `aria-label` uses `t('settings.showKey')` / `t('settings.hideKey')` (or appropriate keys)
-- [ ] New keys added to all 4 locale files if they don't exist
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] PRESET_MODELS labels use `t()` or i18n keys
+- [x] `aria-label` uses `t('settings.showKey')` / `t('settings.hideKey')` (or appropriate keys)
+- [x] New keys added to all 4 locale files if they don't exist
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -141,10 +141,10 @@ Hardcoded strings include: "🔧 EC Debug Panel", "Direct EC RAM access (advance
 
 #### Acceptance Criteria
 
-- [ ] `src/types/hardware.ts` created with all hardware-related types
-- [ ] `src/types/settings.ts` created with AppSettings, SystemContext, AnalysisLogEntry
-- [ ] All imports updated across the codebase
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] `src/types/hardware.ts` created with all hardware-related types
+- [x] `src/types/settings.ts` created with AppSettings, SystemContext, AnalysisLogEntry
+- [x] All imports updated across the codebase
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -176,12 +176,12 @@ The hook returns 12 functions/values. It should be split into focused hooks.
 
 #### Acceptance Criteria
 
-- [ ] `src/hooks/useAiAnalysis.ts` created — contains analyzeSystem, analyzeWithLogs, testConnection, buildPrompt
-- [ ] `src/hooks/useTelemetryConsent.ts` created — contains consent management functions
-- [ ] `src/lib/aiPromptBuilder.ts` created — contains buildPrompt and prompt construction logic
-- [ ] `useSettings.ts` retains only settings persistence and API key management
-- [ ] All callers updated to import from new hooks
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] `src/hooks/useAiAnalysis.ts` created — contains analyzeSystem, analyzeWithLogs, testConnection, buildPrompt
+- [x] `src/hooks/useTelemetryConsent.ts` created — contains consent management functions
+- [x] `src/lib/aiPromptBuilder.ts` created — contains buildPrompt and prompt construction logic
+- [x] `useSettings.ts` retains only settings persistence and API key management
+- [x] All callers updated to import from new hooks
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -202,12 +202,12 @@ The hook returns 12 functions/values. It should be split into focused hooks.
 
 #### Acceptance Criteria
 
-- [ ] Property getter commands consolidated into `get_iot_device_info` (returns composite struct)
-- [ ] WiFi commands consolidated into `get_iot_wifi_list` (returns list with status)
-- [ ] Power event commands consolidated into `iot_notify_event` with enum parameter
-- [ ] Old commands kept as deprecated wrappers (or removed if no frontend callers)
-- [ ] Frontend callers updated
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Property getter commands consolidated into `get_iot_device_info` (returns composite struct)
+- [x] WiFi commands consolidated into `get_iot_wifi_list` (returns list with status)
+- [x] Power event commands consolidated into `iot_notify_event` with enum parameter
+- [x] Old commands kept as deprecated wrappers (or removed if no frontend callers)
+- [x] Frontend callers updated
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -228,16 +228,16 @@ The hook returns 12 functions/values. It should be split into focused hooks.
 
 #### Acceptance Criteria
 
-- [ ] `src-tauri/src/hw/hotkeys/mod.rs` — re-exports, module-level docs
-- [ ] `src-tauri/src/hw/hotkeys/config.rs` — HotkeyMap, KeyBinding, config persistence
-- [ ] `src-tauri/src/hw/hotkeys/hook.rs` — hook installation, keyboard_hook_proc, raw_input_wnd_proc
-- [ ] `src-tauri/src/hw/hotkeys/actions.rs` — dispatch_action, HotkeyAction handling
-- [ ] `src-tauri/src/hw/hotkeys/wmi.rs` — WMI HID listener
-- [ ] `src-tauri/src/hw/hotkeys/hid_reader.rs` — direct HID device reader
-- [ ] `src-tauri/src/hw/hotkeys/script_security.rs` — script allowlist, consent
-- [ ] `src-tauri/src/hw/hotkeys/remap.rs` — RemapToKey logic
-- [ ] All tests pass, no behavior changes
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `src-tauri/src/hw/hotkeys/mod.rs` — re-exports, module-level docs
+- [x] `src-tauri/src/hw/hotkeys/config.rs` — HotkeyMap, KeyBinding, config persistence
+- [x] `src-tauri/src/hw/hotkeys/hook.rs` — hook installation, keyboard_hook_proc, raw_input_wnd_proc
+- [x] `src-tauri/src/hw/hotkeys/actions.rs` — dispatch_action, HotkeyAction handling
+- [x] `src-tauri/src/hw/hotkeys/wmi.rs` — WMI HID listener
+- [x] `src-tauri/src/hw/hotkeys/hid_reader.rs` — direct HID device reader
+- [x] `src-tauri/src/hw/hotkeys/script_security.rs` — script allowlist, consent
+- [x] `src-tauri/src/hw/hotkeys/remap.rs` — RemapToKey logic
+- [x] All tests pass, no behavior changes
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -258,11 +258,11 @@ The hook returns 12 functions/values. It should be split into focused hooks.
 
 #### Acceptance Criteria
 
-- [ ] `OsdState` struct created, holding OSD_HWND, OSD_LEVEL, OSD_HIDE_VER, OSD_ALPHA, etc.
-- [ ] `HotkeyState` struct created, holding HOOK_HANDLE, RAW_INPUT_ACTIVE, HOOK_THREAD_ID, etc.
-- [ ] State structs held in `AppState` or passed via Tauri managed state
-- [ ] Thread-safe access patterns maintained (Mutex/RwLock as needed)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `OsdState` struct created, holding OSD_HWND, OSD_LEVEL, OSD_HIDE_VER, OSD_ALPHA, etc.
+- [x] `HotkeyState` struct created, holding HOOK_HANDLE, RAW_INPUT_ACTIVE, HOOK_THREAD_ID, etc.
+- [x] State structs held in `AppState` or passed via Tauri managed state
+- [x] Thread-safe access patterns maintained (Mutex/RwLock as needed)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -285,11 +285,11 @@ In `src-tauri/src/commands/hardware.rs:432-441`, the safe write list is hardcode
 
 #### Acceptance Criteria
 
-- [ ] `scripts/ecram-safe-writes.json` created with the 9 current offsets
-- [ ] `is_known_safe_single_byte_write` loads offsets from config file
-- [ ] Falls back to hardcoded defaults if config file is missing
-- [ ] Config file loaded once at startup (cached)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `scripts/ecram-safe-writes.json` created with the 9 current offsets
+- [x] `is_known_safe_single_byte_write` loads offsets from config file
+- [x] Falls back to hardcoded defaults if config file is missing
+- [x] Config file loaded once at startup (cached)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -310,11 +310,11 @@ No E2E testing framework exists. Only `vitest` unit/component tests are present.
 
 #### Acceptance Criteria
 
-- [ ] `@playwright/test` added to devDependencies
-- [ ] `playwright.config.ts` created
-- [ ] At least 3 smoke tests: app launches, tab navigation works, settings persist
-- [ ] E2E tests added to CI workflow (separate job, allowed to fail initially)
-- [ ] `npx tsc --noEmit` passes
+- [x] `@playwright/test` added to devDependencies
+- [x] `playwright.config.ts` created
+- [x] At least 3 smoke tests: app launches, tab navigation works, settings persist
+- [x] E2E tests added to CI workflow (separate job, allowed to fail initially)
+- [x] `npx tsc --noEmit` passes
 
 ---
 
@@ -337,8 +337,8 @@ No E2E testing framework exists. Only `vitest` unit/component tests are present.
 
 #### Acceptance Criteria
 
-- [ ] `LICENSE` file created with MIT license text
-- [ ] Copyright year and holder match README reference
+- [x] `LICENSE` file created with MIT license text
+- [x] Copyright year and holder match README reference
 
 ---
 
@@ -359,10 +359,10 @@ Users cannot rate or provide feedback on AI analysis quality. There is no feedba
 
 #### Acceptance Criteria
 
-- [ ] Thumbs up/down buttons added below AI analysis results
-- [ ] Feedback stored in localStorage (or sent to backend)
-- [ ] Feedback includes analysis ID and timestamp
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] Thumbs up/down buttons added below AI analysis results
+- [x] Feedback stored in localStorage (or sent to backend)
+- [x] Feedback includes analysis ID and timestamp
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -383,11 +383,11 @@ Each `analyze_system` call makes a new HTTP request to the AI provider. Identica
 
 #### Acceptance Criteria
 
-- [ ] Cache key based on system context hash (CPU, memory, battery, fan data)
-- [ ] Cache stored in memory with 5-minute TTL
-- [ ] Cache invalidated when hardware state changes significantly
-- [ ] Cache hit logged for debugging
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Cache key based on system context hash (CPU, memory, battery, fan data)
+- [x] Cache stored in memory with 5-minute TTL
+- [x] Cache invalidated when hardware state changes significantly
+- [x] Cache hit logged for debugging
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -408,10 +408,10 @@ Each `analyze_system` call makes a new HTTP request to the AI provider. Identica
 
 #### Acceptance Criteria
 
-- [ ] `AiUsageStats` gains `model_usage: HashMap<String, u64>` field (model name → request count)
-- [ ] `record_usage()` updated to accept and track model name
-- [ ] `save_to_file()` / `load_from_file()` updated for new field
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `AiUsageStats` gains `model_usage: HashMap<String, u64>` field (model name → request count)
+- [x] `record_usage()` updated to accept and track model name
+- [x] `save_to_file()` / `load_from_file()` updated for new field
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -432,14 +432,14 @@ Each `analyze_system` call makes a new HTTP request to the AI provider. Identica
 
 #### Acceptance Criteria
 
-- [ ] `docs/ai-features.md` created documenting:
+- [x] `docs/ai-features.md` created documenting:
   - What AI features exist (system analysis, log analysis)
   - What data is sent to the AI provider (system info, process names, hardware logs)
   - Which models are supported (OpenAI, Ollama, custom)
   - Privacy implications and consent requirements
   - Rate limiting and usage tracking
-- [ ] Link from README to AI documentation
-- [ ] In-app link to AI documentation from AiAnalysis settings
+- [x] Link from README to AI documentation
+- [x] In-app link to AI documentation from AiAnalysis settings
 
 ---
 

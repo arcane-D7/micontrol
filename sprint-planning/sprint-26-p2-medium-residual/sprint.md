@@ -67,10 +67,10 @@ In `src-tauri/src/commands/ai.rs:206-260`, `test_connection` performs a live API
 
 #### Acceptance Criteria
 
-- [ ] `test_connection` calls `check_daily_limit()` or a separate cooldown mechanism before the API request
-- [ ] If rate limit exceeded, returns a descriptive error (e.g., `"rate_limit_exceeded"`)
-- [ ] Alternatively, track `test_connection` calls in the usage counter
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `test_connection` calls `check_daily_limit()` or a separate cooldown mechanism before the API request
+- [x] If rate limit exceeded, returns a descriptive error (e.g., `"rate_limit_exceeded"`)
+- [x] Alternatively, track `test_connection` calls in the usage counter
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -91,9 +91,9 @@ In `src-tauri/src/util/ai_usage.rs:73-82`, `save_to_file()` writes with plain `s
 
 #### Acceptance Criteria
 
-- [ ] `restrict_file_acl` called after `std::fs::write` in `save_to_file()`
-- [ ] Log warning if ACL restriction fails (but don't crash)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `restrict_file_acl` called after `std::fs::write` in `save_to_file()`
+- [x] Log warning if ACL restriction fails (but don't crash)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -114,9 +114,9 @@ In `src-tauri/src/util/consent_audit.rs:170-185`, `log_consent_event` opens the 
 
 #### Acceptance Criteria
 
-- [ ] `restrict_file_acl` called when the file is first created (check if exists before creating)
-- [ ] Log warning if ACL restriction fails (but don't crash)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `restrict_file_acl` called when the file is first created (check if exists before creating)
+- [x] Log warning if ACL restriction fails (but don't crash)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -137,10 +137,10 @@ In `src-tauri/src/lib.rs:~395`, `key_needs_rotation()` is called at startup and 
 
 #### Acceptance Criteria
 
-- [ ] Option A: Implement `--rotate-key` CLI handler in `main.rs` that calls `rotate_key()`
-- [ ] Option B: Auto-rotate at startup when `key_needs_rotation()` returns true (in `spawn_blocking`)
-- [ ] Option C: Remove the misleading log message and document manual rotation as operational procedure
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Option A: Implement `--rotate-key` CLI handler in `main.rs` that calls `rotate_key()`
+- [x] Option B: Auto-rotate at startup when `key_needs_rotation()` returns true (in `spawn_blocking`)
+- [x] Option C: Remove the misleading log message and document manual rotation as operational procedure
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -161,9 +161,9 @@ In `src-tauri/src/elev_bridge.rs:202`, the timeout fallback path of `run_elevate
 
 #### Acceptance Criteria
 
-- [ ] Timeout-path `launch_elevated_via_uac()` call wrapped in `tokio::task::spawn_blocking`
-- [ ] Error handling maps `JoinError` appropriately
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Timeout-path `launch_elevated_via_uac()` call wrapped in `tokio::task::spawn_blocking`
+- [x] Error handling maps `JoinError` appropriately
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -184,8 +184,8 @@ In `src-tauri/src/elev_bridge.rs:63`, `cleanup_stale_elev_files(&dir)` is called
 
 #### Acceptance Criteria
 
-- [ ] `cleanup_stale_elev_files()` call wrapped in `tokio::task::spawn_blocking`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `cleanup_stale_elev_files()` call wrapped in `tokio::task::spawn_blocking`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -206,8 +206,8 @@ In `src-tauri/src/commands/system.rs:75`, the `set_brightness` Tauri command cal
 
 #### Acceptance Criteria
 
-- [ ] `hw_get_ai_cfg()` call in `set_brightness` wrapped in `run_blocking`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `hw_get_ai_cfg()` call in `set_brightness` wrapped in `run_blocking`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -230,9 +230,9 @@ In `.github/workflows/release.yml`, the code signing verification step uses bash
 
 #### Acceptance Criteria
 
-- [ ] Either add `shell: bash` to the step, or rewrite the check in PowerShell
-- [ ] Verify the logic is correct: fail if `WINDOWS_CERTIFICATE` secret is not set
-- [ ] No `continue-on-error` on the signing step
+- [x] Either add `shell: bash` to the step, or rewrite the check in PowerShell
+- [x] Verify the logic is correct: fail if `WINDOWS_CERTIFICATE` secret is not set
+- [x] No `continue-on-error` on the signing step
 
 ---
 

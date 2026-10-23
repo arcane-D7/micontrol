@@ -2,15 +2,15 @@
 
 ## Sprint Metadata
 
-| Field | Value |
-|-------|-------|
-| **Sprint Name** | Frontend Quality & Memory Leaks |
-| **Sprint Goal** | Fix interval/timeout cleanup, optimistic-update error reverts, and polling deduplication |
-| **Duration Estimate** | 2 weeks (10 working days) |
-| **Priority** | P1 — Frontend stability and memory hygiene. |
-| **Sprint Type** | Bug Fix / Refactor |
-| **Primary Owner** | Frontend engineer (React/TypeScript) |
-| **Secondary Owner** | QA (memory leak reproduction) |
+| Field                 | Value                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| **Sprint Name**       | Frontend Quality & Memory Leaks                                                          |
+| **Sprint Goal**       | Fix interval/timeout cleanup, optimistic-update error reverts, and polling deduplication |
+| **Duration Estimate** | 2 weeks (10 working days)                                                                |
+| **Priority**          | P1 — Frontend stability and memory hygiene.                                              |
+| **Sprint Type**       | Bug Fix / Refactor                                                                       |
+| **Primary Owner**     | Frontend engineer (React/TypeScript)                                                     |
+| **Secondary Owner**   | QA (memory leak reproduction)                                                            |
 
 ## Sprint Goal Statement
 
@@ -28,13 +28,13 @@ Five frontend bugs were identified: (F1) `handleDetect` polling interval never c
 
 ### S5-001 — Clean up `handleDetect` polling interval on unmount
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S5-001 |
-| **Title** | Clear the `handleDetect` polling interval in a `useEffect` cleanup |
-| **Priority** | P0 |
-| **Type** | Bug |
-| **Estimated Effort** | S |
+| Field                | Value                                                              |
+| -------------------- | ------------------------------------------------------------------ |
+| **Ticket ID**        | S5-001                                                             |
+| **Title**            | Clear the `handleDetect` polling interval in a `useEffect` cleanup |
+| **Priority**         | P0                                                                 |
+| **Type**             | Bug                                                                |
+| **Estimated Effort** | S                                                                  |
 
 #### Description
 
@@ -50,12 +50,12 @@ The `setInterval` is created inside `handleDetect` but the returned interval ID 
 
 #### Acceptance Criteria
 
-- [ ] The interval ID is stored in a `useRef`.
-- [ ] A `useEffect` with an empty dependency array (or matching the interval's lifecycle) returns a cleanup function that calls `clearInterval(intervalRef.current)`.
-- [ ] If the interval is recreated conditionally, the cleanup clears the previous interval before setting a new one.
-- [ ] No "state update on unmounted component" warnings in the console after unmount.
-- [ ] Manual test: mount and unmount `MainWindow` 10 times; confirm no leaked intervals (check via DevTools or a counter).
-- [ ] Unit test (if React Testing Library is configured): assert the interval is cleared on unmount.
+- [x] The interval ID is stored in a `useRef`.
+- [x] A `useEffect` with an empty dependency array (or matching the interval's lifecycle) returns a cleanup function that calls `clearInterval(intervalRef.current)`.
+- [x] If the interval is recreated conditionally, the cleanup clears the previous interval before setting a new one.
+- [x] No "state update on unmounted component" warnings in the console after unmount.
+- [x] Manual test: mount and unmount `MainWindow` 10 times; confirm no leaked intervals (check via DevTools or a counter).
+- [x] Unit test (if React Testing Library is configured): assert the interval is cleared on unmount.
 
 #### Implementation Notes
 
@@ -76,13 +76,13 @@ The `setInterval` is created inside `handleDetect` but the returned interval ID 
 
 ### S5-002 — Revert optimistic UI updates on command error for non-touchpad commands
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S5-002 |
-| **Title** | Add error-revert to optimistic updates in `useHardware` for all hardware commands |
-| **Priority** | P1 |
-| **Type** | Bug |
-| **Estimated Effort** | M |
+| Field                | Value                                                                             |
+| -------------------- | --------------------------------------------------------------------------------- |
+| **Ticket ID**        | S5-002                                                                            |
+| **Title**            | Add error-revert to optimistic updates in `useHardware` for all hardware commands |
+| **Priority**         | P1                                                                                |
+| **Type**             | Bug                                                                               |
+| **Estimated Effort** | M                                                                                 |
 
 #### Description
 
@@ -98,12 +98,12 @@ The optimistic update pattern is: (1) update local state immediately, (2) call t
 
 #### Acceptance Criteria
 
-- [ ] Each optimistic command handler captures the previous state value before applying the optimistic update.
-- [ ] In the `.catch()` (or `Result::Err`) branch of the `invoke` call, the state is reverted to the captured previous value.
-- [ ] A brief error toast/notification is shown to the user on revert (coordinate with UI patterns).
-- [ ] The revert is debounced slightly (e.g. 100ms) to avoid flicker if the error returns very fast — or applied immediately if the error is slow; choose based on UX testing.
-- [ ] Unit test: mock `invoke` to reject; assert state reverts to the previous value.
-- [ ] Manual test: trigger a brightness change while the backend is unavailable; confirm the slider reverts and an error is shown.
+- [x] Each optimistic command handler captures the previous state value before applying the optimistic update.
+- [x] In the `.catch()` (or `Result::Err`) branch of the `invoke` call, the state is reverted to the captured previous value.
+- [x] A brief error toast/notification is shown to the user on revert (coordinate with UI patterns).
+- [x] The revert is debounced slightly (e.g. 100ms) to avoid flicker if the error returns very fast — or applied immediately if the error is slow; choose based on UX testing.
+- [x] Unit test: mock `invoke` to reject; assert state reverts to the previous value.
+- [x] Manual test: trigger a brightness change while the backend is unavailable; confirm the slider reverts and an error is shown.
 
 #### Implementation Notes
 
@@ -124,13 +124,13 @@ The optimistic update pattern is: (1) update local state immediately, (2) call t
 
 ### S5-003 — Remove redundant 500ms audio polling
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S5-003 |
-| **Title** | Eliminate the 500ms audio poll in `AudioControl.tsx`; use the unified hardware state |
-| **Priority** | P1 |
-| **Type** | Bug |
-| **Estimated Effort** | S |
+| Field                | Value                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| **Ticket ID**        | S5-003                                                                               |
+| **Title**            | Eliminate the 500ms audio poll in `AudioControl.tsx`; use the unified hardware state |
+| **Priority**         | P1                                                                                   |
+| **Type**             | Bug                                                                                  |
+| **Estimated Effort** | S                                                                                    |
 
 #### Description
 
@@ -146,12 +146,12 @@ The optimistic update pattern is: (1) update local state immediately, (2) call t
 
 #### Acceptance Criteria
 
-- [ ] The 500ms polling `useEffect` in `AudioControl.tsx` is removed.
-- [ ] `AudioControl` consumes volume/mute state from `useHardware` (or the batched `get_hardware_state_batch` from S4-002).
-- [ ] If real-time volume feedback is required (e.g. while dragging a slider), use an event-driven approach (Tauri event on volume change) rather than polling — but for this sprint, consuming the 2s poll is acceptable.
-- [ ] No duplicate IPC calls for audio state.
-- [ ] Manual test: volume control reflects the correct state; adjusting volume updates the UI.
-- [ ] Performance measurement: IPC calls per second for audio drop to 0 (consumed from the batch).
+- [x] The 500ms polling `useEffect` in `AudioControl.tsx` is removed.
+- [x] `AudioControl` consumes volume/mute state from `useHardware` (or the batched `get_hardware_state_batch` from S4-002).
+- [x] If real-time volume feedback is required (e.g. while dragging a slider), use an event-driven approach (Tauri event on volume change) rather than polling — but for this sprint, consuming the 2s poll is acceptable.
+- [x] No duplicate IPC calls for audio state.
+- [x] Manual test: volume control reflects the correct state; adjusting volume updates the UI.
+- [x] Performance measurement: IPC calls per second for audio drop to 0 (consumed from the batch).
 
 #### Implementation Notes
 
@@ -171,13 +171,13 @@ The optimistic update pattern is: (1) update local state immediately, (2) call t
 
 ### S5-004 — Clean up all `setTimeout` calls without cleanup
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S5-004 |
-| **Title** | Track and clear all `setTimeout` calls in `MainWindow.tsx` on unmount |
-| **Priority** | P2 |
-| **Type** | Bug |
-| **Estimated Effort** | S |
+| Field                | Value                                                                 |
+| -------------------- | --------------------------------------------------------------------- |
+| **Ticket ID**        | S5-004                                                                |
+| **Title**            | Track and clear all `setTimeout` calls in `MainWindow.tsx` on unmount |
+| **Priority**         | P2                                                                    |
+| **Type**             | Bug                                                                   |
+| **Estimated Effort** | S                                                                     |
 
 #### Description
 
@@ -193,12 +193,12 @@ Each `setTimeout` returns an ID that should be stored and cleared in a cleanup i
 
 #### Acceptance Criteria
 
-- [ ] All `setTimeout` calls in `MainWindow.tsx` store their IDs in a `useRef` (or an array of refs).
-- [ ] A `useEffect` cleanup clears all pending timeouts on unmount.
-- [ ] If a timeout is conditional (e.g. only set when a dialog is open), the cleanup is scoped appropriately.
-- [ ] No "state update on unmounted component" warnings related to these timeouts.
-- [ ] Manual test: trigger each timeout's source action, then unmount before it fires; confirm no warnings or errors.
-- [ ] Code audit: grep for `setTimeout` in `MainWindow.tsx`; confirm all are tracked.
+- [x] All `setTimeout` calls in `MainWindow.tsx` store their IDs in a `useRef` (or an array of refs).
+- [x] A `useEffect` cleanup clears all pending timeouts on unmount.
+- [x] If a timeout is conditional (e.g. only set when a dialog is open), the cleanup is scoped appropriately.
+- [x] No "state update on unmounted component" warnings related to these timeouts.
+- [x] Manual test: trigger each timeout's source action, then unmount before it fires; confirm no warnings or errors.
+- [x] Code audit: grep for `setTimeout` in `MainWindow.tsx`; confirm all are tracked.
 
 #### Implementation Notes
 
@@ -219,13 +219,13 @@ Each `setTimeout` returns an ID that should be stored and cleared in a cleanup i
 
 ### S5-005 — Fix `touchpadDirtyUntil` ref overwrite race
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S5-005 |
-| **Title** | Prevent `touchpadDirtyUntil` ref from being overwritten by a stale poll refresh |
-| **Priority** | P2 |
-| **Type** | Bug |
-| **Estimated Effort** | S |
+| Field                | Value                                                                           |
+| -------------------- | ------------------------------------------------------------------------------- |
+| **Ticket ID**        | S5-005                                                                          |
+| **Title**            | Prevent `touchpadDirtyUntil` ref from being overwritten by a stale poll refresh |
+| **Priority**         | P2                                                                              |
+| **Type**             | Bug                                                                             |
+| **Estimated Effort** | S                                                                               |
 
 #### Description
 
@@ -241,10 +241,10 @@ The `touchpadDirtyUntil` timestamp is checked, but the poll handler may not resp
 
 #### Acceptance Criteria
 
-- [ ] Every poll handler that updates touchpad-related state checks `touchpadDirtyUntil` and skips the update if `Date.now() < touchpadDirtyUntil.current`.
-- [ ] The ref is only reset (to 0 or a past timestamp) when the optimistic action completes or errors, not by a poll.
-- [ ] Unit test: set `touchpadDirtyUntil` to the future; trigger a poll; assert the optimistic value is preserved.
-- [ ] Manual test: perform a touchpad gesture; confirm no flicker from poll overwrites during the dirty window.
+- [x] Every poll handler that updates touchpad-related state checks `touchpadDirtyUntil` and skips the update if `Date.now() < touchpadDirtyUntil.current`.
+- [x] The ref is only reset (to 0 or a past timestamp) when the optimistic action completes or errors, not by a poll.
+- [x] Unit test: set `touchpadDirtyUntil` to the future; trigger a poll; assert the optimistic value is preserved.
+- [x] Manual test: perform a touchpad gesture; confirm no flicker from poll overwrites during the dirty window.
 
 #### Implementation Notes
 
@@ -265,17 +265,17 @@ The `touchpadDirtyUntil` timestamp is checked, but the poll handler may not resp
 
 ## Sprint Exit Criteria
 
-- [ ] All 5 tickets merged.
-- [ ] `npm run build` passes; no TypeScript errors.
-- [ ] No "state update on unmounted component" warnings in a 30-minute active-use session.
-- [ ] No memory leaks detectable via Chrome DevTools heap snapshots (stable heap size after warm-up).
-- [ ] No redundant IPC calls for audio state.
-- [ ] Optimistic updates revert correctly on backend errors.
+- [x] All 5 tickets merged.
+- [x] `npm run build` passes; no TypeScript errors.
+- [x] No "state update on unmounted component" warnings in a 30-minute active-use session.
+- [x] No memory leaks detectable via Chrome DevTools heap snapshots (stable heap size after warm-up).
+- [x] No redundant IPC calls for audio state.
+- [x] Optimistic updates revert correctly on backend errors.
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
+| Risk                                                    | Mitigation                                                       |
+| ------------------------------------------------------- | ---------------------------------------------------------------- |
 | Removing audio poll makes volume feedback feel sluggish | Note event-driven approach as a follow-up; 2s may be acceptable. |
-| Revert logic conflicts with batched poll (S4-002) | Ensure poll respects dirty windows; coordinate timing. |
-| `setTimeout` cleanup changes timing-sensitive behavior | Test each timeout's purpose; preserve intended delays. |
+| Revert logic conflicts with batched poll (S4-002)       | Ensure poll respects dirty windows; coordinate timing.           |
+| `setTimeout` cleanup changes timing-sensitive behavior  | Test each timeout's purpose; preserve intended delays.           |

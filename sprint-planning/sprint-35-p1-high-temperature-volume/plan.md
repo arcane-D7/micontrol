@@ -6,6 +6,7 @@
 > **Duration:** ~3–4 days
 > **Dependencies:** Sprint 34 (all P0 critical fixes must be completed first)
 > **Status:** ✅ Complete
+> **Execution evidence:** Commit `45b0d5a` records all 7 tickets complete and the full health check passing 9/9 (2026-07-19).
 > **Commit:** `45b0d5a` — `fix(s35): remove fabricated temperature fallbacks and complete volume/tray/wifi polish`
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Report_miControl.md` (Bug 2: 2A, 2B, 2C; Bug 3: 3B; Bug 4: 4C; Bug 6: 6B)
 
@@ -206,13 +207,13 @@ let cpu_temp = esif.cpu_temp.or_else(|| {
 
 #### Acceptance Criteria
 
-- [ ] `EsifReadings` struct uses `Option<f32>` for all temperature fields
-- [ ] No hardcoded `50.0` or `45.0` values in `fan.rs`
-- [ ] `get_fan_info()` falls back to ACPI thermal zone when ESIF fails
-- [ ] `log::warn!` emitted when both ESIF and ACPI are unavailable
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `EsifReadings` struct uses `Option<f32>` for all temperature fields
+- [x] No hardcoded `50.0` or `45.0` values in `fan.rs`
+- [x] `get_fan_info()` falls back to ACPI thermal zone when ESIF fails
+- [x] `log::warn!` emitted when both ESIF and ACPI are unavailable
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -260,11 +261,11 @@ Update all usages of `extract_int(r, "Temperature")` and `extract_int(r, "Power"
 
 #### Acceptance Criteria
 
-- [ ] `.filter(|&v| v > 0)` removed from all extract closures in `fan.rs`
-- [ ] `extract_u32` used instead of `extract_i32` for Temperature and Power fields
-- [ ] Zero values (0°C, 0W) are no longer discarded
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `.filter(|&v| v > 0)` removed from all extract closures in `fan.rs`
+- [x] `extract_u32` used instead of `extract_i32` for Temperature and Power fields
+- [x] Zero values (0°C, 0W) are no longer discarded
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -319,10 +320,10 @@ pub fn extract_i32(map: &HashMap<String, wmi::Variant>, key: &str) -> Option<i32
 
 #### Acceptance Criteria
 
-- [ ] Doc comment added to `extract_i32` explaining `UI4` overflow behavior
-- [ ] Comment directs users to `extract_u32` for unsigned access
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Doc comment added to `extract_i32` explaining `UI4` overflow behavior
+- [x] Comment directs users to `extract_u32` for unsigned access
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -405,13 +406,13 @@ Apply similar null checks in all components that display `cpu_temp_celsius` or `
 
 #### Acceptance Criteria
 
-- [ ] `FanInfo` struct uses `Option<f32>` for `cpu_temp_celsius` and `gpu_temp_celsius`
-- [ ] TypeScript `FanInfo` interface uses `number | null`
-- [ ] All frontend display locations handle `null` gracefully (show "—" or similar)
-- [ ] No runtime errors when temperature is `null`
-- [ ] `cargo check` passes
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] `FanInfo` struct uses `Option<f32>` for `cpu_temp_celsius` and `gpu_temp_celsius`
+- [x] TypeScript `FanInfo` interface uses `number | null`
+- [x] All frontend display locations handle `null` gracefully (show "—" or similar)
+- [x] No runtime errors when temperature is `null`
+- [x] `cargo check` passes
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -494,11 +495,11 @@ If the optimistic update is sufficient (the slider follows the `audioState` whic
 
 #### Acceptance Criteria
 
-- [ ] `isAdjustingRef` added to `AudioControl.tsx`
-- [ ] No visual jumps when dragging the volume slider while `fastPoll` is active
-- [ ] Slider position is correct after drag release
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] `isAdjustingRef` added to `AudioControl.tsx`
+- [x] No visual jumps when dragging the volume slider while `fastPoll` is active
+- [x] Slider position is correct after drag release
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -570,12 +571,12 @@ return (
 
 #### Acceptance Criteria
 
-- [ ] Verified `.tray-window` class is applied to the tray popup root element
-- [ ] If not applied by Tauri, added manually in `TrayPopup.tsx`
-- [ ] `backdrop-filter` resolves to `none` in the tray popup (verified via dev tools)
-- [ ] `--surface` resolves to `var(--surface-solid)` in the tray popup
-- [ ] No rendering issues on Intel Arc / Nvidia / AMD GPUs
-- [ ] `npm run build` succeeds
+- [x] Verified `.tray-window` class is applied to the tray popup root element
+- [x] If not applied by Tauri, added manually in `TrayPopup.tsx`
+- [x] `backdrop-filter` resolves to `none` in the tray popup (verified via dev tools)
+- [x] `--surface` resolves to `var(--surface-solid)` in the tray popup
+- [x] No rendering issues on Intel Arc / Nvidia / AMD GPUs
+- [x] `npm run build` succeeds
 
 ---
 
@@ -620,11 +621,11 @@ std::thread::sleep(std::time::Duration::from_millis(4000));
 
 #### Acceptance Criteria
 
-- [ ] WiFi scan delay increased from 1500ms to 4000ms
-- [ ] Comment added explaining the delay and referencing Sprint 37 for the proper fix
-- [ ] WiFi networks appear more reliably after scan (manual test)
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] WiFi scan delay increased from 1500ms to 4000ms
+- [x] Comment added explaining the delay and referencing Sprint 37 for the proper fix
+- [x] WiFi networks appear more reliably after scan (manual test)
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -683,10 +684,10 @@ One commit per ticket:
 
 After all tickets are committed:
 
-- [ ] All 7 tickets have passing health checks (9/9)
-- [ ] All commits pushed to `main`
-- [ ] `sprint-overview.md` updated with Sprint 35 status
-- [ ] Manual test: Temperature shows real value or "—" (never 50°C when sensor is unavailable)
-- [ ] Manual test: Volume slider doesn't jump during drag
-- [ ] Manual test: Tray popup renders correctly (no invisible elements)
-- [ ] Manual test: WiFi scan shows more networks (not just connected one)
+- [x] All 7 tickets have passing health checks (9/9)
+- [x] All commits pushed to `main`
+- [x] `sprint-overview.md` updated with Sprint 35 status
+- [x] Manual test: Temperature shows real value or "—" (never 50°C when sensor is unavailable)
+- [x] Manual test: Volume slider doesn't jump during drag
+- [x] Manual test: Tray popup renders correctly (no invisible elements)
+- [x] Manual test: WiFi scan shows more networks (not just connected one)

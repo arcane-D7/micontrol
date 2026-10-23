@@ -82,14 +82,14 @@ if let Err(e) = launch_elevated_via_uac(&request_id) {
 
 #### Acceptance Criteria
 
-- [ ] `launch_elevated_via_uac(&request_id)` is wrapped in `tokio::task::spawn_blocking`
-- [ ] The `request_id` is moved into the closure (owned `String`, not `&str`)
-- [ ] `JoinError` from `spawn_blocking` is mapped to a descriptive error string
-- [ ] The inner `Result<(), String>` from `launch_elevated_via_uac` is propagated correctly (double `?` or explicit match)
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes
-- [ ] No behavior change — the UAC fallback still works identically, just off the async thread
+- [x] `launch_elevated_via_uac(&request_id)` is wrapped in `tokio::task::spawn_blocking`
+- [x] The `request_id` is moved into the closure (owned `String`, not `&str`)
+- [x] `JoinError` from `spawn_blocking` is mapped to a descriptive error string
+- [x] The inner `Result<(), String>` from `launch_elevated_via_uac` is propagated correctly (double `?` or explicit match)
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes
+- [x] No behavior change — the UAC fallback still works identically, just off the async thread
 
 ---
 
@@ -116,14 +116,14 @@ let key = auth::get_or_create_key().map_err(|e| format!("Cannot obtain HMAC key:
 
 #### Acceptance Criteria
 
-- [ ] `auth::get_or_create_key()` is wrapped in `tokio::task::spawn_blocking`
-- [ ] `JoinError` from `spawn_blocking` is mapped to a descriptive error string
-- [ ] The inner `Result<_, String>` from `get_or_create_key` is propagated correctly
-- [ ] The resulting `key` variable has the same type (`[u8; N]` or `Vec<u8>`) as before
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml` passes
-- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml` passes
-- [ ] No behavior change — key creation/retrieval works identically
+- [x] `auth::get_or_create_key()` is wrapped in `tokio::task::spawn_blocking`
+- [x] `JoinError` from `spawn_blocking` is mapped to a descriptive error string
+- [x] The inner `Result<_, String>` from `get_or_create_key` is propagated correctly
+- [x] The resulting `key` variable has the same type (`[u8; N]` or `Vec<u8>`) as before
+- [x] `cargo check --manifest-path src-tauri/Cargo.toml` passes
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` passes
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml` passes
+- [x] No behavior change — key creation/retrieval works identically
 
 ---
 

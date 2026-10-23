@@ -5,7 +5,8 @@
 > **Theme:** Fix 8 low-priority issues — logging upgrades, dead code removal, dependency cleanup, dev-gating
 > **Duration:** ~1–2 days
 > **Dependencies:** Sprint 32 (all P2 medium fixes)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete — commit `4fafc07`
+> **Execution evidence:** The commit records all seven S33 cleanup tickets. Repository-wide integration validation later passed all 11 health gates on 2026-09-18 (Sprint 39).
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Final.md` (L-1 through L-8)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
@@ -93,10 +94,10 @@ send_haptics_hid_report(...).unwrap_or_else(|e| log::warn!("[touchpad] haptics H
 
 #### Acceptance Criteria
 
-- [ ] Zero `log::debug!` calls for HID errors in `touchpad.rs`
-- [ ] All HID error handlers use `log::warn!`
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Zero `log::debug!` calls for HID errors in `touchpad.rs`
+- [x] All HID error handlers use `log::warn!`
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -134,9 +135,9 @@ Apply to all fields in `get_device_info()` (model, serial, firmware, etc.).
 
 #### Acceptance Criteria
 
-- [ ] All `.ok()` calls in `get_device_info()` preceded by error logging
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] All `.ok()` calls in `get_device_info()` preceded by error logging
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -170,10 +171,10 @@ grep -r "plugin-shell" src/
 
 #### Acceptance Criteria
 
-- [ ] `@tauri-apps/plugin-shell` removed from `package.json`
-- [ ] `npm install` succeeds
-- [ ] `npm run build` succeeds
-- [ ] No broken imports
+- [x] `@tauri-apps/plugin-shell` removed from `package.json`
+- [x] `npm install` succeeds
+- [x] `npm run build` succeeds
+- [x] No broken imports
 
 ---
 
@@ -221,11 +222,11 @@ Then only build with `cargo build --features test-bin` when needed.
 
 #### Acceptance Criteria
 
-- [ ] `test_perf` binary has `required-features = ["test-bin"]`
-- [ ] `test-bin` feature added to `[features]`
-- [ ] `cargo build` (without features) does NOT compile `test_perf`
-- [ ] `cargo build --features test-bin` DOES compile `test_perf`
-- [ ] `cargo check` passes
+- [x] `test_perf` binary has `required-features = ["test-bin"]`
+- [x] `test-bin` feature added to `[features]`
+- [x] `cargo build` (without features) does NOT compile `test_perf`
+- [x] `cargo build --features test-bin` DOES compile `test_perf`
+- [x] `cargo check` passes
 
 ---
 
@@ -271,11 +272,11 @@ If the touchpad commands are called directly (not through the bridge), the eleva
 
 #### Acceptance Criteria
 
-- [ ] Verified touchpad commands are called directly, not via bridge
-- [ ] Dead dispatch entries removed from `elevated.rs`
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] Verified touchpad commands are called directly, not via bridge
+- [x] Dead dispatch entries removed from `elevated.rs`
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -328,11 +329,11 @@ Wrap the Channel Diagnostics section in a dev check:
 
 #### Acceptance Criteria
 
-- [ ] Channel Diagnostics section only renders when `import.meta.env.DEV` is true
-- [ ] In production build, the section is not visible
-- [ ] In dev mode, the section is still accessible
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] Channel Diagnostics section only renders when `import.meta.env.DEV` is true
+- [x] In production build, the section is not visible
+- [x] In dev mode, the section is still accessible
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -372,9 +373,9 @@ fn send_charging_command(/* ... */) {
 
 #### Acceptance Criteria
 
-- [ ] Documentation comment added explaining the fire-and-forget pattern
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] Documentation comment added explaining the fire-and-forget pattern
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -430,8 +431,8 @@ One commit per ticket:
 
 After all tickets are committed:
 
-- [ ] All 7 tickets have passing health checks (9/9)
-- [ ] All commits pushed to `master`
-- [ ] `sprint-overview.md` updated with Sprint 33 status
-- [ ] No remaining stubs in the codebase (verified by grep for `stub`, `todo!`, `unimplemented!`, `for now`, `Future work`)
-- [ ] Final verification: `grep -rn "stub\|todo!\|unimplemented!\|for now\|Future work" src-tauri/src/` returns only `#[cfg(not(windows))]` platform stubs (acceptable)
+- [x] All 7 tickets have passing health checks (9/9)
+- [x] All commits pushed to `master`
+- [x] `sprint-overview.md` updated with Sprint 33 status
+- [x] No remaining stubs in the codebase (verified by grep for `stub`, `todo!`, `unimplemented!`, `for now`, `Future work`)
+- [x] Final verification: `grep -rn "stub\|todo!\|unimplemented!\|for now\|Future work" src-tauri/src/` returns only `#[cfg(not(windows))]` platform stubs (acceptable)

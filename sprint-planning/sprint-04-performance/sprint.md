@@ -2,15 +2,15 @@
 
 ## Sprint Metadata
 
-| Field | Value |
-|-------|-------|
-| **Sprint Name** | Performance Optimization |
-| **Sprint Goal** | Eliminate WMI connection churn, blocking async calls, redundant IPC polling, and per-frame HID allocations |
-| **Duration Estimate** | 2.5 weeks (12–13 working days) |
-| **Priority** | P1 — Performance. Directly impacts UI responsiveness and battery life. |
-| **Sprint Type** | Performance / Refactor |
-| **Primary Owner** | Rust performance engineer |
-| **Secondary Owner** | Frontend engineer (polling/IPC) |
+| Field                 | Value                                                                                                      |
+| --------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Sprint Name**       | Performance Optimization                                                                                   |
+| **Sprint Goal**       | Eliminate WMI connection churn, blocking async calls, redundant IPC polling, and per-frame HID allocations |
+| **Duration Estimate** | 2.5 weeks (12–13 working days)                                                                             |
+| **Priority**          | P1 — Performance. Directly impacts UI responsiveness and battery life.                                     |
+| **Sprint Type**       | Performance / Refactor                                                                                     |
+| **Primary Owner**     | Rust performance engineer                                                                                  |
+| **Secondary Owner**   | Frontend engineer (polling/IPC)                                                                            |
 
 ## Sprint Goal Statement
 
@@ -30,13 +30,13 @@ Note: P1 and P5 overlap with Sprint 3's S3-004 (`spawn_blocking`). This sprint f
 
 ### S4-001 — Cache and reuse WMI connections
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S4-001 |
-| **Title** | Implement a WMI connection pool/cache to eliminate per-query connection churn |
-| **Priority** | P0 |
-| **Type** | Performance |
-| **Estimated Effort** | L |
+| Field                | Value                                                                         |
+| -------------------- | ----------------------------------------------------------------------------- |
+| **Ticket ID**        | S4-001                                                                        |
+| **Title**            | Implement a WMI connection pool/cache to eliminate per-query connection churn |
+| **Priority**         | P0                                                                            |
+| **Type**             | Performance                                                                   |
+| **Estimated Effort** | L                                                                             |
 
 #### Description
 
@@ -54,14 +54,14 @@ Each hardware query independently calls `WMIConnection::new(COMLibrary::new()?)`
 
 #### Acceptance Criteria
 
-- [ ] A `WmiCache` struct holds a single `WMIConnection` (or a small pool) initialized once and reused across queries.
-- [ ] The cache is stored in `AppState` (per Sprint 3's S3-002) or a `OnceLock` if state centralization is not yet complete.
-- [ ] All hardware query sites retrieve the cached connection instead of creating a new one.
-- [ ] The connection is validated before reuse (a lightweight `SELECT * FROM Win32_ComputerSystem` or similar); if invalid, it is recreated transparently.
-- [ ] Connection recreation is logged at `info!` level for diagnostics.
-- [ ] Performance measurement: WMI connection creations per 2s cycle drop from 7 to ≤1 (only on cache miss/invalidation).
-- [ ] Performance measurement: total CPU time per polling cycle drops by ≥60%.
-- [ ] Manual test: run for 10 minutes; confirm no WMI-related freezes and stable connection count in logs.
+- [x] A `WmiCache` struct holds a single `WMIConnection` (or a small pool) initialized once and reused across queries.
+- [x] The cache is stored in `AppState` (per Sprint 3's S3-002) or a `OnceLock` if state centralization is not yet complete.
+- [x] All hardware query sites retrieve the cached connection instead of creating a new one.
+- [x] The connection is validated before reuse (a lightweight `SELECT * FROM Win32_ComputerSystem` or similar); if invalid, it is recreated transparently.
+- [x] Connection recreation is logged at `info!` level for diagnostics.
+- [x] Performance measurement: WMI connection creations per 2s cycle drop from 7 to ≤1 (only on cache miss/invalidation).
+- [x] Performance measurement: total CPU time per polling cycle drops by ≥60%.
+- [x] Manual test: run for 10 minutes; confirm no WMI-related freezes and stable connection count in logs.
 
 #### Implementation Notes
 
@@ -83,13 +83,13 @@ Each hardware query independently calls `WMIConnection::new(COMLibrary::new()?)`
 
 ### S4-002 — Consolidate dual 2s pollers into a single batched IPC call
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S4-002 |
-| **Title** | Merge the two 2s hardware pollers into one batched Tauri command returning all state |
-| **Priority** | P0 |
-| **Type** | Performance |
-| **Estimated Effort** | M |
+| Field                | Value                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| **Ticket ID**        | S4-002                                                                               |
+| **Title**            | Merge the two 2s hardware pollers into one batched Tauri command returning all state |
+| **Priority**         | P0                                                                                   |
+| **Type**             | Performance                                                                          |
+| **Estimated Effort** | M                                                                                    |
 
 #### Description
 
@@ -107,13 +107,13 @@ Each hardware property is queried via a separate Tauri command invocation. With 
 
 #### Acceptance Criteria
 
-- [ ] A single `get_hardware_state_batch` Tauri command is added that returns a `HardwareState` struct containing all polled properties (battery level, charging state, brightness, volume, etc.) in one response.
-- [ ] The backend batches the underlying WMI/IOCTL queries using the cached connection (S4-001) within a single `spawn_blocking` call.
-- [ ] The frontend's two pollers are merged into one 2s interval calling `get_hardware_state_batch`.
-- [ ] IPC calls per cycle drop from 8 (or 16 with dual pollers) to 1.
-- [ ] The `HardwareState` struct is typed on both sides (Rust + TypeScript via `ts-rs` or manual types).
-- [ ] Manual test: hardware state updates every 2s with no regression in freshness.
-- [ ] Performance measurement: frontend re-render count per cycle drops (coordinate with S4-004).
+- [x] A single `get_hardware_state_batch` Tauri command is added that returns a `HardwareState` struct containing all polled properties (battery level, charging state, brightness, volume, etc.) in one response.
+- [x] The backend batches the underlying WMI/IOCTL queries using the cached connection (S4-001) within a single `spawn_blocking` call.
+- [x] The frontend's two pollers are merged into one 2s interval calling `get_hardware_state_batch`.
+- [x] IPC calls per cycle drop from 8 (or 16 with dual pollers) to 1.
+- [x] The `HardwareState` struct is typed on both sides (Rust + TypeScript via `ts-rs` or manual types).
+- [x] Manual test: hardware state updates every 2s with no regression in freshness.
+- [x] Performance measurement: frontend re-render count per cycle drops (coordinate with S4-004).
 
 #### Implementation Notes
 
@@ -134,13 +134,13 @@ Each hardware property is queried via a separate Tauri command invocation. With 
 
 ### S4-003 — Eliminate per-frame HID preparsed data allocation
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S4-003 |
-| **Title** | Cache HID preparsed data per device instead of cloning every raw input frame |
-| **Priority** | P1 |
-| **Type** | Performance |
-| **Estimated Effort** | M |
+| Field                | Value                                                                        |
+| -------------------- | ---------------------------------------------------------------------------- |
+| **Ticket ID**        | S4-003                                                                       |
+| **Title**            | Cache HID preparsed data per device instead of cloning every raw input frame |
+| **Priority**         | P1                                                                           |
+| **Type**             | Performance                                                                  |
+| **Estimated Effort** | M                                                                            |
 
 #### Description
 
@@ -156,12 +156,12 @@ The code calls `GetPreparsedData` and processes the caps on each frame, or clone
 
 #### Acceptance Criteria
 
-- [ ] Preparsed data is fetched once per device (keyed by `device_key`) and stored in `TOUCHPAD_DEVICE_CACHE` alongside the touchpad boolean.
-- [ ] Per-frame processing reads the cached preparsed data by reference, with no clone.
-- [ ] The caps (`y_max`, `x_max`, etc.) are read once and stored in `GESTURE_STATE` (already partially done via `caps_read`); verify this path is complete and not re-reading.
-- [ ] Allocation count per second (measured via a debug allocator or `tracing`) drops to near-zero during steady-state touchpad input.
-- [ ] No behavior change in gesture recognition.
-- [ ] Manual test: touchpad gestures work identically; no input lag introduced.
+- [x] Preparsed data is fetched once per device (keyed by `device_key`) and stored in `TOUCHPAD_DEVICE_CACHE` alongside the touchpad boolean.
+- [x] Per-frame processing reads the cached preparsed data by reference, with no clone.
+- [x] The caps (`y_max`, `x_max`, etc.) are read once and stored in `GESTURE_STATE` (already partially done via `caps_read`); verify this path is complete and not re-reading.
+- [x] Allocation count per second (measured via a debug allocator or `tracing`) drops to near-zero during steady-state touchpad input.
+- [x] No behavior change in gesture recognition.
+- [x] Manual test: touchpad gestures work identically; no input lag introduced.
 
 #### Implementation Notes
 
@@ -182,13 +182,13 @@ The code calls `GetPreparsedData` and processes the caps on each frame, or clone
 
 ### S4-004 — Stabilize `useHardware` return value to prevent full-tree re-renders
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S4-004 |
-| **Title** | Memoize `useHardware` return value; prevent new-object creation every render |
-| **Priority** | P1 |
-| **Type** | Performance |
-| **Estimated Effort** | M |
+| Field                | Value                                                                        |
+| -------------------- | ---------------------------------------------------------------------------- |
+| **Ticket ID**        | S4-004                                                                       |
+| **Title**            | Memoize `useHardware` return value; prevent new-object creation every render |
+| **Priority**         | P1                                                                           |
+| **Type**             | Performance                                                                  |
+| **Estimated Effort** | M                                                                            |
 
 #### Description
 
@@ -204,12 +204,12 @@ The hook likely returns an object literal `{ battery, brightness, volume, ... }`
 
 #### Acceptance Criteria
 
-- [ ] The hook's return value is wrapped in `useMemo` with dependencies on the actual state values (not the object itself).
-- [ ] When no polled value has changed between cycles, the returned object reference is stable (same identity).
-- [ ] Consumers wrapped in `React.memo` do not re-render when the hardware state is unchanged.
-- [ ] A React DevTools profiler trace shows no re-renders of memoized children when values are unchanged.
-- [ ] Manual test: hardware displays update when values change; no unnecessary re-renders when idle.
-- [ ] Performance measurement: render count over 10s of idle polling drops from ~5 (every 2s) to ~1 (initial only).
+- [x] The hook's return value is wrapped in `useMemo` with dependencies on the actual state values (not the object itself).
+- [x] When no polled value has changed between cycles, the returned object reference is stable (same identity).
+- [x] Consumers wrapped in `React.memo` do not re-render when the hardware state is unchanged.
+- [x] A React DevTools profiler trace shows no re-renders of memoized children when values are unchanged.
+- [x] Manual test: hardware displays update when values change; no unnecessary re-renders when idle.
+- [x] Performance measurement: render count over 10s of idle polling drops from ~5 (every 2s) to ~1 (initial only).
 
 #### Implementation Notes
 
@@ -230,13 +230,13 @@ The hook likely returns an object literal `{ battery, brightness, volume, ... }`
 
 ### S4-005 — Move adaptive brightness loop's WMI calls to `spawn_blocking` with cached connection
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S4-005 |
-| **Title** | Refactor `adaptive_brightness_loop` to use cached WMI via `spawn_blocking` |
-| **Priority** | P1 |
-| **Type** | Performance |
-| **Estimated Effort** | M |
+| Field                | Value                                                                      |
+| -------------------- | -------------------------------------------------------------------------- |
+| **Ticket ID**        | S4-005                                                                     |
+| **Title**            | Refactor `adaptive_brightness_loop` to use cached WMI via `spawn_blocking` |
+| **Priority**         | P1                                                                         |
+| **Type**             | Performance                                                                |
+| **Estimated Effort** | M                                                                          |
 
 #### Description
 
@@ -252,11 +252,11 @@ The brightness loop queries ambient light / current brightness via WMI every few
 
 #### Acceptance Criteria
 
-- [ ] All WMI calls in `adaptive_brightness_loop` are wrapped in `spawn_blocking`.
-- [ ] The loop uses the cached WMI connection from S4-001 (accessed inside the `spawn_blocking` closure).
-- [ ] The loop's `sleep`/interval remains on the async runtime (only the WMI call is blocking).
-- [ ] Manual test: brightness adaptation continues to function; UI remains responsive during adaptation.
-- [ ] Profiling: no long-running tasks on the tokio worker pool during brightness adaptation.
+- [x] All WMI calls in `adaptive_brightness_loop` are wrapped in `spawn_blocking`.
+- [x] The loop uses the cached WMI connection from S4-001 (accessed inside the `spawn_blocking` closure).
+- [x] The loop's `sleep`/interval remains on the async runtime (only the WMI call is blocking).
+- [x] Manual test: brightness adaptation continues to function; UI remains responsive during adaptation.
+- [x] Profiling: no long-running tasks on the tokio worker pool during brightness adaptation.
 
 #### Implementation Notes
 
@@ -277,17 +277,17 @@ The brightness loop queries ambient light / current brightness via WMI every few
 
 ## Sprint Exit Criteria
 
-- [ ] All 5 tickets merged.
-- [ ] `cargo check`, `cargo test`, and `npm run build` pass.
-- [ ] Performance benchmarks show: WMI connections/cycle ≤1, IPC calls/cycle ≤3, HID allocations/frame ≈0, idle re-renders/10s ≈1.
-- [ ] No UI freezes during hardware polling or brightness adaptation.
-- [ ] No regression in hardware state freshness or accuracy.
+- [x] All 5 tickets merged.
+- [x] `cargo check`, `cargo test`, and `npm run build` pass.
+- [x] Performance benchmarks show: WMI connections/cycle ≤1, IPC calls/cycle ≤3, HID allocations/frame ≈0, idle re-renders/10s ≈1.
+- [x] No UI freezes during hardware polling or brightness adaptation.
+- [x] No regression in hardware state freshness or accuracy.
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| Cached WMI connection goes stale and returns errors | Validate before reuse; recreate transparently on failure. |
-| Batched IPC loses per-property error granularity | Return per-field error status in the `HardwareState` struct. |
-| HID cache lifetime management (handle leaks) | Free preparsed data on device removal; use RAII wrapper. |
-| `useMemo` deps miss a value, causing stale UI | Include all returned values in deps; add a lint rule or code review checklist. |
+| Risk                                                | Mitigation                                                                     |
+| --------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Cached WMI connection goes stale and returns errors | Validate before reuse; recreate transparently on failure.                      |
+| Batched IPC loses per-property error granularity    | Return per-field error status in the `HardwareState` struct.                   |
+| HID cache lifetime management (handle leaks)        | Free preparsed data on device removal; use RAII wrapper.                       |
+| `useMemo` deps miss a value, causing stale UI       | Include all returned values in deps; add a lint rule or code review checklist. |

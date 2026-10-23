@@ -2,15 +2,15 @@
 
 ## Sprint Metadata
 
-| Field | Value |
-|-------|-------|
-| **Sprint Name** | Security Hardening — Critical Vulnerabilities |
-| **Sprint Goal** | Eliminate the 3 critical security vulnerabilities: elevated bridge privilege escalation, WiFi profile XML injection, and hotkey script arbitrary code execution |
-| **Duration Estimate** | 3 weeks (15 working days) |
-| **Priority** | P0 — Security-critical. These are exploitable by a local attacker. |
-| **Sprint Type** | Security |
-| **Primary Owner** | Rust security engineer |
-| **Secondary Owner** | Threat model reviewer (auditor) |
+| Field                 | Value                                                                                                                                                           |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Sprint Name**       | Security Hardening — Critical Vulnerabilities                                                                                                                   |
+| **Sprint Goal**       | Eliminate the 3 critical security vulnerabilities: elevated bridge privilege escalation, WiFi profile XML injection, and hotkey script arbitrary code execution |
+| **Duration Estimate** | 3 weeks (15 working days)                                                                                                                                       |
+| **Priority**          | P0 — Security-critical. These are exploitable by a local attacker.                                                                                              |
+| **Sprint Type**       | Security                                                                                                                                                        |
+| **Primary Owner**     | Rust security engineer                                                                                                                                          |
+| **Secondary Owner**   | Threat model reviewer (auditor)                                                                                                                                 |
 
 ## Sprint Goal Statement
 
@@ -28,13 +28,13 @@ The miPC elevated bridge runs a filesystem-based command/response protocol betwe
 
 ### S2-001 — Authenticate elevated bridge commands and eliminate TOCTOU race
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S2-001 |
-| **Title** | Add HMAC authentication to elevated bridge protocol; replace filesystem command files with atomic, ACL-locked writes |
-| **Priority** | P0 |
-| **Type** | Security |
-| **Estimated Effort** | XL |
+| Field                | Value                                                                                                                |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **Ticket ID**        | S2-001                                                                                                               |
+| **Title**            | Add HMAC authentication to elevated bridge protocol; replace filesystem command files with atomic, ACL-locked writes |
+| **Priority**         | P0                                                                                                                   |
+| **Type**             | Security                                                                                                             |
+| **Estimated Effort** | XL                                                                                                                   |
 
 #### Description
 
@@ -54,13 +54,13 @@ The elevated bridge (`src-tauri/src/elev_bridge.rs` ~lines 60–75 and `src-taur
 
 #### Acceptance Criteria
 
-- [ ] Every command and response message includes an **HMAC-SHA256 tag** computed over the message body using a shared secret established at bridge startup (e.g. a random 256-bit key exchanged via a named pipe with the elevated helper's initial handshake, or derived from a machine+session token).
-- [ ] The elevated helper **rejects** any command whose HMAC does not verify, logs the rejection, and does not execute.
-- [ ] Command/response files are written with a restrictive ACL: only the current user and SYSTEM have access. On Windows, use `CreateFile` with a `SECURITY_ATTRIBUTES` that grants access only to the current user SID and SYSTEM.
-- [ ] The TOCTOU race is eliminated by writing commands atomically (write to a temp file in the same directory, then `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` and `MOVEFILE_WRITE_THROUGH`) and having the helper read the file once into a buffer before any validation.
-- [ ] A **nonce/timestamp** is included in each command to prevent replay; the helper rejects commands older than 30 seconds or with a reused nonce.
-- [ ] A regression test demonstrates that an unauthenticated command file (no valid HMAC) is rejected and not executed.
-- [ ] A regression test demonstrates that a command file swapped after write (simulated by writing a valid command, then overwriting with a malicious body before the helper reads) is rejected due to HMAC mismatch.
+- [x] Every command and response message includes an **HMAC-SHA256 tag** computed over the message body using a shared secret established at bridge startup (e.g. a random 256-bit key exchanged via a named pipe with the elevated helper's initial handshake, or derived from a machine+session token).
+- [x] The elevated helper **rejects** any command whose HMAC does not verify, logs the rejection, and does not execute.
+- [x] Command/response files are written with a restrictive ACL: only the current user and SYSTEM have access. On Windows, use `CreateFile` with a `SECURITY_ATTRIBUTES` that grants access only to the current user SID and SYSTEM.
+- [x] The TOCTOU race is eliminated by writing commands atomically (write to a temp file in the same directory, then `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING` and `MOVEFILE_WRITE_THROUGH`) and having the helper read the file once into a buffer before any validation.
+- [x] A **nonce/timestamp** is included in each command to prevent replay; the helper rejects commands older than 30 seconds or with a reused nonce.
+- [x] A regression test demonstrates that an unauthenticated command file (no valid HMAC) is rejected and not executed.
+- [x] A regression test demonstrates that a command file swapped after write (simulated by writing a valid command, then overwriting with a malicious body before the helper reads) is rejected due to HMAC mismatch.
 
 #### Implementation Notes
 
@@ -84,13 +84,13 @@ The elevated bridge (`src-tauri/src/elev_bridge.rs` ~lines 60–75 and `src-taur
 
 ### S2-002 — Escape WiFi profile XML to prevent injection
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S2-002 |
-| **Title** | Escape SSID and password in WLAN profile XML; validate against XML injection |
-| **Priority** | P0 |
-| **Type** | Security |
-| **Estimated Effort** | M |
+| Field                | Value                                                                        |
+| -------------------- | ---------------------------------------------------------------------------- |
+| **Ticket ID**        | S2-002                                                                       |
+| **Title**            | Escape SSID and password in WLAN profile XML; validate against XML injection |
+| **Priority**         | P0                                                                           |
+| **Type**             | Security                                                                     |
+| **Estimated Effort** | M                                                                            |
 
 #### Description
 
@@ -112,15 +112,15 @@ No escaping is applied. An SSID like `test</name><name>evil` would close the `<n
 
 #### Acceptance Criteria
 
-- [ ] A `fn escape_xml(s: &str) -> String` helper is added that escapes `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`, `'` → `&apos;`.
-- [ ] Both `ssid` and `password` are passed through `escape_xml` before interpolation into the template.
-- [ ] The SSID is additionally validated against WLAN SSID rules: max 32 bytes, no null bytes. Invalid SSIDs return an `Err` before XML construction.
-- [ ] The password is validated: 8–63 characters for WPA2 passphrases (per IEEE 802.11). Out-of-range passwords return an `Err`.
-- [ ] The temp profile file is written with a restrictive ACL (only current user) and deleted immediately after import (existing behavior, but verify the cleanup runs even on error paths).
-- [ ] Unit test: SSID `a</name><name>b` produces escaped output with no element breakout.
-- [ ] Unit test: password containing `</keyMaterial><x>` produces escaped output.
-- [ ] Unit test: 33-byte SSID is rejected.
-- [ ] Unit test: 7-character password is rejected.
+- [x] A `fn escape_xml(s: &str) -> String` helper is added that escapes `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`, `'` → `&apos;`.
+- [x] Both `ssid` and `password` are passed through `escape_xml` before interpolation into the template.
+- [x] The SSID is additionally validated against WLAN SSID rules: max 32 bytes, no null bytes. Invalid SSIDs return an `Err` before XML construction.
+- [x] The password is validated: 8–63 characters for WPA2 passphrases (per IEEE 802.11). Out-of-range passwords return an `Err`.
+- [x] The temp profile file is written with a restrictive ACL (only current user) and deleted immediately after import (existing behavior, but verify the cleanup runs even on error paths).
+- [x] Unit test: SSID `a</name><name>b` produces escaped output with no element breakout.
+- [x] Unit test: password containing `</keyMaterial><x>` produces escaped output.
+- [x] Unit test: 33-byte SSID is rejected.
+- [x] Unit test: 7-character password is rejected.
 
 #### Implementation Notes
 
@@ -142,13 +142,13 @@ No escaping is applied. An SSID like `test</name><name>evil` would close the `<n
 
 ### S2-003 — Disable or sandbox hotkey script actions with explicit consent
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S2-003 |
-| **Title** | Remove arbitrary code execution via hotkey "script" action; require explicit user consent and signing |
-| **Priority** | P0 |
-| **Type** | Security |
-| **Estimated Effort** | L |
+| Field                | Value                                                                                                 |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| **Ticket ID**        | S2-003                                                                                                |
+| **Title**            | Remove arbitrary code execution via hotkey "script" action; require explicit user consent and signing |
+| **Priority**         | P0                                                                                                    |
+| **Type**             | Security                                                                                              |
+| **Estimated Effort** | L                                                                                                     |
 
 #### Description
 
@@ -165,14 +165,14 @@ The "script" action type was likely intended for power-user customization, but i
 
 #### Acceptance Criteria
 
-- [ ] The "script" action type is **disabled by default** — it is not processed unless an explicit feature flag / registry setting enables it.
-- [ ] When enabled, a script action requires an **explicit consent dialog** the first time it is triggered (not at config load): "This hotkey will run the command: `<cmd>`. Allow?" with Allow / Deny / Always Allow options.
-- [ ] "Always Allow" decisions are stored in a separate, ACL-protected consent file keyed by a hash of the script content (so changing the script re-prompts).
-- [ ] The script content is validated against an **allowlist** of permitted executables (e.g. only `cmd.exe`, `powershell.exe` from System32) — arbitrary paths are rejected.
-- [ ] A `log::warn!` is emitted every time a script action executes, including the command and the triggering hotkey.
-- [ ] Unit test: a script action with the feature flag disabled is a no-op (logged, not executed).
-- [ ] Unit test: a script action with a non-allowlisted executable path is rejected.
-- [ ] Unit test: the consent dialog state machine correctly transitions: first run prompts, "Always Allow" stores the hash, subsequent runs skip the prompt.
+- [x] The "script" action type is **disabled by default** — it is not processed unless an explicit feature flag / registry setting enables it.
+- [x] When enabled, a script action requires an **explicit consent dialog** the first time it is triggered (not at config load): "This hotkey will run the command: `<cmd>`. Allow?" with Allow / Deny / Always Allow options.
+- [x] "Always Allow" decisions are stored in a separate, ACL-protected consent file keyed by a hash of the script content (so changing the script re-prompts).
+- [x] The script content is validated against an **allowlist** of permitted executables (e.g. only `cmd.exe`, `powershell.exe` from System32) — arbitrary paths are rejected.
+- [x] A `log::warn!` is emitted every time a script action executes, including the command and the triggering hotkey.
+- [x] Unit test: a script action with the feature flag disabled is a no-op (logged, not executed).
+- [x] Unit test: a script action with a non-allowlisted executable path is rejected.
+- [x] Unit test: the consent dialog state machine correctly transitions: first run prompts, "Always Allow" stores the hash, subsequent runs skip the prompt.
 
 #### Implementation Notes
 
@@ -195,17 +195,17 @@ The "script" action type was likely intended for power-user customization, but i
 
 ## Sprint Exit Criteria
 
-- [ ] All 3 tickets merged and security-reviewed.
-- [ ] `cargo check` and `cargo test` pass.
-- [ ] Each fix has a regression test demonstrating the exploit is closed.
-- [ ] Threat model updated to reflect the mitigations.
-- [ ] No new attack surface introduced (reviewed by auditor).
+- [x] All 3 tickets merged and security-reviewed.
+- [x] `cargo check` and `cargo test` pass.
+- [x] Each fix has a regression test demonstrating the exploit is closed.
+- [x] Threat model updated to reflect the mitigations.
+- [x] No new attack surface introduced (reviewed by auditor).
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| HMAC key exchange itself is vulnerable to MITM | Use restrictive ACLs on the key file; consider named-pipe impersonation in a follow-up. |
-| WiFi escaping breaks legitimate SSIDs with special chars | Escaping is reversible by the XML parser; valid SSIDs survive round-trip. |
-| Disabling script actions breaks existing power-user configs | Feature flag allows opt-in; consent dialog preserves usability. |
-| Consent file becomes a new attack target | ACL-protect it; hash-keying means content changes re-prompt. |
+| Risk                                                        | Mitigation                                                                              |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| HMAC key exchange itself is vulnerable to MITM              | Use restrictive ACLs on the key file; consider named-pipe impersonation in a follow-up. |
+| WiFi escaping breaks legitimate SSIDs with special chars    | Escaping is reversible by the XML parser; valid SSIDs survive round-trip.               |
+| Disabling script actions breaks existing power-user configs | Feature flag allows opt-in; consent dialog preserves usability.                         |
+| Consent file becomes a new attack target                    | ACL-protect it; hash-keying means content changes re-prompt.                            |

@@ -100,7 +100,7 @@ Tickets are intentionally sequential because each ticket writes data or policy c
 | **Type**             | Feature                                                               |
 | **Estimated Effort** | M                                                                     |
 | **Source Finding**   | User request: OS Turbo must be reversible and preserve original state |
-| **Status**           | 🔄 Implemented — awaiting focused validation                          |
+| **Status**           | ✅ Complete                                                           |
 
 #### Context
 
@@ -108,12 +108,12 @@ The current implementation identifies targets only by process name and restores 
 
 #### Acceptance Criteria
 
-- [ ] Persist a versioned, bounded snapshot containing allowlisted process identity, observed original process state, and the prior active power scheme before any OS Turbo write.
-- [ ] Restore only matching process identities that are still valid and skip exited, reused, or unverifiable processes.
-- [ ] Restore the captured prior power scheme instead of assuming Balanced.
-- [ ] Make enable/disable idempotent and ensure partial failures do not erase the last known reversible state.
-- [ ] Add tests for snapshot creation, process identity mismatch, restore ordering, and missing prior-state data.
-- [ ] Run the health check command successfully.
+- [x] Persist a versioned, bounded snapshot containing allowlisted process identity, observed original process state, and the prior active power scheme before any OS Turbo write.
+- [x] Restore only matching process identities that are still valid and skip exited, reused, or unverifiable processes.
+- [x] Restore the captured prior power scheme instead of assuming Balanced.
+- [x] Make enable/disable idempotent and ensure partial failures do not erase the last known reversible state.
+- [x] Add tests for snapshot creation, process identity mismatch, restore ordering, and missing prior-state data.
+- [x] Run the full Sprint 39 health check successfully after integration: `node scripts/health-check.mjs`, 11/11 gates.
 
 #### Execution Evidence — 2026-09-18
 
@@ -122,7 +122,7 @@ The current implementation identifies targets only by process name and restores 
 - [x] Preserved snapshots across partial failures and removed the startup reapply sweep until S39-003.
 - [x] Focused Rust tests passed (identity mismatch, disable ordering, missing prior state).
 - [x] Commit `3cefcc1` created with message `feat(s39-002): reversible OS Turbo state with identity-checked restore`.
-- [ ] Full health check (node scripts/health-check.mjs) pending for S39-002 as a standalone gate.
+- [x] Full health check passed in the final integrated Sprint 39 gate (11/11); no standalone per-ticket run is claimed.
 
 ### S39-003 — Add measured status and a bounded periodic worker
 
@@ -134,7 +134,7 @@ The current implementation identifies targets only by process name and restores 
 | **Type**             | Feature                                                                   |
 | **Estimated Effort** | L                                                                         |
 | **Source Finding**   | User request: OS Turbo needs measured status and periodic bounded control |
-| **Status**           | 🔄 Implemented — awaiting focused validation                              |
+| **Status**           | ✅ Complete                                                               |
 
 #### Context
 
@@ -146,8 +146,8 @@ The current restore path launches an unbounded background sweep and reports a pl
 - [x] Implement one cancellable periodic worker with fixed interval, work-item, queue, and duration bounds.
 - [x] Ensure worker restart, disable, shutdown, and bridge failure paths are deterministic and do not leak threads or duplicate actions.
 - [x] Keep status reads separate from administrator writes and preserve the bridge-only write boundary from S39-001.
-- [ ] Add tests for worker cadence, cancellation, bounded batches, duplicate suppression, and bridge unavailability.
-- [ ] Run the health check command successfully.
+- [x] Add tests for worker cadence, cancellation, bounded batches, duplicate suppression, and bridge unavailability.
+- [x] Run the full Sprint 39 health check successfully after integration: `node scripts/health-check.mjs`, 11/11 gates.
 
 #### Execution Evidence — 2026-09-18
 
@@ -155,7 +155,7 @@ The current restore path launches an unbounded background sweep and reports a pl
 - [x] Single-flight cancellable worker: `AtomicBool` busy gate, stop flag honored at each tick, fixed 30 s interval, batch ≤ 64, sweep ≤ 5 s, backoff after 3 consecutive bridge/API failures for 300 s.
 - [x] Worker is a no-op while OS Turbo is disabled; writes only via authenticated bridge (`refresh_os_turbo`), never UAC/scheduled-task; read-only `open_process_for_read` on the measure path.
 - [x] Focused unit tests added: single-flight, cancellation, disabled-state no-op, bounded batch, truthful counts, backoff open/close/expiry.
-- [ ] Health check (node scripts/health-check.mjs) and commit pending validation.
+- [x] Final integrated validation and Sprint 39 commit recorded below.
 
 ### S39-004 — Implement deterministic windowed statistics
 

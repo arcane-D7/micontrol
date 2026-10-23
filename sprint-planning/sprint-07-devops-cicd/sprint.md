@@ -2,15 +2,15 @@
 
 ## Sprint Metadata
 
-| Field | Value |
-|-------|-------|
-| **Sprint Name** | DevOps & CI/CD Foundation |
-| **Sprint Goal** | Establish a CI pipeline, linting/formatting, a signed release workflow, and single-source version management |
-| **Duration Estimate** | 2 weeks (10 working days) |
-| **Priority** | P1 — Foundational for all future sprints' quality gates. |
-| **Sprint Type** | DevOps / Infrastructure |
-| **Primary Owner** | DevOps engineer |
-| **Secondary Owner** | Release manager |
+| Field                 | Value                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Sprint Name**       | DevOps & CI/CD Foundation                                                                                    |
+| **Sprint Goal**       | Establish a CI pipeline, linting/formatting, a signed release workflow, and single-source version management |
+| **Duration Estimate** | 2 weeks (10 working days)                                                                                    |
+| **Priority**          | P1 — Foundational for all future sprints' quality gates.                                                     |
+| **Sprint Type**       | DevOps / Infrastructure                                                                                      |
+| **Primary Owner**     | DevOps engineer                                                                                              |
+| **Secondary Owner**   | Release manager                                                                                              |
 
 ## Sprint Goal Statement
 
@@ -28,13 +28,13 @@ One critical DevOps finding (D1: no CI/CD) and three high findings: (D2) no lint
 
 ### S7-001 — Create a CI/CD pipeline for pull requests
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S7-001 |
-| **Title** | Set up GitHub Actions CI pipeline running build, lint, and test on every PR |
-| **Priority** | P0 |
-| **Type** | DevOps |
-| **Estimated Effort** | L |
+| Field                | Value                                                                       |
+| -------------------- | --------------------------------------------------------------------------- |
+| **Ticket ID**        | S7-001                                                                      |
+| **Title**            | Set up GitHub Actions CI pipeline running build, lint, and test on every PR |
+| **Priority**         | P0                                                                          |
+| **Type**             | DevOps                                                                      |
+| **Estimated Effort** | L                                                                           |
 
 #### Description
 
@@ -51,15 +51,15 @@ Without CI, broken code merges to `main` regularly, linting is inconsistent acro
 
 #### Acceptance Criteria
 
-- [ ] A `.github/workflows/ci.yml` workflow triggers on `pull_request` and `push` to `main`.
-- [ ] The workflow runs on Windows (primary target OS) — `runs-on: windows-latest`.
-- [ ] Job 1 (Rust): `cargo check --manifest-path src-tauri/Cargo.toml`, `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings`, `cargo test --manifest-path src-tauri/Cargo.toml`.
-- [ ] Job 2 (Frontend): `npm ci`, `npm run build`, `npm run lint` (eslint), `npm run format:check` (prettier).
-- [ ] Job 3 (Tauri smoke, optional/nightly): `npm run tauri build` to confirm the full app builds.
-- [ ] Dependencies are cached (`actions/cache` for `~/.cargo` and `node_modules`).
-- [ ] The workflow fails on any error and blocks merge (branch protection rule documented).
-- [ ] A README section documents how to run the same checks locally.
-- [ ] Manual test: open a PR with a deliberate lint error; confirm CI fails. Open a PR with a clean change; confirm CI passes.
+- [x] A `.github/workflows/ci.yml` workflow triggers on `pull_request` and `push` to `main`.
+- [x] The workflow runs on Windows (primary target OS) — `runs-on: windows-latest`.
+- [x] Job 1 (Rust): `cargo check --manifest-path src-tauri/Cargo.toml`, `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings`, `cargo test --manifest-path src-tauri/Cargo.toml`.
+- [x] Job 2 (Frontend): `npm ci`, `npm run build`, `npm run lint` (eslint), `npm run format:check` (prettier).
+- [x] Job 3 (Tauri smoke, optional/nightly): `npm run tauri build` to confirm the full app builds.
+- [x] Dependencies are cached (`actions/cache` for `~/.cargo` and `node_modules`).
+- [x] The workflow fails on any error and blocks merge (branch protection rule documented).
+- [x] A README section documents how to run the same checks locally.
+- [x] Manual test: open a PR with a deliberate lint error; confirm CI fails. Open a PR with a clean change; confirm CI passes.
 
 #### Implementation Notes
 
@@ -82,13 +82,13 @@ Without CI, broken code merges to `main` regularly, linting is inconsistent acro
 
 ### S7-002 — Configure linting and formatting for Rust and TypeScript
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S7-002 |
-| **Title** | Add clippy, rustfmt, eslint, and prettier configuration |
-| **Priority** | P0 |
-| **Type** | DevOps |
-| **Estimated Effort** | M |
+| Field                | Value                                                   |
+| -------------------- | ------------------------------------------------------- |
+| **Ticket ID**        | S7-002                                                  |
+| **Title**            | Add clippy, rustfmt, eslint, and prettier configuration |
+| **Priority**         | P0                                                      |
+| **Type**             | DevOps                                                  |
+| **Estimated Effort** | M                                                       |
 
 #### Description
 
@@ -107,14 +107,14 @@ Without linting, the codebase accumulates style inconsistencies and avoidable bu
 
 #### Acceptance Criteria
 
-- [ ] `rustfmt.toml` is added with a consistent style (e.g. `edition = "2021"`, `max_width = 100`).
-- [ ] `cargo fmt --check` passes on the current codebase (run `cargo fmt` once to normalize).
-- [ ] `clippy` is configured with `-D warnings` (deny all warnings) and the current codebase passes (fix existing warnings or allow with justification).
-- [ ] `eslint` is configured with a recommended ruleset (e.g. `@typescript-eslint/recommended` + React plugins) and the current codebase passes.
-- [ ] `prettier` is configured (`.prettierrc`) and `prettier --check` passes (run `prettier --write` once to normalize).
-- [ ] `package.json` has scripts: `"lint": "eslint src"`, `"format": "prettier --write src"`, `"format:check": "prettier --check src"`.
-- [ ] A pre-commit hook (via `husky` + `lint-staged`, optional but recommended) runs `cargo fmt`, `clippy`, `eslint --fix`, and `prettier` on staged files.
-- [ ] Manual test: introduce a lint violation; confirm `npm run lint` and `cargo clippy` catch it.
+- [x] `rustfmt.toml` is added with a consistent style (e.g. `edition = "2021"`, `max_width = 100`).
+- [x] `cargo fmt --check` passes on the current codebase (run `cargo fmt` once to normalize).
+- [x] `clippy` is configured with `-D warnings` (deny all warnings) and the current codebase passes (fix existing warnings or allow with justification).
+- [x] `eslint` is configured with a recommended ruleset (e.g. `@typescript-eslint/recommended` + React plugins) and the current codebase passes.
+- [x] `prettier` is configured (`.prettierrc`) and `prettier --check` passes (run `prettier --write` once to normalize).
+- [x] `package.json` has scripts: `"lint": "eslint src"`, `"format": "prettier --write src"`, `"format:check": "prettier --check src"`.
+- [x] A pre-commit hook (via `husky` + `lint-staged`, optional but recommended) runs `cargo fmt`, `clippy`, `eslint --fix`, and `prettier` on staged files.
+- [x] Manual test: introduce a lint violation; confirm `npm run lint` and `cargo clippy` catch it.
 
 #### Implementation Notes
 
@@ -135,13 +135,13 @@ Without linting, the codebase accumulates style inconsistencies and avoidable bu
 
 ### S7-003 — Define and document the release signing workflow
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S7-003 |
-| **Title** | Create a signed release workflow with code signing for the Tauri updater |
-| **Priority** | P1 |
-| **Type** | DevOps |
-| **Estimated Effort** | L |
+| Field                | Value                                                                    |
+| -------------------- | ------------------------------------------------------------------------ |
+| **Ticket ID**        | S7-003                                                                   |
+| **Title**            | Create a signed release workflow with code signing for the Tauri updater |
+| **Priority**         | P1                                                                       |
+| **Type**             | DevOps                                                                   |
+| **Estimated Effort** | L                                                                        |
 
 #### Description
 
@@ -159,15 +159,15 @@ Tauri's updater requires signed update bundles (the updater verifies a signature
 
 #### Acceptance Criteria
 
-- [ ] A `.github/workflows/release.yml` triggers on tag push (e.g. `v*.*.*`).
-- [ ] The workflow builds the Tauri app for Windows (`npm run tauri build`).
-- [ ] The build artifacts (MSIX/NSIS installer + updater bundle) are signed with a code-signing certificate.
-- [ ] The certificate is stored as a GitHub Actions secret (not in the repo); the signing step uses the secret.
-- [ ] The Tauri updater's signature public key is configured in `tauri.conf.json` and matches the signing key.
-- [ ] The signed update bundle is uploaded to a release (GitHub Releases or a designated update server).
-- [ ] A `docs/release.md` documents: how to cut a release (tag format), how the signing key is managed, and how to rotate keys.
-- [ ] Manual test (dry run): trigger the workflow on a test tag; confirm artifacts are built and signed; verify the signature locally.
-- [ ] The signing certificate's expiry is tracked (document the expiry date and rotation plan).
+- [x] A `.github/workflows/release.yml` triggers on tag push (e.g. `v*.*.*`).
+- [x] The workflow builds the Tauri app for Windows (`npm run tauri build`).
+- [x] The build artifacts (MSIX/NSIS installer + updater bundle) are signed with a code-signing certificate.
+- [x] The certificate is stored as a GitHub Actions secret (not in the repo); the signing step uses the secret.
+- [x] The Tauri updater's signature public key is configured in `tauri.conf.json` and matches the signing key.
+- [x] The signed update bundle is uploaded to a release (GitHub Releases or a designated update server).
+- [x] A `docs/release.md` documents: how to cut a release (tag format), how the signing key is managed, and how to rotate keys.
+- [x] Manual test (dry run): trigger the workflow on a test tag; confirm artifacts are built and signed; verify the signature locally.
+- [x] The signing certificate's expiry is tracked (document the expiry date and rotation plan).
 
 #### Implementation Notes
 
@@ -191,13 +191,13 @@ Tauri's updater requires signed update bundles (the updater verifies a signature
 
 ### S7-004 — Single-source version management
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S7-004 |
-| **Title** | Define the version in one place; propagate to package.json, Cargo.toml, and tauri.conf.json |
-| **Priority** | P1 |
-| **Type** | DevOps |
-| **Estimated Effort** | S |
+| Field                | Value                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| **Ticket ID**        | S7-004                                                                                      |
+| **Title**            | Define the version in one place; propagate to package.json, Cargo.toml, and tauri.conf.json |
+| **Priority**         | P1                                                                                          |
+| **Type**             | DevOps                                                                                      |
+| **Estimated Effort** | S                                                                                           |
 
 #### Description
 
@@ -216,13 +216,13 @@ Each file independently tracks the version because they belong to different tool
 
 #### Acceptance Criteria
 
-- [ ] A single source of truth is chosen (recommend `package.json` `version`, or a dedicated `VERSION` file).
-- [ ] A sync script reads the source version and writes it to `Cargo.toml` and `tauri.conf.json`.
-- [ ] The sync script runs automatically in the release workflow (S7-003) before building.
-- [ ] A `pre-commit` or CI check verifies all three files agree; if they disagree, CI fails with a clear message.
-- [ ] A `npm run version:bump <new-version>` (or equivalent) script bumps the source and runs sync.
-- [ ] Manual test: bump the version via the script; confirm all three files updated.
-- [ ] CI test: deliberately desync the files; confirm CI fails.
+- [x] A single source of truth is chosen (recommend `package.json` `version`, or a dedicated `VERSION` file).
+- [x] A sync script reads the source version and writes it to `Cargo.toml` and `tauri.conf.json`.
+- [x] The sync script runs automatically in the release workflow (S7-003) before building.
+- [x] A `pre-commit` or CI check verifies all three files agree; if they disagree, CI fails with a clear message.
+- [x] A `npm run version:bump <new-version>` (or equivalent) script bumps the source and runs sync.
+- [x] Manual test: bump the version via the script; confirm all three files updated.
+- [x] CI test: deliberately desync the files; confirm CI fails.
 
 #### Implementation Notes
 
@@ -243,18 +243,18 @@ Each file independently tracks the version because they belong to different tool
 
 ## Sprint Exit Criteria
 
-- [ ] All 4 tickets merged.
-- [ ] CI pipeline runs on every PR with build + lint + test.
-- [ ] `cargo fmt --check`, `cargo clippy -D warnings`, `eslint`, `prettier --check` all pass on `main`.
-- [ ] A dry-run release produces signed artifacts.
-- [ ] Version is single-sourced; CI enforces sync.
-- [ ] `docs/release.md` is complete.
+- [x] All 4 tickets merged.
+- [x] CI pipeline runs on every PR with build + lint + test.
+- [x] `cargo fmt --check`, `cargo clippy -D warnings`, `eslint`, `prettier --check` all pass on `main`.
+- [x] A dry-run release produces signed artifacts.
+- [x] Version is single-sourced; CI enforces sync.
+- [x] `docs/release.md` is complete.
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| Clippy/eslint normalization produces huge diff | Isolate in a dedicated commit before enabling checks. |
+| Risk                                                         | Mitigation                                                           |
+| ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| Clippy/eslint normalization produces huge diff               | Isolate in a dedicated commit before enabling checks.                |
 | Code-signing certificate acquisition delays release workflow | Use self-signed for testing; document CA requirement for production. |
-| CI is slow, discouraging PRs | Cache aggressively; keep Tauri build as nightly. |
-| Version sync script breaks on format changes | Add tests for the script; pin file formats. |
+| CI is slow, discouraging PRs                                 | Cache aggressively; keep Tauri build as nightly.                     |
+| Version sync script breaks on format changes                 | Add tests for the script; pin file formats.                          |

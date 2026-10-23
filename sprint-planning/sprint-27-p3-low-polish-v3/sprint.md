@@ -67,10 +67,10 @@ In `src-tauri/src/lib.rs:785-830`, `redact_unc_path` uses `result.find("\\\\")` 
 
 #### Acceptance Criteria
 
-- [ ] `redact_unc_path` redacts ALL UNC path occurrences (use loop or regex)
-- [ ] `redact_path_username` redacts ALL drive-letter path occurrences across all drives
-- [ ] Unit test verifies multiple occurrences are redacted
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `redact_unc_path` redacts ALL UNC path occurrences (use loop or regex)
+- [x] `redact_path_username` redacts ALL drive-letter path occurrences across all drives
+- [x] Unit test verifies multiple occurrences are redacted
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -91,8 +91,8 @@ In `src-tauri/src/commands/privacy.rs:128-145`, `reveal_in_explorer` validates t
 
 #### Acceptance Criteria
 
-- [ ] `explorer.exe` receives `canonical.to_string_lossy()` instead of original `path`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `explorer.exe` receives `canonical.to_string_lossy()` instead of original `path`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -113,8 +113,8 @@ In `src-tauri/src/commands/privacy.rs:20-28`, the `USER_DATA_FILES` list include
 
 #### Acceptance Criteria
 
-- [ ] `nonces.json` removed from `USER_DATA_FILES` array
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `nonces.json` removed from `USER_DATA_FILES` array
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -135,9 +135,9 @@ In `src-tauri/src/commands/credentials.rs:27-34`, the `get_secret` command accep
 
 #### Acceptance Criteria
 
-- [ ] Allowlist of permitted keys (e.g., `["openai_api_key", "telemetry_consent"]`)
-- [ ] Unknown keys rejected with descriptive error
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Allowlist of permitted keys (e.g., `["openai_api_key", "telemetry_consent"]`)
+- [x] Unknown keys rejected with descriptive error
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -158,8 +158,8 @@ In `src-tauri/src/commands/hotkeys.rs:12`, `set_hotkey_config` calls `save_confi
 
 #### Acceptance Criteria
 
-- [ ] `save_config()` call wrapped in `run_blocking`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `save_config()` call wrapped in `run_blocking`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -180,9 +180,9 @@ In `src-tauri/src/hw/osd.rs:113`, `osd::init()` calls `.expect("osd thread spawn
 
 #### Acceptance Criteria
 
-- [ ] `.expect()` replaced with `if let Err(e) = ... { log::warn!(...) }`
-- [ ] App continues without OSD if thread spawn fails
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `.expect()` replaced with `if let Err(e) = ... { log::warn!(...) }`
+- [x] App continues without OSD if thread spawn fails
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -205,9 +205,9 @@ In `src/components/AiConfigForm.tsx:135`, the `aria-label` on the API key show/h
 
 #### Acceptance Criteria
 
-- [ ] `aria-label` uses `t('settings.showKey')` / `t('settings.hideKey')` (or appropriate i18n keys)
-- [ ] New keys added to all 4 locale files if they don't exist
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] `aria-label` uses `t('settings.showKey')` / `t('settings.hideKey')` (or appropriate i18n keys)
+- [x] New keys added to all 4 locale files if they don't exist
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -228,9 +228,9 @@ The ErrorBoundary compact mode (S24-012) and OnboardingWizard focus trap/Escape 
 
 #### Acceptance Criteria
 
-- [ ] Test for ErrorBoundary compact mode: renders compact error UI, "Reload tab" button resets state
-- [ ] Test for OnboardingWizard: focus trap cycles within modal, Escape key closes wizard
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] Test for ErrorBoundary compact mode: renders compact error UI, "Reload tab" button resets state
+- [x] Test for OnboardingWizard: focus trap cycles within modal, Escape key closes wizard
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -251,9 +251,9 @@ CodeQL only covers JavaScript/TypeScript. The Rust backend (where all the crypto
 
 #### Acceptance Criteria
 
-- [ ] `cargo-deny` added to CI workflow (or Semgrep with Rust rules)
-- [ ] Runs on push to `master` and on PRs
-- [ ] `deny.toml` configuration file created with license/advisory rules
+- [x] `cargo-deny` added to CI workflow (or Semgrep with Rust rules)
+- [x] Runs on push to `master` and on PRs
+- [x] `deny.toml` configuration file created with license/advisory rules
 
 ---
 
@@ -274,8 +274,8 @@ The CI workflow caches `cargo-audit` and `cargo-tarpaulin` installs (D-L01, D-L0
 
 #### Acceptance Criteria
 
-- [ ] `actions/cache@v4` step added to release workflow for `~/.cargo/bin/cargo-audit`
-- [ ] Install step only runs if not already cached
+- [x] `actions/cache@v4` step added to release workflow for `~/.cargo/bin/cargo-audit`
+- [x] Install step only runs if not already cached
 
 ---
 
@@ -296,9 +296,9 @@ The release workflow runs `cargo audit` and `npm audit` (D-L05) but skips `tsc`,
 
 #### Acceptance Criteria
 
-- [ ] `npx tsc --noEmit` step added before build
-- [ ] `npm run lint` step added before build
-- [ ] `npm run test` step added before build (if test script exists)
+- [x] `npx tsc --noEmit` step added before build
+- [x] `npm run lint` step added before build
+- [x] `npm run test` step added before build (if test script exists)
 
 ---
 

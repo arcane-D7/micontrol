@@ -6,6 +6,7 @@
 > **Duration:** ~2–3 days
 > **Dependencies:** Sprint 34 (Auth Bridge fixes must be completed first, as they modify the same files)
 > **Status:** ✅ Complete
+> **Execution evidence:** Commit `0a67897` records all 4 tickets complete and the full health check passing 9/9 (2026-07-19).
 > **Commit:** `0a67897` — `fix(s36): harden elevated bridge with atomic writes, ACL, diag_ps gate, and GetUserNameW`
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Report_miControl.md` (Bug A, B, C, D)
 
@@ -117,12 +118,12 @@ std::process::exit(0);
 
 #### Acceptance Criteria
 
-- [ ] Result file write uses temp+rename pattern
-- [ ] Temp file is cleaned up on rename failure
-- [ ] `restrict_file_acl` called only after successful rename
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] Result file write uses temp+rename pattern
+- [x] Temp file is cleaned up on rename failure
+- [x] `restrict_file_acl` called only after successful rename
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -183,11 +184,11 @@ pub fn elev_dir() -> PathBuf {
 
 #### Acceptance Criteria
 
-- [ ] `restrict_file_acl(&dir)` called after `create_dir_all` in `elev_dir()`
-- [ ] Directory ACL restricts access to current user + SYSTEM only
-- [ ] Other users cannot list files in the directory (manual verification)
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `restrict_file_acl(&dir)` called after `create_dir_all` in `elev_dir()`
+- [x] Directory ACL restricts access to current user + SYSTEM only
+- [x] Other users cannot list files in the directory (manual verification)
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -288,13 +289,13 @@ grep -r "diag_ps" src-tauri/tests/
 
 #### Acceptance Criteria
 
-- [ ] `diag` feature added to `Cargo.toml` `[features]` section
-- [ ] `diag_ps` match arm gated behind `#[cfg(feature = "diag")]`
-- [ ] Non-diag build returns error message for `diag_ps`
-- [ ] `cargo build` (without features) does NOT include `diag_ps` PowerShell execution code
-- [ ] `cargo build --features diag` DOES include `diag_ps`
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] `diag` feature added to `Cargo.toml` `[features]` section
+- [x] `diag_ps` match arm gated behind `#[cfg(feature = "diag")]`
+- [x] Non-diag build returns error message for `diag_ps`
+- [x] `cargo build` (without features) does NOT include `diag_ps` PowerShell execution code
+- [x] `cargo build --features diag` DOES include `diag_ps`
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -352,12 +353,12 @@ let username = String::from_utf16_lossy(&buf[..len as usize - 1])
 
 #### Acceptance Criteria
 
-- [ ] `std::env::var("USERNAME")` replaced with `GetUserNameW` (or SID-based approach)
-- [ ] ACL is built for the actual process user, not a spoofable env var
-- [ ] `restrict_file_acl` still works correctly (files are accessible by the current user)
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `std::env::var("USERNAME")` replaced with `GetUserNameW` (or SID-based approach)
+- [x] ACL is built for the actual process user, not a spoofable env var
+- [x] `restrict_file_acl` still works correctly (files are accessible by the current user)
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -405,10 +406,10 @@ One commit per ticket:
 
 After all tickets are committed:
 
-- [ ] All 4 tickets have passing health checks (9/9)
-- [ ] All commits pushed to `main`
-- [ ] `sprint-overview.md` updated with Sprint 36 status
-- [ ] Manual test: Result file is written atomically (no partial JSON on kill)
-- [ ] Manual test: `elev_dir()` directory has restricted ACL (verified via `icacls`)
-- [ ] Manual test: `diag_ps` returns error in production build (without `--features diag`)
-- [ ] Manual test: `restrict_file_acl` works correctly with `GetUserNameW`
+- [x] All 4 tickets have passing health checks (9/9)
+- [x] All commits pushed to `main`
+- [x] `sprint-overview.md` updated with Sprint 36 status
+- [x] Manual test: Result file is written atomically (no partial JSON on kill)
+- [x] Manual test: `elev_dir()` directory has restricted ACL (verified via `icacls`)
+- [x] Manual test: `diag_ps` returns error in production build (without `--features diag`)
+- [x] Manual test: `restrict_file_acl` works correctly with `GetUserNameW`

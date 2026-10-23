@@ -5,7 +5,8 @@
 > **Theme:** Fix 7 high-priority issues including FULL implementation of all stubs (Miracast, ECRAM WMI discovery)
 > **Duration:** ~4–5 days
 > **Dependencies:** Sprint 30 (all P0 critical fixes)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete — commit `9a8f9fc`
+> **Execution evidence:** The commit resolves S31-001 through S31-008, including WinRT casting and WMI discovery, and records passing Rust, TypeScript, lint, format, build, and version checks (2026-06-27).
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Final.md` (A-1 through A-7)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
@@ -80,13 +81,14 @@ The most complex ticket is **S31-004** (Miracast/Screen Cast), which requires a 
 5 navigation keys referenced in `NAV_ITEMS` (`src/pages/MainWindow.tsx:38-57`) do not exist in any of the 4 translation files. The sidebar shows raw key names (e.g., `nav.audio`) instead of translated labels.
 
 Missing keys:
-| Key | Icon | EN | PT | ES | FR |
-|-----|------|----|----|----|----|
-| `nav.audio` | 🎵 | Audio | Áudio | Audio | Audio |
-| `nav.cast` | 📺 | Cast | Transmissão | Transmitir | Diffusion |
-| `nav.iot` | 🔌 | IoT Device | Dispositivo IoT | Dispositivo IoT | Appareil IoT |
-| `nav.wifi` | 📶 | Wi-Fi | Wi-Fi | Wi-Fi | Wi-Fi |
-| `nav.ecrdebug` | 🔧 | EC Debug | Debug EC | Debug EC | Debug EC |
+
+| Key            | Icon | EN         | PT              | ES              | FR           |
+| -------------- | ---- | ---------- | --------------- | --------------- | ------------ |
+| `nav.audio`    | 🎵   | Audio      | Áudio           | Audio           | Audio        |
+| `nav.cast`     | 📺   | Cast       | Transmissão     | Transmitir      | Diffusion    |
+| `nav.iot`      | 🔌   | IoT Device | Dispositivo IoT | Dispositivo IoT | Appareil IoT |
+| `nav.wifi`     | 📶   | Wi-Fi      | Wi-Fi           | Wi-Fi           | Wi-Fi        |
+| `nav.ecrdebug` | 🔧   | EC Debug   | Debug EC        | Debug EC        | Debug EC     |
 
 #### Solution
 
@@ -149,11 +151,11 @@ After `"setup": "Device Setup",`:
 
 #### Acceptance Criteria
 
-- [ ] All 5 keys exist in `en.json`, `pt.json`, `es.json`, `fr.json`
-- [ ] Keys are in the `"nav"` section of each file
-- [ ] No duplicate keys in any file
-- [ ] `npm run build` succeeds
-- [ ] Sidebar shows translated labels for all 18 nav items in all 4 languages
+- [x] All 5 keys exist in `en.json`, `pt.json`, `es.json`, `fr.json`
+- [x] Keys are in the `"nav"` section of each file
+- [x] No duplicate keys in any file
+- [x] `npm run build` succeeds
+- [x] Sidebar shows translated labels for all 18 nav items in all 4 languages
 
 ---
 
@@ -228,13 +230,13 @@ fn get_device_friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) ->
 
 #### Acceptance Criteria
 
-- [ ] `get_device_friendly_name()` uses `OpenPropertyStore` + `PKEY_Device_FriendlyName`
-- [ ] Falls back to device ID if friendly name is unavailable
-- [ ] Audio device names in the UI match Windows Sound Control Panel
-- [ ] No more hash IDs shown in the Volume tab
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `get_device_friendly_name()` uses `OpenPropertyStore` + `PKEY_Device_FriendlyName`
+- [x] Falls back to device ID if friendly name is unavailable
+- [x] Audio device names in the UI match Windows Sound Control Panel
+- [x] No more hash IDs shown in the Volume tab
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -352,12 +354,12 @@ cmd.creation_flags(CREATE_NO_WINDOW);
 
 #### Acceptance Criteria
 
-- [ ] All `Command::new("netsh")` calls in `wifi.rs` have `creation_flags(CREATE_NO_WINDOW)`
-- [ ] All `Command::new("cmd")` calls in `screen_cast.rs` have `creation_flags(CREATE_NO_WINDOW)`
-- [ ] No visible console window flashes during WiFi scan, connect, disconnect, or status operations
-- [ ] No visible console window flashes during cast start/stop
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] All `Command::new("netsh")` calls in `wifi.rs` have `creation_flags(CREATE_NO_WINDOW)`
+- [x] All `Command::new("cmd")` calls in `screen_cast.rs` have `creation_flags(CREATE_NO_WINDOW)`
+- [x] No visible console window flashes during WiFi scan, connect, disconnect, or status operations
+- [x] No visible console window flashes during cast start/stop
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -618,18 +620,18 @@ Use `Windows.Devices.Enumeration.DeviceInformation.FindAllAsync` with the castin
 
 #### Acceptance Criteria
 
-- [ ] `list_cast_devices()` returns real Miracast devices (not empty list) when devices are available
-- [ ] `list_cast_devices()` returns empty list when no devices are available (not an error)
-- [ ] `start_casting()` uses `CastingDevice::FromIdAsync` + `CreateCastingConnection` + `StartCastingAsync`
-- [ ] `stop_casting()` disconnects the active casting connection
-- [ ] No `cmd /c start ms-settings-connectabledevices:project` fallback (full WinRT only)
-- [ ] No `taskkill` as primary stop mechanism (only as cleanup fallback)
-- [ ] `CREATE_NO_WINDOW` on any subprocess calls
-- [ ] `Cargo.toml` has `Media_Casting` and `Devices_Enumeration` features
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
-- [ ] Unit test: `test_list_cast_devices_returns_ok`
+- [x] `list_cast_devices()` returns real Miracast devices (not empty list) when devices are available
+- [x] `list_cast_devices()` returns empty list when no devices are available (not an error)
+- [x] `start_casting()` uses `CastingDevice::FromIdAsync` + `CreateCastingConnection` + `StartCastingAsync`
+- [x] `stop_casting()` disconnects the active casting connection
+- [x] No `cmd /c start ms-settings-connectabledevices:project` fallback (full WinRT only)
+- [x] No `taskkill` as primary stop mechanism (only as cleanup fallback)
+- [x] `CREATE_NO_WINDOW` on any subprocess calls
+- [x] `Cargo.toml` has `Media_Casting` and `Devices_Enumeration` features
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
+- [x] Unit test: `test_list_cast_devices_returns_ok`
 
 ---
 
@@ -687,11 +689,11 @@ export default function StartupTab() {
 
 #### Acceptance Criteria
 
-- [ ] `startup.tsx` calls `invoke<boolean>('get_autostart')` on mount
-- [ ] Loading state prevents flash of incorrect toggle state
-- [ ] After F5, toggle matches actual autostart state from registry
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] `startup.tsx` calls `invoke<boolean>('get_autostart')` on mount
+- [x] Loading state prevents flash of incorrect toggle state
+- [x] After F5, toggle matches actual autostart state from registry
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -861,13 +863,13 @@ fn touchpad_hid_path() -> String {
 
 #### Acceptance Criteria
 
-- [ ] All `log::debug!` for HID errors changed to `log::warn!`
-- [ ] HID device path is logged at `info` level when opening
-- [ ] `discover_touchpad_hid_path()` uses SetupAPI to find BLTP7853 COL04
-- [ ] `touchpad_hid_path()` tries: discovery profile → dynamic discovery → fallback
-- [ ] Warning logged when falling back to hardcoded path
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] All `log::debug!` for HID errors changed to `log::warn!`
+- [x] HID device path is logged at `info` level when opening
+- [x] `discover_touchpad_hid_path()` uses SetupAPI to find BLTP7853 COL04
+- [x] `touchpad_hid_path()` tries: discovery profile → dynamic discovery → fallback
+- [x] Warning logged when falling back to hardcoded path
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
 
 ---
 
@@ -922,11 +924,11 @@ const NAV_ITEMS = [
 
 #### Acceptance Criteria
 
-- [ ] EC Debug nav item only appears when `import.meta.env.DEV` is true
-- [ ] In production build, EC Debug is not in the sidebar
-- [ ] In dev mode, EC Debug is still accessible
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run build` succeeds
+- [x] EC Debug nav item only appears when `import.meta.env.DEV` is true
+- [x] In production build, EC Debug is not in the sidebar
+- [x] In dev mode, EC Debug is still accessible
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -1070,14 +1072,14 @@ fn query_msacpi_ec_region() -> wmi::Result<Option<u32>> {
 
 #### Acceptance Criteria
 
-- [ ] `discover_from_wmi()` no longer returns `None` unconditionally
-- [ ] Queries `Win32_PnPEntity` for ACPI EC device (PNP0C09)
-- [ ] Parses resource descriptors for I/O port addresses
-- [ ] Falls back to `None` gracefully if WMI query fails
-- [ ] No "Future work" or "for now" comments remain
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `discover_from_wmi()` no longer returns `None` unconditionally
+- [x] Queries `Win32_PnPEntity` for ACPI EC device (PNP0C09)
+- [x] Parses resource descriptors for I/O port addresses
+- [x] Falls back to `None` gracefully if WMI query fails
+- [x] No "Future work" or "for now" comments remain
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 

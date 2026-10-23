@@ -2,15 +2,15 @@
 
 ## Sprint Metadata
 
-| Field | Value |
-|-------|-------|
-| **Sprint Name** | Architecture & Stability — Crash Prevention |
-| **Sprint Goal** | Eliminate fatal crashes from `panic = "abort"`, fix state management fragmentation, introduce structured error handling, and move blocking calls off the async runtime |
-| **Duration Estimate** | 3 weeks (15 working days) |
-| **Priority** | P1 — Stability-critical. Crashes are user-visible and data-loss-prone. |
-| **Sprint Type** | Refactor / Architecture |
-| **Primary Owner** | Rust architect |
-| **Secondary Owner** | Backend engineer (async runtime) |
+| Field                 | Value                                                                                                                                                                  |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Sprint Name**       | Architecture & Stability — Crash Prevention                                                                                                                            |
+| **Sprint Goal**       | Eliminate fatal crashes from `panic = "abort"`, fix state management fragmentation, introduce structured error handling, and move blocking calls off the async runtime |
+| **Duration Estimate** | 3 weeks (15 working days)                                                                                                                                              |
+| **Priority**          | P1 — Stability-critical. Crashes are user-visible and data-loss-prone.                                                                                                 |
+| **Sprint Type**       | Refactor / Architecture                                                                                                                                                |
+| **Primary Owner**     | Rust architect                                                                                                                                                         |
+| **Secondary Owner**   | Backend engineer (async runtime)                                                                                                                                       |
 
 ## Sprint Goal Statement
 
@@ -28,13 +28,13 @@ Two critical architecture findings drive this sprint: (A1) blocking WMI/IGCL/Pow
 
 ### S3-001 — Replace `panic = "abort"` with panic-catching and graceful degradation
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S3-001 |
-| **Title** | Remove `panic = "abort"`; add panic hooks and graceful error paths |
-| **Priority** | P0 |
-| **Type** | Refactor |
-| **Estimated Effort** | M |
+| Field                | Value                                                              |
+| -------------------- | ------------------------------------------------------------------ |
+| **Ticket ID**        | S3-001                                                             |
+| **Title**            | Remove `panic = "abort"`; add panic hooks and graceful error paths |
+| **Priority**         | P0                                                                 |
+| **Type**             | Refactor                                                           |
+| **Estimated Effort** | M                                                                  |
 
 #### Description
 
@@ -52,12 +52,12 @@ Two critical architecture findings drive this sprint: (A1) blocking WMI/IGCL/Pow
 
 #### Acceptance Criteria
 
-- [ ] `panic = "abort"` is removed from `Cargo.toml` (or set to `panic = "unwind"` explicitly).
-- [ ] A global panic hook is installed in `main.rs` that logs the panic payload and backtrace to the app's log file before the default behavior.
-- [ ] All `Mutex::lock().unwrap()` calls in `commands/hardware.rs` (and audited across the codebase) are replaced with a helper `fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<T>` that uses `unwrap_or_else(|e| e.into_inner())` to recover poisoned mutexes.
-- [ ] Critical async tasks are wrapped in `tokio::spawn` with a `.unwrap_or_else` that logs and restarts, so a panic in one task does not crash the runtime.
-- [ ] Manual test: deliberately poison a mutex in a debug build (inject a panic while holding the lock); confirm the app continues running and logs the recovery.
-- [ ] Binary size impact is measured and documented (unwind tables add ~50–200 KB; acceptable for a desktop app).
+- [x] `panic = "abort"` is removed from `Cargo.toml` (or set to `panic = "unwind"` explicitly).
+- [x] A global panic hook is installed in `main.rs` that logs the panic payload and backtrace to the app's log file before the default behavior.
+- [x] All `Mutex::lock().unwrap()` calls in `commands/hardware.rs` (and audited across the codebase) are replaced with a helper `fn lock_or_recover<T>(m: &Mutex<T>) -> MutexGuard<T>` that uses `unwrap_or_else(|e| e.into_inner())` to recover poisoned mutexes.
+- [x] Critical async tasks are wrapped in `tokio::spawn` with a `.unwrap_or_else` that logs and restarts, so a panic in one task does not crash the runtime.
+- [x] Manual test: deliberately poison a mutex in a debug build (inject a panic while holding the lock); confirm the app continues running and logs the recovery.
+- [x] Binary size impact is measured and documented (unwind tables add ~50–200 KB; acceptable for a desktop app).
 
 #### Implementation Notes
 
@@ -79,13 +79,13 @@ Two critical architecture findings drive this sprint: (A1) blocking WMI/IGCL/Pow
 
 ### S3-002 — Centralize state management; eliminate OnceLock/static global fragmentation
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S3-002 |
-| **Title** | Consolidate AppState and module-level statics into a single state container |
-| **Priority** | P1 |
-| **Type** | Refactor |
-| **Estimated Effort** | XL |
+| Field                | Value                                                                       |
+| -------------------- | --------------------------------------------------------------------------- |
+| **Ticket ID**        | S3-002                                                                      |
+| **Title**            | Consolidate AppState and module-level statics into a single state container |
+| **Priority**         | P1                                                                          |
+| **Type**             | Refactor                                                                    |
+| **Estimated Effort** | XL                                                                          |
 
 #### Description
 
@@ -106,13 +106,13 @@ State was added incrementally per-module using `thread_local!` and `OnceLock` fo
 
 #### Acceptance Criteria
 
-- [ ] A single `AppState` struct is defined that holds all previously-static state as fields (each wrapped in `Mutex` or `RwLock` as appropriate).
-- [ ] `AppState` is registered with Tauri via `app.manage(state)` and accessed in handlers via `State<'_, AppState>`.
-- [ ] All `thread_local!` and `OnceLock` statics in the audited modules are removed and replaced with `AppState` access.
-- [ ] For the touchpad raw-input callback (which cannot easily take a Tauri `State`), state is accessed via a single `OnceLock<Arc<AppState>>` set once at startup — documented as the sole exception.
-- [ ] A `AppState::reset()` method is added for testing and for a future "reset settings" feature.
-- [ ] Unit tests can construct an `AppState` directly and inject it, with no reliance on process-global statics.
-- [ ] No behavior change in production (state values are preserved, just relocated).
+- [x] A single `AppState` struct is defined that holds all previously-static state as fields (each wrapped in `Mutex` or `RwLock` as appropriate).
+- [x] `AppState` is registered with Tauri via `app.manage(state)` and accessed in handlers via `State<'_, AppState>`.
+- [x] All `thread_local!` and `OnceLock` statics in the audited modules are removed and replaced with `AppState` access.
+- [x] For the touchpad raw-input callback (which cannot easily take a Tauri `State`), state is accessed via a single `OnceLock<Arc<AppState>>` set once at startup — documented as the sole exception.
+- [x] A `AppState::reset()` method is added for testing and for a future "reset settings" feature.
+- [x] Unit tests can construct an `AppState` directly and inject it, with no reliance on process-global statics.
+- [x] No behavior change in production (state values are preserved, just relocated).
 
 #### Implementation Notes
 
@@ -134,13 +134,13 @@ State was added incrementally per-module using `thread_local!` and `OnceLock` fo
 
 ### S3-003 — Introduce structured error types with thiserror; replace opaque anyhow→String
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S3-003 |
-| **Title** | Define typed error enums with thiserror; stop converting errors to opaque Strings |
-| **Priority** | P1 |
-| **Type** | Refactor |
-| **Estimated Effort** | L |
+| Field                | Value                                                                             |
+| -------------------- | --------------------------------------------------------------------------------- |
+| **Ticket ID**        | S3-003                                                                            |
+| **Title**            | Define typed error enums with thiserror; stop converting errors to opaque Strings |
+| **Priority**         | P1                                                                                |
+| **Type**             | Refactor                                                                          |
+| **Estimated Effort** | L                                                                                 |
 
 #### Description
 
@@ -159,13 +159,13 @@ Using `anyhow` everywhere is convenient for prototyping but loses type informati
 
 #### Acceptance Criteria
 
-- [ ] A `HardwareError` enum is defined with `#[derive(thiserror::Error)]` and variants for each failure mode (e.g. `WmiQuery`, `Io`, `Hid`, `InvalidConfig`, `Timeout`, `NotSupported`).
-- [ ] Each variant carries relevant context (e.g. `WmiQuery { source: wmi::Error, query: String }`).
-- [ ] Hardware modules return `Result<T, HardwareError>` instead of `anyhow::Result`.
-- [ ] Command handlers map `HardwareError` to a serializable error response with a `code` field (string enum) and `message` field, so the frontend can switch on `code`.
-- [ ] `anyhow` is retained only at the top-level command boundary for ergonomic `?` propagation where the error type doesn't matter.
-- [ ] Unit test: a WMI failure produces a `HardwareError::WmiQuery` that serializes with `code: "wmi_query"`.
-- [ ] The frontend error handling is updated (coordinate with frontend team) to switch on `code` rather than string-matching messages.
+- [x] A `HardwareError` enum is defined with `#[derive(thiserror::Error)]` and variants for each failure mode (e.g. `WmiQuery`, `Io`, `Hid`, `InvalidConfig`, `Timeout`, `NotSupported`).
+- [x] Each variant carries relevant context (e.g. `WmiQuery { source: wmi::Error, query: String }`).
+- [x] Hardware modules return `Result<T, HardwareError>` instead of `anyhow::Result`.
+- [x] Command handlers map `HardwareError` to a serializable error response with a `code` field (string enum) and `message` field, so the frontend can switch on `code`.
+- [x] `anyhow` is retained only at the top-level command boundary for ergonomic `?` propagation where the error type doesn't matter.
+- [x] Unit test: a WMI failure produces a `HardwareError::WmiQuery` that serializes with `code: "wmi_query"`.
+- [x] The frontend error handling is updated (coordinate with frontend team) to switch on `code` rather than string-matching messages.
 
 #### Implementation Notes
 
@@ -186,13 +186,13 @@ Using `anyhow` everywhere is convenient for prototyping but loses type informati
 
 ### S3-004 — Move blocking WMI/IGCL/PowerShell calls to `spawn_blocking`
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S3-004 |
-| **Title** | Wrap all blocking WMI/IGCL/PowerShell calls in `tokio::task::spawn_blocking` |
-| **Priority** | P0 |
-| **Type** | Bug / Performance |
-| **Estimated Effort** | L |
+| Field                | Value                                                                        |
+| -------------------- | ---------------------------------------------------------------------------- |
+| **Ticket ID**        | S3-004                                                                       |
+| **Title**            | Wrap all blocking WMI/IGCL/PowerShell calls in `tokio::task::spawn_blocking` |
+| **Priority**         | P0                                                                           |
+| **Type**             | Bug / Performance                                                            |
+| **Estimated Effort** | L                                                                            |
 
 #### Description
 
@@ -210,13 +210,13 @@ WMI (via `wmi` crate), IGCL (Intel Graphics Control Library), and `std::process:
 
 #### Acceptance Criteria
 
-- [ ] Every blocking WMI query is wrapped in `tokio::task::spawn_blocking(move || { ... })`.
-- [ ] Every IGCL call is wrapped in `spawn_blocking`.
-- [ ] Every `Command::new("powershell")` (or `cmd`) call in async context is wrapped in `spawn_blocking`.
-- [ ] The `adaptive_brightness_loop` no longer blocks the runtime between iterations — the loop `await`s the `spawn_blocking` future.
-- [ ] A code audit (grep for `wmi::`, `IGCL`, `Command::new` in `async fn`) confirms no remaining un-wrapped blocking calls.
-- [ ] Manual test: during a brightness adjustment, the UI remains responsive (no freeze).
-- [ ] Performance test: measure the runtime's idle task latency during a WMI call cycle; confirm it stays under 16ms (one frame).
+- [x] Every blocking WMI query is wrapped in `tokio::task::spawn_blocking(move || { ... })`.
+- [x] Every IGCL call is wrapped in `spawn_blocking`.
+- [x] Every `Command::new("powershell")` (or `cmd`) call in async context is wrapped in `spawn_blocking`.
+- [x] The `adaptive_brightness_loop` no longer blocks the runtime between iterations — the loop `await`s the `spawn_blocking` future.
+- [x] A code audit (grep for `wmi::`, `IGCL`, `Command::new` in `async fn`) confirms no remaining un-wrapped blocking calls.
+- [x] Manual test: during a brightness adjustment, the UI remains responsive (no freeze).
+- [x] Performance test: measure the runtime's idle task latency during a WMI call cycle; confirm it stays under 16ms (one frame).
 
 #### Implementation Notes
 
@@ -238,13 +238,13 @@ WMI (via `wmi` crate), IGCL (Intel Graphics Control Library), and `std::process:
 
 ### S3-005 — Replace `.lock().unwrap()` panic sites with poison-recovery helpers
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S3-005 |
-| **Title** | Audit and replace all `Mutex::lock().unwrap()` with poison-recovering accessors |
-| **Priority** | P1 |
-| **Type** | Refactor |
-| **Estimated Effort** | M |
+| Field                | Value                                                                           |
+| -------------------- | ------------------------------------------------------------------------------- |
+| **Ticket ID**        | S3-005                                                                          |
+| **Title**            | Audit and replace all `Mutex::lock().unwrap()` with poison-recovering accessors |
+| **Priority**         | P1                                                                              |
+| **Type**             | Refactor                                                                        |
+| **Estimated Effort** | M                                                                               |
 
 #### Description
 
@@ -261,10 +261,10 @@ Following S3-001's introduction of `lock_or_recover`, this ticket audits the ent
 
 #### Acceptance Criteria
 
-- [ ] A `grep` for `\.lock\(\)\.unwrap\(\)` and `\.lock\(\)\.expect` across `src-tauri/src/` returns zero results (or each remaining instance is documented as intentional).
-- [ ] All `RwLock` read/write lock sites are similarly audited and use `unwrap_or_else(|e| e.into_inner())`.
-- [ ] A `clippy` lint or custom lint is configured (if feasible) to flag new `.lock().unwrap()` additions.
-- [ ] Unit test: poison a mutex used in a command handler; confirm the handler recovers and returns a sensible default rather than panicking.
+- [x] A `grep` for `\.lock\(\)\.unwrap\(\)` and `\.lock\(\)\.expect` across `src-tauri/src/` returns zero results (or each remaining instance is documented as intentional).
+- [x] All `RwLock` read/write lock sites are similarly audited and use `unwrap_or_else(|e| e.into_inner())`.
+- [x] A `clippy` lint or custom lint is configured (if feasible) to flag new `.lock().unwrap()` additions.
+- [x] Unit test: poison a mutex used in a command handler; confirm the handler recovers and returns a sensible default rather than panicking.
 
 #### Implementation Notes
 
@@ -284,13 +284,13 @@ Following S3-001's introduction of `lock_or_recover`, this ticket audits the ent
 
 ### S3-006 — Introduce HAL trait abstractions for hardware operations
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S3-006 |
-| **Title** | Define HAL (Hardware Abstraction Layer) traits for swappable, mockable hardware ops |
-| **Priority** | P2 |
-| **Type** | Refactor |
-| **Estimated Effort** | XL |
+| Field                | Value                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------- |
+| **Ticket ID**        | S3-006                                                                              |
+| **Title**            | Define HAL (Hardware Abstraction Layer) traits for swappable, mockable hardware ops |
+| **Priority**         | P2                                                                                  |
+| **Type**             | Refactor                                                                            |
+| **Estimated Effort** | XL                                                                                  |
 
 #### Description
 
@@ -308,12 +308,12 @@ Direct WMI/IOCTL calls in business logic couple the logic to the platform. There
 
 #### Acceptance Criteria
 
-- [ ] HAL traits are defined for each hardware domain: `DisplayHardware`, `TouchpadHardware`, `WifiHardware`, `ChargingHardware`, `HotkeyHardware`.
-- [ ] The Win32 implementations are moved into `impl DisplayHardware for Win32Display` (etc.).
-- [ ] `AppState` holds `Box<dyn DisplayHardware>` (or `Arc<dyn ...>`) so the implementation is injectable.
-- [ ] A `MockDisplayHardware` is implemented in `#[cfg(test)]` and used in at least 3 unit tests that previously had no hardware coverage.
-- [ ] Production behavior is unchanged (the Win32 impl is wired by default).
-- [ ] The traits are documented with the contract each method must uphold.
+- [x] HAL traits are defined for each hardware domain: `DisplayHardware`, `TouchpadHardware`, `WifiHardware`, `ChargingHardware`, `HotkeyHardware`.
+- [x] The Win32 implementations are moved into `impl DisplayHardware for Win32Display` (etc.).
+- [x] `AppState` holds `Box<dyn DisplayHardware>` (or `Arc<dyn ...>`) so the implementation is injectable.
+- [x] A `MockDisplayHardware` is implemented in `#[cfg(test)]` and used in at least 3 unit tests that previously had no hardware coverage.
+- [x] Production behavior is unchanged (the Win32 impl is wired by default).
+- [x] The traits are documented with the contract each method must uphold.
 
 #### Implementation Notes
 
@@ -336,18 +336,18 @@ Direct WMI/IOCTL calls in business logic couple the logic to the platform. There
 
 ## Sprint Exit Criteria
 
-- [ ] All 6 tickets merged.
-- [ ] `cargo check` and `cargo test` pass.
-- [ ] The app survives a forced mutex-poison scenario (S3-001/S3-005).
-- [ ] No blocking calls on the async runtime (S3-004, verified by profiling).
-- [ ] At least one hardware domain has mock-based unit tests (S3-006 pilot).
-- [ ] Error responses include machine-readable codes (S3-003).
+- [x] All 6 tickets merged.
+- [x] `cargo check` and `cargo test` pass.
+- [x] The app survives a forced mutex-poison scenario (S3-001/S3-005).
+- [x] No blocking calls on the async runtime (S3-004, verified by profiling).
+- [x] At least one hardware domain has mock-based unit tests (S3-006 pilot).
+- [x] Error responses include machine-readable codes (S3-003).
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| State centralization (S3-002) is large and risky | Do it module-by-module; keep PRs small; full regression test after each module. |
-| HAL traits (S3-006) over-abstract | Pilot with display only; do not refactor all domains in one sprint. |
-| `spawn_blocking` overhead on hot paths | Only wrap genuinely blocking calls; use dedicated threads for high-frequency paths. |
-| Removing `panic = "abort"` increases binary size | Acceptable for a desktop app; document the trade-off. |
+| Risk                                             | Mitigation                                                                          |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| State centralization (S3-002) is large and risky | Do it module-by-module; keep PRs small; full regression test after each module.     |
+| HAL traits (S3-006) over-abstract                | Pilot with display only; do not refactor all domains in one sprint.                 |
+| `spawn_blocking` overhead on hot paths           | Only wrap genuinely blocking calls; use dedicated threads for high-frequency paths. |
+| Removing `panic = "abort"` increases binary size | Acceptable for a desktop app; document the trade-off.                               |

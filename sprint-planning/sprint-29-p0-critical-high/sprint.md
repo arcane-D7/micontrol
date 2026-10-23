@@ -108,16 +108,16 @@ pub async fn grant_script_consent(
 
 ### Acceptance Criteria
 
-- [ ] `#[cfg(test)]` removed from `grant_consent()` function
-- [ ] `grant_consent()` is `pub(crate)` or `pub`
-- [ ] New `grant_script_consent` Tauri command created in `commands/hotkeys.rs`
-- [ ] `grant_script_consent` registered in `invoke_handler!` in `lib.rs`
-- [ ] `grant_script_consent` uses `run_blocking` for file I/O
-- [ ] Unit test verifies `grant_consent()` works outside `#[cfg(test)]` context
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -D warnings` passes
-- [ ] `cargo test` passes
-- [ ] `cargo fmt --check` passes
+- [x] `#[cfg(test)]` removed from `grant_consent()` function
+- [x] `grant_consent()` is `pub(crate)` or `pub`
+- [x] New `grant_script_consent` Tauri command created in `commands/hotkeys.rs`
+- [x] `grant_script_consent` registered in `invoke_handler!` in `lib.rs`
+- [x] `grant_script_consent` uses `run_blocking` for file I/O
+- [x] Unit test verifies `grant_consent()` works outside `#[cfg(test)]` context
+- [x] `cargo check` passes
+- [x] `cargo clippy -D warnings` passes
+- [x] `cargo test` passes
+- [x] `cargo fmt --check` passes
 
 ---
 
@@ -181,20 +181,20 @@ fn local_data_dir() -> Result<PathBuf, String> {
 
 ### Acceptance Criteria
 
-- [ ] `local_data_dir()` helper added to `data_deletion.rs`
-- [ ] `delete_all_user_data()` deletes from both `app_data_dir()` and `local_data_dir()`
-- [ ] `elev_key.bin`, `elev_key.bin.old`, `nonces.json` deleted from `local_data_dir()`
-- [ ] `ai_usage.json` deleted from `local_data_dir()`
-- [ ] `hotkey_consent.json` deleted from `local_data_dir()`
-- [ ] `hotkeys.json` deleted from `local_data_dir()`
-- [ ] `ai_config.json` deleted from `local_data_dir()`
-- [ ] `consent_audit.log` deleted from `local_data_dir()` (in addition to `purge_audit_log()`)
-- [ ] `DeleteDataReport` struct updated with new fields
-- [ ] Unit tests verify all files are deleted
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -D warnings` passes
-- [ ] `cargo test` passes
-- [ ] `cargo fmt --check` passes
+- [x] `local_data_dir()` helper added to `data_deletion.rs`
+- [x] `delete_all_user_data()` deletes from both `app_data_dir()` and `local_data_dir()`
+- [x] `elev_key.bin`, `elev_key.bin.old`, `nonces.json` deleted from `local_data_dir()`
+- [x] `ai_usage.json` deleted from `local_data_dir()`
+- [x] `hotkey_consent.json` deleted from `local_data_dir()`
+- [x] `hotkeys.json` deleted from `local_data_dir()`
+- [x] `ai_config.json` deleted from `local_data_dir()`
+- [x] `consent_audit.log` deleted from `local_data_dir()` (in addition to `purge_audit_log()`)
+- [x] `DeleteDataReport` struct updated with new fields
+- [x] Unit tests verify all files are deleted
+- [x] `cargo check` passes
+- [x] `cargo clippy -D warnings` passes
+- [x] `cargo test` passes
+- [x] `cargo fmt --check` passes
 
 ---
 
@@ -242,14 +242,14 @@ const USER_DATA_FILES: &[&str] = &[
 
 ### Acceptance Criteria
 
-- [ ] `"ai_usage.json"` added to `USER_DATA_FILES` array
-- [ ] `export_user_data()` reads from both `app_data_dir()` and `local_data_dir()`
-- [ ] Comment explains inclusion rationale
-- [ ] Unit test verifies `ai_usage.json` is included in export
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -D warnings` passes
-- [ ] `cargo test` passes
-- [ ] `cargo fmt --check` passes
+- [x] `"ai_usage.json"` added to `USER_DATA_FILES` array
+- [x] `export_user_data()` reads from both `app_data_dir()` and `local_data_dir()`
+- [x] Comment explains inclusion rationale
+- [x] Unit test verifies `ai_usage.json` is included in export
+- [x] `cargo check` passes
+- [x] `cargo clippy -D warnings` passes
+- [x] `cargo test` passes
+- [x] `cargo fmt --check` passes
 
 ---
 

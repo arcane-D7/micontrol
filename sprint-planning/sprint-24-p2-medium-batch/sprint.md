@@ -68,11 +68,11 @@ In `src-tauri/src/elevated.rs`, the `run()` function processes one command and t
 
 #### Acceptance Criteria
 
-- [ ] `flush_nonces()` is called before every `std::process::exit(0)` in `elevated.rs`
-- [ ] The call is placed after the result file is written but before exit
-- [ ] `flush_nonces()` is also called before the error-path exit (line ~38, where `select_pending_command` fails)
-- [ ] Unit test verifies nonces are persisted after a single command (existing `test_flush_nonces_persists_to_disk` may need updating)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `flush_nonces()` is called before every `std::process::exit(0)` in `elevated.rs`
+- [x] The call is placed after the result file is written but before exit
+- [x] `flush_nonces()` is also called before the error-path exit (line ~38, where `select_pending_command` fails)
+- [x] Unit test verifies nonces are persisted after a single command (existing `test_flush_nonces_persists_to_disk` may need updating)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -93,11 +93,11 @@ In `src-tauri/src/util/auth.rs:383-460`, the functions `key_needs_rotation()`, `
 
 #### Acceptance Criteria
 
-- [ ] `key_needs_rotation()` is called during app startup in `lib.rs` setup (or in `elevated.rs::run()`)
-- [ ] If rotation is needed, log a `warn!` message: "HMAC key rotation needed — run with --rotate-key to rotate"
-- [ ] Do NOT auto-rotate (requires elevated process and careful key migration)
-- [ ] `read_old_key()` is wired into `verify_payload` to support grace period (see S24-003), OR both S24-002 and S24-003 are resolved by removing the dead code entirely
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `key_needs_rotation()` is called during app startup in `lib.rs` setup (or in `elevated.rs::run()`)
+- [x] If rotation is needed, log a `warn!` message: "HMAC key rotation needed — run with --rotate-key to rotate"
+- [x] Do NOT auto-rotate (requires elevated process and careful key migration)
+- [x] `read_old_key()` is wired into `verify_payload` to support grace period (see S24-003), OR both S24-002 and S24-003 are resolved by removing the dead code entirely
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -120,16 +120,16 @@ The key rotation grace period is broken: `verify_payload` only tries the current
 
 #### Acceptance Criteria (if keeping rotation)
 
-- [ ] `verify_payload` accepts a slice of keys: `&[&[u8]]` or tries current key first, then old key
-- [ ] In `elevated.rs::run()`, after `read_key()`, also try `read_old_key()` and pass both to `verify_payload`
-- [ ] If old key validates, log a warning that key rotation is in progress
-- [ ] Unit test verifies payload signed with old key is accepted during grace period
+- [x] `verify_payload` accepts a slice of keys: `&[&[u8]]` or tries current key first, then old key
+- [x] In `elevated.rs::run()`, after `read_key()`, also try `read_old_key()` and pass both to `verify_payload`
+- [x] If old key validates, log a warning that key rotation is in progress
+- [x] Unit test verifies payload signed with old key is accepted during grace period
 
 #### Acceptance Criteria (if removing rotation)
 
-- [ ] `key_needs_rotation()`, `rotate_key()`, `read_old_key()` are removed from `auth.rs`
-- [ ] All references removed
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `key_needs_rotation()`, `rotate_key()`, `read_old_key()` are removed from `auth.rs`
+- [x] All references removed
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -150,10 +150,10 @@ In `src-tauri/src/hw/hotkeys.rs:288`, `start_hook()` calls `.expect("Failed to s
 
 #### Acceptance Criteria
 
-- [ ] `start_hook()` returns `Result<(), HardwareError>` instead of panicking
-- [ ] `.expect()` is replaced with `?` and proper error mapping (`io::Error` → `HardwareError`)
-- [ ] Callers of `start_hook()` handle the error (log warning, continue without hotkeys)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `start_hook()` returns `Result<(), HardwareError>` instead of panicking
+- [x] `.expect()` is replaced with `?` and proper error mapping (`io::Error` → `HardwareError`)
+- [x] Callers of `start_hook()` handle the error (log warning, continue without hotkeys)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -174,9 +174,9 @@ In `src-tauri/src/hw/battery.rs:155`, the code calls `.expect("battery static da
 
 #### Acceptance Criteria
 
-- [ ] `.expect()` is replaced with `.ok_or_else(|| HardwareError::Battery("static data not initialized".to_string()))?`
-- [ ] The function returns `HardwareResult<T>` (or `Result<T, ErrorResponse>`)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `.expect()` is replaced with `.ok_or_else(|| HardwareError::Battery("static data not initialized".to_string()))?`
+- [x] The function returns `HardwareResult<T>` (or `Result<T, ErrorResponse>`)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -202,13 +202,13 @@ In `src-tauri/src/hw/battery.rs:155`, the code calls `.expect("battery static da
 
 #### Acceptance Criteria
 
-- [ ] `state.rs`: Replace silent `if let Ok(...)` with `lock_or_recover` (or add `lock_write_or_recover` for RwLock to `panic.rs`)
-- [ ] `hotkeys.rs`: Replace `.ok()` patterns with `lock_or_recover`
-- [ ] `battery.rs`: Replace `if let Ok(...)` with `lock_or_recover`
-- [ ] `iotservice.rs`: Replace `.unwrap_or_else(|e| e.into_inner())` with `lock_or_recover`
-- [ ] If RwLock support is needed, add `lock_write_or_recover` / `lock_read_or_recover` to `util/panic.rs`
-- [ ] All poison recovery now logs a warning via `log::warn!`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `state.rs`: Replace silent `if let Ok(...)` with `lock_or_recover` (or add `lock_write_or_recover` for RwLock to `panic.rs`)
+- [x] `hotkeys.rs`: Replace `.ok()` patterns with `lock_or_recover`
+- [x] `battery.rs`: Replace `if let Ok(...)` with `lock_or_recover`
+- [x] `iotservice.rs`: Replace `.unwrap_or_else(|e| e.into_inner())` with `lock_or_recover`
+- [x] If RwLock support is needed, add `lock_write_or_recover` / `lock_read_or_recover` to `util/panic.rs`
+- [x] All poison recovery now logs a warning via `log::warn!`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -229,11 +229,11 @@ In `src-tauri/src/hw/battery.rs:100-150`, the `BATTERY_STATIC_DATA` is a `Mutex<
 
 #### Acceptance Criteria
 
-- [ ] `BATTERY_STATIC_DATA` is changed from `Mutex<Option<BatteryStaticData>>` to `OnceLock<BatteryStaticData>`
-- [ ] `init()` uses `BATTERY_STATIC_DATA.get_or_init(|| { /* WMI query */ })`
-- [ ] `get_battery_info()` uses `BATTERY_STATIC_DATA.get()` which returns `Option<&BatteryStaticData>` without locking
-- [ ] If `get()` returns `None` (init not called), return appropriate error (not panic)
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `BATTERY_STATIC_DATA` is changed from `Mutex<Option<BatteryStaticData>>` to `OnceLock<BatteryStaticData>`
+- [x] `init()` uses `BATTERY_STATIC_DATA.get_or_init(|| { /* WMI query */ })`
+- [x] `get_battery_info()` uses `BATTERY_STATIC_DATA.get()` which returns `Option<&BatteryStaticData>` without locking
+- [x] If `get()` returns `None` (init not called), return appropriate error (not panic)
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -260,11 +260,11 @@ The frontend must handle all three. Additionally, in `src-tauri/src/commands/har
 
 #### Acceptance Criteria
 
-- [ ] `From<String> for ErrorResponse` uses code `"other"` (not `"UNKNOWN_ERROR"`)
-- [ ] `From<anyhow::Error> for ErrorResponse` uses code `"other"` (not `"INTERNAL_ERROR"`)
-- [ ] `hardware.rs:230` replaces manual `ErrorResponse { code: "INVALID_STATUS"... }` with `HardwareError::InvalidConfig(format!("Invalid laptop status: {status}"))` or appropriate typed variant
-- [ ] Add a comment in `errors.rs` documenting the full list of error codes
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `From<String> for ErrorResponse` uses code `"other"` (not `"UNKNOWN_ERROR"`)
+- [x] `From<anyhow::Error> for ErrorResponse` uses code `"other"` (not `"INTERNAL_ERROR"`)
+- [x] `hardware.rs:230` replaces manual `ErrorResponse { code: "INVALID_STATUS"... }` with `HardwareError::InvalidConfig(format!("Invalid laptop status: {status}"))` or appropriate typed variant
+- [x] Add a comment in `errors.rs` documenting the full list of error codes
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -287,10 +287,10 @@ In `src/components/ErrorBoundary.tsx:61`, `componentDidCatch` only logs to `cons
 
 #### Acceptance Criteria
 
-- [ ] `componentDidCatch` calls `Sentry.captureException(error, { extra: { componentStack: errorInfo.componentStack } })`
-- [ ] Import `@sentry/react` and use `Sentry.captureException`
-- [ ] Sentry call is wrapped in try/catch to prevent crash-loop if Sentry fails
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] `componentDidCatch` calls `Sentry.captureException(error, { extra: { componentStack: errorInfo.componentStack } })`
+- [x] Import `@sentry/react` and use `Sentry.captureException`
+- [x] Sentry call is wrapped in try/catch to prevent crash-loop if Sentry fails
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -311,13 +311,13 @@ In `src/components/ErrorBoundary.tsx:61`, `componentDidCatch` only logs to `cons
 
 #### Acceptance Criteria
 
-- [ ] Modal container has `role="dialog"` and `aria-modal="true"`
-- [ ] Focus trap implemented: Tab key cycles within modal
-- [ ] Escape key handler closes the wizard
-- [ ] Initial focus set to first interactive element on open
-- [ ] Focus restored to trigger element on close
-- [ ] Follow the same pattern as `ConsentDialog.tsx`
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] Modal container has `role="dialog"` and `aria-modal="true"`
+- [x] Focus trap implemented: Tab key cycles within modal
+- [x] Escape key handler closes the wizard
+- [x] Initial focus set to first interactive element on open
+- [x] Focus restored to trigger element on close
+- [x] Follow the same pattern as `ConsentDialog.tsx`
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -338,11 +338,11 @@ In `src/types/error.ts:73-89`, `getUserFriendlyMessage` returns hardcoded Englis
 
 #### Acceptance Criteria
 
-- [ ] `getUserFriendlyMessage` accepts a translation function `t: (key: string) => string`
-- [ ] All hardcoded English strings replaced with i18n keys (e.g., `t('errors.wifiInvalidSsid')`)
-- [ ] New keys added to all 4 locale files (`en.json`, `pt.json`, `es.json`, `fr.json`)
-- [ ] All callers updated to pass the `t` function from `useI18n`
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] `getUserFriendlyMessage` accepts a translation function `t: (key: string) => string`
+- [x] All hardcoded English strings replaced with i18n keys (e.g., `t('errors.wifiInvalidSsid')`)
+- [x] New keys added to all 4 locale files (`en.json`, `pt.json`, `es.json`, `fr.json`)
+- [x] All callers updated to pass the `t` function from `useI18n`
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -363,10 +363,10 @@ In `src/App.tsx:62-64`, a single top-level `ErrorBoundary` wraps the entire app.
 
 #### Acceptance Criteria
 
-- [ ] Each tab content wrapped in its own `<ErrorBoundary>` component
-- [ ] Tab-level ErrorBoundary shows compact error message with "Reload tab" button
-- [ ] Top-level ErrorBoundary kept as last-resort catch-all
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] Each tab content wrapped in its own `<ErrorBoundary>` component
+- [x] Tab-level ErrorBoundary shows compact error message with "Reload tab" button
+- [x] Top-level ErrorBoundary kept as last-resort catch-all
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -387,11 +387,11 @@ In `src-tauri/src/commands/hardware.rs:37-39, 50-52, 63-65`, three Tauri command
 
 #### Acceptance Criteria
 
-- [ ] `get_performance_mode` wraps `hw_get_perf()` in `run_blocking(move || Ok(hw_get_perf()))`
-- [ ] `get_charging_threshold` wraps `hw_get_charge()` in `run_blocking(move || Ok(hw_get_charge()))`
-- [ ] `get_perf_debug` wraps `hw_perf_debug()` in `run_blocking(move || Ok(hw_perf_debug()))`
-- [ ] `get_ai_brightness_config` in `system.rs` wraps registry read in `run_blocking`
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `get_performance_mode` wraps `hw_get_perf()` in `run_blocking(move || Ok(hw_get_perf()))`
+- [x] `get_charging_threshold` wraps `hw_get_charge()` in `run_blocking(move || Ok(hw_get_charge()))`
+- [x] `get_perf_debug` wraps `hw_perf_debug()` in `run_blocking(move || Ok(hw_perf_debug()))`
+- [x] `get_ai_brightness_config` in `system.rs` wraps registry read in `run_blocking`
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -412,10 +412,10 @@ In `src/hooks/useHardware.ts:860-950`, a single `useMemo` spreads `...fanState` 
 
 #### Acceptance Criteria
 
-- [ ] Split the single `useMemo` into separate slices (fan, system, battery) OR use a selector pattern
-- [ ] Minimum viable fix: 3 separate `useMemo` calls so each slice only re-renders when its data changes
-- [ ] Use `React.memo` on consumer components to prevent unnecessary re-renders
-- [ ] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
+- [x] Split the single `useMemo` into separate slices (fan, system, battery) OR use a selector pattern
+- [x] Minimum viable fix: 3 separate `useMemo` calls so each slice only re-renders when its data changes
+- [x] Use `React.memo` on consumer components to prevent unnecessary re-renders
+- [x] `npx tsc --noEmit` passes, `npm run lint` passes, `npm run build` passes
 
 ---
 
@@ -438,11 +438,11 @@ In `src-tauri/src/commands/ai.rs:43-55`, `base_url` is user-controlled and passe
 
 #### Acceptance Criteria
 
-- [ ] Parse `base_url` with `url::Url::parse()`
-- [ ] Validate scheme is `https` (or `http` for localhost/Ollama)
-- [ ] If `http`, require host to be `localhost` or `127.0.0.1`
-- [ ] Return descriptive error on validation failure
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] Parse `base_url` with `url::Url::parse()`
+- [x] Validate scheme is `https` (or `http` for localhost/Ollama)
+- [x] If `http`, require host to be `localhost` or `127.0.0.1`
+- [x] Return descriptive error on validation failure
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -463,11 +463,11 @@ In `src-tauri/src/util/ai_usage.rs:22-40`, AI usage tracking is in-memory only. 
 
 #### Acceptance Criteria
 
-- [ ] `AiUsageStats` has `save_to_file()` and `load_from_file()` methods
-- [ ] Stats saved to `%LOCALAPPDATA%\MiControl\ai_usage.json`
-- [ ] Stats loaded on startup
-- [ ] Backend-enforced daily limit: if `today_count >= ai_daily_analyses`, return error
-- [ ] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
+- [x] `AiUsageStats` has `save_to_file()` and `load_from_file()` methods
+- [x] Stats saved to `%LOCALAPPDATA%\MiControl\ai_usage.json`
+- [x] Stats loaded on startup
+- [x] Backend-enforced daily limit: if `today_count >= ai_daily_analyses`, return error
+- [x] `cargo check` passes, `cargo clippy -D warnings` passes, `cargo test` passes
 
 ---
 
@@ -488,9 +488,9 @@ In `.github/workflows/release.yml:62-70`, code signing is optional. If `WINDOWS_
 
 #### Acceptance Criteria
 
-- [ ] Release workflow fails with `::error::` if `WINDOWS_CERTIFICATE` secret is not set
-- [ ] No `continue-on-error` on the signing step
-- [ ] Error message is clear: "WINDOWS_CERTIFICATE secret is required for production releases"
+- [x] Release workflow fails with `::error::` if `WINDOWS_CERTIFICATE` secret is not set
+- [x] No `continue-on-error` on the signing step
+- [x] Error message is clear: "WINDOWS_CERTIFICATE secret is required for production releases"
 
 ---
 
@@ -511,11 +511,11 @@ No `dependabot.yml` or `renovate.json` exists. Dependencies are not automaticall
 
 #### Acceptance Criteria
 
-- [ ] `.github/dependabot.yml` created with:
+- [x] `.github/dependabot.yml` created with:
   - `cargo` ecosystem for `/src-tauri` (weekly)
   - `npm` ecosystem for `/` (weekly)
   - `github-actions` ecosystem for `/` (weekly)
-- [ ] Configuration follows Dependabot v2 schema
+- [x] Configuration follows Dependabot v2 schema
 
 ---
 
@@ -536,11 +536,11 @@ No SAST tool (CodeQL, Semgrep) is configured. `cargo audit` and `npm audit` only
 
 #### Acceptance Criteria
 
-- [ ] `.github/workflows/codeql.yml` created
-- [ ] Workflow runs on push to `master` and on PRs to `master`
-- [ ] Analyzes JavaScript/TypeScript (Rust support in CodeQL is limited)
-- [ ] `permissions: security-events: write` set
-- [ ] Uses `github/codeql-action/init@v3` and `github/codeql-action/analyze@v3`
+- [x] `.github/workflows/codeql.yml` created
+- [x] Workflow runs on push to `master` and on PRs to `master`
+- [x] Analyzes JavaScript/TypeScript (Rust support in CodeQL is limited)
+- [x] `permissions: security-events: write` set
+- [x] Uses `github/codeql-action/init@v3` and `github/codeql-action/analyze@v3`
 
 ---
 

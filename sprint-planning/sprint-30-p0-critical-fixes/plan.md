@@ -5,7 +5,8 @@
 > **Theme:** Fix 4 critical issues from `Audit_Final.md` — 2 regressions + 2 UX blockers
 > **Duration:** ~2 days
 > **Dependencies:** Sprint 29 (commit `bec0d42`)
-> **Status:** 📌 Active
+> **Status:** ✅ Complete — commit `b597d66`
+> **Execution evidence:** The commit resolves S30-001 through S30-004 and records passing Rust, TypeScript, lint, format, build, and version checks (2026-06-27).
 > **Audit Reference:** `C:\Users\mafsc\Documents\Audit_Final.md` (C-1 through C-4)
 
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
@@ -172,12 +173,12 @@ setChargingThresholdState(chargeThreshold);
 
 #### Acceptance Criteria
 
-- [ ] `slowPoll` includes `get_performance_mode` and `get_charging_threshold` in its `Promise.all`
-- [ ] `doInitialLoad` includes `get_performance_mode` and `get_charging_threshold` in its `Promise.all`
-- [ ] After F5 refresh, the performance mode shown in the UI matches the backend registry value
-- [ ] After F5 refresh, the charging threshold shown in the UI matches the backend value
-- [ ] `npx tsc --noEmit` passes with no errors
-- [ ] `npm run build` succeeds
+- [x] `slowPoll` includes `get_performance_mode` and `get_charging_threshold` in its `Promise.all`
+- [x] `doInitialLoad` includes `get_performance_mode` and `get_charging_threshold` in its `Promise.all`
+- [x] After F5 refresh, the performance mode shown in the UI matches the backend registry value
+- [x] After F5 refresh, the charging threshold shown in the UI matches the backend value
+- [x] `npx tsc --noEmit` passes with no errors
+- [x] `npm run build` succeeds
 
 ---
 
@@ -253,15 +254,15 @@ pub fn check_sentry_consent() -> bool {
 
 #### Acceptance Criteria
 
-- [ ] `check_sentry_consent()` returns `true` when keyring contains plain string `"granted"`
-- [ ] `check_sentry_consent()` returns `false` when keyring contains plain string `"denied"`
-- [ ] `check_sentry_consent()` returns `true` when keyring contains legacy JSON `{"value":"granted"}`
-- [ ] `check_sentry_consent()` returns `false` when keyring is empty or key doesn't exist
-- [ ] Unit test added: `test_check_sentry_consent_plain_string`
-- [ ] Unit test added: `test_check_sentry_consent_legacy_json`
-- [ ] `cargo check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test` passes
+- [x] `check_sentry_consent()` returns `true` when keyring contains plain string `"granted"`
+- [x] `check_sentry_consent()` returns `false` when keyring contains plain string `"denied"`
+- [x] `check_sentry_consent()` returns `true` when keyring contains legacy JSON `{"value":"granted"}`
+- [x] `check_sentry_consent()` returns `false` when keyring is empty or key doesn't exist
+- [x] Unit test added: `test_check_sentry_consent_plain_string`
+- [x] Unit test added: `test_check_sentry_consent_legacy_json`
+- [x] `cargo check` passes
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `cargo test` passes
 
 ---
 
@@ -381,14 +382,14 @@ return useMemo(
 
 #### Acceptance Criteria
 
-- [ ] `getTelemetryConsent()` retries once after 500ms if the first attempt returns `null`
-- [ ] `useSettings()` return value is wrapped in `useMemo` with correct dependencies
-- [ ] After F5 refresh with consent already granted, the consent dialog does NOT appear
-- [ ] After F5 refresh with consent denied, the consent dialog does NOT appear
-- [ ] After F5 refresh with no consent set, the consent dialog DOES appear (correct behavior)
-- [ ] `npx tsc --noEmit` passes
-- [ ] `npm run lint` passes
-- [ ] `npm run build` succeeds
+- [x] `getTelemetryConsent()` retries once after 500ms if the first attempt returns `null`
+- [x] `useSettings()` return value is wrapped in `useMemo` with correct dependencies
+- [x] After F5 refresh with consent already granted, the consent dialog does NOT appear
+- [x] After F5 refresh with consent denied, the consent dialog does NOT appear
+- [x] After F5 refresh with no consent set, the consent dialog DOES appear (correct behavior)
+- [x] `npx tsc --noEmit` passes
+- [x] `npm run lint` passes
+- [x] `npm run build` succeeds
 
 ---
 
@@ -465,13 +466,13 @@ Add `overflow-y: auto`, `overflow-x: hidden`, and `scrollbar-width: thin` to `.s
 
 #### Acceptance Criteria
 
-- [ ] `.sidebar` has `overflow-y: auto`
-- [ ] `.sidebar` has `overflow-x: hidden`
-- [ ] `.sidebar` has `scrollbar-width: thin` (Firefox)
-- [ ] At 600px window height, all 18 nav items are scrollable and accessible
-- [ ] Settings and About tabs are reachable by scrolling
-- [ ] Horizontal scrollbar does not appear
-- [ ] `npm run build` succeeds
+- [x] `.sidebar` has `overflow-y: auto`
+- [x] `.sidebar` has `overflow-x: hidden`
+- [x] `.sidebar` has `scrollbar-width: thin` (Firefox)
+- [x] At 600px window height, all 18 nav items are scrollable and accessible
+- [x] Settings and About tabs are reachable by scrolling
+- [x] Horizontal scrollbar does not appear
+- [x] `npm run build` succeeds
 
 ---
 

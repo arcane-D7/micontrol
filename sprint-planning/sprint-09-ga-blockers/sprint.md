@@ -2,16 +2,16 @@
 
 ## Sprint Metadata
 
-| Field | Value |
-|-------|-------|
-| **Sprint Name** | GA Blockers — Critical Fixes |
-| **Sprint Goal** | Eliminar todos os 14 findings CRITICAL do relatório de estabilidade para desbloquear o release GA |
-| **Duration Estimate** | 1.5 semanas (7.5 dias úteis) |
-| **Priority** | P0 — Blocker de GA. Sem estas correções o release não pode prosseguir. |
-| **Sprint Type** | Security + RAI + DevOps + Code Quality |
-| **Primary Owner** | Full-stack engineer (Rust + TS) |
-| **Secondary Owner** | Security reviewer |
-| **Source** | `docs/stability-report-2026-06-24.md` |
+| Field                 | Value                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| **Sprint Name**       | GA Blockers — Critical Fixes                                                                      |
+| **Sprint Goal**       | Eliminar todos os 14 findings CRITICAL do relatório de estabilidade para desbloquear o release GA |
+| **Duration Estimate** | 1.5 semanas (7.5 dias úteis)                                                                      |
+| **Priority**          | P0 — Blocker de GA. Sem estas correções o release não pode prosseguir.                            |
+| **Sprint Type**       | Security + RAI + DevOps + Code Quality                                                            |
+| **Primary Owner**     | Full-stack engineer (Rust + TS)                                                                   |
+| **Secondary Owner**   | Security reviewer                                                                                 |
+| **Source**            | `docs/stability-report-2026-06-24.md`                                                             |
 
 ## Sprint Goal Statement
 
@@ -23,14 +23,14 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 ### S9-001 — Fix HMAC key bootstrap race with cross-process file locking
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-001 |
-| **Title** | Eliminar TOCTOU race em `get_or_create_key` usando file locking cross-process |
-| **Priority** | P0 |
-| **Type** | Security |
-| **Estimated Effort** | M |
-| **Source Finding** | S1 (CRITICAL, CWE-367) |
+| Field                | Value                                                                         |
+| -------------------- | ----------------------------------------------------------------------------- |
+| **Ticket ID**        | S9-001                                                                        |
+| **Title**            | Eliminar TOCTOU race em `get_or_create_key` usando file locking cross-process |
+| **Priority**         | P0                                                                            |
+| **Type**             | Security                                                                      |
+| **Estimated Effort** | M                                                                             |
+| **Source Finding**   | S1 (CRITICAL, CWE-367)                                                        |
 
 #### Description
 
@@ -44,10 +44,10 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 #### Acceptance Criteria
 
-- [ ] `get_or_create_key` usa `fs2::FileExt::lock_exclusive` no arquivo de chave com retry loop
-- [ ] Se o lock não for obtido em 5s, retorna erro em vez de gerar chave nova
-- [ ] Teste de regressão: simular chamada concorrente de 2 threads e verificar que ambas obtêm a mesma chave
-- [ ] Adicionar `fs2` crate ao `Cargo.toml`
+- [x] `get_or_create_key` usa `fs2::FileExt::lock_exclusive` no arquivo de chave com retry loop
+- [x] Se o lock não for obtido em 5s, retorna erro em vez de gerar chave nova
+- [x] Teste de regressão: simular chamada concorrente de 2 threads e verificar que ambas obtêm a mesma chave
+- [x] Adicionar `fs2` crate ao `Cargo.toml`
 
 #### Dependencies
 
@@ -57,14 +57,14 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 ### S9-002 — Remove auto-focus from "Allow" button in ConsentDialog
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-002 |
-| **Title** | Remover auto-focus do botão "Allow" no ConsentDialog (dark pattern) |
-| **Priority** | P0 |
-| **Type** | RAI / UX |
-| **Estimated Effort** | XS |
-| **Source Finding** | R1/U1 (CRITICAL, GDPR Art.7) |
+| Field                | Value                                                               |
+| -------------------- | ------------------------------------------------------------------- |
+| **Ticket ID**        | S9-002                                                              |
+| **Title**            | Remover auto-focus do botão "Allow" no ConsentDialog (dark pattern) |
+| **Priority**         | P0                                                                  |
+| **Type**             | RAI / UX                                                            |
+| **Estimated Effort** | XS                                                                  |
+| **Source Finding**   | R1/U1 (CRITICAL, GDPR Art.7)                                        |
 
 #### Description
 
@@ -77,10 +77,10 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 #### Acceptance Criteria
 
-- [ ] Remover `allowRef.current?.focus()` do `useEffect`
-- [ ] Focar um elemento neutro (ex: o título do diálogo ou nenhum elemento)
-- [ ] Equalizar peso visual dos botões "Allow" e "Deny" (ambos `btn-primary` ou ambos `btn-ghost`)
-- [ ] Teste manual: abrir diálogo, pressionar Enter imediatamente — NÃO deve conceder consentimento
+- [x] Remover `allowRef.current?.focus()` do `useEffect`
+- [x] Focar um elemento neutro (ex: o título do diálogo ou nenhum elemento)
+- [x] Equalizar peso visual dos botões "Allow" e "Deny" (ambos `btn-primary` ou ambos `btn-ghost`)
+- [x] Teste manual: abrir diálogo, pressionar Enter imediatamente — NÃO deve conceder consentimento
 
 #### Dependencies
 
@@ -90,14 +90,14 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 ### S9-003 — Add consent check to testConnection()
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-003 |
-| **Title** | Adicionar verificação de consent em `testConnection()` |
-| **Priority** | P0 |
-| **Type** | RAI |
-| **Estimated Effort** | XS |
-| **Source Finding** | R2 (CRITICAL, GDPR Art.6) |
+| Field                | Value                                                  |
+| -------------------- | ------------------------------------------------------ |
+| **Ticket ID**        | S9-003                                                 |
+| **Title**            | Adicionar verificação de consent em `testConnection()` |
+| **Priority**         | P0                                                     |
+| **Type**             | RAI                                                    |
+| **Estimated Effort** | XS                                                     |
+| **Source Finding**   | R2 (CRITICAL, GDPR Art.6)                              |
 
 #### Description
 
@@ -109,9 +109,9 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 #### Acceptance Criteria
 
-- [ ] Adicionar `getTelemetryConsent()` check no início de `testConnection()`
-- [ ] Se consent não concedido, retornar erro amigável: "Consent required to test connection"
-- [ ] Teste: com consent negado, `testConnection()` não deve fazer chamada API
+- [x] Adicionar `getTelemetryConsent()` check no início de `testConnection()`
+- [x] Se consent não concedido, retornar erro amigável: "Consent required to test connection"
+- [x] Teste: com consent negado, `testConnection()` não deve fazer chamada API
 
 #### Dependencies
 
@@ -121,14 +121,14 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 ### S9-004 — Fix misleading storageNote string
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-004 |
-| **Title** | Corrigir string `storageNote` enganosa sobre armazenamento da API key |
-| **Priority** | P0 |
-| **Type** | RAI |
-| **Estimated Effort** | XS |
-| **Source Finding** | R5 (CRITICAL, Transparency) |
+| Field                | Value                                                                 |
+| -------------------- | --------------------------------------------------------------------- |
+| **Ticket ID**        | S9-004                                                                |
+| **Title**            | Corrigir string `storageNote` enganosa sobre armazenamento da API key |
+| **Priority**         | P0                                                                    |
+| **Type**             | RAI                                                                   |
+| **Estimated Effort** | XS                                                                    |
+| **Source Finding**   | R5 (CRITICAL, Transparency)                                           |
 
 #### Description
 
@@ -143,9 +143,9 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 #### Acceptance Criteria
 
-- [ ] Corrigir string para: "API key is stored securely in Windows Credential Manager. It is sent to the AI provider when making analysis requests."
-- [ ] Atualizar traduções em pt, es, fr
-- [ ] Verificar que nenhuma outra string menciona localStorage para API key
+- [x] Corrigir string para: "API key is stored securely in Windows Credential Manager. It is sent to the AI provider when making analysis requests."
+- [x] Atualizar traduções em pt, es, fr
+- [x] Verificar que nenhuma outra string menciona localStorage para API key
 
 #### Dependencies
 
@@ -155,14 +155,14 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 ### S9-005 — Implement focus trap and :focus-visible in modals
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-005 |
-| **Title** | Implementar focus trap e indicadores de foco visíveis em modais |
-| **Priority** | P0 |
-| **Type** | RAI / UX / Accessibility |
-| **Estimated Effort** | L |
-| **Source Finding** | R3/R4/U1 (CRITICAL, WCAG 2.4.3 + 2.4.7) |
+| Field                | Value                                                           |
+| -------------------- | --------------------------------------------------------------- |
+| **Ticket ID**        | S9-005                                                          |
+| **Title**            | Implementar focus trap e indicadores de foco visíveis em modais |
+| **Priority**         | P0                                                              |
+| **Type**             | RAI / UX / Accessibility                                        |
+| **Estimated Effort** | L                                                               |
+| **Source Finding**   | R3/R4/U1 (CRITICAL, WCAG 2.4.3 + 2.4.7)                         |
 
 #### Description
 
@@ -176,12 +176,12 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 #### Acceptance Criteria
 
-- [ ] Implementar focus trap em `ConsentDialog`: Tab cicla apenas entre elementos do diálogo
-- [ ] Implementar focus trap em `InfoModal`: mesmo comportamento
-- [ ] Adicionar `:focus-visible` outline em todos elementos interativos (buttons, toggles, inputs, links)
-- [ ] Adicionar `:focus-visible` em `globals.css` com `outline: 2px solid var(--accent)` e `outline-offset: 2px`
-- [ ] Teste manual: navegar por Tab através do diálogo — foco não deve escapar
-- [ ] Teste manual: Tab através da página principal — outline visível em cada elemento focado
+- [x] Implementar focus trap em `ConsentDialog`: Tab cicla apenas entre elementos do diálogo
+- [x] Implementar focus trap em `InfoModal`: mesmo comportamento
+- [x] Adicionar `:focus-visible` outline em todos elementos interativos (buttons, toggles, inputs, links)
+- [x] Adicionar `:focus-visible` em `globals.css` com `outline: 2px solid var(--accent)` e `outline-offset: 2px`
+- [x] Teste manual: navegar por Tab através do diálogo — foco não deve escapar
+- [x] Teste manual: Tab através da página principal — outline visível em cada elemento focado
 
 #### Dependencies
 
@@ -191,14 +191,14 @@ Catorze findings CRITICAL foram identificados na auditoria de estabilidade. Eles
 
 ### S9-006 — Fix silent failures: replace console.error with user-visible feedback
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-006 |
-| **Title** | Eliminar silent failures — substituir `console.error` por feedback visível ao usuário |
-| **Priority** | P0 |
-| **Type** | UX |
-| **Estimated Effort** | M |
-| **Source Finding** | U2 (CRITICAL) |
+| Field                | Value                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------- |
+| **Ticket ID**        | S9-006                                                                                |
+| **Title**            | Eliminar silent failures — substituir `console.error` por feedback visível ao usuário |
+| **Priority**         | P0                                                                                    |
+| **Type**             | UX                                                                                    |
+| **Estimated Effort** | M                                                                                     |
+| **Source Finding**   | U2 (CRITICAL)                                                                         |
 
 #### Description
 
@@ -212,10 +212,10 @@ Múltiplos locais capturam erros e apenas logam no console sem feedback ao usuá
 
 #### Acceptance Criteria
 
-- [ ] Auditar todos `console.error` em catch blocks — identificar os que faltam feedback visual
-- [ ] Substituir cada `console.error` silencioso por `addToast` com mensagem i18n amigável
-- [ ] Manter `console.error` para debug, mas SEMPRE adicionar `addToast` para o usuário
-- [ ] Teste: simular falha em `get_audio_devices` — toast de erro deve aparecer
+- [x] Auditar todos `console.error` em catch blocks — identificar os que faltam feedback visual
+- [x] Substituir cada `console.error` silencioso por `addToast` com mensagem i18n amigável
+- [x] Manter `console.error` para debug, mas SEMPRE adicionar `addToast` para o usuário
+- [x] Teste: simular falha em `get_audio_devices` — toast de erro deve aparecer
 
 #### Dependencies
 
@@ -225,14 +225,14 @@ Múltiplos locais capturam erros e apenas logam no console sem feedback ao usuá
 
 ### S9-007 — Generate latest.json updater manifest in release workflow
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-007 |
-| **Title** | Gerar e uploadar `latest.json` updater manifest no release workflow |
-| **Priority** | P0 |
-| **Type** | DevOps |
-| **Estimated Effort** | S |
-| **Source Finding** | D1 (CRITICAL, Updater broken) |
+| Field                | Value                                                               |
+| -------------------- | ------------------------------------------------------------------- |
+| **Ticket ID**        | S9-007                                                              |
+| **Title**            | Gerar e uploadar `latest.json` updater manifest no release workflow |
+| **Priority**         | P0                                                                  |
+| **Type**             | DevOps                                                              |
+| **Estimated Effort** | S                                                                   |
+| **Source Finding**   | D1 (CRITICAL, Updater broken)                                       |
 
 #### Description
 
@@ -244,10 +244,10 @@ O Tauri updater está configurado em `tauri.conf.json` para buscar de `.../relea
 
 #### Acceptance Criteria
 
-- [ ] Adicionar step pós-build que gera `latest.json` com version, pub_date, platforms, signature, url
-- [ ] Uploadar `latest.json` como asset do GitHub Release
-- [ ] Teste: após release, `latest.json` deve ser acessível via `releases/latest/download/latest.json`
-- [ ] Documentar formato do `latest.json` em `docs/release.md`
+- [x] Adicionar step pós-build que gera `latest.json` com version, pub_date, platforms, signature, url
+- [x] Uploadar `latest.json` como asset do GitHub Release
+- [x] Teste: após release, `latest.json` deve ser acessível via `releases/latest/download/latest.json`
+- [x] Documentar formato do `latest.json` em `docs/release.md`
 
 #### Dependencies
 
@@ -257,14 +257,14 @@ O Tauri updater está configurado em `tauri.conf.json` para buscar de `.../relea
 
 ### S9-008 — Make Tauri signing key missing a hard error
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-008 |
-| **Title** | Transformar chave de signing efêmera fallback em hard error |
-| **Priority** | P0 |
-| **Type** | DevOps |
-| **Estimated Effort** | XS |
-| **Source Finding** | D2 (CRITICAL, Supply chain) |
+| Field                | Value                                                       |
+| -------------------- | ----------------------------------------------------------- |
+| **Ticket ID**        | S9-008                                                      |
+| **Title**            | Transformar chave de signing efêmera fallback em hard error |
+| **Priority**         | P0                                                          |
+| **Type**             | DevOps                                                      |
+| **Estimated Effort** | XS                                                          |
+| **Source Finding**   | D2 (CRITICAL, Supply chain)                                 |
 
 #### Description
 
@@ -276,10 +276,10 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 #### Acceptance Criteria
 
-- [ ] Remover o fallback de chave efêmera
-- [ ] Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, falhar o workflow com erro claro
-- [ ] Adicionar mensagem: "TAURI_SIGNING_PRIVATE_KEY secret is required for releases. See docs/release.md for setup."
-- [ ] Documentar procedimento de geração de chave em `docs/release.md`
+- [x] Remover o fallback de chave efêmera
+- [x] Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, falhar o workflow com erro claro
+- [x] Adicionar mensagem: "TAURI_SIGNING_PRIVATE_KEY secret is required for releases. See docs/release.md for setup."
+- [x] Documentar procedimento de geração de chave em `docs/release.md`
 
 #### Dependencies
 
@@ -289,14 +289,14 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 ### S9-009 — Replace REMAP_STATE.lock().unwrap() with lock_or_recover()
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-009 |
-| **Title** | Substituir `REMAP_STATE.lock().unwrap()` por `lock_or_recover()` (12 sites) |
-| **Priority** | P0 |
-| **Type** | Code Quality |
-| **Estimated Effort** | M |
-| **Source Finding** | C1 (CRITICAL, Panic risk) |
+| Field                | Value                                                                       |
+| -------------------- | --------------------------------------------------------------------------- |
+| **Ticket ID**        | S9-009                                                                      |
+| **Title**            | Substituir `REMAP_STATE.lock().unwrap()` por `lock_or_recover()` (12 sites) |
+| **Priority**         | P0                                                                          |
+| **Type**             | Code Quality                                                                |
+| **Estimated Effort** | M                                                                           |
+| **Source Finding**   | C1 (CRITICAL, Panic risk)                                                   |
 
 #### Description
 
@@ -308,10 +308,10 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 #### Acceptance Criteria
 
-- [ ] Substituir todos os 12 `REMAP_STATE.lock().unwrap()` por `lock_or_recover(&REMAP_STATE, "REMAP_STATE")`
-- [ ] Verificar que `lock_or_recover` está importado de `util::panic`
-- [ ] `cargo test` passa sem regressões
-- [ ] `cargo clippy` não introduz novos warnings
+- [x] Substituir todos os 12 `REMAP_STATE.lock().unwrap()` por `lock_or_recover(&REMAP_STATE, "REMAP_STATE")`
+- [x] Verificar que `lock_or_recover` está importado de `util::panic`
+- [x] `cargo test` passa sem regressões
+- [x] `cargo clippy` não introduz novos warnings
 
 #### Dependencies
 
@@ -321,14 +321,14 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 ### S9-010 — Validate Raw Input buffer size before pointer cast
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-010 |
-| **Title** | Validar tamanho do buffer de Raw Input antes do cast para `*const RAWINPUT` |
-| **Priority** | P0 |
-| **Type** | Code Quality / Security |
-| **Estimated Effort** | S |
-| **Source Finding** | C3 (CRITICAL, CWE-822) |
+| Field                | Value                                                                       |
+| -------------------- | --------------------------------------------------------------------------- |
+| **Ticket ID**        | S9-010                                                                      |
+| **Title**            | Validar tamanho do buffer de Raw Input antes do cast para `*const RAWINPUT` |
+| **Priority**         | P0                                                                          |
+| **Type**             | Code Quality / Security                                                     |
+| **Estimated Effort** | S                                                                           |
+| **Source Finding**   | C3 (CRITICAL, CWE-822)                                                      |
 
 #### Description
 
@@ -341,9 +341,9 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 #### Acceptance Criteria
 
-- [ ] Adicionar check: `if written < size_of::<RAWINPUT>() as u32 { return; }` antes do cast
-- [ ] Logar warning se buffer for menor que esperado
-- [ ] Teste: verificar que input inválido não causa crash
+- [x] Adicionar check: `if written < size_of::<RAWINPUT>() as u32 { return; }` antes do cast
+- [x] Logar warning se buffer for menor que esperado
+- [x] Teste: verificar que input inválido não causa crash
 
 #### Dependencies
 
@@ -353,14 +353,14 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 ### S9-011 — Add safety invariant comments to all unsafe blocks
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-011 |
-| **Title** | Adicionar safety invariant comments em todos os 98 blocos `unsafe` |
-| **Priority** | P0 |
-| **Type** | Code Quality |
-| **Estimated Effort** | XL |
-| **Source Finding** | C4 (CRITICAL, Best practice) |
+| Field                | Value                                                              |
+| -------------------- | ------------------------------------------------------------------ |
+| **Ticket ID**        | S9-011                                                             |
+| **Title**            | Adicionar safety invariant comments em todos os 98 blocos `unsafe` |
+| **Priority**         | P0                                                                 |
+| **Type**             | Code Quality                                                       |
+| **Estimated Effort** | XL                                                                 |
+| **Source Finding**   | C4 (CRITICAL, Best practice)                                       |
 
 #### Description
 
@@ -372,11 +372,11 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 #### Acceptance Criteria
 
-- [ ] Cada bloco `unsafe` tem um comentário `// SAFETY:` explicando as precondições
-- [ ] Para `mem::zeroed()`: explicar por que zero-inicialização é válida para aquele tipo
-- [ ] Para pointer casts: explicar por que o ponteiro é válido e alinhado
-- [ ] Para FFI calls: explicar quais invariantes o caller deve manter
-- [ ] `cargo test` passa sem regressões
+- [x] Cada bloco `unsafe` tem um comentário `// SAFETY:` explicando as precondições
+- [x] Para `mem::zeroed()`: explicar por que zero-inicialização é válida para aquele tipo
+- [x] Para pointer casts: explicar por que o ponteiro é válido e alinhado
+- [x] Para FFI calls: explicar quais invariantes o caller deve manter
+- [x] `cargo test` passa sem regressões
 
 #### Dependencies
 
@@ -386,14 +386,14 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 ### S9-012 — Replace std::mem::zeroed() on registry handles with MaybeUninit
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-012 |
-| **Title** | Substituir `std::mem::zeroed()` em registry handles por `MaybeUninit` (24 sites) |
-| **Priority** | P0 |
-| **Type** | Code Quality |
-| **Estimated Effort** | L |
-| **Source Finding** | C2 (CRITICAL, CWE-824 / UB) |
+| Field                | Value                                                                            |
+| -------------------- | -------------------------------------------------------------------------------- |
+| **Ticket ID**        | S9-012                                                                           |
+| **Title**            | Substituir `std::mem::zeroed()` em registry handles por `MaybeUninit` (24 sites) |
+| **Priority**         | P0                                                                               |
+| **Type**             | Code Quality                                                                     |
+| **Estimated Effort** | L                                                                                |
+| **Source Finding**   | C2 (CRITICAL, CWE-824 / UB)                                                      |
 
 #### Description
 
@@ -405,11 +405,11 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 #### Acceptance Criteria
 
-- [ ] Criar helper `util/registry.rs` com `fn open_reg_key() -> Result<Option<HKEY>>` que usa `MaybeUninit`
-- [ ] Substituir todos os 24 `std::mem::zeroed()` para registry handles pelo helper
-- [ ] Garantir que `RegCloseKey` só é chamado se o handle foi inicializado com sucesso
-- [ ] `cargo test` passa sem regressões
-- [ ] Eliminar código duplicado de registry read/write (também resolve C11)
+- [x] Criar helper `util/registry.rs` com `fn open_reg_key() -> Result<Option<HKEY>>` que usa `MaybeUninit`
+- [x] Substituir todos os 24 `std::mem::zeroed()` para registry handles pelo helper
+- [x] Garantir que `RegCloseKey` só é chamado se o handle foi inicializado com sucesso
+- [x] `cargo test` passa sem regressões
+- [x] Eliminar código duplicado de registry read/write (também resolve C11)
 
 #### Dependencies
 
@@ -419,14 +419,14 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 ### S9-013 — Add Escape key handler and dismiss options to modals
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-013 |
-| **Title** | Adicionar Escape key handler e opções de dismiss em modais |
-| **Priority** | P0 |
-| **Type** | RAI / UX |
-| **Estimated Effort** | S |
-| **Source Finding** | R8/U20 (HIGH, WCAG) |
+| Field                | Value                                                      |
+| -------------------- | ---------------------------------------------------------- |
+| **Ticket ID**        | S9-013                                                     |
+| **Title**            | Adicionar Escape key handler e opções de dismiss em modais |
+| **Priority**         | P0                                                         |
+| **Type**             | RAI / UX                                                   |
+| **Estimated Effort** | S                                                          |
+| **Source Finding**   | R8/U20 (HIGH, WCAG)                                        |
 
 #### Description
 
@@ -439,10 +439,10 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 #### Acceptance Criteria
 
-- [ ] Adicionar `onKeyDown` handler em `ConsentDialog` que fecha (deny) com Escape
-- [ ] Adicionar `onKeyDown` handler em `InfoModal` que fecha com Escape
-- [ ] Adicionar backdrop click-to-dismiss em `InfoModal`
-- [ ] Teste manual: pressionar Escape fecha os modais
+- [x] Adicionar `onKeyDown` handler em `ConsentDialog` que fecha (deny) com Escape
+- [x] Adicionar `onKeyDown` handler em `InfoModal` que fecha com Escape
+- [x] Adicionar backdrop click-to-dismiss em `InfoModal`
+- [x] Teste manual: pressionar Escape fecha os modais
 
 #### Dependencies
 
@@ -452,14 +452,14 @@ Se `TAURI_SIGNING_PRIVATE_KEY` está vazio, o release workflow gera uma chave ef
 
 ### S9-014 — Add React Error Boundary
 
-| Field | Value |
-|-------|-------|
-| **Ticket ID** | S9-014 |
-| **Title** | Adicionar React Error Boundary para prevenir white-screen-of-death |
-| **Priority** | P0 |
-| **Type** | Code Quality |
-| **Estimated Effort** | S |
-| **Source Finding** | C13 (MEDIUM, but critical for stability) |
+| Field                | Value                                                              |
+| -------------------- | ------------------------------------------------------------------ |
+| **Ticket ID**        | S9-014                                                             |
+| **Title**            | Adicionar React Error Boundary para prevenir white-screen-of-death |
+| **Priority**         | P0                                                                 |
+| **Type**             | Code Quality                                                       |
+| **Estimated Effort** | S                                                                  |
+| **Source Finding**   | C13 (MEDIUM, but critical for stability)                           |
 
 #### Description
 
@@ -472,10 +472,10 @@ Sem Error Boundary, se qualquer componente crashar durante o render, a janela in
 
 #### Acceptance Criteria
 
-- [ ] Criar `ErrorBoundary.tsx` com fallback UI amigável (mensagem + botão "Reload")
-- [ ] Wrap `App.tsx` com `ErrorBoundary`
-- [ ] Logar erro no console + toast
-- [ ] Teste: forçar throw em um componente — ErrorBoundary deve capturar e mostrar fallback
+- [x] Criar `ErrorBoundary.tsx` com fallback UI amigável (mensagem + botão "Reload")
+- [x] Wrap `App.tsx` com `ErrorBoundary`
+- [x] Logar erro no console + toast
+- [x] Teste: forçar throw em um componente — ErrorBoundary deve capturar e mostrar fallback
 
 #### Dependencies
 
@@ -485,9 +485,9 @@ Sem Error Boundary, se qualquer componente crashar durante o render, a janela in
 
 ## Sprint Exit Criteria
 
-- [ ] Todos os 14 tickets completos com acceptance criteria verificadas
-- [ ] `cargo test` passa (142+ testes, sem regressões)
-- [ ] `npm run build` + `npm run lint` + `npm run format:check` passam
-- [ ] `cargo clippy` sem novos warnings
-- [ ] `npm run version:check` passa
-- [ ] Relatório de estabilidade re-auditado: 0 findings CRITICAL restantes
+- [x] Todos os 14 tickets completos com acceptance criteria verificadas
+- [x] `cargo test` passa (142+ testes, sem regressões)
+- [x] `npm run build` + `npm run lint` + `npm run format:check` passam
+- [x] `cargo clippy` sem novos warnings
+- [x] `npm run version:check` passa
+- [x] Relatório de estabilidade re-auditado: 0 findings CRITICAL restantes
