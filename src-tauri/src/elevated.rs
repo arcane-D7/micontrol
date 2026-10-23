@@ -2273,14 +2273,15 @@ fn ensure_face_service() -> Result<Value, String> {
 
     if query_text.contains("does not exist") || query_text.contains("service has not been started")
     {
-        // Service not registered — nothing to heal. The UI installer path
-        // (`face_service_install`) handles a fresh install.
-        return Ok(json!({
-            "service_installed": false,
-            "service_running": false,
-            "state": state,
-            "action": "not_installed",
-        }));
+        // ── S66-003: the SCM entry vanished (observed 2026-10-23 16:48:
+        // stop → start → stop, then 1060 forever) while the deployed binary
+        // is still in Program Files. The old behavior returned `not_installed`
+        // and never recovered — the health supervisor called this every 30 s
+        // as a no-op (4,869 no-ops over 4 days) and Face Unlock stayed dead
+        // until a manual reinstall. Reinstall through the idempotent
+        // `install` command, rate-limited so a persistently-failing install
+        // doesn't loop with the 30 s supervisor cadence.
+        return ensure_face_service_reinstall(&state);
     }
 
     let running = state.contains("RUNNING");
@@ -2339,6 +2340,83 @@ fn ensure_face_service() -> Result<Value, String> {
 
 #[cfg(not(windows))]
 fn ensure_face_service() -> Result<Value, String> {
+    Err("Face auth service only supported on Windows".to_string())
+}
+
+/// S66-003: reinstall the MiControlFace service when its SCM entry is gone
+/// but the deployed binary still exists. Rate-limited to one attempt per
+/// 10 minutes (the health supervisor probes every 30 s — without the limit
+/// a persistently-failing install would spawn `micontrol_face_svc install`
+/// 120×/hour).
+#[cfg(windows)]
+fn ensure_face_service_reinstall(state: &str) -> Result<Value, String> {
+    use std::os::windows::process::CommandExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Timestamp (ms) of the last reinstall attempt; 0 = never.
+    static LAST_REINSTALL_MS: AtomicU64 = AtomicU64::new(0);
+    const REINSTALL_COOLDOWN_MS: u64 = 10 * 60 * 1000;
+
+    // No binary → genuinely not installed (fresh machine, face feature off).
+    // The UI installer path (`face_service_install`) handles that case.
+    let Some(svc_exe) = find_deployed_face_svc_exe() else {
+        return Ok(json!({
+            "service_installed": false,
+            "service_running": false,
+            "state": state,
+            "action": "not_installed",
+        }));
+    };
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default();
+    let last = LAST_REINSTALL_MS.load(Ordering::Relaxed);
+    if last != 0 && now_ms.saturating_sub(last) < REINSTALL_COOLDOWN_MS {
+        return Ok(json!({
+            "service_installed": false,
+            "service_running": false,
+            "state": state,
+            "action": "reinstall_cooldown",
+            "note": "SCM entry missing and binary present; reinstall attempted recently — retrying later.",
+        }));
+    }
+    LAST_REINSTALL_MS.store(now_ms, Ordering::Relaxed);
+
+    log::warn!(
+        "[ensure_face_service] S66-003: SCM entry missing but binary present ({}) — reinstalling",
+        svc_exe.display()
+    );
+    let output = std::process::Command::new(&svc_exe)
+        .arg("install")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("reinstall: failed to run {}: {e}", svc_exe.display()))?;
+
+    let exit_ok = output.status.success();
+    let out_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !exit_ok {
+        log::warn!(
+            "[ensure_face_service] reinstall failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            out_text
+        );
+    }
+
+    Ok(json!({
+        "service_installed": exit_ok,
+        "service_running": exit_ok,
+        "state": if exit_ok { "reinstalled" } else { state },
+        "action": if exit_ok { "reinstalled" } else { "reinstall_failed" },
+        "exit_code": output.status.code().unwrap_or(-1),
+        "output": out_text,
+    }))
+}
+
+#[cfg(not(windows))]
+fn ensure_face_service_reinstall(_state: &str) -> Result<Value, String> {
     Err("Face auth service only supported on Windows".to_string())
 }
 
@@ -2622,6 +2700,25 @@ mod tests {
         assert!(
             result["error"].as_str().is_some(),
             "failed dispatch must carry an error string"
+        );
+    }
+
+    /// S66-003 regression: `ensure_face_service_reinstall` must be wired into
+    /// `ensure_face_service` for the "SCM entry missing" branch (the 2026-10-23
+    /// incident: entry vanished, binary present, 4,869 no-op probes, Face
+    /// Unlock dead). Source-marker test — the function itself needs a live
+    /// SCM/binary, which unit tests cannot provide.
+    #[test]
+    fn s66_003_missing_scm_entry_routes_to_reinstall() {
+        let src = include_str!("elevated.rs");
+        assert!(
+            src.contains("return ensure_face_service_reinstall(&state);"),
+            "S66-003: the 'does not exist' branch must attempt reinstall, \
+             not return not_installed"
+        );
+        assert!(
+            src.contains("REINSTALL_COOLDOWN_MS"),
+            "S66-003: reinstall must be rate-limited (supervisor probes 30s)"
         );
     }
 
