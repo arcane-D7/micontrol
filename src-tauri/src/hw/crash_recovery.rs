@@ -257,8 +257,17 @@ fn register_restart_manager() -> bool {
 /// storing them in `%LOCALAPPDATA%\MiControl\crashdumps`.
 ///
 /// WER LocalDumps requires registry configuration under
-/// `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\MiControl.exe`
-/// with DumpFolder, DumpType, and DumpCount values.
+/// `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\<exact
+/// process image name>` with DumpFolder, DumpType, and DumpCount values.
+///
+/// S66-006: the key MUST match the process image name EXACTLY — the binary
+/// is `micontrol.exe` (lowercase). The previous key `MiControl.exe` never
+/// matched, so 9,718 crashes (2026-10-20..23) produced ZERO dumps. Both key
+/// spellings are now written (the old one kept for compatibility with any
+/// external tooling that reads it). The dump folder is also created with a
+/// permissive ACL: when the elevated helper (SYSTEM) creates it first, the
+/// inherited default ACL denied even directory-listing to the user, blocking
+/// forensics.
 fn register_wer() -> bool {
     #[cfg(windows)]
     {
@@ -280,19 +289,46 @@ fn register_wer() -> bool {
             .unwrap_or_else(|_| std::path::PathBuf::from("crashdumps"));
 
         let _ = std::fs::create_dir_all(&dump_dir);
-
-        // Write WER LocalDumps registry settings
-        // HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\MiControl.exe
-        let dump_dir_str = dump_dir.to_string_lossy().to_string();
-        let wer_key_path =
-            r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\MiControl.exe";
-        if let Ok(hklm) =
-            winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE).create_subkey(wer_key_path)
+        // S66-006: ensure the user can READ the dumps even when the folder
+        // was first created by the SYSTEM helper (its default ACL denied
+        // user listing). icacls grants the current user modify rights; best
+        // effort — failure is logged, not fatal.
         {
-            let (key, _) = hklm;
-            let _ = key.set_value("DumpFolder", &dump_dir_str);
-            let _ = key.set_value("DumpType", &2u32); // 2 = full dump
-            let _ = key.set_value("DumpCount", &10u32); // keep last 10 dumps
+            let whoami = std::process::Command::new("whoami.exe")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if !whoami.is_empty() {
+                let dir = dump_dir.display().to_string();
+                let out = std::process::Command::new("icacls.exe")
+                    .args([&dir, "/grant", &format!("{whoami}:(OI)(CI)M"), "/Q"])
+                    .output();
+                if let Some(o) = out.ok().filter(|o| !o.status.success()) {
+                    log::warn!(
+                        target: "hw::crash_recovery",
+                        "icacls grant on dump dir failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                }
+            }
+        }
+
+        // Write WER LocalDumps registry settings — BOTH process-name
+        // spellings (S66-006: exact-match requirement).
+        let dump_dir_str = dump_dir.to_string_lossy().to_string();
+        for key_name in ["micontrol.exe", "MiControl.exe"] {
+            let wer_key_path = format!(
+                r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\{key_name}"
+            );
+            if let Ok(hklm) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+                .create_subkey(&wer_key_path)
+            {
+                let (key, _) = hklm;
+                let _ = key.set_value("DumpFolder", &dump_dir_str);
+                let _ = key.set_value("DumpType", &2u32); // 2 = full dump
+                let _ = key.set_value("DumpCount", &10u32); // keep last 10 dumps
+            }
         }
 
         log::info!(
