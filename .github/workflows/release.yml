@@ -142,15 +142,112 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Generate latest.json for updater
+      - name: Build static setup shell
         shell: pwsh
         run: |
-          $tagName = "${{ github.ref_name }}"
-          $version = $tagName -replace '^v', ''
-          $sigPath = "src-tauri/target/release/bundle/nsis/MiControl_$($version)_x64-setup.exe.sig"
-          $installerName = "MiControl_$($version)_x64-setup.exe"
-          $installerUrl = "https://github.com/arcane-D7/micontrol/releases/latest/download/$installerName"
-          node scripts/generate-latest-json.mjs "$version" "$sigPath" "$installerUrl" "src-tauri/target/release/bundle/nsis/latest.json"
+          # S65-003 AC3: CI builds the SAME static shell artifact as the local
+          # release path (cargo build -p micontrol-setup --profile shell-release)
+          # and verifies its expected signing state.
+          cargo build -p micontrol-setup --profile shell-release --manifest-path src-tauri/Cargo.toml
+          $shell = "src-tauri/target/release/shell-release/micontrol_setup.exe"
+          if (-not (Test-Path $shell)) { throw "shell binary not found: $shell" }
+          $size = (Get-Item $shell).Length
+          if ($size -lt 500000 -or $size -gt (16 * 1024 * 1024)) {
+            throw "shell size out of bounds: $size bytes (expected 500000..16777216)"
+          }
+          Write-Host "shell size OK: $size bytes"
+          Write-Host "shell SHA256: $((Get-FileHash $shell -Algorithm SHA256).Hash)"
+          # Expected signing state in CI: unsigned — Authenticode signing of the
+          # shell is done locally (publish-release.ps1) with the code-signing
+          # cert (never exposed to CI). Verify + report, do not fail.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $signtool) {
+            Write-Host 'signing state: signtool unavailable (expected None in CI)'
+          } else {
+            & $signtool.FullName verify /pa /v $shell | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Host 'signing state: Authenticode VERIFIED' }
+            else { Write-Host 'signing state: unsigned (expected for CI shell; local publisher signs with cert)' }
+          }
+          # Place the shell under bundle/ where the release asset glob picks it
+          # up under its canonical name (single source of truth).
+          $bundleDir = "src-tauri/target/release/bundle/nsis"
+          New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+          Copy-Item $shell (Join-Path $bundleDir 'MiControl_Setup.exe') -Force
+
+      - name: Build, sign decoupled payload and generate latest.json
+        shell: pwsh
+        run: |
+          # S65-004 AC1/AC5 + S65-003 AC2: required signing credentials and
+          # payload entries MUST be present — fail closed before publication.
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY secret is not set — release aborted (S65-003/004 AC)'
+          }
+          $Version = "${{ github.ref_name }}" -replace '^v', ''
+          $releaseDir = 'src-tauri/target/release'
+          $bundleDir = "$releaseDir/bundle/nsis"
+          $staging = Join-Path $env:RUNNER_TEMP "micontrol-payload-$Version"
+          if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+
+          $required = @('micontrol.exe', 'ecram_service.exe', 'micontrol_bridge.exe')
+          $missing = @()
+          foreach ($f in $required) {
+            $src = Join-Path $releaseDir $f
+            if (Test-Path $src) { Copy-Item $src (Join-Path $staging $f) }
+            else { $missing += $f }
+          }
+          if ($missing.Count -gt 0) {
+            throw "FAIL-CLOSED: required payload entry(s) missing — $($missing -join ', '). Release aborted."
+          }
+          foreach ($o in @('micontrol_face_svc.exe', 'micontrol_facecp.dll', 'WebView2Loader.dll')) {
+            $src = Join-Path $releaseDir $o
+            if (Test-Path $src) { Copy-Item $src (Join-Path $staging $o) }
+            else { Write-Warning "optional payload component absent: $o" }
+          }
+          foreach ($d in @('drivers', 'resources')) {
+            $src = Join-Path $releaseDir $d
+            if (Test-Path $src) { Copy-Item $src (Join-Path $staging $d) -Recurse }
+            else { Write-Warning "optional payload component absent: $d" }
+          }
+          '{"version":"' + $Version + '","optional":["micontrol_face_svc.exe","micontrol_facecp.dll","WebView2Loader.dll","drivers","resources"]}' |
+            Set-Content -Encoding UTF8 (Join-Path $staging 'payload.json')
+
+          $payloadName = "MiControl_${Version}_payload.zip"
+          $payloadZip = Join-Path $bundleDir $payloadName
+          Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $payloadZip -CompressionLevel Optimal
+          Remove-Item $staging -Recurse -Force
+          Write-Host "payload: $payloadZip ($((Get-Item $payloadZip).Length) bytes)"
+
+          # Minisign-sign the PAYLOAD (the updater verifies this signature).
+          pnpm exec tauri signer sign -k $env:TAURI_SIGNING_PRIVATE_KEY $payloadZip
+          if ($LASTEXITCODE -ne 0) { throw 'tauri signer sign failed for the payload' }
+          if (-not (Test-Path "$payloadZip.sig")) { throw 'payload signature not found after signing' }
+
+          # latest.json → signed PAYLOAD zip. The NSIS installer is a manual
+          # fallback and is NEVER the updater target (S65-003 AC2).
+          $payloadUrl = "https://github.com/arcane-D7/micontrol/releases/latest/download/$payloadName"
+          node scripts/generate-latest-json.mjs "$Version" "$payloadZip.sig" "$payloadUrl" "$bundleDir/latest.json"
+          if ($LASTEXITCODE -ne 0) { throw 'generate-latest-json.mjs failed' }
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Offline dry-run release validation
+        shell: pwsh
+        run: |
+          # S65-003 AC4 + S65-004 AC5: validate the staged asset set and updater
+          # manifest WITHOUT calling gh release / pushing a tag. Any violation
+          # (missing asset, wrong name, NSIS-targeted latest.json, bad/absent
+          # signature) fails the job before publication.
+          $Version = "${{ github.ref_name }}" -replace '^v', ''
+          $bundleDir = 'src-tauri/target/release/bundle/nsis'
+          $payloadZip = Join-Path $bundleDir "MiControl_${Version}_payload.zip"
+          node scripts/release-contract.mjs dry-run $Version $payloadZip "$payloadZip.sig"
+          if ($LASTEXITCODE -ne 0) { throw 'release-contract dry-run failed — release aborted' }
+          node scripts/release-contract.mjs check $Version $bundleDir
+          if ($LASTEXITCODE -ne 0) { throw 'release-contract check failed — release aborted' }
+          Write-Host '✓ offline release validation passed'
 
       - name: Prepare release body from CHANGELOG
         shell: pwsh
