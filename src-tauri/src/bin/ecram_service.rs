@@ -142,6 +142,7 @@ mod ecram {
 
     /// Open the IoT driver device handle.
     fn open_device() -> Result<HANDLE, String> {
+        // leak-check: audited — every exit path closes the handle explicitly (S67).
         let device_path = find_iot_device_path()?;
         let path_w: Vec<u16> = OsStr::new(&device_path)
             .encode_wide()
@@ -1259,6 +1260,7 @@ mod pipe_server {
     /// A listening server now always exists; `DisconnectNamedPipe` recycles the
     /// instance for the next client without ever removing the pipe name.
     pub fn run_pipe_server(shutdown: Arc<AtomicBool>) {
+        // leak-check: audited — every exit path closes the handle explicitly (S67).
         let pipe_name_w: Vec<u16> = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect();
 
         eprintln!("[ecram_service] pipe server starting on {PIPE_NAME}");

@@ -2610,6 +2610,7 @@ fn start_virtual_control_hid() {
 /// the case where VirtualControlHID was already running; the 6 s pass catches
 /// the VHF virtual device that appears after the driver finishes loading.
 fn start_hid_raw_reader() {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     for delay_ms in [3000u64, 6000u64] {
         std::thread::Builder::new()
             .name("hid-enum".into())

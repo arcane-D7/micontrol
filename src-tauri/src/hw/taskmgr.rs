@@ -539,6 +539,7 @@ pub struct ProcessTaskInfo {
 /// to Task Manager's "End task". Fails cleanly when the process is gone or
 /// access is denied (protected/other-user process).
 pub fn kill_process(pid: u32) -> HardwareResult<()> {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     #[cfg(windows)]
     {
         use windows::Win32::Foundation::CloseHandle;

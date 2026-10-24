@@ -754,10 +754,14 @@ fn read_exact_timeout(
 
     // Create an event for overlapped I/O
     // SAFETY: CreateEventW with null name creates an unnamed event.
-    let event = unsafe {
+    // S67: RAII — the event is closed on EVERY exit path. Before, the
+    // `GetOverlappedResult(...)?` below returned WITHOUT CloseHandle,
+    // leaking one event handle per failed overlapped read.
+    let event_guard = crate::util::win_handle::OwnedEvent::new(unsafe {
         CreateEventW(None, true, false, windows::core::PCWSTR::null())
             .map_err(|e| anyhow::anyhow!("CreateEventW failed: {e}"))?
-    };
+    });
+    let event = event_guard.raw();
 
     let mut filled = 0;
 
@@ -795,9 +799,6 @@ fn read_exact_timeout(
             if bytes_read == 0 {
                 // S23-001: Pipe closed by remote end (EOF). Without this check,
                 // the loop spins forever consuming 100% CPU.
-                unsafe {
-                    let _ = windows::Win32::Foundation::CloseHandle(event);
-                }
                 anyhow::bail!(
                     "Pipe closed by remote end (EOF) after reading {filled}/{} bytes",
                     buf.len()
@@ -808,10 +809,6 @@ fn read_exact_timeout(
             let err = windows::core::Error::from_win32();
             // ERROR_IO_PENDING is expected for overlapped I/O
             if err.code() != windows::Win32::Foundation::ERROR_IO_PENDING.to_hresult() {
-                // SAFETY: event was created by CreateEventW.
-                unsafe {
-                    let _ = windows::Win32::Foundation::CloseHandle(event);
-                }
                 return Err(err).context("ReadFile (overlapped) failed");
             }
 
@@ -824,9 +821,6 @@ fn read_exact_timeout(
                 // SAFETY: handle is valid, overlapped is from the pending operation.
                 unsafe {
                     let _ = CancelIoEx(handle, Some(&overlapped as *const OVERLAPPED));
-                }
-                unsafe {
-                    let _ = windows::Win32::Foundation::CloseHandle(event);
                 }
                 anyhow::bail!(
                     "Pipe read timeout after reading {filled}/{len} bytes",
@@ -841,9 +835,6 @@ fn read_exact_timeout(
             }
             // S23-001: Check for EOF on the overlapped path as well.
             if bytes_read == 0 {
-                unsafe {
-                    let _ = windows::Win32::Foundation::CloseHandle(event);
-                }
                 anyhow::bail!(
                     "Pipe closed by remote end (EOF) after reading {filled}/{} bytes",
                     buf.len()
@@ -851,11 +842,6 @@ fn read_exact_timeout(
             }
             filled += bytes_read as usize;
         }
-    }
-
-    // SAFETY: event was created by CreateEventW.
-    unsafe {
-        let _ = windows::Win32::Foundation::CloseHandle(event);
     }
 
     Ok(())

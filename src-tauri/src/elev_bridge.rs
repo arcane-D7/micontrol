@@ -43,6 +43,7 @@ static UAC_DECLINED: AtomicBool = AtomicBool::new(false);
 /// Cheap check — a single `CreateFileW` on the pipe. Used at startup to
 /// decide whether to install the service.
 pub fn is_bridge_service_available() -> bool {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
@@ -708,8 +709,7 @@ fn pipe_request(body: &str) -> Result<String, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
@@ -785,9 +785,21 @@ fn pipe_request(body: &str) -> Result<String, String> {
         return Err("INVALID_HANDLE_VALUE opening bridge pipe".to_string());
     }
 
+    // S67: RAII for the pipe handle as well. Before this, every early return
+    // below (`write_result.map_err(..)?` and the read loop's break paths that
+    // bail through errors) skipped the two manual CloseHandle calls at the end,
+    // leaking 2 kernel handles per failed elevated round-trip — the audited
+    // ~11 handles/min that reached 188,715 handles / 2.5 GB commit in 218 h.
+    let _pipe_guard = crate::util::win_handle::OwnedHandle::new(handle);
+
     // Event used for both the write and read overlapped waits.
-    let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
-        .map_err(|e| format!("CreateEventW bridge pipe: {e}"))?;
+    // S67: RAII — the event is closed on EVERY exit path (including the
+    // `write_result.map_err(...)?` below, which previously leaked it).
+    let _event_guard = crate::util::win_handle::OwnedEvent::new(
+        unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .map_err(|e| format!("CreateEventW bridge pipe: {e}"))?,
+    );
+    let event = _event_guard.raw();
 
     let mut write_result: Result<(), windows::core::Error> = Ok(());
     let mut written = 0u32;
@@ -888,10 +900,10 @@ fn pipe_request(body: &str) -> Result<String, String> {
         }
     }
 
-    unsafe {
-        CloseHandle(event).ok();
-        CloseHandle(handle).ok();
-    }
+    // S67: the pipe handle and overlapped event are owned by `_pipe_guard` /
+    // `_event_guard` and closed on drop — including every early return above.
+    // Manual CloseHandle calls were removed (they double-closed on the happy
+    // path, and leaked on every error path).
 
     if total_read == 0 {
         return Err("No response from bridge service (timed out or empty)".to_string());

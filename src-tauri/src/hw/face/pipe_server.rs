@@ -23,7 +23,7 @@ mod winpipe {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
     use windows::Win32::Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
         PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
@@ -152,6 +152,12 @@ mod winpipe {
                 .map_err(|e| FaceError::Pipe(format!("CreateEventW: {e}")))?
         };
 
+        // S67: RAII — three manual CloseHandle(event) + CloseHandle(handle_win)
+        // pairs covered three exits; any new exit path (or a `?` added later)
+        // would leak both. The guards own them now.
+        let _event_guard = crate::util::win_handle::OwnedEvent::new(event);
+        let _pipe_guard = crate::util::win_handle::OwnedHandle::new(handle_win);
+
         let mut overlapped = unsafe {
             windows::Win32::System::IO::OVERLAPPED {
                 hEvent: event,
@@ -166,8 +172,6 @@ mod winpipe {
             if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
                 unsafe {
                     CancelIoEx(handle_win, Some(&overlapped)).ok();
-                    CloseHandle(event).ok();
-                    CloseHandle(handle_win).ok();
                 }
                 return Ok(false);
             }
@@ -190,8 +194,6 @@ mod winpipe {
         if read_ok.is_err() || bytes_read == 0 {
             unsafe {
                 DisconnectNamedPipe(handle_win).ok();
-                CloseHandle(event).ok();
-                CloseHandle(handle_win).ok();
             }
             return Ok(true);
         }
@@ -206,9 +208,8 @@ mod winpipe {
             WriteFile(handle_win, Some(&resp_bytes), Some(&mut written), None).ok();
             FlushFileBuffers(handle_win).ok();
             DisconnectNamedPipe(handle_win).ok();
-            CloseHandle(event).ok();
-            CloseHandle(handle_win).ok();
         }
+        // S67: both handles closed by their guards on return.
         Ok(true)
     }
 }

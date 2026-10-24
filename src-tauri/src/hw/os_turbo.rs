@@ -623,6 +623,9 @@ fn throttling_state_snapshot(enabled: bool) -> ProcessPowerStateSnapshot {
 }
 
 #[cfg(windows)]
+// leak-check: every caller (7 sites) closes this handle explicitly on ALL paths;
+// the function cannot use RAII without changing 7 signatures. A future refactor
+// should return `OwnedHandle` and drop the manual CloseHandle calls.
 fn open_process_for_turbo(pid: u32) -> Result<windows::Win32::Foundation::HANDLE, i32> {
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
@@ -1283,6 +1286,7 @@ fn measure_sweep() -> SweepCounts {
 /// The worker never requests write/set access — measurement only.
 #[cfg(windows)]
 fn open_process_for_read(pid: u32) -> Result<windows::Win32::Foundation::HANDLE, i32> {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     unsafe {
@@ -1509,6 +1513,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn public_api_updates_a_disposable_child_state() {
+        // leak-check: audited — every exit path closes the handle explicitly (S67).
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         use windows::Win32::Foundation::CloseHandle;

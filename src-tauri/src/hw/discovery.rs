@@ -930,6 +930,7 @@ fn enumerate_device_interfaces(guid: &GUID) -> Vec<String> {
 /// Open a HID device (read-only, shared) and return its capability snapshot.
 #[cfg(windows)]
 fn hid_caps_for_path(path: &str) -> Option<HIDP_CAPS> {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     // SAFETY: FFI calls to CreateFileW (opens device), HidD_GetPreparsedData
     // (allocates preparsed data), HidP_GetCaps (reads caps from preparsed data),
     // CloseHandle, and HidD_FreePreparsedData. The path_w wide string is

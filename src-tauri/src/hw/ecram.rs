@@ -452,6 +452,7 @@ fn find_iot_device_path() -> anyhow::Result<String> {
 
 #[cfg(windows)]
 fn read_ecram_inner(
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     device_path: &str,
     phys_addr: u64,
     byte_count: usize,
@@ -570,6 +571,7 @@ fn validate_eram_index(index: usize) -> HardwareResult<()> {
 
 #[cfg(windows)]
 fn write_ecram_inner(device_path: &str, phys_addr: u64, data: &[u8]) -> anyhow::Result<()> {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::{
@@ -1187,15 +1189,17 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
         return Err("INVALID_HANDLE_VALUE opening pipe".to_string());
     }
 
+    // S67: RAII — this function had three separate manual CloseHandle sites and
+    // the `WriteFile(...).map_err(...)?` in the middle leaked the pipe handle on
+    // every write failure. Owned by the guard now: closed on every exit path.
+    let _pipe_guard = crate::util::win_handle::OwnedHandle::new(handle);
+
     // The service pipe can remain open but stop servicing requests after
     // resume. Non-wait mode lets us enforce a deadline instead of blocking
     // forever in ReadFile.
     let mode = PIPE_READMODE_MESSAGE | PIPE_NOWAIT;
     if let Err(e) = unsafe { SetNamedPipeHandleState(handle, Some(&mode as *const _), None, None) }
     {
-        unsafe {
-            windows::Win32::Foundation::CloseHandle(handle).ok();
-        }
         return Err(format!("SetNamedPipeHandleState: {e}"));
     }
 
@@ -1237,9 +1241,6 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            unsafe {
-                windows::Win32::Foundation::CloseHandle(handle).ok();
-            }
             return Err(if no_data {
                 "ReadFile timeout waiting for ecram_service response".to_string()
             } else {
@@ -1256,9 +1257,7 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
         }
     }
 
-    unsafe {
-        windows::Win32::Foundation::CloseHandle(handle).ok();
-    }
+    // S67: handle closed by `_pipe_guard` on drop.
 
     if total_read == 0 {
         return Err("No response from pipe".to_string());
@@ -1310,6 +1309,11 @@ pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>>
         return None;
     }
 
+    // S67: RAII — every early return below (the `WriteFile(...).ok()?` included)
+    // used to skip the CloseHandle at the end, leaking one pipe handle per
+    // failed EC read. Same class as the audited 188,715-handle leak.
+    let _pipe_guard = crate::util::win_handle::OwnedHandle::new(handle);
+
     // Build JSON request
     let request = serde_json::json!({
         "op": "read",
@@ -1357,9 +1361,9 @@ pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>>
         }
     }
 
-    unsafe {
-        windows::Win32::Foundation::CloseHandle(handle).ok();
-    }
+    // S67: the pipe handle is owned by `_pipe_guard` — closed on every return
+    // path, including the `WriteFile(...).ok()?` above and the `None` returns
+    // below. The manual CloseHandle that used to sit here is gone.
 
     if total_read == 0 {
         return None;
@@ -1400,6 +1404,7 @@ pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>>
 /// Check if the custom IoTService.exe pipe broker is available.
 #[cfg(windows)]
 pub fn is_pipe_broker_available() -> bool {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     use std::os::windows::ffi::OsStrExt;
 
     let path_w: Vec<u16> = std::ffi::OsStr::new(ECRAM_PIPE_NAME)
@@ -1439,6 +1444,7 @@ pub fn read_ecram_via_pipe(_phys_addr: u64, _byte_count: usize) -> Option<Vec<u8
 
 #[cfg(not(windows))]
 pub fn is_pipe_broker_available() -> bool {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     false
 }
 

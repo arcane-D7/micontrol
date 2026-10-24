@@ -211,6 +211,31 @@ fn get_health_status() -> health_supervisor::HealthSnapshot {
     health_supervisor::snapshot()
 }
 
+/// S67: live kernel-handle / commit-memory leak diagnostics.
+///
+/// `leaking: true` means the growth rate exceeded the thresholds documented in
+/// `util::leak_monitor` (3 handles/min or 2 MB commit/min over a 15 min
+/// window). The same signal is logged as a throttled WARN by the sampler.
+#[tauri::command]
+fn get_leak_diagnostics() -> serde_json::Value {
+    let report = crate::util::leak_monitor::latest();
+    serde_json::json!({
+        "handles": report.handles,
+        "commit_bytes": report.commit_bytes,
+        "handles_per_min": report.handles_per_min,
+        "commit_bytes_per_min": report.commit_bytes_per_min,
+        "samples": report.samples,
+        "leaking": report.leaking,
+        "alerts_this_session": crate::util::leak_monitor::alert_count(),
+        "thresholds": {
+            "handles_per_min": crate::util::leak_monitor::LEAK_HANDLES_PER_MIN,
+            "commit_bytes_per_min": crate::util::leak_monitor::LEAK_COMMIT_BYTES_PER_MIN,
+        },
+        "sample_interval_secs": crate::util::leak_monitor::SAMPLE_INTERVAL.as_secs(),
+        "window_secs": crate::util::leak_monitor::WINDOW.as_secs(),
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[allow(deprecated)]
 pub fn run() {
@@ -416,6 +441,7 @@ pub fn run() {
             ensure_iot_service,
             ensure_bridge_service,
             get_health_status,
+            get_leak_diagnostics,
             get_iot_device_info,
             get_iot_wifi_list,
             iot_notify_event,
@@ -713,6 +739,12 @@ pub fn run() {
             if let Err(e) = crate::hw::crash_recovery::init_crash_recovery() {
                 log::warn!("Crash recovery init failed (non-fatal): {e}");
             }
+
+            // S67: kernel-handle leak monitor. The audited leak grew ~11
+            // handles/min unnoticed for 218 h until the process held 188,715
+            // handles / 2.5 GB commit. This sampler turns any future
+            // regression into a WARN within minutes.
+            crate::util::leak_monitor::start();
 
             // S26-005b: Re-arm the interactive watchdog after an intentional
             // quit. The app is starting now (any reason), so clear the

@@ -127,12 +127,7 @@ export function checkStagedAssets(stagedDir, version) {
   const missing = [];
   const violations = [];
 
-  const required = [
-    c.assets.payload,
-    c.assets.payloadSig,
-    c.assets.shell,
-    c.assets.latestJson,
-  ];
+  const required = [c.assets.payload, c.assets.payloadSig, c.assets.shell, c.assets.latestJson];
   for (const name of required) {
     if (!existsSync(path.join(stagedDir, name))) {
       missing.push(name);
@@ -149,8 +144,7 @@ export function checkStagedAssets(stagedDir, version) {
       violations.push(`latest.json is not valid JSON: ${e.message}`);
     }
     if (manifest) {
-      const url =
-        manifest.platforms?.['windows-x86_64']?.url ?? '';
+      const url = manifest.platforms?.['windows-x86_64']?.url ?? '';
       if (url.includes('_x64-setup.exe')) {
         violations.push(
           `latest.json targets the NSIS installer (${url}) — it must target ` +
@@ -173,8 +167,7 @@ export function checkStagedAssets(stagedDir, version) {
       const sig = manifest.platforms?.['windows-x86_64']?.signature;
       if (!sig || sig.length < 32) {
         violations.push(
-          'latest.json is missing a valid signature in ' +
-            'platforms.windows-x86_64.signature.',
+          'latest.json is missing a valid signature in ' + 'platforms.windows-x86_64.signature.',
         );
       }
     }
@@ -219,7 +212,10 @@ function cmdDryRun(version, payloadZip, payloadSig) {
   const problems = [];
 
   // 1. Existence + non-empty.
-  for (const [label, p] of [['payload zip', payloadZip], ['signature', payloadSig]]) {
+  for (const [label, p] of [
+    ['payload zip', payloadZip],
+    ['signature', payloadSig],
+  ]) {
     if (!existsSync(p)) {
       problems.push(`${label} not found: ${p}`);
       continue;

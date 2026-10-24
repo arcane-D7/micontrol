@@ -5,6 +5,19 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Kernel-handle leak (~11 handles/min → 188,715 handles / 2.5 GB commit after 218 h) — root-caused and fixed.** Every elevated round-trip that failed early (`WriteFile` timeout, `?` on an error path) skipped the manual `CloseHandle` calls at the end of `pipe_request`, leaking the pipe handle AND the overlapped event. The same pattern existed in five more call sites (`read_ecram_via_pipe`, `send_pipe_request`, `read_exact_timeout`, the bridge's `handle_client`, and the face pipe server). All seven sites now own their handles through RAII guards (`util/win_handle.rs`), so every early return closes automatically. See `memory-leak-audit.md` for the full forensic trail.
+
+### Added
+
+- **Handle-leak prevention system (S67), three layers:**
+  - `OwnedHandle` / `OwnedEvent` RAII guards (`src-tauri/src/util/win_handle.rs`) — the only sanctioned way to hold a raw kernel handle.
+  - **Static gate** `scripts/check-handle-leaks.mjs`, wired into `pnpm run health-check` (`handle-leaks` step): fails the build when a function acquires a kernel handle (`CreateFileW`, `CreateEventW`, `CreateNamedPipeW`, `OpenProcess`, `CreateToolhelp32Snapshot`, …) without an RAII guard, an owning wrapper, or an explicit `// leak-check: <reason>` annotation. Polices all 32 acquisition sites in `src-tauri`.
+  - **Runtime monitor** `src-tauri/src/util/leak_monitor.rs`: samples handle count + commit bytes every 60 s over a 15 min sliding window; sustained growth (≥3 handles/min or ≥2 MB/min) triggers a throttled WARN log and is exposed to the UI through the new `get_leak_diagnostics` Tauri command (handles, rates, thresholds, alert count). A future leak regression is caught in ~1 hour instead of 9 days.
+
 ## [0.2.17-beta] - 2026-09-15
 
 ### Fixed

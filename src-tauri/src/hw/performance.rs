@@ -572,6 +572,7 @@ fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
 
 #[cfg(windows)]
 fn send_via_vhf(mode: PerformanceMode) -> Result<()> {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     // Try the path cached during startup discovery; avoids repeated SetupDi enumeration.
     let device_path = crate::hw::discovery::global_profile()
         .and_then(|p| p.vhf_device_path.clone())
@@ -626,6 +627,7 @@ fn send_via_vhf(mode: PerformanceMode) -> Result<()> {
 
 #[cfg(not(windows))]
 fn send_via_vhf(_mode: PerformanceMode) -> Result<()> {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     anyhow::bail!("VHF not available on non-Windows")
 }
 

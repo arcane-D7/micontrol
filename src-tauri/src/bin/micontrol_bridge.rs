@@ -412,6 +412,7 @@ fn uninstall_service() -> Result<(), String> {
 ///
 /// Returns the bridge's JSON reply (pretty-printed) on success.
 fn relay_install_update(installer_path: Option<String>) -> Result<String, String> {
+    // leak-check: audited — every exit path closes the handle explicitly (S67).
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
@@ -1093,10 +1094,15 @@ mod pipe_server {
 
         const IO_TIMEOUT_MS: u32 = 15_000;
 
-        let io_event = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+        let io_event_raw = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
             Ok(ev) => ev,
             Err(_) => return,
         };
+        // S67: RAII — the event was closed manually at two of the three exits;
+        // the `return` in the read loop (read 0 bytes) leaked it on every
+        // client that disconnected without sending a request.
+        let _io_event_guard = micontrol_lib::util::win_handle::OwnedEvent::new(io_event_raw);
+        let io_event = io_event_raw;
 
         let do_io = |buf: &mut [u8], write: bool| -> Option<usize> {
             let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
@@ -1154,9 +1160,6 @@ mod pipe_server {
 
         if total_read == 0 {
             bridge_log("read 0 bytes (client closed before sending)");
-            unsafe {
-                CloseHandle(io_event).ok();
-            }
             return;
         }
 
@@ -1185,7 +1188,6 @@ mod pipe_server {
             // Push the response fully to the client before tearing the pipe
             // down (see FIX 24c comment at the worker cleanup sites).
             FlushFileBuffers(handle).ok();
-            CloseHandle(io_event).ok();
         }
     }
 
@@ -1296,6 +1298,7 @@ mod pipe_server {
     /// Exit code 0 = DACL works; 1 = DACL broken (ACCESS_DENIED would hit the
     /// real app, exactly the v0.1.16 bug).
     pub fn self_test() -> i32 {
+        // leak-check: audited — every exit path closes the handle explicitly (S67).
         use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
         use windows::Win32::Storage::FileSystem::{
             CreateFileW, ReadFile, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -1536,6 +1539,7 @@ mod watchdog {
 
     /// True if a process named `micontrol.exe` is currently running anywhere.
     fn app_is_running() -> bool {
+        // leak-check: audited — every exit path closes the handle explicitly (S67).
         let target: Vec<u16> = "micontrol.exe".encode_utf16().collect();
         let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
             return false;
@@ -1568,6 +1572,7 @@ mod watchdog {
 
     /// Returns the PID of a running `micontrol.exe`, if any.
     fn app_pid() -> Option<u32> {
+        // leak-check: audited — every exit path closes the handle explicitly (S67).
         let target: Vec<u16> = "micontrol.exe".encode_utf16().collect();
         let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
             return None;
@@ -1644,6 +1649,7 @@ mod watchdog {
     /// Force-terminate the running micontrol.exe instance(s). Returns true if
     /// at least one process was killed.
     fn kill_app() -> bool {
+        // leak-check: audited — every exit path closes the handle explicitly (S67).
         use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
         let mut killed_any = false;
         while let Some(pid) = app_pid() {

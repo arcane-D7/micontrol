@@ -58,6 +58,12 @@ const STEPS = [
   },
   { id: 'build', name: 'Frontend build', cmd: 'pnpm', args: ['run', 'build'] },
   { id: 'i18n', name: 'i18n completeness check', cmd: 'node', args: ['scripts/check-i18n.mjs'] },
+  {
+    id: 'handle-leaks',
+    name: 'Kernel-handle leak gate (S67)',
+    cmd: 'node',
+    args: ['scripts/check-handle-leaks.mjs'],
+  },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];
 
