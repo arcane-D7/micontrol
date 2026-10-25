@@ -1249,28 +1249,72 @@ mod pipe_server {
         // returns an error response to the client instead of blocking the
         // worker indefinitely. Healthy dispatches are single-digit ms, so
         // 30 s is a generous ceiling that only trips on genuine hangs.
+        //
+        // S68 FIX (TLS crash): the first version of this fix spawned a
+        // short-lived thread PER DISPATCH — and every thread exit runs the
+        // buggy Rust std Windows TLS destructor path
+        // (std::sys::thread_local::native::eager::destroy), which crashes
+        // this SYSTEM service with 0xc0000005 (same class as S55 FIX 23b:
+        // the fixed worker pool exists precisely to avoid thread churn).
+        // The crash was observed live: the freshly installed bridge crashed
+        // at startup 3x (offset 0x175668 = eager::destroy+0x18) and the
+        // service never reached RUNNING.
+        //
+        // Correct design: a FIXED dispatch pool (2 long-lived threads that
+        // NEVER exit) + a bounded channel receive. The pipe worker blocks on
+        // recv_timeout instead of on the WMI call; a hung dispatch occupies
+        // one dispatch thread (bounded by pool size) while the pipe worker
+        // returns the deadline error to the client. Zero thread churn.
         const DISPATCH_DEADLINE_SECS: u64 = 30;
-        let result = {
-            let cmd_for_thread = cmd.clone();
-            let args_for_thread = args.clone();
-            let (tx, rx) = std::sync::mpsc::channel();
-            // Detached by design: on deadline timeout we deliberately do NOT
-            // join — the thread finishes on its own and its result is dropped.
-            let _detached_worker = std::thread::spawn(move || {
-                let r = micontrol_lib::elevated::dispatch_cmd(&cmd_for_thread, args_for_thread);
-                let _ = tx.send(r);
-            });
-            match rx.recv_timeout(std::time::Duration::from_secs(DISPATCH_DEADLINE_SECS)) {
+        const DISPATCH_POOL: usize = 2;
+        static DISPATCH_TX: std::sync::OnceLock<
+            std::sync::mpsc::Sender<(
+                String,
+                serde_json::Value,
+                std::sync::mpsc::Sender<serde_json::Value>,
+            )>,
+        > = std::sync::OnceLock::new();
+        let dispatch_tx = DISPATCH_TX.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<(
+                String,
+                serde_json::Value,
+                std::sync::mpsc::Sender<serde_json::Value>,
+            )>();
+            let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+            for id in 0..DISPATCH_POOL {
+                let rx = std::sync::Arc::clone(&rx);
+                // Long-lived dispatch threads — they NEVER exit, so the
+                // buggy TLS destructor path is never exercised (S55 23b).
+                let _ = std::thread::Builder::new()
+                    .name(format!("bridge-dispatch-{id}"))
+                    .spawn(move || loop {
+                        let job = {
+                            let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.recv()
+                        };
+                        let Ok((cmd, args, reply_tx)) = job else {
+                            break; // process teardown
+                        };
+                        let r = micontrol_lib::elevated::dispatch_cmd(&cmd, args);
+                        let _ = reply_tx.send(r);
+                    });
+            }
+            tx
+        });
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<serde_json::Value>();
+        let _ = dispatch_tx.send((cmd.clone(), args.clone(), reply_tx));
+        let result =
+            match reply_rx.recv_timeout(std::time::Duration::from_secs(DISPATCH_DEADLINE_SECS)) {
                 Ok(r) => r,
                 Err(_) => {
-                    // The worker thread is still running the hung dispatch —
-                    // it will finish (or not) on its own; we do NOT join or
-                    // kill it (killing threads is unsafe; the WMI call may
-                    // still complete and its result is simply discarded).
-                    // Log throttled: one line per event, includes elapsed.
+                    // The dispatch thread is still running the hung call — it
+                    // will finish (or not) on its own; its reply is dropped when
+                    // the channel sender goes out of scope. The dispatch pool
+                    // being fixed-size bounds how many hung calls can stack.
                     bridge_log(&format!(
                         "dispatch deadline exceeded ({DISPATCH_DEADLINE_SECS}s): cmd={cmd} — \
-                         returning error to client, worker continues in background"
+                     returning error to client, dispatch thread continues in background"
                     ));
                     serde_json::json!({
                         "ok": false,
@@ -1280,8 +1324,7 @@ mod pipe_server {
                         ),
                     })
                 }
-            }
-        };
+            };
         if result["ok"].as_bool().unwrap_or(false) {
             Ok(result["data"].clone())
         } else {
