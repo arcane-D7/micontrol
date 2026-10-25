@@ -666,17 +666,20 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
 }
 
 /// Motor gear values for vibration intensity, verified against Xiaomi's
-/// SvrCModule.dll disassembly (WriteMotorGears):
+/// SvrCModule.dll disassembly (WriteMotorGears) and confirmed on hardware by
+/// Oksion (issue #106):
 ///   mode 1 (Low)    → gears (56, 80)
 ///   mode 2 (Medium) → gears (80, 104)
-///   mode 3 (High)   → gears (104, 104)
+///   mode 3 (High)   → gears (104, 128)  [was (104, 104) — hardware-verified
+///                      wrong; the firmware ignores the second short when it
+///                      equals the first]
 /// The two shorts are sent as a 4-byte payload with report ID 0x5D.
 #[cfg(windows)]
 fn motor_gears(intensity: &HapticsIntensity) -> (u16, u16) {
     match intensity {
         HapticsIntensity::Low => (56, 80),
         HapticsIntensity::Medium => (80, 104),
-        HapticsIntensity::High => (104, 104),
+        HapticsIntensity::High => (104, 128),
     }
 }
 
@@ -709,58 +712,95 @@ fn force_threshold_shorts(sensitivity: &TouchpadSensitivity) -> [u16; 4] {
 
 /// Build a 33-byte BLTP7853 output report frame.
 ///
-/// Verified against Xiaomi's SvrCModule.dll `TouchSettingManager::report`
-/// constructor: byte 0 is a fixed 0x0D magic, byte 1 = payload_len + 7,
-/// byte 2 = checksum (XOR of all payload bytes + 1), byte 3 = phase flag
-/// (0x01 first frame, 0x00 commit), byte 5 = payload_len + 1, byte 8 = the
-/// report ID, and the payload follows at byte 9. The rest is zero-padded to
-/// 33 bytes. `HidD_SetOutputReport` requires the full 33-byte frame.
+/// Protocol verified on TM2424 hardware by Oksion (XiControl maintainer,
+/// GitHub issue #106, 2026-10-25) by reading values back after each write:
+/// - byte 0: fixed 0x0D magic
+/// - byte 1: payload_len + 7
+/// - byte 2: checksum = XOR of bytes [3..31] + 1 — covers the phase flag,
+///   length, command and payload (NOT just the payload as previously
+///   believed; the old formula produced frames the firmware ignored)
+/// - byte 3: phase flag — FIRST frame 0x00, COMMIT frame 0x01 (inverted
+///   relative to the old assumption)
+/// - byte 5: payload_len + 1
+/// - byte 8: report ID
+/// - bytes 9..: payload
+///
+/// A write is TWO frames: the command frame, then a COMMIT frame
+/// (cmd 0x01, payload `[cmd, 0x100 - cmd]`) — without the commit frame the
+/// firmware does not apply the write. ~120 ms between frames (at ~10 ms the
+/// readback is all zeros).
+///
+/// Example (vibration Medium, 0x5D (80,104)):
+///   write : 0D 0B 61 00 00 05 00 00 5D 50 00 68 00
+///   commit: 0D 09 FE 01 00 03 00 00 01 5D A3
 #[cfg(windows)]
 fn build_touchpad_report(report_id: u8, payload: &[u8], commit: bool) -> [u8; 33] {
     let mut r = [0u8; 33];
     r[0] = 0x0D;
     r[1] = payload.len() as u8 + 7;
-    let mut cks = 0u8;
-    for &b in payload {
-        cks ^= b;
-    }
-    r[2] = cks + 1;
-    r[3] = if commit { 0x00 } else { 0x01 };
-    r[5] = payload.len() as u8 + 1;
     r[8] = report_id;
     let copy_len = payload.len().min(24); // max payload region
     r[9..9 + copy_len].copy_from_slice(&payload[..copy_len]);
+    // Phase flag BEFORE the checksum: the checksum covers bytes [3..31].
+    r[3] = if commit { 0x01 } else { 0x00 };
+    r[5] = payload.len() as u8 + 1;
+    // Checksum: XOR of bytes [3..31] + 1 (phase flag, len, cmd, payload).
+    let mut cks = 0u8;
+    for &b in &r[3..31] {
+        cks ^= b;
+    }
+    r[2] = cks.wrapping_add(1);
     r
+}
+
+/// Build the COMMIT frame that makes the firmware apply the preceding write.
+///
+/// Verified on hardware (issue #106): cmd 0x01, payload `[cmd, 0x100 - cmd]`
+/// where `cmd` is the report ID of the write being committed. Example for
+/// 0x5D: `0D 09 FE 01 00 03 00 00 01 5D A3`.
+#[cfg(windows)]
+fn build_commit_frame(cmd: u8) -> [u8; 33] {
+    let payload = [cmd, (0x100u16.wrapping_sub(cmd as u16)) as u8];
+    build_touchpad_report(0x01, &payload, true)
+}
+
+/// Send a command frame followed by its commit frame, with the inter-frame
+/// delay verified on hardware (~120 ms; at ~10 ms the readback is all zeros).
+#[cfg(windows)]
+fn send_touchpad_command(report_id: u8, payload: &[u8]) -> HardwareResult<()> {
+    let write = build_touchpad_report(report_id, payload, false);
+    send_touchpad_output_report(&write)?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let commit = build_commit_frame(report_id);
+    send_touchpad_output_report(&commit)?;
+    Ok(())
 }
 
 /// Send heavy-press (repress / second-tap) enable/disable via HID output
 /// report 0x59 `WriteEnableHeavyPress` — replicated from Xiaomi's
-/// SvrCModule.dll (payload [0x01]=on, [0x02]=off, sent in two frames:
-/// phase-flag 0x01 then commit 0x00).
+/// SvrCModule.dll. Issue #106 (hardware-verified): the payload is ONE
+/// LITTLE-ENDIAN SHORT (01 00 = on, 02 00 = off), not a single byte, and the
+/// write must be followed by the commit frame.
 #[cfg(windows)]
 fn send_heavy_press_hid_report(enabled: bool) -> HardwareResult<()> {
-    let heavy_payload = [if enabled { 0x01 } else { 0x02 }];
-    let heavy1 = build_touchpad_report(0x59, &heavy_payload, false);
-    send_touchpad_output_report(&heavy1)?;
-    let heavy2 = build_touchpad_report(0x59, &heavy_payload, true);
-    send_touchpad_output_report(&heavy2)?;
+    let value: u16 = if enabled { 0x01 } else { 0x02 };
+    let heavy_payload = value.to_le_bytes(); // 01 00 / 02 00
+    send_touchpad_command(0x59, &heavy_payload)?;
     log::info!("[touchpad] WriteEnableHeavyPress: enabled={}", enabled);
     Ok(())
 }
 
 /// Send haptic vibration intensity via HID output report 0x5D
-/// `WriteMotorGears` (2 LE shorts gear pair, two frames phase+commit) —
-/// replicated from Xiaomi's SvrCModule.dll.
+/// `WriteMotorGears` (2 LE shorts gear pair + commit frame) — replicated
+/// from Xiaomi's SvrCModule.dll. Issue #106 (hardware-verified): High is
+/// (104, 128), not (104, 104).
 #[cfg(windows)]
 fn send_motor_gears_hid_report(intensity: &HapticsIntensity) -> HardwareResult<()> {
     let (g1, g2) = motor_gears(intensity);
     let mut motor_payload = [0u8; 4];
     motor_payload[..2].copy_from_slice(&g1.to_le_bytes());
     motor_payload[2..].copy_from_slice(&g2.to_le_bytes());
-    let motor1 = build_touchpad_report(0x5D, &motor_payload, false);
-    send_touchpad_output_report(&motor1)?;
-    let motor2 = build_touchpad_report(0x5D, &motor_payload, true);
-    send_touchpad_output_report(&motor2)?;
+    send_touchpad_command(0x5D, &motor_payload)?;
 
     log::info!(
         "[touchpad] WriteMotorGears: intensity={:?} gears=({},{})",
@@ -785,10 +825,7 @@ fn send_force_threshold_hid_report(sensitivity: &TouchpadSensitivity) -> Hardwar
     for (i, s) in shorts.iter().enumerate() {
         payload[i * 2..i * 2 + 2].copy_from_slice(&s.to_le_bytes());
     }
-    let report1 = build_touchpad_report(0x5B, &payload, false);
-    send_touchpad_output_report(&report1)?;
-    let report2 = build_touchpad_report(0x5B, &payload, true);
-    send_touchpad_output_report(&report2)?;
+    send_touchpad_command(0x5B, &payload)?;
 
     log::info!(
         "[touchpad] WriteForceGears: sensitivity={:?} shorts={:?}",
@@ -1547,6 +1584,101 @@ mod tests {
         handle_edge_slide, hid_hardware_key, hid_instance_root, hid_vid_pid_key,
         is_touchpad_device_path, normalize_hid_path,
     };
+
+    // ── Issue #106: BLTP7853 frame protocol (hardware-verified by Oksion) ──
+
+    #[cfg(windows)]
+    #[test]
+    fn issue106_write_frame_matches_verified_example() {
+        // Vibration Medium, 0x5D (80, 104) — the exact frame Oksion verified
+        // on TM2424 hardware: 0D 0B 61 00 00 05 00 00 5D 50 00 68 00
+        let payload = [
+            80u16.to_le_bytes()[0],
+            80u16.to_le_bytes()[1],
+            104u16.to_le_bytes()[0],
+            104u16.to_le_bytes()[1],
+        ];
+        let f = super::build_touchpad_report(0x5D, &payload, false);
+        assert_eq!(f[0], 0x0D, "magic");
+        assert_eq!(f[1], 0x0B, "len = payload_len(4) + 7");
+        assert_eq!(f[2], 0x61, "checksum XOR(bytes[3..31])+1");
+        assert_eq!(f[3], 0x00, "phase flag: FIRST frame is 0x00");
+        assert_eq!(f[5], 0x05, "payload_len + 1");
+        assert_eq!(f[8], 0x5D, "report id");
+        assert_eq!(&f[9..13], &[0x50, 0x00, 0x68, 0x00], "payload LE shorts");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue106_commit_frame_matches_verified_example() {
+        // Commit frame for 0x5D: 0D 09 FE 01 00 03 00 00 01 5D A3
+        let f = super::build_commit_frame(0x5D);
+        assert_eq!(f[0], 0x0D, "magic");
+        assert_eq!(f[1], 0x09, "len = payload_len(2) + 7");
+        assert_eq!(f[2], 0xFE, "checksum");
+        assert_eq!(f[3], 0x01, "phase flag: COMMIT frame is 0x01");
+        assert_eq!(f[5], 0x03, "payload_len + 1");
+        assert_eq!(f[8], 0x01, "commit command id");
+        assert_eq!(&f[9..11], &[0x5D, 0xA3], "payload [cmd, 0x100-cmd]");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue106_checksum_covers_header_not_just_payload() {
+        // The old (wrong) formula XORed only the payload bytes; the correct
+        // one XORs bytes [3..31]. With payload [0x00, 0x00] the payload XOR
+        // is 0 (old checksum would be 0x01); the correct one folds in
+        // byte 5 (len+1 = 0x03) and byte 8 (cmd 0x59) → 0x03^0x59 = 0x5A,
+        // +1 = 0x5B.
+        let f = super::build_touchpad_report(0x59, &[0x00, 0x00], false);
+        assert_eq!(
+            f[2], 0x5B,
+            "checksum must cover bytes [3..31], not just payload"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue106_heavy_press_payload_is_le_short() {
+        // 0x59 payload is ONE LE short (01 00 on / 02 00 off), not 1 byte.
+        // Build the frame and inspect the payload region.
+        let on: u16 = 0x01;
+        let f = super::build_touchpad_report(0x59, &on.to_le_bytes(), false);
+        assert_eq!(&f[9..11], &[0x01, 0x00], "on = LE short 01 00");
+        let off: u16 = 0x02;
+        let f2 = super::build_touchpad_report(0x59, &off.to_le_bytes(), false);
+        assert_eq!(&f2[9..11], &[0x02, 0x00], "off = LE short 02 00");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue106_motor_gears_high_is_104_128() {
+        // High was (104, 104) — hardware-verified wrong; it is (104, 128).
+        assert_eq!(
+            super::motor_gears(&super::HapticsIntensity::High),
+            (104, 128)
+        );
+        assert_eq!(super::motor_gears(&super::HapticsIntensity::Low), (56, 80));
+        assert_eq!(
+            super::motor_gears(&super::HapticsIntensity::Medium),
+            (80, 104)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue106_single_haptic_click_frame_checksum() {
+        // Sanity check from PluginGesture.dll (edge-slider tick):
+        // 0D 09 FD 01 00 03 00 00 02 32 CE — cmd 0x02, payload [0x32, 0xCE]
+        // (strength + trailing byte; payload_len = 2 per bytes 1 and 5).
+        let f = super::build_touchpad_report(0x02, &[0x32, 0xCE], true);
+        assert_eq!(f[1], 0x09, "len = payload_len(2) + 7");
+        assert_eq!(f[2], 0xFD, "checksum for the known click frame");
+        assert_eq!(f[3], 0x01, "commit phase");
+        assert_eq!(f[5], 0x03, "payload_len + 1");
+        assert_eq!(f[8], 0x02, "cmd");
+        assert_eq!(&f[9..11], &[0x32, 0xCE], "payload");
+    }
 
     #[test]
     fn normalize_hid_path_handles_case_and_prefix() {
