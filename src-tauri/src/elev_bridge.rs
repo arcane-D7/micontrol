@@ -669,15 +669,24 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
     };
 
     // Parse + verify response.
-    let mut v: Value =
-        serde_json::from_str(&content).map_err(|e| format!("Invalid bridge response JSON: {e}"))?;
+    // S68: these error paths were SILENT — the app fell back to the scheduled
+    // task (spawning a helper process per poll) with no log line explaining
+    // why the healthy pipe was skipped. Every failure now logs its reason.
+    let mut v: Value = serde_json::from_str(&content).map_err(|e| {
+        log::warn!("Bridge response not valid JSON ({e}) — falling back to task path");
+        format!("Invalid bridge response JSON: {e}")
+    })?;
     if let Err(e) = auth::verify_payload(&mut v, &key) {
-        log::warn!("Bridge response HMAC verification failed: {e}");
+        log::warn!("Bridge response HMAC verification failed: {e} — falling back to task path");
         return Err(format!("Bridge response authentication failed: {e}"));
     }
 
     let resp_req = v["request_id"].as_str().unwrap_or_default();
     if resp_req != request_id {
+        log::warn!(
+            "Bridge response request_id mismatch (expected {request_id}, got {resp_req}) — \
+             falling back to task path"
+        );
         return Err(format!(
             "Bridge response request_id mismatch (expected {}, got {})",
             request_id, resp_req

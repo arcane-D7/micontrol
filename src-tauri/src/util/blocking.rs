@@ -1,12 +1,20 @@
-//! Helper for running blocking operations on the tokio blocking thread pool.
+//! Helper for running blocking operations on a FIXED dedicated thread pool.
 //!
-//! Wraps `tokio::task::spawn_blocking` with consistent error handling,
-//! converting join errors into [`HardwareError::TaskJoin`].
+//! Wraps [`crate::util::fixed_pool::run_blocking`] with consistent error
+//! handling, converting join errors into [`HardwareError::TaskJoin`].
+//!
+//! S68 (handle-leak root cause): this used `tokio::task::spawn_blocking`,
+//! whose pool threads expire after ~10 s idle and are re-created on every
+//! poll burst. Each new thread initializes COM (the `wmi_cache` thread_local
+//! creates fresh WMIConnections), producing Section/Event handles, and the
+//! create/exit churn retained Thread handles in the process handle table
+//! (measured: ~15-16 handles/min, 646 Thread handles for 318 TIDs with only
+//! ~82 alive). The fixed pool never exits its threads, so the churn — and
+//! the buggy Rust std Windows TLS destructor path on thread exit — never
+//! runs. Same public API; all 129 call sites migrated at once.
 
-use crate::hw::errors::{HardwareError, HardwareResult};
-use std::sync::{Arc, OnceLock};
+use crate::hw::errors::HardwareResult;
 use std::time::Duration;
-use tokio::sync::Semaphore;
 
 /// Maximum time a synchronous hardware query may occupy an IPC command.
 ///
@@ -14,26 +22,13 @@ use tokio::sync::Semaphore;
 /// underlying blocking task cannot be cancelled safely, but the Tauri command
 /// must still complete so the frontend can recover and show a real error.
 pub const DEFAULT_BLOCKING_TIMEOUT: Duration = Duration::from_secs(15);
-// Cap on concurrent synchronous hardware queries. Generous enough that the
-// startup burst of parallel IPC commands (battery/charge/perf/fan/display/
-// audio...) never hits it, small enough that a WMI/vendor-pipe hang after
-// sleep cannot pile up arbitrary blocking threads. Slots are released when
-// the timeout fires (see run_blocking_timeout), so this limit can never be
-// permanently exhausted by hung tasks.
-const MAX_IN_FLIGHT_BLOCKING_TASKS: usize = 64;
 
-fn blocking_slots() -> Arc<Semaphore> {
-    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    SLOTS
-        .get_or_init(|| Arc::new(Semaphore::new(MAX_IN_FLIGHT_BLOCKING_TASKS)))
-        .clone()
-}
-
-/// Run a blocking closure on the tokio blocking thread pool.
+/// Run a blocking closure on the fixed pool.
 ///
-/// This is a thin wrapper around `tokio::task::spawn_blocking` that maps
-/// the `JoinError` (task panic, cancellation) into a [`HardwareError::TaskJoin`]
-/// instead of requiring each call site to repeat the same `.map_err` boilerplate.
+/// This is a thin wrapper around [`crate::util::fixed_pool::run_blocking`]
+/// that maps the timeout error into [`HardwareError::Timeout`] (the fixed
+/// pool already returns that shape; the wrapper keeps the historical public
+/// surface stable for the 129 call sites).
 ///
 /// # Example
 ///
@@ -47,7 +42,7 @@ where
     F: FnOnce() -> HardwareResult<T> + Send + 'static,
     T: Send + 'static,
 {
-    run_blocking_timeout(DEFAULT_BLOCKING_TIMEOUT, f).await
+    crate::util::fixed_pool::run_blocking(f).await?
 }
 
 /// Run a blocking closure with a bounded wait for its result.
@@ -56,29 +51,5 @@ where
     F: FnOnce() -> HardwareResult<T> + Send + 'static,
     T: Send + 'static,
 {
-    let permit = blocking_slots().try_acquire_owned().map_err(|_| {
-        HardwareError::Timeout(
-            "too many hardware operations are still blocked; retry after recovery".into(),
-        )
-    })?;
-    let task = tokio::task::spawn_blocking(f);
-    match tokio::time::timeout(timeout, task).await {
-        Ok(result) => {
-            // The blocking task finished — release the slot with the response.
-            drop(permit);
-            result.map_err(|e| HardwareError::TaskJoin(format!("Blocking task join error: {e}")))?
-        }
-        Err(_) => {
-            // The underlying blocking task may still be running (WMI/vendor
-            // pipe hung after sleep — it cannot be cancelled safely). Drop the
-            // permit NOW so this slot is usable again: the "too many hardware
-            // operations" failure must not become permanent because a few
-            // hung tasks hold every slot forever.
-            drop(permit);
-            Err(HardwareError::Timeout(format!(
-                "blocking hardware operation exceeded {} seconds",
-                timeout.as_secs()
-            )))
-        }
-    }
+    crate::util::fixed_pool::run_blocking_timeout(timeout, f).await?
 }
