@@ -296,22 +296,30 @@ async fn run_elevated_impl(
     // When this process is running as an administrator (dev mode or installed
     // with admin manifest), dispatch the privileged operation directly in a
     // blocking thread.  This eliminates the ~15 s scheduled-task round-trip.
+    // S69: FIXED pool (no tokio blocking-pool churn).
     #[cfg(windows)]
     if is_admin() {
         let args2 = args.clone();
-        return tokio::task::spawn_blocking(move || {
-            let result = crate::elevated::dispatch_cmd(cmd, args2);
-            if result["ok"].as_bool().unwrap_or(false) {
-                Ok(result["data"].clone())
-            } else {
-                Err(result["error"]
-                    .as_str()
-                    .unwrap_or("elevated dispatch failed")
-                    .to_string())
-            }
-        })
+        let cmd_static: &'static str = cmd;
+        return match crate::util::fixed_pool::run_blocking_timeout(
+            Duration::from_secs(timeout_for_cmd(cmd).as_secs()),
+            move || {
+                let result = crate::elevated::dispatch_cmd(cmd_static, args2);
+                if result["ok"].as_bool().unwrap_or(false) {
+                    Ok(result["data"].clone())
+                } else {
+                    Err(result["error"]
+                        .as_str()
+                        .unwrap_or("elevated dispatch failed")
+                        .to_string())
+                }
+            },
+        )
         .await
-        .map_err(|e| format!("blocking task panicked: {e}"))?;
+        {
+            Ok(v) => v,
+            Err(e) => Err(format!("blocking task failed: {e}")),
+        };
     }
 
     // ── Preferred path: autonomous MiControlBridge service pipe ─────────────
@@ -350,11 +358,14 @@ async fn run_elevated_impl(
     }
 
     let dir = crate::elevated::elev_dir();
-    // S26-006: Wrap in spawn_blocking — cleanup_stale_elev_files() uses std::fs::read_dir.
+    // S26-006: run on a blocking thread — cleanup_stale_elev_files() uses
+    // std::fs::read_dir. S69: FIXED pool (no tokio blocking-pool churn).
     let dir_clone = dir.clone();
-    tokio::task::spawn_blocking(move || cleanup_stale_elev_files(&dir_clone))
-        .await
-        .map_err(|e| format!("cleanup_stale_elev_files task panicked: {e}"))?;
+    crate::util::fixed_pool::run_blocking_timeout(Duration::from_secs(10), move || {
+        cleanup_stale_elev_files(&dir_clone)
+    })
+    .await
+    .map_err(|e| format!("cleanup_stale_elev_files task failed: {e}"))?;
 
     let request_id = make_request_id();
     let cmd_path = dir.join(cmd_file_name(&request_id));
@@ -371,12 +382,16 @@ async fn run_elevated_impl(
     });
 
     // Sign the payload with HMAC-SHA256 using the shared key.
-    // S22-002: Wrap in spawn_blocking — get_or_create_key() does sync file I/O
-    // with a 5-second polling loop, which would block the async runtime.
-    let key = tokio::task::spawn_blocking(auth::get_or_create_key)
-        .await
-        .map_err(|e| format!("HMAC key task panicked: {e}"))?
-        .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
+    // S22-002: get_or_create_key() does sync file I/O with a 5-second polling
+    // loop, which would block the async runtime. S69: FIXED pool (no tokio
+    // blocking-pool churn).
+    let key = crate::util::fixed_pool::run_blocking_timeout(
+        Duration::from_secs(10),
+        auth::get_or_create_key,
+    )
+    .await
+    .map_err(|e| format!("HMAC key task failed: {e}"))?
+    .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
     auth::sign_payload(&mut payload, &key);
 
     // Remove any stale result from a previous run for this request id.
@@ -413,9 +428,13 @@ async fn run_elevated_impl(
         // Self-healing: try to re-register the scheduled task with the correct
         // path. This fixes the case where the task was registered during
         // `cargo tauri dev` and points to the debug exe.
-        let healed = tokio::task::spawn_blocking(ensure_task_correct_path)
-            .await
-            .map_err(|e| format!("task heal task panicked: {e}"))?;
+        // S69: FIXED pool (no tokio blocking-pool churn).
+        let healed = crate::util::fixed_pool::run_blocking_timeout(
+            Duration::from_secs(30),
+            ensure_task_correct_path,
+        )
+        .await
+        .map_err(|e| format!("task heal task failed: {e}"))?;
 
         let no_uac = || async {
             log::warn!(
@@ -532,13 +551,16 @@ async fn run_elevated_impl(
                 // Re-write the command file in case the bad task process
                 // consumed or deleted it.
                 let _ = tokio::fs::write(&cmd_path, payload.to_string()).await;
-                // S26-005: Wrap in spawn_blocking — launch_elevated_via_uac() blocks
-                // for up to 30 s via WaitForSingleObject.
+                // S26-005: launch_elevated_via_uac() blocks for up to 30 s via
+                // WaitForSingleObject. S69: FIXED pool (no tokio blocking-pool
+                // churn).
                 let req_id_owned = request_id.clone();
-                let uac_result =
-                    tokio::task::spawn_blocking(move || launch_elevated_via_uac(&req_id_owned))
-                        .await
-                        .map_err(|e| format!("UAC timeout fallback task panicked: {e}"))?;
+                let uac_result = crate::util::fixed_pool::run_blocking_timeout(
+                    Duration::from_secs(35),
+                    move || launch_elevated_via_uac(&req_id_owned),
+                )
+                .await
+                .map_err(|e| format!("UAC timeout fallback task failed: {e}"))?;
                 if let Err(e) = uac_result {
                     let _ = tokio::fs::remove_file(&cmd_path).await;
                     return Err(format!(
@@ -623,20 +645,31 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
     });
 
     // Sign the payload (same shared key as the scheduled-task bridge).
-    let key = tokio::task::spawn_blocking(auth::get_or_create_key)
-        .await
-        .map_err(|e| format!("HMAC key task panicked: {e}"))?
-        .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
+    // S69: run on the FIXED pool — `tokio::task::spawn_blocking` pool threads
+    // expire after ~10 s idle and churn (each new thread initializes COM and
+    // the TLS teardown retains handles: the residual ~15 handles/min leak).
+    let key = crate::util::fixed_pool::run_blocking_timeout(
+        Duration::from_secs(10),
+        auth::get_or_create_key,
+    )
+    .await
+    .map_err(|e| format!("HMAC key task failed: {e}"))?
+    .map_err(|e| format!("Cannot obtain HMAC key: {e}"))?;
     auth::sign_payload(&mut payload, &key);
 
     // Open the pipe (blocking — do it on a blocking thread). Bound the whole
     // round-trip with a timeout so a wedged bridge service can never hold the
     // serialized ELEV_REQUEST_LOCK forever (a hung pipe previously stalled
     // every subsequent elevated command and froze the UI).
+    // S69: FIXED pool instead of `tokio::task::spawn_blocking` (thread churn
+    // → COM init + TLS teardown → the residual handle leak).
     let body = payload.to_string();
     let result = tokio::time::timeout(
         Duration::from_secs(ELEV_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || pipe_request(&body)),
+        crate::util::fixed_pool::run_blocking_timeout(
+            Duration::from_secs(ELEV_TIMEOUT_SECS),
+            move || pipe_request(&body),
+        ),
     )
     .await
     .map_err(|_| {
@@ -653,8 +686,8 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
         )
     })?
     .map_err(|e| {
-        log::warn!("pipe request task panicked: {e}");
-        format!("pipe request task panicked: {e}")
+        log::warn!("pipe request task failed: {e}");
+        format!("pipe request task failed: {e}")
     })?;
 
     let content = match result {
@@ -957,10 +990,13 @@ async fn launch_uac_fallback(request_id: &str, cmd_path: &std::path::Path) -> Re
     #[cfg(windows)]
     {
         let req_id_owned = request_id.to_string();
+        // S69: FIXED pool (no tokio blocking-pool churn).
         let uac_result =
-            tokio::task::spawn_blocking(move || launch_elevated_via_uac(&req_id_owned))
-                .await
-                .map_err(|e| format!("UAC launch task panicked: {e}"))?;
+            crate::util::fixed_pool::run_blocking_timeout(Duration::from_secs(35), move || {
+                launch_elevated_via_uac(&req_id_owned)
+            })
+            .await
+            .map_err(|e| format!("UAC launch task failed: {e}"))?;
 
         if let Err(e) = uac_result {
             let _ = tokio::fs::remove_file(cmd_path).await;

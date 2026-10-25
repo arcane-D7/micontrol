@@ -116,12 +116,19 @@ pub fn apply_event(ev: &str) {
     };
 
     log::info!("[scenario_rules] event {ev:?} -> applying performance mode {mode:?}");
-    tauri::async_runtime::spawn_blocking(
-        move || match crate::hw::performance::set_performance_mode(mode) {
-            Ok(r) => log::info!("[scenario_rules] applied {mode:?} via {}", r.method),
-            Err(e) => log::warn!("[scenario_rules] failed to apply {mode:?}: {e}"),
-        },
-    );
+    // S69: FIXED pool (no tokio blocking-pool churn → no handle leak).
+    let mode2 = mode;
+    tauri::async_runtime::spawn(async move {
+        match crate::util::fixed_pool::run_blocking(move || {
+            crate::hw::performance::set_performance_mode(mode2)
+        })
+        .await
+        {
+            Ok(Ok(r)) => log::info!("[scenario_rules] applied {mode:?} via {}", r.method),
+            Ok(Err(e)) => log::warn!("[scenario_rules] failed to apply {mode:?}: {e}"),
+            Err(e) => log::warn!("[scenario_rules] apply task failed: {e}"),
+        }
+    });
 }
 
 /// Apply the configured lid action. Reserved for a future laptop-status hook
@@ -134,12 +141,21 @@ pub fn apply_lid_action() {
         LidAction::None => {}
         LidAction::Sleep => {
             log::info!("[scenario_rules] lid action: requesting system sleep");
-            tauri::async_runtime::spawn_blocking(|| {
-                // hibernate=false, force=false → a normal system sleep.
-                let ok = unsafe { SetSuspendState(false, false, false) };
-                if !ok.as_bool() {
-                    let err = windows::core::Error::from_win32();
-                    log::warn!("[scenario_rules] SetSuspendState failed: {err}");
+            // S69: FIXED pool (no tokio blocking-pool churn → no handle leak).
+            tauri::async_runtime::spawn(async {
+                match crate::util::fixed_pool::run_blocking(|| {
+                    // hibernate=false, force=false → a normal system sleep.
+                    let ok = unsafe { SetSuspendState(false, false, false) };
+                    ok.as_bool()
+                })
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let err = windows::core::Error::from_win32();
+                        log::warn!("[scenario_rules] SetSuspendState failed: {err}");
+                    }
+                    Err(e) => log::warn!("[scenario_rules] suspend task failed: {e}"),
                 }
             });
         }

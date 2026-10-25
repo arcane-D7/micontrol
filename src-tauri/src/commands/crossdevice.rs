@@ -139,9 +139,13 @@ pub async fn scrcpy_stop() -> Result<(), String> {
 /// Install scrcpy via winget (background task; may take a minute).
 #[tauri::command]
 pub async fn scrcpy_install() -> Result<(), String> {
-    tokio::task::spawn_blocking(crate::hw::scrcpy_bridge::install_scrcpy)
-        .await
-        .map_err(|e| format!("install task failed: {e}"))?
+    // S69: FIXED pool with a long budget — winget installs take minutes.
+    crate::util::fixed_pool::run_blocking_timeout(
+        std::time::Duration::from_secs(600),
+        crate::hw::scrcpy_bridge::install_scrcpy,
+    )
+    .await
+    .map_err(|e| format!("install task failed: {e}"))?
 }
 
 /// Local transcription status: binary installed? model downloaded?
@@ -159,12 +163,15 @@ pub async fn transcription_download_model() -> Result<String, String> {
 }
 
 /// Install the sherpa-onnx CLI (downloads the official Windows build into
-/// app-data — not on winget). Runs on a blocking task.
+/// app-data — not on winget). Runs on the fixed pool (S69) with a long budget.
 #[tauri::command]
 pub async fn transcription_install_binary() -> Result<String, String> {
-    let dir = tokio::task::spawn_blocking(crate::hw::transcription::install_binary)
-        .await
-        .map_err(|e| format!("install task failed: {e}"))??;
+    let dir = crate::util::fixed_pool::run_blocking_timeout(
+        std::time::Duration::from_secs(600),
+        crate::hw::transcription::install_binary,
+    )
+    .await
+    .map_err(|e| format!("install task failed: {e}"))??;
     Ok(dir.display().to_string())
 }
 

@@ -1345,16 +1345,17 @@ pub async fn adaptive_brightness_loop() {
 
         // Skip the iteration when the display is off (lid closed, sleep, etc.)
         // to avoid wasting CPU and fighting with the OS power manager.
-        let display_on = tokio::task::spawn_blocking(is_display_on)
+        // S69: FIXED pool (no tokio blocking-pool churn → no handle leak).
+        let display_on = crate::util::fixed_pool::run_blocking(is_display_on)
             .await
             .unwrap_or(true);
         if !display_on {
             continue;
         }
 
-        // Run blocking hardware calls on the blocking thread pool to avoid
-        // starving the tokio runtime worker threads.
-        let Ok((cfg, brightness_actual)) = tokio::task::spawn_blocking(|| {
+        // Run blocking hardware calls on the fixed pool to avoid starving the
+        // tokio runtime worker threads.
+        let Ok((cfg, brightness_actual)) = crate::util::fixed_pool::run_blocking(|| {
             let cfg = get_ai_brightness_config();
             let brightness_actual = if cfg.enabled {
                 read_current_brightness()
@@ -1365,7 +1366,7 @@ pub async fn adaptive_brightness_loop() {
         })
         .await
         else {
-            log::warn!("adaptive_brightness: spawn_blocking(config) panicked");
+            log::warn!("adaptive_brightness: blocking(config) failed");
             continue;
         };
 
@@ -1391,7 +1392,8 @@ pub async fn adaptive_brightness_loop() {
         // off — if both run simultaneously they fight over the backlight,
         // causing the brightness-near-zero oscillation symptom.
         if !adaptbright_suppressed {
-            let _ = tokio::task::spawn_blocking(disable_windows_adaptive_brightness).await;
+            let _ =
+                crate::util::fixed_pool::run_blocking(disable_windows_adaptive_brightness).await;
             adaptbright_suppressed = true;
         }
 
@@ -1448,7 +1450,7 @@ pub async fn adaptive_brightness_loop() {
             continue;
         }
 
-        let lux = match tokio::task::spawn_blocking(get_ambient_lux).await {
+        let lux = match crate::util::fixed_pool::run_blocking(get_ambient_lux).await {
             // A reading ≤ MIN_PLAUSIBLE_LUX lux with the screen on is physically
             // impossible; it means a placeholder sensor, an uninitialised value
             // (common at process startup on this hardware), or a stuck sensor
@@ -1491,7 +1493,7 @@ pub async fn adaptive_brightness_loop() {
                 continue;
             }
             Err(e) => {
-                log::warn!("adaptive_brightness: spawn_blocking(get_ambient_lux) panicked: {e}");
+                log::warn!("adaptive_brightness: get_ambient_lux task failed: {e}");
                 continue;
             }
         };
@@ -1546,8 +1548,8 @@ pub async fn adaptive_brightness_loop() {
                 // First valid lux reading: seed the smoother from actual current
                 // brightness so we never jump immediately to the computed target.
                 // read_current_brightness → get_brightness_wmi is a blocking COM
-                // call, so it must run on the blocking thread pool.
-                tokio::task::spawn_blocking(move || {
+                // call, so it must run on the fixed pool (S69).
+                crate::util::fixed_pool::run_blocking(move || {
                     read_current_brightness()
                         .map(|b| b as f32)
                         .unwrap_or(target)
@@ -1569,7 +1571,7 @@ pub async fn adaptive_brightness_loop() {
         log::info!(
             "[adaptive_brightness] setting brightness to {set_value}% (lux={lux:.0}, target={target:.1}, smoothed={next:.1})"
         );
-        match tokio::task::spawn_blocking(move || set_brightness(set_value)).await {
+        match crate::util::fixed_pool::run_blocking(move || set_brightness(set_value)).await {
             Ok(Ok(())) => {
                 last_set = Some(set_value);
             }
@@ -1577,7 +1579,7 @@ pub async fn adaptive_brightness_loop() {
                 log::warn!("adaptive_brightness: set_brightness error: {e}");
             }
             Err(e) => {
-                log::warn!("adaptive_brightness: set_brightness task panicked: {e}");
+                log::warn!("adaptive_brightness: set_brightness task failed: {e}");
             }
         }
     }

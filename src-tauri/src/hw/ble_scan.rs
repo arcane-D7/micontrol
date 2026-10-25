@@ -53,8 +53,9 @@ pub struct BleScanResult {
 /// Discover BLE devices: paired (primary) + a short active scan (secondary).
 /// Never panics; failures degrade the scan portion but keep paired results.
 pub async fn discover_devices(scan_seconds: u64) -> BleScanResult {
-    // 1. Paired devices (fast, reliable) — run on a COM-initialized thread.
-    let paired = tokio::task::spawn_blocking(list_paired_devices)
+    // 1. Paired devices (fast, reliable) — run on a COM-initialized thread
+    //    (S69: FIXED pool — no tokio blocking-pool churn).
+    let paired = crate::util::fixed_pool::run_blocking(list_paired_devices)
         .await
         .unwrap_or_default();
 

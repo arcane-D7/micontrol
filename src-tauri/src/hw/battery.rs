@@ -130,14 +130,15 @@ fn should_query_battery_now() -> bool {
 /// Fetch battery info without blocking the caller for longer than
 /// [`BATTERY_QUERY_TIMEOUT`].
 ///
-/// The (potentially slow / hung) WMI work runs on a dedicated thread. On
-/// timeout we log and return the last known-good snapshot; only if no snapshot
-/// exists yet do we fail with a `Timeout` error. Every successful read refreshes
-/// the snapshot cache. The `AC_PROBE_MIN_INTERVAL` throttle inside
-/// `probe_ac_input_power_throttled` is preserved unchanged.
-///
-/// S64: calls inside [`BATTERY_QUERY_MIN_INTERVAL`] are served from the cached
-/// snapshot without spawning a thread (see that constant).
+/// S69 (residual handle-leak root cause): this used to spawn a fresh
+/// `battery-wmi-query` thread per real query (every 15 s). Each new thread
+/// initializes COM (the `wmi_cache` thread_local creates fresh WMI
+/// connections) and, on exit, the Rust std Windows TLS-destructor path
+/// retains Thread/Section/Event handles in the process handle table
+/// (measured: ~15 handles/min, 64 dead TIDs with retained handles after
+/// 25 min). The query now runs on a single PERSISTENT worker thread that
+/// never exits, so the COM init + TLS teardown churn never happens.
+/// The timeout and the S64 snapshot/throttle semantics are unchanged.
 #[cfg(windows)]
 pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
     use std::sync::mpsc;
@@ -149,15 +150,21 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
         // No snapshot yet (first call of the session) — fall through and query.
     }
 
-    let (tx, rx) = mpsc::channel::<HardwareResult<BatteryInfo>>();
-    std::thread::Builder::new()
-        .name("battery-wmi-query".into())
-        .spawn(move || {
-            let _ = tx.send(get_battery_info_inner());
-        })
-        .map_err(|e| HardwareError::Other(format!("battery query thread spawn failed: {e}")))?;
+    let (result_tx, result_rx) = mpsc::channel::<HardwareResult<BatteryInfo>>();
+    {
+        let mut guard = crate::util::panic::lock_or_recover(&BATTERY_WORKER_TX);
+        let tx = guard.get_or_insert_with(|| {
+            let (tx, rx) = mpsc::channel::<BatteryRequest>();
+            std::thread::Builder::new()
+                .name("battery-wmi-worker".into())
+                .spawn(move || battery_worker_loop(rx))
+                .expect("battery worker thread spawn failed");
+            tx
+        });
+        let _ = tx.send(BatteryRequest { result_tx });
+    }
 
-    match rx.recv_timeout(BATTERY_QUERY_TIMEOUT) {
+    match result_rx.recv_timeout(BATTERY_QUERY_TIMEOUT) {
         Ok(result) => {
             if let Ok(info) = &result {
                 let mut guard = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY);
@@ -181,11 +188,33 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
             }
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            log::error!(target: "hw::battery", "battery WMI query thread disconnected");
+            log::error!(target: "hw::battery", "battery WMI worker disconnected");
             Err(HardwareError::Other(
-                "battery WMI query thread disconnected".into(),
+                "battery WMI worker disconnected".into(),
             ))
         }
+    }
+}
+
+/// One-shot request sent to the persistent battery worker.
+#[cfg(windows)]
+struct BatteryRequest {
+    result_tx: std::sync::mpsc::Sender<HardwareResult<BatteryInfo>>,
+}
+
+/// The persistent worker's inbound channel. The worker thread is created on
+/// first use and NEVER exits (S69: thread exit is what leaked handles).
+#[cfg(windows)]
+static BATTERY_WORKER_TX: Mutex<Option<std::sync::mpsc::Sender<BatteryRequest>>> = Mutex::new(None);
+
+/// Persistent battery WMI worker loop. Runs `get_battery_info_inner` for each
+/// request and replies. The thread never exits; a dropped result channel
+/// (caller timed out) is simply ignored.
+#[cfg(windows)]
+fn battery_worker_loop(rx: std::sync::mpsc::Receiver<BatteryRequest>) {
+    for req in rx {
+        let result = get_battery_info_inner();
+        let _ = req.result_tx.send(result);
     }
 }
 

@@ -978,95 +978,100 @@ pub async fn install_update(installer_path: String) -> Result<serde_json::Value,
 /// anti-arbitrary-executable gate at every layer.
 #[tauri::command]
 pub async fn find_latest_downloaded_installer() -> Result<Option<String>, ErrorResponse> {
-    let result = tokio::task::spawn_blocking(|| -> Option<String> {
-        let temp = std::env::var_os("TEMP")?;
-        let app_name = "MiControl";
-        let mut best: Option<(std::time::SystemTime, String, std::path::PathBuf)> = None;
+    // S69: FIXED pool (no tokio blocking-pool churn → no handle leak).
+    let result = crate::util::fixed_pool::run_blocking_timeout(
+        std::time::Duration::from_secs(30),
+        || -> Option<String> {
+            let temp = std::env::var_os("TEMP")?;
+            let app_name = "MiControl";
+            let mut best: Option<(std::time::SystemTime, String, std::path::PathBuf)> = None;
 
-        let entries = std::fs::read_dir(&temp).ok()?;
-        for entry in entries.flatten() {
-            let dir_name = entry.file_name();
-            let dir_name = dir_name.to_string_lossy();
-            // Match "<App>-<version>-updater-*" (plugin tempdir prefix).
-            if !dir_name.starts_with(&format!("{app_name}-")) || !dir_name.contains("-updater-") {
-                continue;
+            let entries = std::fs::read_dir(&temp).ok()?;
+            for entry in entries.flatten() {
+                let dir_name = entry.file_name();
+                let dir_name = dir_name.to_string_lossy();
+                // Match "<App>-<version>-updater-*" (plugin tempdir prefix).
+                if !dir_name.starts_with(&format!("{app_name}-")) || !dir_name.contains("-updater-")
+                {
+                    continue;
+                }
+                let Ok(files) = std::fs::read_dir(entry.path()) else {
+                    continue;
+                };
+                for file in files.flatten() {
+                    let path = file.path();
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase());
+                    if !matches!(ext.as_deref(), Some("exe") | Some("zip")) {
+                        continue;
+                    }
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    let lower = name.to_ascii_lowercase();
+                    let version = if lower.ends_with("-installer.exe") {
+                        name.strip_prefix(&format!("{app_name}-"))
+                            .and_then(|rest| rest.strip_suffix("-installer.exe"))
+                    } else if lower.ends_with("_payload.zip") {
+                        name.strip_prefix("MiControl_")
+                            .and_then(|rest| rest.strip_suffix("_payload.zip"))
+                    } else {
+                        None
+                    };
+                    let Some(version) = version else { continue };
+                    if version.is_empty() || version.contains(['\\', '/']) {
+                        continue;
+                    }
+                    let Ok(meta) = file.metadata() else { continue };
+                    let Ok(modified) = meta.modified() else {
+                        continue;
+                    };
+                    if best.as_ref().is_none_or(|(t, _, _)| {
+                        modified > *t
+                            || (modified == *t && version.len() > best.as_ref().unwrap().1.len())
+                    }) {
+                        best = Some((modified, version.to_string(), path));
+                    }
+                }
             }
-            let Ok(files) = std::fs::read_dir(entry.path()) else {
-                continue;
+
+            let (_, version, source) = best?;
+            let is_zip = source
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("zip"))
+                .unwrap_or(false);
+
+            // Canonical release-artifact names so the S50 gate passes at both the
+            // Tauri command and the SYSTEM bridge.
+            let canonical = if is_zip {
+                format!("MiControl_{version}_payload.zip")
+            } else {
+                format!("MiControl_{version}_x64-setup.exe")
             };
-            for file in files.flatten() {
-                let path = file.path();
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_ascii_lowercase());
-                if !matches!(ext.as_deref(), Some("exe") | Some("zip")) {
-                    continue;
-                }
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                let lower = name.to_ascii_lowercase();
-                let version = if lower.ends_with("-installer.exe") {
-                    name.strip_prefix(&format!("{app_name}-"))
-                        .and_then(|rest| rest.strip_suffix("-installer.exe"))
-                } else if lower.ends_with("_payload.zip") {
-                    name.strip_prefix("MiControl_")
-                        .and_then(|rest| rest.strip_suffix("_payload.zip"))
-                } else {
-                    None
-                };
-                let Some(version) = version else { continue };
-                if version.is_empty() || version.contains(['\\', '/']) {
-                    continue;
-                }
-                let Ok(meta) = file.metadata() else { continue };
-                let Ok(modified) = meta.modified() else {
-                    continue;
-                };
-                if best.as_ref().is_none_or(|(t, _, _)| {
-                    modified > *t
-                        || (modified == *t && version.len() > best.as_ref().unwrap().1.len())
-                }) {
-                    best = Some((modified, version.to_string(), path));
+            let local_app = std::env::var_os("LOCALAPPDATA")?;
+            let dest_dir = std::path::PathBuf::from(local_app).join("MiControl");
+            std::fs::create_dir_all(&dest_dir).ok()?;
+            let dest = dest_dir.join(&canonical);
+            // Remove stale copies of previous versions so only the newest remains.
+            if let Ok(old) = std::fs::read_dir(&dest_dir) {
+                for entry in old.flatten() {
+                    let n = entry.file_name();
+                    let n = n.to_string_lossy().to_ascii_lowercase();
+                    let stale = (n.starts_with("micontrol_") && n.ends_with("_x64-setup.exe"))
+                        || (n.starts_with("micontrol_") && n.ends_with("_payload.zip"));
+                    if stale && entry.path() != dest {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
                 }
             }
-        }
-
-        let (_, version, source) = best?;
-        let is_zip = source
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("zip"))
-            .unwrap_or(false);
-
-        // Canonical release-artifact names so the S50 gate passes at both the
-        // Tauri command and the SYSTEM bridge.
-        let canonical = if is_zip {
-            format!("MiControl_{version}_payload.zip")
-        } else {
-            format!("MiControl_{version}_x64-setup.exe")
-        };
-        let local_app = std::env::var_os("LOCALAPPDATA")?;
-        let dest_dir = std::path::PathBuf::from(local_app).join("MiControl");
-        std::fs::create_dir_all(&dest_dir).ok()?;
-        let dest = dest_dir.join(&canonical);
-        // Remove stale copies of previous versions so only the newest remains.
-        if let Ok(old) = std::fs::read_dir(&dest_dir) {
-            for entry in old.flatten() {
-                let n = entry.file_name();
-                let n = n.to_string_lossy().to_ascii_lowercase();
-                let stale = (n.starts_with("micontrol_") && n.ends_with("_x64-setup.exe"))
-                    || (n.starts_with("micontrol_") && n.ends_with("_payload.zip"));
-                if stale && entry.path() != dest {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-        std::fs::copy(&source, &dest).ok()?;
-        Some(dest.to_string_lossy().into_owned())
-    })
+            std::fs::copy(&source, &dest).ok()?;
+            Some(dest.to_string_lossy().into_owned())
+        },
+    )
     .await
     .map_err(|e| ErrorResponse::from(anyhow::anyhow!("installer scan failed: {e}")))?;
 
