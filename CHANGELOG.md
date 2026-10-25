@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-10-25
+
 ### Fixed
 
 - **Kernel-handle leak (~11 handles/min → 188,715 handles / 2.5 GB commit after 218 h) — root-caused and fixed.** Every elevated round-trip that failed early (`WriteFile` timeout, `?` on an error path) skipped the manual `CloseHandle` calls at the end of `pipe_request`, leaking the pipe handle AND the overlapped event. The same pattern existed in five more call sites (`read_ecram_via_pipe`, `send_pipe_request`, `read_exact_timeout`, the bridge's `handle_client`, and the face pipe server). All seven sites now own their handles through RAII guards (`util/win_handle.rs`), so every early return closes automatically. See `memory-leak-audit.md` for the full forensic trail.
+- **Residual handle leak (~15 handles/min) — two more sources eliminated (S68/S69).** After the RAII fixes the app still grew ~15-16 handles/min. Live `handle64` tracing showed the growth was Thread handles + COM artifacts (`Theme*`, `__ComCatalogCache__`): (1) `tokio::task::spawn_blocking` pool threads expire after ~10 s idle and are re-created on every poll burst — each new thread re-initializes COM and the thread create/exit cycle retains handles; (2) `get_battery_info()` spawned a fresh WMI query thread every 15 s. Fixes: a **fixed 4-thread pool** (`util/fixed_pool.rs`) whose threads NEVER exit now serves all blocking hardware queries (129 call sites + every direct `spawn_blocking` migrated), and the battery query runs on a single persistent worker thread. Measured on hardware: handle growth went from ~15/min to **0/min** (deltas 0, 0 over 3×120 s samples).
+- **Bridge service crash (TLS destructor 0xc0000005) — fixed.** The bridge dispatched each pipe command on a fresh short-lived thread; on thread exit the Rust std Windows TLS destructor path crashed the SYSTEM service (9,718 WER events observed). Dispatch now runs on a FIXED 2-thread pool whose threads never exit, so the buggy teardown path never runs.
+- **Elevated helper crash-loop — fixed.** The `--elevated` helper exited through normal COM teardown, which crashed after the WMI work (WER crash-loop). It now exits via `TerminateProcess`, bypassing the broken teardown entirely.
+- **Touchpad sliders were no-ops — HID protocol corrected (issue #106, protocol verified on hardware by @Oksion).** The vendor touchpad channel (BLTP7853) requires: checksum = XOR of bytes [3..31] + 1 (covers phase flag, len, cmd and payload); phase flag 0x00 on the write frame and 0x01 on the commit frame; a **commit frame** (cmd 0x01, payload `[cmd, 0x100-cmd]`) ~120 ms after each write — without it the firmware ignores the write; `0x5D` High = (104, 128); `0x59` payload is one LE short. Unit tests assert the exact bytes of the hardware-verified example frames.
+- **OS Turbo "does absolutely nothing" — fixed.** The flag-on snapshot could be missing (stale state after driver/registry changes), making every toggle a silent no-op. The toggle now auto-repairs by taking a fresh snapshot when the stored one is missing, and the throttle target list was expanded (16 targets) so more background services are actually throttled.
+- **Bridge stuck on an old binary after updates — hot-upgrade added.** When the installed `micontrol_bridge.exe` is older than a newer binary in `%LOCALAPPDATA%`, the service now stops, copies the new binary over itself, and restarts — no more manual service reinstalls after an update.
+- **Face service vanishing from SCM — self-reinstall.** `ensure_face_service` reinstalls the service when the SCM entry disappears (rate-limited to 10 min).
+- **NSIS bundle now ships the setup shell** — closes the migration gap where legacy installs never received the decoupled-installer update path.
+- **Tray popup regressions** — theme media-query specificity ghosting, collapsed 171 px width, and DPI-stale geometry fixed (S63/S64).
+- **Brightness no-op on null IGCL device** and adaptive-brightness fighting the user after manual changes (120 s grace window) — fixed.
+- **eCRAM pipe lost 3.5% of connections** (single instance recreated every 500 ms) — fixed.
+- **IoT recovery timeout, battery poll throttle, log rotation, touchpad timeout** — S64 hardening batch.
 
 ### Added
 
@@ -17,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `OwnedHandle` / `OwnedEvent` RAII guards (`src-tauri/src/util/win_handle.rs`) — the only sanctioned way to hold a raw kernel handle.
   - **Static gate** `scripts/check-handle-leaks.mjs`, wired into `pnpm run health-check` (`handle-leaks` step): fails the build when a function acquires a kernel handle (`CreateFileW`, `CreateEventW`, `CreateNamedPipeW`, `OpenProcess`, `CreateToolhelp32Snapshot`, …) without an RAII guard, an owning wrapper, or an explicit `// leak-check: <reason>` annotation. Polices all 32 acquisition sites in `src-tauri`.
   - **Runtime monitor** `src-tauri/src/util/leak_monitor.rs`: samples handle count + commit bytes every 60 s over a 15 min sliding window; sustained growth (≥3 handles/min or ≥2 MB/min) triggers a throttled WARN log and is exposed to the UI through the new `get_leak_diagnostics` Tauri command (handles, rates, thresholds, alert count). A future leak regression is caught in ~1 hour instead of 9 days.
+- **Decoupled installer architecture (S65):** a static ~2.5 MB setup shell (`micontrol_setup.exe`, hash-stable across releases) + a versioned, minisign-signed payload zip. Updates never kill/replace the shell, eliminating the NSIS self-kill/SCM-1072 race class. The updater downloads the payload zip, the SYSTEM bridge hands it to the installed shell, and the shell applies it. Legacy NSIS installs are bootstrapped onto the new path automatically.
+- **Measured adaptive OS Turbo (S39):** reversible EcoQoS state with identity-checked restore, deterministic windowed statistics with matched-workload evidence, a bounded allowlisted adaptive policy with cooldown and rollback, an anonymous bounded action log, and a truthful measured status panel (4 locales).
+- **Unified release artifact contract (CI + local publisher)** — the same payload/shell/latest.json contract is validated in CI and produced by `scripts/publish-release.ps1`.
 
 ## [0.2.17-beta] - 2026-09-15
 

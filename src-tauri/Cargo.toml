@@ -13,7 +13,7 @@ strip = true
 
 [package]
 name = "micontrol"
-version = "0.2.19-beta"
+version = "0.2.20"
 edition = "2021"
 default-run = "micontrol"
 
