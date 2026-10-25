@@ -1905,6 +1905,99 @@ fn install_bridge_service() -> Result<Value, String> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
+    // ── S68 (bridge hot-upgrade): a NEWER bridge in %LOCALAPPDATA% wins ────
+    // The S55 FIX 25 no-op guard below means a RUNNING service is never
+    // touched — correct for the pipe path (self-kill protection), but it also
+    // made it impossible to deploy a fixed bridge to a live machine without
+    // a full installer run (observed 2026-10-25: the TLS-crash fix sat in
+    // LOCALAPPDATA while the crashing binary kept being restarted by the SCM).
+    //
+    // Contract: when the candidate binary (LOCALAPPDATA, per find_bridge_exe's
+    // priority 0) is STRICTLY NEWER than the installed Program Files copy,
+    // this command stops the service, copies the new binary over, and starts
+    // it again. The pipe dies mid-flight when called THROUGH the pipe — the
+    // caller must tolerate that (the app already retries through the task
+    // path). Called via the scheduled task (helper process, separate from the
+    // service) it is a clean stop/copy/start.
+    {
+        let candidate = std::env::var("LOCALAPPDATA").ok().map(|base| {
+            PathBuf::from(base)
+                .join("MiControl")
+                .join("micontrol_bridge.exe")
+        });
+        let installed = std::env::var("ProgramFiles").ok().map(|pf| {
+            PathBuf::from(pf)
+                .join("miControl")
+                .join("micontrol_bridge.exe")
+        });
+        if let (Some(cand), Some(inst)) = (candidate.as_ref(), installed.as_ref()) {
+            let cand_newer = || {
+                std::fs::metadata(cand)
+                    .and_then(|c| std::fs::metadata(inst).map(|i| (c, i)))
+                    .map(|(c, i)| {
+                        c.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                            > i.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                    })
+                    .unwrap_or(false)
+            };
+            if cand.is_file() && inst.is_file() && cand_newer() {
+                log::info!(
+                    "install_bridge_service: newer bridge in LOCALAPPDATA — hot-upgrading ({:?} > {:?})",
+                    cand, inst
+                );
+                // Stop (best-effort; a stopped service is fine too).
+                let _ = Command::new("sc.exe")
+                    .args(["stop", "MiControlBridge"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+                // Wait for STOPPED (bounded) so the file is not locked.
+                let mut stopped = false;
+                for _ in 0..30 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let q = Command::new("sc.exe")
+                        .args(["query", "MiControlBridge"])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .output();
+                    if let Ok(q) = q {
+                        let text = String::from_utf8_lossy(&q.stdout).to_string();
+                        if !text.contains("RUNNING") && !text.contains("STOP_PENDING") {
+                            stopped = true;
+                            break;
+                        }
+                    }
+                }
+                if !stopped {
+                    // Not stopped (locked): kill the process so the copy can proceed.
+                    let _ = Command::new("taskkill.exe")
+                        .args(["/IM", "micontrol_bridge.exe", "/T", "/F"])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .output();
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                match std::fs::copy(cand, inst) {
+                    Ok(_) => {
+                        log::info!("install_bridge_service: hot-upgrade copy OK");
+                        // Start (or let `install` below do a full re-create).
+                        let _ = Command::new("sc.exe")
+                            .args(["start", "MiControlBridge"])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output();
+                        let out = "bridge hot-upgraded from LOCALAPPDATA (newer binary)";
+                        return Ok(json!({
+                            "service_installed": true,
+                            "hot_upgraded": true,
+                            "output": out,
+                        }));
+                    }
+                    Err(e) => {
+                        log::warn!("install_bridge_service: hot-upgrade copy failed: {e}");
+                        // Fall through to the normal path.
+                    }
+                }
+            }
+        }
+    }
+
     // S55 FIX 25: if the bridge service is ALREADY installed and running, do
     // nothing. This command can arrive through the pipe itself (the app's
     // thermal poller calls ensure_bridge_service whenever a transient

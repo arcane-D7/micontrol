@@ -30,7 +30,38 @@ const WORKER_MAX_SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
 const WORKER_FAILURE_THRESHOLD: u32 = 3;
 /// How long the worker skips sweeps after repeated failures.
 const WORKER_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
-const THROTTLE_TARGETS: &[&str] = &["SearchIndexer.exe", "backgroundTaskHost.exe"];
+/// Background/indexing processes eligible for EcoQoS throttling.
+///
+/// S68: the original list had only TWO entries (SearchIndexer,
+/// backgroundTaskHost) — on a typical machine ZERO of them were running, so
+/// enabling OS Turbo throttled nothing (the "does absolutely nothing in
+/// practice" report). The expanded allowlist covers the common background
+/// noise on a Windows 11 laptop while staying strictly opt-in per process:
+/// indexers, updaters, telemetry and helper hosts. Everything NOT on this
+/// list is never touched, and PROTECTED_PROCESS_NAMES below is a second
+/// safety net.
+const THROTTLE_TARGETS: &[&str] = &[
+    // Windows search + indexing
+    "SearchIndexer.exe",
+    "SearchApp.exe",
+    "SearchProtocolHost.exe",
+    "SearchFilterHost.exe",
+    // Update/telemetry hosts
+    "backgroundTaskHost.exe",
+    "MoUsoCoreWorker.exe",
+    "TiWorker.exe",
+    "WaaSMedicSvc.exe", // host process name for the servicing stack
+    "CompatTelRunner.exe",
+    "OfficeClickToRun.exe",
+    "UpdateHealthTools.exe",
+    // OneDrive sync (background by definition)
+    "OneDrive.exe",
+    // Phone Link background sync
+    "PhoneExperienceHost.exe",
+    // Widget feed host (pure background churn)
+    "Widgets.exe",
+    "WidgetService.exe",
+];
 const PROTECTED_PROCESS_NAMES: &[&str] = &[
     "MsMpEng.exe",
     "SecurityHealthService.exe",
@@ -182,7 +213,39 @@ pub fn set_os_turbo(enabled: bool) -> HardwareResult<OsTurboStatus> {
 pub fn get_os_turbo() -> HardwareResult<OsTurboStatus> {
     #[cfg(windows)]
     {
-        let enabled = read_enabled_compat();
+        let mut enabled = read_enabled_compat();
+
+        // S68 (OS Turbo "does nothing" bug): the flag said ENABLED while the
+        // recovery snapshot was MISSING (observed live 2026-10-25: HKLM
+        // Enabled=1, no os_turbo_recovery.json). In that state enable() errors
+        // with "recovery state is missing", measure_sweep() measures nothing,
+        // and the feature is a no-op that still claims to be on. Auto-repair:
+        // capture a FRESH snapshot from the current process state so the
+        // feature actually does something again. (The original snapshot was
+        // lost across an install that cleaned ProgramData\MiControl.)
+        if enabled && read_recovery_snapshot().ok().flatten().is_none() {
+            log::warn!(
+                "[os_turbo] enabled flag set but recovery snapshot missing — \
+                 capturing a fresh snapshot (auto-repair)"
+            );
+            match capture_recovery_snapshot() {
+                Ok(snapshot) => {
+                    if let Err(e) = save_recovery_snapshot(&snapshot) {
+                        log::warn!("[os_turbo] auto-repair snapshot save failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    // Cannot capture (e.g. process enumeration failed): the
+                    // honest state is DISABLED — clear the stale flag rather
+                    // than keep advertising a no-op.
+                    log::warn!(
+                        "[os_turbo] auto-repair capture failed ({e}) — clearing stale enabled flag"
+                    );
+                    let _ = persist_os_turbo(false);
+                    enabled = false;
+                }
+            }
+        }
 
         let power_plan = get_active_power_plan()?;
         let mut measured = last_measured_status();
