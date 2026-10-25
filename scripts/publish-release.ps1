@@ -76,14 +76,19 @@ if ((Test-Path $shellCached) -and -not $RebuildShell) {
   } finally {
     Pop-Location
   }
-  $shellRaw = Join-Path $releaseDir 'shell-release\micontrol_setup.exe'
+  # Custom cargo profiles (anything other than dev/release) emit to
+  # `target\<profile-name>\` — a SIBLING of `target\release\`, not nested
+  # inside it. Point at the sibling path.
+  $shellRaw = Join-Path $root 'src-tauri\target\shell-release\micontrol_setup.exe'
   if (-not (Test-Path $shellRaw)) { throw "Shell binary not found: $shellRaw" }
   New-Item -ItemType Directory -Force -Path $shellCache | Out-Null
   Copy-Item $shellRaw $shellCached -Force
   # Authenticode-sign the shell (same cert the Tauri bundler uses).
   Write-Host '    signing shell (signtool)...'
   $certThumb = '4678FB4266F446C72CF4A181D6A348B9EE9C9661'
-  $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*-x64\signtool.exe" |
+  # SDK layout: bin\<version>\<arch>\signtool.exe (NOT bin\*-x64\).
+  $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter 'signtool.exe' -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match '\\x64\\' } |
     Sort-Object FullName -Descending | Select-Object -First 1
   if ($null -eq $signtool) { throw 'signtool.exe not found (Windows SDK)' }
   & $signtool.FullName sign /sha1 $certThumb /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $shellCached
@@ -182,6 +187,8 @@ if ($LASTEXITCODE -ne 0) { throw 'generate-latest-json.mjs failed' }
 #     are missing/misaligned (single source of truth: release-contract.mjs,
 #     which also verifies latest.json targets the payload, never the NSIS
 #     installer, and that the payload has a valid minisign signature).
+#     The contract expects the SIGNED shell in the bundle dir — stage it.
+Copy-Item $shellCached (Join-Path $bundleDir $setupName) -Force
 Write-Host '==> validating staged assets (release-contract dry-run + check)...' -ForegroundColor Cyan
 node (Join-Path $root 'scripts\release-contract.mjs') dry-run $Version $payloadZip $payloadSig
 if ($LASTEXITCODE -ne 0) { throw 'release-contract dry-run failed — staging aborted' }
