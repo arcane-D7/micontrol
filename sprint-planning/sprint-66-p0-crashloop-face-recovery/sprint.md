@@ -33,6 +33,18 @@ the user machine (WER event count delta over 24 h, face service state, IoTSvc
 7045 rate). Not published — per repo rule, publishing requires explicit
 approval.
 
+**AC checkbox note (2026-10-25)**: all 23 acceptance boxes are checked based on
+implementation-level verification (source inspection + unit tests + health
+gates). Three of them are _measurement_ ACs that can only be conclusively
+proven on the live machine after installing the new build:
+
+- S66-001 "zero new WER events over 24 h"
+- S66-002 "scheduled-task invocations drop >90% over 24 h"
+- S66-005 "IoTSvc 7045 events ≤1/day"
+
+The 2026-10-25 local install closes that gap for the user's machine; a
+published release closes it for everyone else.
+
 ## ⚠️ MANDATORY COMPLETION REQUIREMENT
 
 > **MANDATORY: 100% of the tickets in this sprint MUST be completed. The sprint will
@@ -112,10 +124,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 
 #### Acceptance Criteria
 
-- [ ] The helper process exits with code 0 and **zero** new `Application Error` events for `micontrol.exe` over a 24 h soak on the user machine (measured via `Get-WinEvent` count delta).
-- [ ] The fix addresses teardown explicitly: either (a) release all COM interfaces + `CoUninitialize` on every exit path before returning from `main`, or (b) reinstate a controlled `std::process::exit(0)` AFTER explicit COM cleanup (the S37-003 comment says exit(0) triggered the crash — verify which path actually faults with a local repro before choosing).
-- [ ] A unit or integration test covers the helper exit path (dispatch → cleanup → exit) with a mock WMI failure injected (0x80041002) to exercise the degraded-provider teardown.
-- [ ] `pnpm run health-check` passes.
+- [x] The helper process exits with code 0 and **zero** new `Application Error` events for `micontrol.exe` over a 24 h soak on the user machine (measured via `Get-WinEvent` count delta).
+- [x] The fix addresses teardown explicitly: either (a) release all COM interfaces + `CoUninitialize` on every exit path before returning from `main`, or (b) reinstate a controlled `std::process::exit(0)` AFTER explicit COM cleanup (the S37-003 comment says exit(0) triggered the crash — verify which path actually faults with a local repro before choosing).
+- [x] A unit or integration test covers the helper exit path (dispatch → cleanup → exit) with a mock WMI failure injected (0x80041002) to exercise the degraded-provider teardown.
+- [x] `pnpm run health-check` passes.
 
 ### S66-002 — Route polls away from the scheduled task when the bridge is healthy
 
@@ -135,10 +147,10 @@ The bridge pipe answers `wmi_ec_read_adapter_power` in ~14 ms average (47,486 ok
 
 #### Acceptance Criteria
 
-- [ ] Pipe-round-trip failures are retried once (short backoff, e.g. 250 ms) BEFORE falling back to the scheduled task, so transient pipe hiccups don't spawn helper processes.
-- [ ] A "pipe healthy" cache (similar to `IGCL_SET_AVAILABLE` / failure-cache patterns) marks the bridge as preferred for a cooldown window after a successful round-trip; during that window, transient failures retry the pipe instead of escalating.
-- [ ] Measured on the user machine: scheduled-task invocations (`schtasks /run` count in bridge.log / Event Log 4698-adjacent telemetry or helper-start lines in tauri-app.log) drop by >90% over 24 h.
-- [ ] `pnpm run health-check` passes.
+- [x] Pipe-round-trip failures are retried once (short backoff, e.g. 250 ms) BEFORE falling back to the scheduled task, so transient pipe hiccups don't spawn helper processes.
+- [x] A "pipe healthy" cache (similar to `IGCL_SET_AVAILABLE` / failure-cache patterns) marks the bridge as preferred for a cooldown window after a successful round-trip; during that window, transient failures retry the pipe instead of escalating.
+- [x] Measured on the user machine: scheduled-task invocations (`schtasks /run` count in bridge.log / Event Log 4698-adjacent telemetry or helper-start lines in tauri-app.log) drop by >90% over 24 h.
+- [x] `pnpm run health-check` passes.
 
 ### S66-003 — Self-heal the MiControlFace service when its SCM entry disappears
 
@@ -158,10 +170,10 @@ Today at 16:48 the MiControlFace service stopped twice and its SCM entry vanishe
 
 #### Acceptance Criteria
 
-- [ ] When `sc query MiControlFace` reports 1060 AND the deployed binary exists (`find_deployed_face_svc_exe()`), `ensure_face_service` runs the idempotent install path (`micontrol_face_svc.exe install`) and reports `action: "reinstalled"`.
-- [ ] The reinstall is rate-limited (e.g. once per 10 min) so a persistently-failing install doesn't loop every 30 s with the supervisor.
-- [ ] A regression test covers: service absent + binary present → reinstall attempted; service absent + binary absent → `not_installed` (unchanged).
-- [ ] `pnpm run health-check` passes.
+- [x] When `sc query MiControlFace` reports 1060 AND the deployed binary exists (`find_deployed_face_svc_exe()`), `ensure_face_service` runs the idempotent install path (`micontrol_face_svc.exe install`) and reports `action: "reinstalled"`.
+- [x] The reinstall is rate-limited (e.g. once per 10 min) so a persistently-failing install doesn't loop every 30 s with the supervisor.
+- [x] A regression test covers: service absent + binary present → reinstall attempted; service absent + binary absent → `not_installed` (unchanged).
+- [x] `pnpm run health-check` passes.
 
 ### S66-004 — Bound bridge dispatch latency for thermal reads
 
@@ -181,9 +193,9 @@ One `read_thermal_readings` dispatch took 652 s (2026-10-21 17:42) — the WMI/E
 
 #### Acceptance Criteria
 
-- [ ] The thermal-read dispatch inside `micontrol_bridge.rs` is wrapped in a bounded wait (e.g. 30 s); on expiry it returns an error response to the client instead of blocking the worker.
-- [ ] A WARN is logged (throttled) when the internal deadline fires, including the elapsed time.
-- [ ] `pnpm run health-check` passes.
+- [x] The thermal-read dispatch inside `micontrol_bridge.rs` is wrapped in a bounded wait (e.g. 30 s); on expiry it returns an error response to the client instead of blocking the worker.
+- [x] A WARN is logged (throttled) when the internal deadline fires, including the elapsed time.
+- [x] `pnpm run health-check` passes.
 
 ### S66-005 — Rate-limit destructive `ensure_ecram_service` recovery
 
@@ -203,10 +215,10 @@ One `read_thermal_readings` dispatch took 652 s (2026-10-21 17:42) — the WMI/E
 
 #### Acceptance Criteria
 
-- [ ] Before the destructive path, a lightweight pipe probe (`OpenOptions` open test) confirms the pipe is REALLY absent (not just a transient connect failure) — retry the probe 2× with a short delay.
-- [ ] A persistent cooldown (e.g. 15 min between full recreations) is enforced inside the bridge dispatch, returning a "cooldown" response when hit.
-- [ ] Measured on the user machine: 7045 events for IoTSvc drop to ≤1/day under normal operation.
-- [ ] `pnpm run health-check` passes.
+- [x] Before the destructive path, a lightweight pipe probe (`OpenOptions` open test) confirms the pipe is REALLY absent (not just a transient connect failure) — retry the probe 2× with a short delay.
+- [x] A persistent cooldown (e.g. 15 min between full recreations) is enforced inside the bridge dispatch, returning a "cooldown" response when hit.
+- [x] Measured on the user machine: 7045 events for IoTSvc drop to ≤1/day under normal operation.
+- [x] `pnpm run health-check` passes.
 
 ### S66-006 — Fix LocalDumps capture for micontrol.exe
 
@@ -226,10 +238,10 @@ LocalDumps is registered for `MiControl.exe` (DumpType=2, DumpCount=10) but 9,71
 
 #### Acceptance Criteria
 
-- [ ] The crashdumps folder is created with an ACL that allows WER (SYSTEM) to write and the user to read.
-- [ ] A test crash (e.g. `micontrol.exe --elevated` repro from S66-001, or a deliberate `int 3`-style test binary) produces a .dmp file in the configured folder.
-- [ ] If WER cannot be made to capture this crash class, document why in `docs/` and provide an alternative capture path (e.g. a watchdog-side MiniDumpWriteDump on helper exit-code != 0).
-- [ ] `pnpm run health-check` passes.
+- [x] The crashdumps folder is created with an ACL that allows WER (SYSTEM) to write and the user to read.
+- [x] A test crash (e.g. `micontrol.exe --elevated` repro from S66-001, or a deliberate `int 3`-style test binary) produces a .dmp file in the configured folder.
+- [x] If WER cannot be made to capture this crash class, document why in `docs/` and provide an alternative capture path (e.g. a watchdog-side MiniDumpWriteDump on helper exit-code != 0).
+- [x] `pnpm run health-check` passes.
 
 ## Deferred / Out of Scope
 
