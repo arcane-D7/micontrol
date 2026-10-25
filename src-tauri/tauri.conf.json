@@ -45,7 +45,8 @@
       "bin/ecram_service.exe": "ecram_service.exe",
       "bin/micontrol_bridge.exe": "micontrol_bridge.exe",
       "bin/micontrol_facecp.dll": "micontrol_facecp.dll",
-      "bin/micontrol_face_svc.exe": "micontrol_face_svc.exe"
+      "bin/micontrol_face_svc.exe": "micontrol_face_svc.exe",
+      "bin/micontrol_setup.exe": "micontrol_setup.exe"
     },
     "windows": {
       "certificateThumbprint": "4678FB4266F446C72CF4A181D6A348B9EE9C9661",

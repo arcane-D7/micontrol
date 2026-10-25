@@ -35,6 +35,17 @@ fn main() {
         // This is a WORKSPACE cdylib (`cp/` crate) — not produced by the main
         // bin build. Ensure it's built first, then copy it.
         copy_face_cp_dll(&target_dir, &profile, dst_dir);
+
+        // S65-002 (migration gap fix): copy the STATIC setup shell into bin/
+        // so the NSIS bundle ships it and the installer deploys it to
+        // <INSTDIR>\setup\micontrol_setup.exe. Without this, an NSIS→decoupled
+        // transition leaves the machine WITHOUT the shell, and the first
+        // payload update has to download it from GitHub at runtime (works,
+        // but network-dependent). Shipping it in the bundle makes the
+        // migration self-contained.
+        // The shell lives in target/shell-release/ (its own profile, built by
+        // `cargo build -p micontrol-setup --profile shell-release`).
+        copy_shell_binary(&target_dir, dst_dir);
     }
 
     let windows_attrs =
@@ -205,5 +216,61 @@ fn copy_face_cp_dll(target_dir: &std::path::Path, profile: &str, dst_dir: &std::
             st.code()
         ),
         Err(e) => println!("cargo:warning=Failed to spawn cargo build for cp crate: {e}"),
+    }
+}
+
+/// Copy the STATIC setup shell (`micontrol-setup` crate, `shell-release`
+/// profile) into `bin/micontrol_setup.exe` so the NSIS bundle ships it and
+/// the installer hook deploys it to `<INSTDIR>\setup\`.
+///
+/// Unlike the other aux binaries this NEVER ships a placeholder: a 0-byte
+/// "shell" would be silently installed and break every subsequent payload
+/// update. When the shell is not built yet we register a rerun watch; when
+/// it stays absent (fresh checkout, shell not built) we simply skip — the
+/// runtime S65-002 bootstrap downloads the shell from the release assets as
+/// a fallback, so an NSIS bundle without the shell still migrates, just
+/// network-dependently.
+///
+/// Build the shell with:
+///   cargo build -p micontrol-setup --profile shell-release
+#[cfg(windows)]
+fn copy_shell_binary(target_dir: &std::path::Path, dst_dir: &std::path::Path) {
+    const MIN_SHELL_SIZE: u64 = 500_000; // matches bootstrap.rs MIN_SHELL_SIZE
+
+    // The shell-release profile outputs to target/shell-release/.
+    let src = target_dir.join("shell-release").join("micontrol_setup.exe");
+    let dst = dst_dir.join("micontrol_setup.exe");
+
+    println!("cargo:rerun-if-changed={}", src.display());
+
+    if !src.exists() {
+        // Keep an existing valid copy from a previous build; never ship 0 bytes.
+        if dst.exists()
+            && !is_zero_byte(&dst)
+            && std::fs::metadata(&dst)
+                .map(|m| m.len() >= MIN_SHELL_SIZE)
+                .unwrap_or(false)
+        {
+            println!("cargo:warning=shell not rebuilt; keeping existing bin/micontrol_setup.exe");
+            return;
+        }
+        println!(
+            "cargo:warning=setup shell not found at {} — NSIS bundle will NOT ship it; runtime bootstrap will download it on first update (build with: cargo build -p micontrol-setup --profile shell-release)",
+            src.display()
+        );
+        return;
+    }
+
+    let len = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+    if len < MIN_SHELL_SIZE {
+        println!(
+            "cargo:warning=setup shell at {} is only {len} bytes (< {MIN_SHELL_SIZE}) — not shipping it",
+            src.display()
+        );
+        return;
+    }
+
+    if let Err(e) = std::fs::copy(&src, &dst) {
+        println!("cargo:warning=Could not copy setup shell to bin/ ({e})");
     }
 }

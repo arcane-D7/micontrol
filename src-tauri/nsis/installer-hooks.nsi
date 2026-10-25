@@ -18,6 +18,26 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; ── Decoupled installer migration (S65-002) ───────────────────────────────
+  ; Deploy the STATIC setup shell to <INSTDIR>\setup\micontrol_setup.exe.
+  ; From this point on, payload updates are applied by the shell (which never
+  ; replaces itself) instead of the NSIS installer killing the bridge that
+  ; launched it. The shell binary has a stable hash across releases, so an
+  ; unconditional copy is safe and keeps the deployed shell fresh.
+  ${If} ${FileExists} "$INSTDIR\micontrol_setup.exe"
+    CreateDirectory "$INSTDIR\setup"
+    CopyFiles /SILENT "$INSTDIR\micontrol_setup.exe" "$INSTDIR\setup\micontrol_setup.exe"
+    ${If} ${FileExists} "$INSTDIR\setup\micontrol_setup.exe"
+      DetailPrint "Setup shell deployed to setup\micontrol_setup.exe (decoupled updates enabled)."
+    ${Else}
+      DetailPrint "WARNING: failed to deploy setup shell — first payload update will download it at runtime."
+    ${EndIf}
+    ; The root copy is only the transport vehicle for the resource system.
+    Delete "$INSTDIR\micontrol_setup.exe"
+  ${Else}
+    DetailPrint "Note: setup shell not in bundle — first payload update will download it (runtime bootstrap)."
+  ${EndIf}
+
   ; ── Windows startup (register auto-start; desktop shortcut is handled by
   ;    the installer.nsi template's finish page) ─────────────────────────────
   WriteRegStr SHCTX "Software\Microsoft\Windows\CurrentVersion\Run" \
