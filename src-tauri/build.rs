@@ -254,8 +254,21 @@ fn copy_shell_binary(target_dir: &std::path::Path, dst_dir: &std::path::Path) {
             println!("cargo:warning=shell not rebuilt; keeping existing bin/micontrol_setup.exe");
             return;
         }
+        // CI parity (S70): on a fresh checkout the shell is not built yet and
+        // tauri-build FAILS because tauri.conf.json declares
+        // bin/micontrol_setup.exe as a required resource. Create a temporary
+        // 0-byte placeholder so resource validation passes — the same
+        // pattern `copy_aux_binary_optional` uses for the face service.
+        // Safety: a 0-byte shell is never *used* — the NSIS hook's
+        // FileExists copy is followed by the runtime bootstrap's
+        // MIN_SHELL_SIZE check (bootstrap.rs), which rejects it and
+        // downloads the real shell from the release assets. The real
+        // publish path always builds the shell first
+        // (`cargo build -p micontrol-setup --profile shell-release`), so
+        // release bundles ship the real binary, never the placeholder.
+        let _ = std::fs::write(&dst, []);
         println!(
-            "cargo:warning=setup shell not found at {} — NSIS bundle will NOT ship it; runtime bootstrap will download it on first update (build with: cargo build -p micontrol-setup --profile shell-release)",
+            "cargo:warning=setup shell not found at {} — temporary placeholder created for resource validation; build with: cargo build -p micontrol-setup --profile shell-release",
             src.display()
         );
         return;
