@@ -1,17 +1,11 @@
 name: Warm Release Cache
 
+# S70: DISABLED. This workflow existed only to keep the release cache hot
+# for ci.yml's "Build smoke test" job — that job was removed (2-4 h cold
+# compiles on a 2-vCPU runner, redundant with the clippy compile in the
+# `quality` job). release.yml builds locally via publish-release.ps1.
 on:
-  schedule:
-    # Weekly warm-cache refresh: keeps the Rust release cache hot so
-    # ci.yml's Build smoke test and release.yml's build-and-publish restore
-    # it and finish in minutes instead of paying a ~4h cold compile.
-    - cron: '0 4 * * 1'
-  workflow_dispatch:
-    inputs:
-      warm_cache:
-        description: 'Run the warm-cache release compile'
-        type: boolean
-        default: true
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
