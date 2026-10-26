@@ -73,6 +73,7 @@ jobs:
 
       # Same release cache key shape as ci.yml's Build smoke test and
       # release.yml, so this weekly job warms exactly what they restore.
+      # S70: key on Cargo.lock only (see ci.yml for the rationale).
       # save-always: true keeps the compiled artifacts cached even if a
       # later job in the same run fails.
       - name: Cache Rust release build artifacts
@@ -82,9 +83,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target/release
-          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-
             ${{ runner.os }}-rust-release-
           save-always: true
 

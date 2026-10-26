@@ -203,9 +203,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target/release
-          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          # S70 (CI cache fix): the previous key hashed ALL .rs/Cargo.toml
+          # sources, so EVERY commit touching Rust (i.e. nearly every
+          # commit) missed the cache and forced a 2-4 h cold compile on the
+          # 2-vCPU runner. Key on Cargo.lock only (dependency set); cargo's
+          # own incremental/fingerprint logic decides what to rebuild —
+          # restoring a stale target dir is always correct, cargo reuses
+          # what it can and recompiles only what changed.
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-
             ${{ runner.os }}-rust-release-
           save-always: true
 

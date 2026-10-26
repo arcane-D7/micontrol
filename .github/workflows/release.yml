@@ -101,9 +101,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target/release
-          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ hashFiles('src-tauri/**/*.rs', 'src-tauri/**/Cargo.toml') }}
+          # S70 (CI cache fix): key on Cargo.lock only — hashing all .rs
+          # sources guaranteed a cache miss on every Rust commit (2-4 h cold
+          # compiles on the 2-vCPU runner). cargo reuses a restored target
+          # dir incrementally; see ci.yml for the full rationale.
+          key: ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-release-${{ hashFiles('src-tauri/Cargo.lock') }}-
+            ${{ runner.os }}-rust-release-
             ${{ runner.os }}-rust-release-
           save-always: true
 
