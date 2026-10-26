@@ -268,6 +268,16 @@ fn private_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// Reference "now" for tests, shifted 2 h into the future.
+    ///
+    /// CI runners can have <1 h of uptime, so `Instant::now() - 3600s`
+    /// underflows (panics: "overflow when subtracting duration from instant").
+    /// Anchoring the tests 2 h ahead makes every `now - <up to 2 h>`
+    /// subtraction representable on any host, deterministically.
+    fn test_now() -> Instant {
+        Instant::now() + Duration::from_secs(7200)
+    }
+
     fn s(secs_from_now: i64, handles: u32, commit: u64, now: Instant) -> Sample {
         let at = if secs_from_now >= 0 {
             now + Duration::from_secs(secs_from_now as u64)
@@ -284,7 +294,7 @@ mod tests {
     #[test]
     fn ring_is_bounded() {
         let mut ring = Ring::new();
-        let now = Instant::now();
+        let now = test_now();
         for i in 0..1000 {
             ring.push(s(0, i as u32, 0, now));
         }
@@ -295,7 +305,7 @@ mod tests {
     #[test]
     fn oldest_in_window_ignores_expired_samples() {
         let mut ring = Ring::new();
-        let now = Instant::now();
+        let now = test_now();
         // One sample far outside the window, one inside.
         ring.push(s(-3600, 100, 0, now));
         ring.push(s(-60, 200, 0, now));
@@ -306,7 +316,7 @@ mod tests {
     #[test]
     fn rate_detects_handle_growth() {
         let mut ring = Ring::new();
-        let now = Instant::now();
+        let now = test_now();
         // 10 minutes ago: 1000 handles. Now: 1100 → 10/min → LEAK.
         ring.push(s(-600, 1000, 500 * 1024 * 1024, now));
         ring.push(s(-300, 1050, 550 * 1024 * 1024, now));
@@ -328,7 +338,7 @@ mod tests {
     #[test]
     fn rate_ignores_stable_state() {
         let mut ring = Ring::new();
-        let now = Instant::now();
+        let now = test_now();
         ring.push(s(-600, 500, 200 * 1024 * 1024, now));
         ring.push(s(-300, 505, 201 * 1024 * 1024, now));
         ring.push(Sample {
@@ -344,7 +354,7 @@ mod tests {
     #[test]
     fn rate_handles_shrinking_counts() {
         let mut ring = Ring::new();
-        let now = Instant::now();
+        let now = test_now();
         // Samples DROP (e.g. the app restarted and reclaimed handles).
         ring.push(s(-600, 5000, 2_000 * 1024 * 1024, now));
         ring.push(Sample {
@@ -364,7 +374,7 @@ mod tests {
     #[test]
     fn commit_growth_alone_flags_a_leak() {
         let mut ring = Ring::new();
-        let now = Instant::now();
+        let now = test_now();
         // Handles flat, commit +100 MB in 10 min = 10 MB/min → LEAK.
         ring.push(s(-600, 500, 100 * 1024 * 1024, now));
         ring.push(s(-300, 500, 150 * 1024 * 1024, now));
