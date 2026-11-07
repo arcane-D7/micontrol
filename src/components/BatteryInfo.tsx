@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { t } from '../hooks/useI18n';
+import { batteryState, batteryStateBadge } from '../lib/batteryState';
 import type { BatteryInfo as BatteryData } from '../types/hardware';
 import InfoModal, { InfoRow, InfoSection } from './InfoModal';
 
@@ -51,7 +52,7 @@ export default function BatteryInfo({ battery }: Props) {
     );
   }
 
-  const statusKey = battery.is_charging ? 'charging' : battery.is_plugged ? 'full' : 'discharging';
+  const state = batteryState(battery.is_charging, battery.is_plugged);
   const designedMah = mwhToMah(battery.designed_capacity_mwh, battery.voltage_mv);
   const fullMah = mwhToMah(battery.full_capacity_mwh, battery.voltage_mv);
 
@@ -98,10 +99,8 @@ export default function BatteryInfo({ battery }: Props) {
           marginBottom: 6,
         }}
       >
-        <span
-          className={`badge ${battery.is_charging ? 'success' : battery.is_plugged ? 'info' : 'warning'}`}
-        >
-          {t(`battery.${statusKey}` as Parameters<typeof t>[0])}
+        <span className={`badge ${batteryStateBadge(state)}`}>
+          {t(`battery.${state}` as Parameters<typeof t>[0])}
         </span>
         <span style={{ fontWeight: 700, fontSize: 18, lineHeight: 1 }}>{battery.level}%</span>
       </div>
@@ -128,6 +127,18 @@ export default function BatteryInfo({ battery }: Props) {
         </span>
       </div>
 
+      {/* Power source is shown explicitly: "plugged in but not charging"
+          (charge threshold reached) is a real state and must not read as
+          "Discharging" nor imply that current is flowing. */}
+      <div className="stat-row">
+        <span className="stat-label">{t('battery.powerSource')}</span>
+        <span
+          className="stat-value"
+          style={{ color: battery.is_plugged ? 'var(--success, #4caf50)' : undefined }}
+        >
+          {battery.is_plugged ? t('battery.acConnected') : t('battery.acOnBattery')}
+        </span>
+      </div>
       <div className="stat-row">
         <span className="stat-label">{t('battery.manufacturer')}</span>
         <span className="stat-value">{battery.manufacturer}</span>

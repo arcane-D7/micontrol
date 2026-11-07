@@ -49,15 +49,28 @@ pub struct BatteryInfo {
 }
 
 /// Normalize the two WMI rate fields into the public signed representation.
-/// `ChargeRate` can remain stale after unplugging, so `PowerOnline` decides
-/// whether a positive value is a charge; on battery, use `DischargeRate`.
+///
+/// `ChargeRate` alone is NOT a reliable "is charging" signal. This platform's
+/// firmware reports `ChargeRate = 0` as soon as the charge threshold is hit
+/// (audit 2026-11-07: 96 %, `PowerOnline = True`, `Charging = False`), and
+/// some ACPI providers report 0 while `Charging` is still true. The `Charging`
+/// bit is authoritative; a positive rate stays as the fallback for providers
+/// that omit the bit. Ignoring it made the UI claim "not charging" with the
+/// charger connected.
+///
+/// `ChargeRate` can also remain stale after unplugging, so `PowerOnline`
+/// decides whether a positive value is a charge; on battery, use
+/// `DischargeRate`.
 fn effective_battery_rate(
     is_plugged: bool,
+    charging_flag: bool,
     charge_rate_mw: i32,
     discharge_rate_mw: i32,
 ) -> (bool, i32) {
     if is_plugged {
-        return (charge_rate_mw > 0, charge_rate_mw.max(0));
+        // Charging is only possible with the adapter connected, whatever the
+        // (possibly stale) flag claims.
+        return (charging_flag || charge_rate_mw > 0, charge_rate_mw.max(0));
     }
 
     let discharge = if discharge_rate_mw > 0 {
@@ -413,12 +426,17 @@ fn get_battery_info_inner() -> HardwareResult<BatteryInfo> {
         let voltage_mv = wmi_extract::extract_u32_or(&status, "Voltage", 0);
 
         let is_plugged = wmi_extract::extract_bool(&status, "PowerOnline").unwrap_or(false);
+        // `Charging` is the ACPI bit that says current is flowing into the
+        // battery. It is authoritative when `ChargeRate` reads 0 because the
+        // charge threshold was reached (or the driver omits the rate).
+        let charging_flag = wmi_extract::extract_bool(&status, "Charging").unwrap_or(false);
         let (is_charging, effective_rate_mw) =
-            effective_battery_rate(is_plugged, charging_rate, discharge_rate);
+            effective_battery_rate(is_plugged, charging_flag, charging_rate, discharge_rate);
         log::debug!(
             target: "hw::battery",
-            "wmi snapshot: plugged={} charging={} remaining_capacity={} charge_rate_mw={} discharge_rate_mw={} effective_rate_mw={} voltage_v={:.3}",
+            "wmi snapshot: plugged={} charging_flag={} charging={} remaining_capacity={} charge_rate_mw={} discharge_rate_mw={} effective_rate_mw={} voltage_v={:.3}",
             is_plugged,
+            charging_flag,
             is_charging,
             remaining_capacity,
             charging_rate,
@@ -520,13 +538,27 @@ fn get_battery_info_inner() -> HardwareResult<BatteryInfo> {
     // WORKING FORM — DO NOT MODIFY: AC adapter power read MUST be outside
     // the with_wmi closure. probe_ac_input_power_throttled() → read_adapter_power()
     // → wmi_read() → wmi_cache::with_wmi() — nested borrow_mut() would panic.
-    let ac_input_power_mw = if snapshot.is_plugged {
-        log::debug!(target: "hw::battery", "charger is plugged; attempting WMI AC power read");
-        probe_ac_input_power_throttled()
-    } else {
+    //
+    // The probe is also the single most expensive part of this call: on this
+    // platform the WMAA adapter-power class does not exist (0x80041002) or is
+    // denied to the non-elevated process (0x80041003), and each attempt costs
+    // ~2.2 s (median 2222 ms, max 4927 ms in the 2026-11-07 audit). The answer
+    // can never change within a process, so both the shared capability circuit
+    // and the local "this process is denied" latch must be checked BEFORE the
+    // query — after the first failure every poll is free again.
+    let ac_input_power_mw = if !snapshot.is_plugged {
         log::debug!(target: "hw::battery", "charger is unplugged; skipping AC power read");
         clear_ac_power_probe_cache();
         None
+    } else if local_ac_probe_is_useless() {
+        log::debug!(
+            target: "hw::battery",
+            "charger is plugged but the local AC power probe is known to be unavailable; skipping"
+        );
+        None
+    } else {
+        log::debug!(target: "hw::battery", "charger is plugged; attempting WMI AC power read");
+        probe_ac_input_power_throttled()
     };
 
     log::debug!(
@@ -566,6 +598,59 @@ struct AcPowerProbeCache {
     last_value_mw: Option<i32>,
 }
 
+/// Set once the in-process WMAA adapter-power read has proved it cannot work
+/// in THIS process (missing class or access denied to a non-elevated caller).
+///
+/// Deliberately separate from `adapter_power`'s hardware circuit: that one
+/// says "this machine has no such class" and is also consulted before the
+/// elevated bridge read, which runs at SYSTEM and can succeed where the app
+/// process is denied. Here the fact is narrower — the local probe is useless —
+/// so only the local probe is switched off.
+#[cfg(windows)]
+static LOCAL_AC_PROBE_DISABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+fn local_ac_probe_is_useless() -> bool {
+    LOCAL_AC_PROBE_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
+        || crate::hw::adapter_power::is_known_unsupported()
+}
+
+#[cfg(windows)]
+fn disable_local_ac_probe(reason: &str) {
+    if !LOCAL_AC_PROBE_DISABLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::info!(
+            target: "hw::battery",
+            "local AC adapter-power probe disabled for this session ({reason}); \
+             the elevated bridge path is unaffected"
+        );
+    }
+}
+
+/// `true` when a failed LOCAL adapter-power read proves the probe can never
+/// succeed in this process: the WMI class is missing (`0x80041002` /
+/// `0x80041010`) or the caller is denied (`0x80041003` / `0x80070005`).
+///
+/// Transport failures (timeouts, provider hiccups, empty answers) stay
+/// retryable, so a transient WMI stall cannot silently disable the feature.
+#[cfg(windows)]
+fn local_probe_failure_is_permanent(message: &str) -> bool {
+    use crate::hw::adapter_power::{classify_failure, AdapterPowerFailure};
+
+    if classify_failure(message) == AdapterPowerFailure::HardwareUnsupported {
+        return true;
+    }
+    let lowered = message.to_ascii_lowercase();
+    [
+        "0x80041003",
+        "0x80070005",
+        "access is denied",
+        "access denied",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
 #[cfg(windows)]
 fn ac_probe_cache() -> &'static Mutex<AcPowerProbeCache> {
     static CACHE: OnceLock<Mutex<AcPowerProbeCache>> = OnceLock::new();
@@ -595,9 +680,16 @@ fn probe_ac_input_power_throttled() -> Option<i32> {
         }
     }
 
-    let value = crate::hw::wmi_ec::read_adapter_power()
-        .ok()
-        .map(|watts| (watts as i32) * 1000); // W → mW
+    let value = match crate::hw::wmi_ec::read_adapter_power() {
+        Ok(watts) => Some((watts as i32) * 1000), // W → mW
+        Err(e) => {
+            let message = e.to_string();
+            if local_probe_failure_is_permanent(&message) {
+                disable_local_ac_probe(&message);
+            }
+            None
+        }
+    };
 
     // S24-006: Use lock_or_recover for consistent poison recovery.
     {
@@ -682,19 +774,68 @@ mod tests {
     #[test]
     fn unplugged_battery_uses_discharge_rate() {
         assert_eq!(
-            effective_battery_rate(false, 10_000, 21_728),
+            effective_battery_rate(false, false, 10_000, 21_728),
             (false, -21_728)
         );
     }
 
     #[test]
     fn unplugged_battery_cannot_be_reported_as_charging() {
-        assert_eq!(effective_battery_rate(false, 10_000, 0), (false, 0));
+        assert_eq!(effective_battery_rate(false, false, 10_000, 0), (false, 0));
+    }
+
+    #[test]
+    fn unplugged_battery_ignores_a_stale_charging_flag() {
+        // A stale/false-positive `Charging` bit must never win over PowerOnline.
+        assert_eq!(effective_battery_rate(false, true, 0, 0), (false, 0));
     }
 
     #[test]
     fn plugged_battery_uses_positive_charge_rate() {
-        assert_eq!(effective_battery_rate(true, 10_000, 0), (true, 10_000));
+        assert_eq!(
+            effective_battery_rate(true, false, 10_000, 0),
+            (true, 10_000)
+        );
+    }
+
+    #[test]
+    fn plugged_battery_with_charging_flag_charges_at_zero_rate() {
+        // Production quirk: the firmware reports ChargeRate=0 once the charge
+        // threshold is reached while `Charging` stays True. The flag wins.
+        assert_eq!(effective_battery_rate(true, true, 0, 0), (true, 0));
+    }
+
+    #[test]
+    fn plugged_and_full_battery_is_not_charging() {
+        // This host today: PowerOnline=True, Charging=False, ChargeRate=0.
+        // The UI must show the "AC connected" state, not "charging".
+        assert_eq!(effective_battery_rate(true, false, 0, 0), (false, 0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_probe_failure_classification() {
+        // Permanent: class missing or caller denied.
+        assert!(local_probe_failure_is_permanent(
+            "Hardware error: 0x80041002"
+        ));
+        assert!(local_probe_failure_is_permanent(
+            "WMI query failed: 0x80041010"
+        ));
+        assert!(local_probe_failure_is_permanent(
+            "Hardware error: 0x80041003 (Access denied)"
+        ));
+        assert!(local_probe_failure_is_permanent(
+            "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"
+        ));
+        // Transient: keep retrying.
+        assert!(!local_probe_failure_is_permanent(
+            "Bridge service pipe round-trip timed out after 15s"
+        ));
+        assert!(!local_probe_failure_is_permanent(
+            "No MICommonInterface instance found"
+        ));
+        assert!(!local_probe_failure_is_permanent(""));
     }
 
     #[test]
