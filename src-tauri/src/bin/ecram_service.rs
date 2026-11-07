@@ -27,6 +27,33 @@ use std::os::windows::process::CommandExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+/// Append a diagnostic line to `C:\ProgramData\MiControl\logs\ecram_service.log`.
+///
+/// The service runs as SYSTEM with no console: `eprintln!` output is discarded,
+/// so before this there was no way to see why the bridge died (the two 7031
+/// events left no trace). Write-through, size-rotated via the shared helper.
+fn service_log(line: &str) {
+    eprintln!("[ecram_service] {line}");
+    let path = std::path::Path::new(r"C:\ProgramData\MiControl\logs\ecram_service.log");
+    let _ = micontrol_lib::util::log_rotation::append_line(
+        path,
+        line,
+        micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
+        micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
+    );
+}
+
+/// Log every panic (thread name + location) before the default hook runs.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed");
+        service_log(&format!("PANIC in thread '{name}': {info}"));
+        default_hook(info);
+    }));
+}
+
 // ── ECRAM low-level IOCTL access ─────────────────────────────────────────────
 
 mod ecram {
@@ -1156,16 +1183,17 @@ mod pipe_server {
     use std::ffi::OsStr;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
     use windows::Win32::Storage::FileSystem::{
         FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe,
+        PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
     use windows::Win32::System::IO::CancelIoEx;
@@ -1173,6 +1201,47 @@ mod pipe_server {
     const PIPE_NAME: &str = r"\\.\pipe\ecram_service";
     const PIPE_BUF_SIZE: u32 = 4096;
     const BUFSIZE: u32 = 4096;
+
+    /// Maximum time a connected client may take to deliver one complete
+    /// request. The pipe server is single-threaded: a client that opens the
+    /// pipe and never sends a `}` (e.g. a 16-byte MCPI header) used to block
+    /// the only pipe instance forever. The app's recovery then saw the pipe
+    /// as busy/unavailable and force-killed the service (SCM event 7031).
+    const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+    /// Upper bound on concurrent client handler threads. A local flood must
+    /// not be able to spawn unbounded threads in the SYSTEM service.
+    const MAX_CONCURRENT_CLIENTS: usize = 16;
+    static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+
+    /// RAII slot in the concurrent-client budget.
+    struct ClientSlot;
+
+    impl ClientSlot {
+        fn acquire() -> Option<Self> {
+            let mut current = ACTIVE_CLIENTS.load(Ordering::SeqCst);
+            loop {
+                if current >= MAX_CONCURRENT_CLIENTS {
+                    return None;
+                }
+                match ACTIVE_CLIENTS.compare_exchange(
+                    current,
+                    current + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return Some(ClientSlot),
+                    Err(actual) => current = actual,
+                }
+            }
+        }
+    }
+
+    impl Drop for ClientSlot {
+        fn drop(&mut self) {
+            ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 
     /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
     /// access to the named pipe.
@@ -1263,7 +1332,7 @@ mod pipe_server {
         // leak-check: audited — every exit path closes the handle explicitly (S67).
         let pipe_name_w: Vec<u16> = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect();
 
-        eprintln!("[ecram_service] pipe server starting on {PIPE_NAME}");
+        super::service_log(&format!("pipe server starting on {PIPE_NAME}"));
 
         // Create a permissive DACL so the unprivileged app can connect even
         // when we run as SYSTEM.
@@ -1279,7 +1348,13 @@ mod pipe_server {
                 CreateNamedPipeW(
                     PCWSTR(pipe_name_w.as_ptr()),
                     PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    // Message-type pipe: the JSON protocol is request/response,
+                    // so preserving message boundaries is correct. Message-mode
+                    // pipes still accept byte-mode clients (the app's
+                    // read_ecram_via_pipe), while clients that ask for
+                    // PIPE_READMODE_MESSAGE (send_pipe_request) are no longer
+                    // rejected with 0x80070057.
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                     PIPE_UNLIMITED_INSTANCES,
                     PIPE_BUF_SIZE,
                     PIPE_BUF_SIZE,
@@ -1291,16 +1366,29 @@ mod pipe_server {
             };
 
             if handle == INVALID_HANDLE_VALUE {
-                eprintln!(
-                    "[ecram_service] CreateNamedPipeW failed: {}",
+                super::service_log(&format!(
+                    "CreateNamedPipeW failed: {} — retrying in 1 s",
                     io::Error::last_os_error()
-                );
+                ));
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }
 
-            let event = unsafe {
-                CreateEventW(None, true, false, PCWSTR::null()).expect("CreateEventW failed")
+            // A failed CreateEventW used to panic the pipe thread, which left
+            // the service RUNNING with no pipe at all (observed live: IoTSvc
+            // running, \\.\pipe\ecram_service ERROR_PATH_NOT_FOUND). Retry.
+            let event = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(event) => event,
+                Err(e) => {
+                    super::service_log(&format!(
+                        "CreateEventW failed: {e} — closing instance and retrying in 1 s"
+                    ));
+                    unsafe {
+                        CloseHandle(handle).ok();
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
             };
 
             let mut overlapped = unsafe {
@@ -1345,28 +1433,170 @@ mod pipe_server {
                 break;
             }
 
-            handle_client(handle);
+            // Serve this client on its own thread and go straight back to
+            // creating the next instance. The old loop called handle_client
+            // inline, so the pipe name had NO instance while a request was
+            // being served — concurrent probes got ERROR_PIPE_BUSY (or a
+            // transient path-not-found), which is what made the app's
+            // recovery force-kill the service. Thread-per-client also means a
+            // slow EC command no longer blocks every other query.
+            let Some(slot) = ClientSlot::acquire() else {
+                super::service_log("Too many concurrent pipe clients — dropping this connection");
+                unsafe {
+                    DisconnectNamedPipe(handle).ok();
+                    CloseHandle(handle).ok();
+                    CloseHandle(event).ok();
+                }
+                continue;
+            };
 
-            // Recycle the instance for the next client WITHOUT removing the pipe
-            // name, so there is never a window where the pipe is unavailable.
+            // The connect event is not needed past this point; the thread only
+            // owns the pipe instance.
             unsafe {
-                DisconnectNamedPipe(handle).ok();
-                CloseHandle(handle).ok();
                 CloseHandle(event).ok();
             }
+
+            // HANDLE contains a raw pointer in windows-rs, so pass its numeric
+            // value across the thread boundary and rebuild it inside.
+            let raw_handle = handle.0 as isize;
+            std::thread::spawn(move || {
+                let _slot = slot;
+                let handle = HANDLE(raw_handle as *mut core::ffi::c_void);
+                handle_client(handle);
+                unsafe {
+                    DisconnectNamedPipe(handle).ok();
+                    CloseHandle(handle).ok();
+                }
+            });
         }
 
-        eprintln!("[ecram_service] pipe server shutting down");
+        super::service_log("pipe server shutting down");
     }
 
     fn handle_client(handle: HANDLE) {
+        // A panic while serving one client must never take the bridge down:
+        // an unexpected service exit makes the SCM log 7031, and every client
+        // loses the pipe until the restart. Swallow the unwind, log it and
+        // keep the accept loop alive.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_client_inner(handle)));
+        if let Err(payload) = result {
+            let msg = panic_payload_message(&payload);
+            super::service_log(&format!("PANIC while handling pipe client: {msg}"));
+            write_response(
+                handle,
+                r#"{"ok":false,"error":"internal error handling request"}"#,
+            );
+        }
+    }
+
+    /// What the read loop concluded about the client's request.
+    enum ClientRead {
+        /// The client connected and closed without sending anything.
+        Empty,
+        /// No complete request within `CLIENT_REQUEST_TIMEOUT`.
+        Timeout,
+        /// The request is not JSON (binary MCPI header, garbage, ...).
+        Binary { prefix: Vec<u8>, len: usize },
+        /// More than `BUFSIZE` bytes arrived without a complete request.
+        TooLarge,
+        /// A complete (or timed-out partial) JSON request.
+        Request(String),
+    }
+
+    fn handle_client_inner(handle: HANDLE) {
+        match read_client_request(handle) {
+            ClientRead::Empty => {}
+            ClientRead::Timeout => {
+                super::service_log(
+                    "Pipe client sent no complete request within the timeout; dropping it \
+                     (previous behaviour blocked the only pipe instance forever)",
+                );
+            }
+            ClientRead::TooLarge => {
+                write_response(
+                    handle,
+                    r#"{"ok":false,"error":"request exceeds 4096 bytes"}"#,
+                );
+            }
+            ClientRead::Binary { prefix, len } => {
+                if is_mcpi_prefix(&prefix) {
+                    super::service_log(&format!(
+                        "Rejected binary MCPI request ({len} bytes, magic {:02X?}) — this pipe speaks JSON",
+                        &prefix[..prefix.len().min(4)]
+                    ));
+                    write_response(
+                        handle,
+                        r#"{"ok":false,"error":"binary MCPI protocol is not supported on this pipe; send a JSON request"}"#,
+                    );
+                } else {
+                    super::service_log(&format!(
+                        "Rejected non-JSON request ({len} bytes) without waiting for a terminator"
+                    ));
+                    write_response(
+                        handle,
+                        r#"{"ok":false,"error":"invalid request: expected a JSON object"}"#,
+                    );
+                }
+            }
+            ClientRead::Request(request) => {
+                let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    process_request(&request)
+                })) {
+                    Ok(response) => response,
+                    Err(payload) => {
+                        let msg = panic_payload_message(&payload);
+                        super::service_log(&format!(
+                            "PANIC in process_request (request len {}): {msg}",
+                            request.len()
+                        ));
+                        r#"{"ok":false,"error":"internal error processing request"}"#.to_string()
+                    }
+                };
+                write_response(handle, &response);
+            }
+        }
+    }
+
+    /// Read one request from the client with a bounded wait.
+    ///
+    /// The old loop called blocking `ReadFile` until the buffer ended with
+    /// `}`. A binary MCPI client writes a 16-byte header and waits for a
+    /// response: the `}` never arrives, so the single-threaded server stayed
+    /// stuck in `ReadFile` forever. `PeekNamedPipe` + a deadline fixes that
+    /// without touching the JSON framing.
+    fn read_client_request(handle: HANDLE) -> ClientRead {
         let mut read_buf = [0u8; BUFSIZE as usize];
         let mut total_read = 0usize;
+        let deadline = Instant::now() + CLIENT_REQUEST_TIMEOUT;
 
         loop {
             if total_read >= read_buf.len() {
-                break;
+                return ClientRead::TooLarge;
             }
+
+            // Wait for bytes without blocking past the deadline. Peek works
+            // for byte- and message-mode pipes and never consumes data.
+            loop {
+                let mut available = 0u32;
+                let peek =
+                    unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) };
+                if peek.is_err() {
+                    // Pipe broken/disconnected — nothing more will arrive.
+                    return finish_read(&read_buf[..total_read]);
+                }
+                if available > 0 {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    if total_read == 0 {
+                        return ClientRead::Timeout;
+                    }
+                    return finish_read(&read_buf[..total_read]);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
             let mut bytes_read = 0u32;
             let result = unsafe {
                 ReadFile(
@@ -1377,26 +1607,83 @@ mod pipe_server {
                 )
             };
             if result.is_err() || bytes_read == 0 {
-                break;
+                return finish_read(&read_buf[..total_read]);
             }
             total_read += bytes_read as usize;
 
-            let s = String::from_utf8_lossy(&read_buf[..total_read]);
-            if s.trim_end().ends_with('}') {
-                break;
+            // Reject non-JSON as soon as the first chunk shows it. This is
+            // what keeps a binary MCPI caller from wedging the server.
+            if !looks_like_json_prefix(&read_buf[..total_read]) {
+                return ClientRead::Binary {
+                    prefix: read_buf[..total_read.min(8)].to_vec(),
+                    len: total_read,
+                };
+            }
+
+            if let Some(request) = complete_json_request(&read_buf[..total_read]) {
+                return ClientRead::Request(request);
             }
         }
+    }
 
-        if total_read == 0 {
-            return;
+    /// Classify whatever was accumulated when the loop stopped.
+    fn finish_read(bytes: &[u8]) -> ClientRead {
+        if bytes.is_empty() {
+            return ClientRead::Empty;
         }
+        if !looks_like_json_prefix(bytes) {
+            return ClientRead::Binary {
+                prefix: bytes[..bytes.len().min(8)].to_vec(),
+                len: bytes.len(),
+            };
+        }
+        ClientRead::Request(String::from_utf8_lossy(bytes).trim().to_string())
+    }
 
-        let request = String::from_utf8_lossy(&read_buf[..total_read]);
-        let response = process_request(&request);
+    /// True while the buffered bytes can still be the start of a JSON object.
+    /// Leading ASCII whitespace is tolerated.
+    fn looks_like_json_prefix(bytes: &[u8]) -> bool {
+        match bytes.iter().find(|b| !b.is_ascii_whitespace()) {
+            None => true,
+            Some(b) => *b == b'{',
+        }
+    }
 
+    /// Return the request text once it parses as a complete JSON value.
+    fn complete_json_request(bytes: &[u8]) -> Option<String> {
+        let text = String::from_utf8_lossy(bytes);
+        let trimmed = text.trim();
+        if !trimmed.ends_with('}') {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .map(|_| trimmed.to_string())
+    }
+
+    /// True when the first bytes are the MCPI wire magic ("MCPI").
+    fn is_mcpi_prefix(prefix: &[u8]) -> bool {
+        prefix.starts_with(b"MCPI")
+    }
+
+    fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        }
+    }
+
+    fn write_response(handle: HANDLE, response: &str) {
         let resp_bytes = response.as_bytes();
         let mut written = 0u32;
         unsafe {
+            // FlushFileBuffers must stay: DisconnectNamedPipe DISCARDS data
+            // the client has not consumed yet, and the caller disconnects
+            // immediately after this function. Clients poll for the reply, so
+            // the flush returns as soon as they read it (or close the pipe).
             WriteFile(handle, Some(resp_bytes), Some(&mut written), None).ok();
             FlushFileBuffers(handle).ok();
         }
@@ -1633,6 +1920,61 @@ mod pipe_server {
             })
             .collect()
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A 16-byte MCPI header (magic "MCPI") must be classified as binary
+        /// on the first chunk, not waited on for a `}` that never comes.
+        #[test]
+        fn mcpi_header_is_rejected_without_waiting_for_json() {
+            let header = [
+                0x4Du8, 0x43, 0x50, 0x49, // "MCPI"
+                0x01, 0x00, // version
+                0x01, 0x00, // src id
+                0x02, 0x00, // dst id
+                0x01, 0x40, // msg type
+                0x00, 0x00, 0x00, 0x00, // payload len
+            ];
+            assert!(is_mcpi_prefix(&header));
+            assert!(!looks_like_json_prefix(&header));
+            assert!(complete_json_request(&header).is_none());
+        }
+
+        #[test]
+        fn json_request_is_accepted() {
+            let req = br#"{"op":"ping"}"#;
+            assert!(looks_like_json_prefix(req));
+            assert_eq!(
+                complete_json_request(req).as_deref(),
+                Some(r#"{"op":"ping"}"#)
+            );
+            assert_eq!(
+                process_request(r#"{"op":"ping"}"#),
+                r#"{"ok":true,"pong":true}"#
+            );
+        }
+
+        #[test]
+        fn partial_json_is_not_treated_as_complete() {
+            assert!(looks_like_json_prefix(br#"{"op":"pi"#));
+            assert!(complete_json_request(br#"{"op":"pi"#).is_none());
+        }
+
+        #[test]
+        fn leading_whitespace_is_tolerated() {
+            assert!(looks_like_json_prefix(b"\r\n\t "));
+            assert!(looks_like_json_prefix(b" \r\n{\"op\":\"ping\"}"));
+        }
+
+        #[test]
+        fn invalid_json_returns_error_not_panic() {
+            let response = process_request("not json");
+            assert!(response.contains(r#""ok":false"#), "{response}");
+            assert!(response.contains("invalid JSON"), "{response}");
+        }
+    }
 }
 
 // ── Windows Service implementation ────────────────────────────────────────────
@@ -1707,10 +2049,33 @@ mod service {
                 }
 
                 let shutdown = Arc::new(AtomicBool::new(false));
-                let shutdown_clone = shutdown.clone();
+                let shutdown_watch = shutdown.clone();
 
                 let pipe_thread = std::thread::spawn(move || {
-                    pipe_server::run_pipe_server(shutdown_clone);
+                    // The pipe thread is the whole point of this service. If it
+                    // ever returns or panics, the service must not sit there
+                    // "RUNNING" with no pipe (observed live: IoTSvc running,
+                    // pipe open → ERROR_PATH_NOT_FOUND). Restart it.
+                    while !shutdown_watch.load(Ordering::SeqCst) {
+                        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            pipe_server::run_pipe_server(shutdown_watch.clone());
+                        }));
+                        if let Err(payload) = run {
+                            let msg = payload
+                                .downcast_ref::<&str>()
+                                .map(|s| (*s).to_string())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown panic payload".to_string());
+                            super::service_log(&format!("PANIC in pipe server thread: {msg}"));
+                        }
+                        if shutdown_watch.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        super::service_log(
+                            "pipe server exited unexpectedly — restarting it in 1 s",
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
                 });
 
                 set_service_state(h, SERVICE_RUNNING);
@@ -2199,6 +2564,12 @@ fn cli_mode(args: &[String]) -> i32 {
 }
 
 fn main() {
+    install_panic_hook();
+    service_log(&format!(
+        "ecram_service starting (v{}, pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    ));
     // When started by SCM, the args are the SCM's service-name invocation:
     // the Service Control Manager launches the binPath and passes the service
     // NAME as argv[1] (e.g. `IoTService.exe IoTSvc`), NOT `service`.

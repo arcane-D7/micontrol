@@ -514,13 +514,37 @@ fn encrypt_wifi_password(password: &str) -> Result<String, String> {
 
 // ── Pipe communication ───────────────────────────────────────────────────────
 
-/// Resolve the pipe path: use discovered path if available, otherwise default.
+/// True when `path` is the JSON-over-pipe ecram_service endpoint.
+///
+/// That pipe speaks `{"op":...}` JSON, not the 16-byte binary MCPI frame
+/// header. Sending an MCPI header there wedges the single-threaded service
+/// (it waits for a `}` that never arrives), the app's recovery then finds the
+/// pipe busy and force-kills the service — which is what produced the
+/// `7031 terminated unexpectedly` events. Never let the two protocols mix.
+pub fn is_json_ecram_pipe(path: &str) -> bool {
+    #[cfg(windows)]
+    {
+        path.trim_end_matches('/')
+            .eq_ignore_ascii_case(crate::hw::ecram::ECRAM_PIPE_NAME)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Resolve the MCPI pipe path: use the discovered MCPI path when available,
+/// otherwise the default. The ecram_service JSON pipe is explicitly excluded:
+/// `iot_pipe_path` is reserved for the binary MCPI broker, and persisted
+/// profiles written by older builds may still point at `ecram_service`.
 pub fn resolve_pipe_path() -> String {
     #[cfg(windows)]
     {
-        crate::hw::discovery::global_profile()
-            .and_then(|p| p.iot_pipe_path)
-            .unwrap_or_else(|| IOT_PIPE.to_string())
+        match crate::hw::discovery::global_profile().and_then(|p| p.iot_pipe_path) {
+            Some(path) if !is_json_ecram_pipe(&path) => path,
+            _ => IOT_PIPE.to_string(),
+        }
     }
     #[cfg(not(windows))]
     {
@@ -584,6 +608,15 @@ fn send_ipc_message(dst_id: u16, msg_type: u32, payload: &[u8]) -> Result<Vec<u8
             );
 
             let pipe_path = resolve_pipe_path();
+            if is_json_ecram_pipe(&pipe_path) {
+                // Guard: this path is the binary MCPI broker. Speaking MCPI
+                // to the JSON ecram_service pipe wedges it (waits for a `}`
+                // that never arrives) and triggered the SCM 7031 kill cycle —
+                // fail closed instead.
+                anyhow::bail!(
+                    "Refusing to send an MCPI binary frame to the JSON ecram_service pipe ({pipe_path})"
+                );
+            }
 
             // Open the pipe using CreateFileW so we can set MESSAGE mode.
             // The IoTService creates the pipe with PIPE_TYPE_MESSAGE|PIPE_READMODE_MESSAGE,
@@ -2128,5 +2161,16 @@ mod tests {
             "networks should be empty by default"
         );
         assert!(list.status.is_none(), "status should be None by default");
+    }
+
+    /// The MCPI client must never speak binary to the JSON ecram_service pipe.
+    /// Mixing the two protocols is what wedged the service and produced the
+    /// SCM 7031 kill/restart cycle.
+    #[test]
+    fn json_ecram_pipe_is_recognised_and_never_used_for_mcpi() {
+        assert!(is_json_ecram_pipe(r"\\.\pipe\ecram_service"));
+        assert!(!is_json_ecram_pipe(IOT_PIPE));
+        assert!(!is_json_ecram_pipe(r"\\.\pipe\LOCAL\IoTService_IPC_Broker"));
+        assert!(!is_json_ecram_pipe(""));
     }
 }

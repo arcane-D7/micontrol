@@ -242,6 +242,13 @@ export interface EramMap {
   display_brightness_level: number;
   keyboard_backlight_level: number;
   raw_hex: string;
+  /** False when ERAM could not be read (driver blocks 0xFE0B0300). The
+   *  numeric fields above are placeholders, not measurements. */
+  available: boolean;
+  /** Regions the driver refused (e.g. ["ERAM", "SMA2"]). */
+  blocked_regions: string[];
+  /** Driver/pipe error explaining why the map is unavailable. */
+  blocked_reason: string | null;
 }
 
 export interface AudioVolumeResult {

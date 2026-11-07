@@ -105,7 +105,7 @@ export default function EcrDebugPanel() {
   const handleReadMap = async () => {
     setLoading(true);
     try {
-      const map = await invoke<string>('get_ecram_map');
+      const map = await invoke<import('../types/hardware').EramMap>('get_ecram_map');
       setResult(JSON.stringify(map, null, 2));
     } catch (e) {
       addToast({

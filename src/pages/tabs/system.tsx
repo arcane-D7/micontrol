@@ -119,14 +119,17 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
     try {
       const [map, ...hexes] = await Promise.all([
         hw.getEcramMap(),
-        ...IOT_REGIONS.map((region) => hw.getIotRegionHex(region)),
+        // ERAM/SMA2 are blocked by the driver (honest errors now). Do not let
+        // one blocked region abort the whole panel — IOT_STATUS/IOT_SENSORS
+        // and the map itself are still usable.
+        ...IOT_REGIONS.map((region) => hw.getIotRegionHex(region).catch(() => null)),
       ]);
       setEcramMap(map);
       setRegions({
-        ERAM: hexes[0],
-        SMA2: hexes[1],
-        IOT_STATUS: hexes[2],
-        IOT_SENSORS: hexes[3],
+        ERAM: hexes[0] ?? undefined,
+        SMA2: hexes[1] ?? undefined,
+        IOT_STATUS: hexes[2] ?? undefined,
+        IOT_SENSORS: hexes[3] ?? undefined,
       });
     } catch (e) {
       setError(errToString(e));
@@ -224,123 +227,137 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
 
       {ecramMap && (
         <>
-          <div className="grid-2" style={{ marginBottom: 14 }}>
-            <div className="card" style={{ marginBottom: 0 }}>
+          {!ecramMap.available && (
+            <div className="card" style={{ marginBottom: 14, borderColor: 'var(--warning)' }}>
               <div className="card-title" style={{ fontSize: 13 }}>
-                System State
+                {t('ecrDebug.ecramBlockedTitle')}
               </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.ac_connected')}</span>
-                <span className="stat-value">{ecramMap.ac_connected ? 'Yes' : 'No'}</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.adapter_power')}</span>
-                <span className="stat-value">{ecramMap.ac_adapter_w} W</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.battery_current')}</span>
-                <span className="stat-value">{ecramMap.battery_current_ma} mA</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.battery_voltage')}</span>
-                <span className="stat-value">{ecramMap.battery_voltage_mv} mV</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.battery_capacity')}</span>
-                <span className="stat-value">{ecramMap.battery_capacity_mah} mAh</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.charge_limit')}</span>
-                <span className="stat-value">{ecramMap.charge_threshold_pct} %</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.battery_temp')}</span>
-                <span className="stat-value">{ecramMap.battery_temp_c} °C</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.cpu_temp')}</span>
-                <span className="stat-value">{ecramMap.cpu_temp_c} °C</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.cpu_power')}</span>
-                <span className="stat-value">{ecramMap.cpu_power_w} W</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.fan_1_rpm')}</span>
-                <span className="stat-value">{ecramMap.fan_rpm}</span>
-              </div>
-              {ecramMap.fan2_rpm > 0 && (
-                <div className="stat-row">
-                  <span className="stat-label">{t('system.fan_2_rpm')}</span>
-                  <span className="stat-value">{ecramMap.fan2_rpm}</span>
+              <p className="page-subtitle" style={{ margin: 0 }}>
+                {t('ecrDebug.ecramBlockedBody', {
+                  reason: ecramMap.blocked_reason ?? '0x80070005',
+                })}
+              </p>
+            </div>
+          )}
+          {ecramMap.available && (
+            <div className="grid-2" style={{ marginBottom: 14 }}>
+              <div className="card" style={{ marginBottom: 0 }}>
+                <div className="card-title" style={{ fontSize: 13 }}>
+                  System State
                 </div>
-              )}
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.ac_connected')}</span>
+                  <span className="stat-value">{ecramMap.ac_connected ? 'Yes' : 'No'}</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.adapter_power')}</span>
+                  <span className="stat-value">{ecramMap.ac_adapter_w} W</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.battery_current')}</span>
+                  <span className="stat-value">{ecramMap.battery_current_ma} mA</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.battery_voltage')}</span>
+                  <span className="stat-value">{ecramMap.battery_voltage_mv} mV</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.battery_capacity')}</span>
+                  <span className="stat-value">{ecramMap.battery_capacity_mah} mAh</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.charge_limit')}</span>
+                  <span className="stat-value">{ecramMap.charge_threshold_pct} %</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.battery_temp')}</span>
+                  <span className="stat-value">{ecramMap.battery_temp_c} °C</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.cpu_temp')}</span>
+                  <span className="stat-value">{ecramMap.cpu_temp_c} °C</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.cpu_power')}</span>
+                  <span className="stat-value">{ecramMap.cpu_power_w} W</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.fan_1_rpm')}</span>
+                  <span className="stat-value">{ecramMap.fan_rpm}</span>
+                </div>
+                {ecramMap.fan2_rpm > 0 && (
+                  <div className="stat-row">
+                    <span className="stat-label">{t('system.fan_2_rpm')}</span>
+                    <span className="stat-value">{ecramMap.fan2_rpm}</span>
+                  </div>
+                )}
+              </div>
+              <div className="card" style={{ marginBottom: 0 }}>
+                <div className="card-title" style={{ fontSize: 13 }}>
+                  Mode / Limits (decoded)
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.performance_profile')}</span>
+                  <span className="stat-value">
+                    {formatPerfProfile(ecramMap.perf_profile)} (0x
+                    {ecramMap.perf_profile.toString(16).toUpperCase()})
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.tdp_override')}</span>
+                  <span className="stat-value">{ecramMap.tdp_w} W</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.smart_profile')}</span>
+                  <span className="stat-value">{ecramMap.smart_mode_profile ?? '—'}</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">SMMT</span>
+                  <span className="stat-value">
+                    0x{ecramMap.smart_mode_type.toString(16).toUpperCase().padStart(2, '0')}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">SMMD</span>
+                  <span className="stat-value">
+                    0x{ecramMap.smart_mode_data.toString(16).toUpperCase().padStart(2, '0')}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">QFAN</span>
+                  <span className="stat-value">
+                    0x{ecramMap.qfan_mode.toString(16).toUpperCase().padStart(2, '0')}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.ai_limit_ailm')}</span>
+                  <span className="stat-value">
+                    {ecramMap.ai_limit_enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.long_battery_limit')}</span>
+                  <span className="stat-value">
+                    {ecramMap.long_battery_limit_enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.display_brightness')}</span>
+                  <span className="stat-value">{ecramMap.display_brightness_level}</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">{t('system.kb_backlight')}</span>
+                  <span className="stat-value">{ecramMap.keyboard_backlight_level}</span>
+                </div>
+                <div className="stat-row">
+                  <span className="stat-label">control_flags[0x1B]</span>
+                  <span className="stat-value">
+                    0x{ecramMap.control_flags_1b.toString(16).toUpperCase().padStart(2, '0')}
+                  </span>
+                </div>
+              </div>
             </div>
-            <div className="card" style={{ marginBottom: 0 }}>
-              <div className="card-title" style={{ fontSize: 13 }}>
-                Mode / Limits (decoded)
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.performance_profile')}</span>
-                <span className="stat-value">
-                  {formatPerfProfile(ecramMap.perf_profile)} (0x
-                  {ecramMap.perf_profile.toString(16).toUpperCase()})
-                </span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.tdp_override')}</span>
-                <span className="stat-value">{ecramMap.tdp_w} W</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.smart_profile')}</span>
-                <span className="stat-value">{ecramMap.smart_mode_profile ?? '—'}</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">SMMT</span>
-                <span className="stat-value">
-                  0x{ecramMap.smart_mode_type.toString(16).toUpperCase().padStart(2, '0')}
-                </span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">SMMD</span>
-                <span className="stat-value">
-                  0x{ecramMap.smart_mode_data.toString(16).toUpperCase().padStart(2, '0')}
-                </span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">QFAN</span>
-                <span className="stat-value">
-                  0x{ecramMap.qfan_mode.toString(16).toUpperCase().padStart(2, '0')}
-                </span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.ai_limit_ailm')}</span>
-                <span className="stat-value">
-                  {ecramMap.ai_limit_enabled ? 'Enabled' : 'Disabled'}
-                </span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.long_battery_limit')}</span>
-                <span className="stat-value">
-                  {ecramMap.long_battery_limit_enabled ? 'Enabled' : 'Disabled'}
-                </span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.display_brightness')}</span>
-                <span className="stat-value">{ecramMap.display_brightness_level}</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">{t('system.kb_backlight')}</span>
-                <span className="stat-value">{ecramMap.keyboard_backlight_level}</span>
-              </div>
-              <div className="stat-row">
-                <span className="stat-label">control_flags[0x1B]</span>
-                <span className="stat-value">
-                  0x{ecramMap.control_flags_1b.toString(16).toUpperCase().padStart(2, '0')}
-                </span>
-              </div>
-            </div>
-          </div>
+          )}
 
           <div className="card" style={{ marginBottom: 14 }}>
             <div className="card-title" style={{ fontSize: 13 }}>

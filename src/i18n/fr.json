@@ -1155,6 +1155,8 @@
     "readError": "Erreur de lecture : {error}",
     "writeError": "Erreur d'écriture : {error}",
     "mapError": "Erreur de carte : {error}",
+    "ecramBlockedTitle": "RAM EC bloquée par le pilote IoT",
+    "ecramBlockedBody": "ERAM/SMA2 ne sont pas lisibles sur cet ordinateur — le pilote renvoie 0x80070005 même à SYSTEM. Les températures, ventilateurs et données de batterie issus de l'EC sont masqués au lieu d'être affichés à zéro. Raison : {reason}",
     "invalidHexData": "Données hex invalides : ne doivent contenir que des caractères hex (0-9, A-F)",
     "invalidAddress": "Format d'adresse invalide : doit être un nombre hex",
     "addressOutOfRange": "Adresse hors de la plage sécurisée de la RAM EC (0x{min}–0x{max})",

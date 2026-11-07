@@ -1155,6 +1155,8 @@
     "readError": "Error de lectura: {error}",
     "writeError": "Error de escritura: {error}",
     "mapError": "Error de mapa: {error}",
+    "ecramBlockedTitle": "RAM EC bloqueada por el driver IoT",
+    "ecramBlockedBody": "ERAM/SMA2 no se pueden leer en este equipo: el driver devuelve 0x80070005 incluso a SYSTEM. Las temperaturas, ventiladores y datos de batería derivados de la EC se ocultan en lugar de mostrarse como cero. Motivo: {reason}",
     "invalidHexData": "Datos hex inválidos: deben contener solo caracteres hex (0-9, A-F)",
     "invalidAddress": "Formato de dirección inválido: debe ser un número hex",
     "addressOutOfRange": "Dirección fuera del rango seguro de RAM EC (0x{min}–0x{max})",
