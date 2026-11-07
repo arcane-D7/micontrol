@@ -785,7 +785,10 @@ mod pipe_server {
     use super::*;
     use std::ffi::OsStr;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
+        WAIT_OBJECT_0,
+    };
     use windows::Win32::Storage::FileSystem::{
         FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
@@ -794,7 +797,7 @@ mod pipe_server {
         PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-    use windows::Win32::System::IO::CancelIoEx;
+    use windows::Win32::System::IO::{CancelIoEx, OVERLAPPED};
 
     /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
     /// access to the named pipe.
@@ -859,6 +862,200 @@ mod pipe_server {
         }
     }
 
+    // ── Accept-step primitives ──────────────────────────────────────────────
+
+    /// `HANDLE` wraps a raw pointer, so it is `!Send`. These newtypes carry a
+    /// handle across a thread boundary where ownership is 1:1 and unambiguous.
+    ///
+    /// SAFETY (both impls): a handle is an opaque kernel identifier, not memory.
+    /// The value is owned by exactly one thread at a time — the accept loop
+    /// stops touching it after the handoff and an unbounded channel has a single
+    /// consumer per item — so no two threads ever use the same handle
+    /// concurrently.
+    struct SendHandle(HANDLE);
+    unsafe impl Send for SendHandle {}
+    struct SendEvent(HANDLE);
+    unsafe impl Send for SendEvent {}
+
+    impl SendHandle {
+        /// Raw handle, consuming the newtype. Taking `self` is deliberate:
+        /// a `move` closure that only reads `.0` would capture the `!Send`
+        /// `HANDLE` field alone (edition 2021 disjoint captures), so callers go
+        /// through this method and capture the whole newtype instead.
+        fn into_handle(self) -> HANDLE {
+            self.0
+        }
+    }
+
+    impl SendEvent {
+        /// See [`SendHandle::into_handle`].
+        fn into_event(self) -> HANDLE {
+            self.0
+        }
+    }
+
+    /// Outcome of one accept step ([`accept_client`]).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AcceptOutcome {
+        /// A client connected while `ConnectNamedPipe` was pending: the
+        /// overlapped event fired. The normal path.
+        Connected,
+        /// A client had ALREADY connected when `ConnectNamedPipe` ran, so the
+        /// call failed with `ERROR_PIPE_CONNECTED` (535) *without queueing any
+        /// overlapped I/O*. The event is never signalled — but the pipe IS
+        /// connected and the client must be served.
+        AlreadyConnected,
+        /// `ConnectNamedPipe` (or the wait) failed hard; the instance is
+        /// unusable and must be destroyed. Carries the Win32 error code.
+        Failed(u32),
+    }
+
+    /// One accept step: issue `ConnectNamedPipe` on `handle` and block until a
+    /// client is connected.
+    ///
+    /// `handle` must be a pipe instance created with `FILE_FLAG_OVERLAPPED`;
+    /// `event` must be the manual-reset event stored in the `OVERLAPPED` passed
+    /// to `ConnectNamedPipe`.
+    ///
+    /// C-01 (deadlock, production 2026-11-02 → 2026-11-07): the previous code
+    /// discarded the `ConnectNamedPipe` result (`let _ = …`) and always waited
+    /// `INFINITE` on the event. For an overlapped pipe, a client that connects
+    /// BEFORE the call makes `ConnectNamedPipe` return FALSE with
+    /// `ERROR_PIPE_CONNECTED` **without queueing I/O**, so the event can never
+    /// be signalled and the accept loop parked forever: the service stayed
+    /// RUNNING, the single listening instance stayed connected to a client
+    /// nobody served, and every later open failed with `ERROR_PIPE_BUSY`
+    /// (0x800700E7) — the app then fell back to one elevated helper process per
+    /// hardware read. `bridge.log` stops right after such a client
+    /// ("client connected" / "read 0 bytes").
+    ///
+    /// `ERROR_PIPE_CONNECTED` means "there is already a client on the other
+    /// end": the correct response is to proceed to the handoff, never to wait.
+    fn accept_client(handle: HANDLE, event: HANDLE) -> AcceptOutcome {
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.hEvent = event;
+
+        let connect = unsafe { ConnectNamedPipe(handle, Some(&mut overlapped)) };
+        // Grab GetLastError before anything else on this thread can clobber it.
+        // `windows` builds its Err from the same value, but reading it here is
+        // what makes the ERROR_PIPE_CONNECTED branch explicit.
+        let last_error = std::io::Error::last_os_error();
+
+        if connect.is_ok() {
+            // Connected synchronously — there is no pending I/O to wait for.
+            return AcceptOutcome::Connected;
+        }
+
+        let code = last_error.raw_os_error().unwrap_or(0) as u32;
+        if code == ERROR_PIPE_CONNECTED.0 {
+            // The client raced in between CreateNamedPipeW and this call. No
+            // I/O was queued, so waiting on the event would hang forever.
+            return AcceptOutcome::AlreadyConnected;
+        }
+        if code != ERROR_IO_PENDING.0 {
+            return AcceptOutcome::Failed(code);
+        }
+
+        // Normal overlapped path: park until a client actually connects.
+        // INFINITE is deliberate (S55 FIX 21): a client connection is the only
+        // wake-up, and timing the instance out orphaned connected clients.
+        match unsafe { WaitForSingleObject(event, INFINITE) } {
+            WAIT_OBJECT_0 => AcceptOutcome::Connected,
+            _ => AcceptOutcome::Failed(
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32
+            ),
+        }
+    }
+
+    /// One listening instance of the bridge pipe plus the manual-reset event
+    /// used for its overlapped accept.
+    ///
+    /// Owns both HANDLEs: `Drop` closes them, so every `continue` in the accept
+    /// loop is leak-free (S67 RAII discipline — the loop used to close handles
+    /// by hand at four different exits). [`PipeInstance::into_handles`] releases
+    /// them to the worker that serves the client.
+    struct PipeInstance {
+        handle: HANDLE,
+        event: HANDLE,
+    }
+
+    impl PipeInstance {
+        /// `CreateNamedPipeW` + `CreateEventW` with the exact flags the service
+        /// uses. Returns `None` (closing anything already created) on failure.
+        fn create(
+            name_w: &[u16],
+            max_instances: u32,
+            sec_attr: Option<&windows::Win32::Security::SECURITY_ATTRIBUTES>,
+        ) -> Option<Self> {
+            // SAFETY: `name_w` is NUL-terminated and outlives the call;
+            // `sec_attr`, when present, outlives the call and points to a
+            // descriptor the kernel copies into the pipe object (so it does not
+            // have to outlive the instance).
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(name_w.as_ptr()),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    max_instances,
+                    PIPE_BUF_SIZE,
+                    PIPE_BUF_SIZE,
+                    0,
+                    sec_attr.map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                eprintln!(
+                    "[micontrol_bridge] CreateNamedPipeW failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                return None;
+            }
+
+            match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(event) => Some(Self { handle, event }),
+                Err(_) => {
+                    eprintln!(
+                        "[micontrol_bridge] CreateEventW failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    // SAFETY: created above, not owned anywhere else yet.
+                    unsafe {
+                        CloseHandle(handle).ok();
+                    }
+                    None
+                }
+            }
+        }
+
+        /// Block until a client is connected on this instance (see
+        /// [`accept_client`] for the `ERROR_PIPE_CONNECTED` race).
+        fn accept(&self) -> AcceptOutcome {
+            accept_client(self.handle, self.event)
+        }
+
+        /// Release both handles to the worker that will serve the client. The
+        /// instance no longer closes them on drop.
+        fn into_handles(mut self) -> (HANDLE, HANDLE) {
+            let handles = (self.handle, self.event);
+            self.handle = INVALID_HANDLE_VALUE;
+            self.event = INVALID_HANDLE_VALUE;
+            handles
+        }
+    }
+
+    impl Drop for PipeInstance {
+        fn drop(&mut self) {
+            unsafe {
+                if self.handle != INVALID_HANDLE_VALUE {
+                    CloseHandle(self.handle).ok();
+                }
+                if self.event != INVALID_HANDLE_VALUE {
+                    CloseHandle(self.event).ok();
+                }
+            }
+        }
+    }
+
     pub fn run(shutdown: Arc<AtomicBool>) {
         let pipe_name_w: Vec<u16> = OsStr::new(BRIDGE_PIPE_NAME)
             .encode_wide()
@@ -874,11 +1071,8 @@ mod pipe_server {
         // SAFETY: HANDLEs crossing the channel are owned 1:1 by whichever
         // worker pops the job; the accept loop never touches them again and
         // no other thread can see them (unbounded channel, single consumer
-        // per item). The SendHandle/SendEvent newtypes assert `Send` only.
-        struct SendHandle(windows::Win32::Foundation::HANDLE);
-        unsafe impl Send for SendHandle {}
-        struct SendEvent(windows::Win32::Foundation::HANDLE);
-        unsafe impl Send for SendEvent {}
+        // per item). The module-level SendHandle/SendEvent newtypes assert
+        // `Send` only — see their definition above.
 
         const PIPE_WORKERS: usize = 4;
         let (worker_tx, worker_rx) = std::sync::mpsc::channel::<(SendHandle, SendEvent)>();
@@ -933,89 +1127,75 @@ mod pipe_server {
         // (thermal/battery via other processes/threads) and the app's own
         // health checks raced, producing the storm of
         // "All pipe instances are busy" fallbacks to schtasks in the app log.
-        // FIX: accept loop creates a fresh pipe instance, then serves the
-        // client on a dedicated short-lived thread while the loop immediately
-        // recreates the listener — effectively unlimited concurrent clients.
+        // FIX: the accept loop creates a fresh pipe instance, hands the
+        // connected client to the fixed worker pool, and immediately recreates
+        // the listener — effectively unlimited concurrent clients.
+        //
+        // C-01: `last_accept_error` throttles accept-failure logging to one line
+        // per distinct error code, so a stuck listener is visible in bridge.log
+        // without flooding a 3 × 8 MiB rotation.
+        let mut last_accept_error: Option<u32> = None;
         while !shutdown.load(Ordering::SeqCst) {
-            // Keep the SECURITY_ATTRIBUTES alive for the duration of the
-            // CreateNamedPipeW call — passing it as an inline temporary and
-            // converting to a raw pointer in the same expression is safe, but
-            // binding it explicitly guarantees the pointed-to memory cannot be
-            // recycled between the temporary's drop and the FFI read.
+            // The SECURITY_ATTRIBUTES only has to outlive each CreateNamedPipeW
+            // call — the kernel copies the descriptor into the pipe object — so
+            // it is built ONCE here. Building it inside the loop (as before)
+            // leaked one heap SECURITY_DESCRIPTOR per accepted connection:
+            // ConvertStringSecurityDescriptorToSecurityDescriptorW allocates
+            // and nothing ever freed it.
             let sec_attr = build_pipe_security_attributes();
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    PCWSTR(pipe_name_w.as_ptr()),
-                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    PIPE_UNLIMITED_INSTANCES,
-                    PIPE_BUF_SIZE,
-                    PIPE_BUF_SIZE,
-                    0,
-                    sec_attr
-                        .as_ref()
-                        .map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
-                )
-            };
 
-            if handle == INVALID_HANDLE_VALUE {
-                eprintln!(
-                    "[micontrol_bridge] CreateNamedPipeW failed: {}",
-                    std::io::Error::last_os_error()
-                );
+            // The accept step (create instance → connect → wait) lives in
+            // `PipeInstance` so it can be tested without a service: see
+            // `accept_client` for the C-01 ERROR_PIPE_CONNECTED fix.
+            let Some(instance) =
+                PipeInstance::create(&pipe_name_w, PIPE_UNLIMITED_INSTANCES, sec_attr.as_ref())
+            else {
+                // CreateNamedPipeW / CreateEventW failed. Back off instead of
+                // spinning: a persistent failure (handle exhaustion, a stuck
+                // name) would otherwise burn 100% CPU.
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
-            }
-
-            let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) };
-            let Ok(event) = event else {
-                unsafe {
-                    CloseHandle(handle).ok();
-                }
-                continue;
             };
 
-            let mut overlapped = unsafe {
-                windows::Win32::System::IO::OVERLAPPED {
-                    hEvent: event,
-                    ..std::mem::zeroed()
+            match instance.accept() {
+                // C-01: BOTH success shapes hand the instance off. The
+                // pre-connected client (ERROR_PIPE_CONNECTED) never signals the
+                // event, so treating it as "keep waiting" is what parked this
+                // loop for five days in production.
+                AcceptOutcome::Connected | AcceptOutcome::AlreadyConnected => {
+                    if last_accept_error.take().is_some() {
+                        bridge_log("accept step recovered — client connected");
+                    }
                 }
-            };
-
-            // S55 FIX 21: the previous loop waited only 500 ms for a client and
-            // CANCELLED + destroyed the instance on timeout. A client that
-            // connected inside that tiny window could be orphaned — its
-            // CreateFileW succeeded, but the instance (and its pending
-            // ConnectNamedPipe I/O) was destroyed before handle_client could
-            // run. The client then saw read=0/EOF with no response, which the
-            // app logged as "No response from bridge service (timed out or
-            // empty)" and fell back to the (broken) scheduled-task path.
-            // Observed empirically: the FIRST request after an idle period hit
-            // the race consistently, so every tab's first elevated call failed.
-            //
-            // FIX: wait on the overlapped event INDEFINITELY instead of 500 ms.
-            // ConnectNamedPipe with FILE_FLAG_OVERLAPPED returns immediately
-            // (ERROR_IO_PENDING); the event fires when a client connects. A
-            // client connection IS the wake-up, so blocking forever is correct:
-            // each loop iteration parks until a real client arrives, then the
-            // instance is handed to a dedicated client thread and the loop
-            // immediately creates the next listening instance. Service stop
-            // still works because the SCM stop path terminates the process.
-            let _ = unsafe { ConnectNamedPipe(handle, Some(&mut overlapped)) };
-            // ERROR_IO_PENDING (997) is the expected overlapped result; any
-            // other hard failure (or ERROR_PIPE_CONNECTED, where a client
-            // connected before ConnectNamedPipe was called and the event is
-            // already/signalled) is handled below.
-            let wait_result = unsafe { WaitForSingleObject(event, INFINITE) };
-
-            if wait_result != WAIT_OBJECT_0 {
-                unsafe {
-                    CancelIoEx(handle, Some(&overlapped)).ok();
-                    CloseHandle(handle).ok();
-                    CloseHandle(event).ok();
+                AcceptOutcome::Failed(code) => {
+                    // Log the FIRST failure of a given code only: a persistent
+                    // failure must be visible in bridge.log without flooding a
+                    // file that keeps only 3 × 8 MiB.
+                    if last_accept_error != Some(code) {
+                        bridge_log(&format!(
+                            "accept step failed: win32 error {code} — destroying the instance and listening again"
+                        ));
+                        last_accept_error = Some(code);
+                    }
+                    // Bounded backoff: never turn a hard failure into a
+                    // create/destroy storm. `instance` is closed by Drop.
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
                 }
-                continue;
             }
+
+            let (handle, event) = instance.into_handles();
+
+            // S55 FIX 21 (history): this loop used to wait only 500 ms for a
+            // client and then CANCELLED + destroyed the instance. A client that
+            // connected inside that window was orphaned: its CreateFileW had
+            // succeeded but the instance (and its pending ConnectNamedPipe I/O)
+            // was destroyed before handle_client could run, so the app saw
+            // "No response from bridge service (timed out or empty)" and fell
+            // back to the (broken) scheduled-task path. The wait is therefore
+            // INFINITE — a client connection is the only wake-up. That wait now
+            // lives in `accept_client`, which also handles the
+            // ERROR_PIPE_CONNECTED case where no wait must happen at all.
 
             // S55 FIX 23b: serve on a worker from a FIXED pool instead of
             // spawning a short-lived thread per client.
@@ -1377,7 +1557,12 @@ mod pipe_server {
             return 1;
         }
 
-        // Connect the server side.
+        // Connect the server side. NOTE THE ORDER: the CLIENT is opened first,
+        // which is the case the service hits in production (a client that
+        // connects between CreateNamedPipeW and ConnectNamedPipe). The accept
+        // step therefore takes the ERROR_PIPE_CONNECTED path deterministically,
+        // so this self-test doubles as a field canary for C-01 — the deadlock
+        // that parked the accept loop in production from 2026-11-02.
         let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) };
         let Ok(event) = event else {
             eprintln!("[self-test] CreateEventW failed");
@@ -1386,13 +1571,6 @@ mod pipe_server {
             }
             return 1;
         };
-        let mut overlapped = unsafe {
-            windows::Win32::System::IO::OVERLAPPED {
-                hEvent: event,
-                ..std::mem::zeroed()
-            }
-        };
-        let _ = unsafe { ConnectNamedPipe(server_handle, Some(&mut overlapped)) };
 
         // Now connect as the current (unprivileged) user → the whole point.
         let client_handle = unsafe {
@@ -1419,6 +1597,46 @@ mod pipe_server {
             return 1;
         }
         let client_handle = client_handle.unwrap();
+
+        // Run the real accept step (same code as the service's accept loop) on
+        // a helper thread with a bounded wait: if the ERROR_PIPE_CONNECTED
+        // handling ever regresses, the self-test fails loudly in 5 s instead of
+        // hanging forever on an event that can never be signalled.
+        let (accept_tx, accept_rx) = std::sync::mpsc::channel();
+        // HANDLE is !Send: hand it over through the same newtypes the worker
+        // pool uses.
+        let accept_pipe = SendHandle(server_handle);
+        let accept_event = SendEvent(event);
+        std::thread::spawn(move || {
+            let _ = accept_tx.send(accept_client(
+                accept_pipe.into_handle(),
+                accept_event.into_event(),
+            ));
+        });
+        let accept_outcome = match accept_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                eprintln!(
+                    "[self-test] FAIL: accept step did not complete within 5 s — a pre-connected \
+                     client (ERROR_PIPE_CONNECTED) must never be waited on (C-01 deadlock)",
+                );
+                unsafe {
+                    CloseHandle(server_handle).ok();
+                    CloseHandle(event).ok();
+                    CloseHandle(client_handle).ok();
+                }
+                return 1;
+            }
+        };
+        if let AcceptOutcome::Failed(code) = accept_outcome {
+            eprintln!("[self-test] FAIL: accept step failed (win32 error {code})");
+            unsafe {
+                CloseHandle(server_handle).ok();
+                CloseHandle(event).ok();
+                CloseHandle(client_handle).ok();
+            }
+            return 1;
+        }
 
         // Round-trip: client writes "ping", server reads it.
         let ping = b"ping";
@@ -1460,6 +1678,261 @@ mod pipe_server {
                 CloseHandle(client_handle).ok();
             }
             1
+        }
+    }
+
+    // ── C-01 regression tests ───────────────────────────────────────────────
+    // Only compiled for `cargo test --bin micontrol_bridge`; the whole file is
+    // `#![cfg(windows)]`, so these are Windows-only by construction. They use
+    // real named pipes (the race cannot be faked) but never touch
+    // `handle_client` / `bridge_log`, so they do not write to the production
+    // `ProgramData\MiControl\logs\bridge.log`.
+    #[cfg(test)]
+    mod c01_accept_tests {
+        use super::*;
+        use std::os::windows::ffi::OsStrExt;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows::Win32::System::IO::GetOverlappedResult;
+
+        /// Unique pipe name per call (pid + counter), so the tests can run in
+        /// parallel and a leftover instance from a crashed run cannot collide.
+        fn unique_pipe_name(tag: &str) -> String {
+            static SEQ: AtomicU32 = AtomicU32::new(0);
+            format!(
+                r"\\.\pipe\micontrol_bridge_c01_{tag}_{}_{}",
+                std::process::id(),
+                SEQ.fetch_add(1, AtomicOrdering::SeqCst)
+            )
+        }
+
+        fn wide(name: &str) -> Vec<u16> {
+            std::ffi::OsStr::new(name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect()
+        }
+
+        /// A listening instance with the production flags (overlapped, byte
+        /// mode, Everyone-RW DACL).
+        fn listening_instance(name: &str) -> PipeInstance {
+            let sec_attr = build_pipe_security_attributes();
+            PipeInstance::create(&wide(name), 1, sec_attr.as_ref())
+                .expect("CreateNamedPipeW/CreateEventW failed")
+        }
+
+        /// Client side. A SYNCHRONOUS handle (no FILE_FLAG_OVERLAPPED) so the
+        /// test can use plain blocking WriteFile; the server side stays
+        /// overlapped exactly like production.
+        fn connect_client(name: &str) -> HANDLE {
+            let path = wide(name);
+            unsafe {
+                CreateFileW(
+                    PCWSTR(path.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+            }
+            .expect("client CreateFileW failed")
+        }
+
+        fn client_write(handle: HANDLE, payload: &[u8]) {
+            let mut written = 0u32;
+            unsafe { WriteFile(handle, Some(payload), Some(&mut written), None) }
+                .expect("client WriteFile failed");
+            assert_eq!(written, payload.len() as u32, "short client write");
+        }
+
+        /// Server-side read on an overlapped instance handle. `None` means the
+        /// client is gone (`ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`) —
+        /// the condition `handle_client` maps to "read 0 bytes".
+        fn server_read(handle: HANDLE, buf: &mut [u8]) -> Option<usize> {
+            let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+                .expect("server_read: CreateEventW failed");
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = event;
+            let mut transferred = 0u32;
+
+            let started = unsafe {
+                ReadFile(
+                    handle,
+                    Some(buf),
+                    Some(&mut transferred),
+                    Some(&mut overlapped),
+                )
+            };
+            let immediate = match started {
+                Ok(()) => Some(transferred as usize),
+                Err(_) => None,
+            };
+
+            let result = match immediate {
+                Some(n) => Some(n),
+                None => {
+                    let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+                    if code != ERROR_IO_PENDING.0 {
+                        None // client vanished: EOF
+                    } else {
+                        assert_eq!(
+                            unsafe { WaitForSingleObject(event, 5_000) },
+                            WAIT_OBJECT_0,
+                            "server read never completed"
+                        );
+                        let mut done = 0u32;
+                        unsafe { GetOverlappedResult(handle, &overlapped, &mut done, false) }
+                            .expect("GetOverlappedResult failed");
+                        Some(done as usize)
+                    }
+                }
+            };
+
+            unsafe { CloseHandle(event).ok() };
+            result
+        }
+
+        /// One accept step on a helper thread with a 5 s guard: if the C-01
+        /// bug ever comes back, the test fails instead of hanging the suite.
+        fn accept_with_timeout(handle: HANDLE, event: HANDLE) -> AcceptOutcome {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let pipe = SendHandle(handle);
+            let accept_event = SendEvent(event);
+            std::thread::spawn(move || {
+                let _ = tx.send(accept_client(pipe.into_handle(), accept_event.into_event()));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5)).expect(
+                "accept step did not complete within 5 s — ERROR_PIPE_CONNECTED deadlock (C-01)",
+            )
+        }
+
+        /// C-01, the exact production race: the client is connected BEFORE the
+        /// accept step runs. `ConnectNamedPipe` then returns FALSE +
+        /// ERROR_PIPE_CONNECTED *without queueing overlapped I/O*; the pre-fix
+        /// code `let _ =`'d that result and waited INFINITE on an event that can
+        /// never be signalled, parking the accept loop for good (service
+        /// RUNNING, pipe permanently ERROR_BUSY).
+        #[test]
+        fn accept_completes_when_client_connects_before_connect_named_pipe() {
+            let name = unique_pipe_name("race");
+            let instance = listening_instance(&name);
+
+            // Client first — this IS the race.
+            let client = connect_client(&name);
+
+            let outcome = accept_with_timeout(instance.handle, instance.event);
+            assert_eq!(
+                outcome,
+                AcceptOutcome::AlreadyConnected,
+                "a pre-connected client must be recognised as ERROR_PIPE_CONNECTED"
+            );
+
+            // And the connection must be USABLE, not merely "not blocked".
+            client_write(client, b"ping");
+            let mut buf = [0u8; 16];
+            let n = server_read(instance.handle, &mut buf).expect("server read failed");
+            assert_eq!(&buf[..n], b"ping".as_slice());
+
+            unsafe { CloseHandle(client).ok() };
+        }
+
+        /// Normal path: no client yet, so `ConnectNamedPipe` pends
+        /// (ERROR_IO_PENDING) and the accept step must return exactly when the
+        /// client connects — never before.
+        #[test]
+        fn accept_returns_when_client_connects_after_connect_named_pipe() {
+            let name = unique_pipe_name("normal");
+            let instance = listening_instance(&name);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (handle, event) = (instance.handle, instance.event);
+            let pipe = SendHandle(handle);
+            let accept_event = SendEvent(event);
+            std::thread::spawn(move || {
+                let _ = tx.send(accept_client(pipe.into_handle(), accept_event.into_event()));
+            });
+
+            // Let the helper reach the blocking wait, so this really exercises
+            // the ERROR_IO_PENDING path rather than the pre-connected one.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(
+                matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+                "accept step returned before any client connected"
+            );
+
+            let client = connect_client(&name);
+            let outcome = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("accept step never woke up when the client connected");
+            assert_eq!(outcome, AcceptOutcome::Connected);
+
+            client_write(client, b"pong");
+            let mut buf = [0u8; 16];
+            let n = server_read(instance.handle, &mut buf).expect("server read failed");
+            assert_eq!(&buf[..n], b"pong".as_slice());
+
+            unsafe { CloseHandle(client).ok() };
+        }
+
+        /// A client that connects and immediately disappears must not wedge the
+        /// accept step, and the loop must keep serving afterwards — the
+        /// production signature was "client connected" / "read 0 bytes" right
+        /// before bridge.log went silent for five days.
+        #[test]
+        fn accept_step_survives_client_that_connects_and_disconnects() {
+            let name = unique_pipe_name("ghost");
+
+            // Round 1: a probe connects and vanishes without sending anything.
+            {
+                let instance = listening_instance(&name);
+                let ghost = connect_client(&name);
+                assert!(matches!(
+                    accept_with_timeout(instance.handle, instance.event),
+                    AcceptOutcome::Connected | AcceptOutcome::AlreadyConnected
+                ));
+                unsafe { CloseHandle(ghost).ok() };
+
+                let mut buf = [0u8; 16];
+                assert_eq!(
+                    server_read(instance.handle, &mut buf),
+                    None,
+                    "a vanished client must surface as EOF, never as a hang"
+                );
+            }
+
+            // Round 2: same pipe name, fresh instance — the loop can still
+            // accept and serve a real client (the name is released on drop).
+            let instance = listening_instance(&name);
+            let client = connect_client(&name);
+            assert_eq!(
+                accept_with_timeout(instance.handle, instance.event),
+                AcceptOutcome::AlreadyConnected
+            );
+
+            client_write(client, b"pong");
+            let mut buf = [0u8; 16];
+            let n = server_read(instance.handle, &mut buf).expect("server read failed");
+            assert_eq!(&buf[..n], b"pong".as_slice());
+
+            unsafe { CloseHandle(client).ok() };
+        }
+
+        /// A hard `ConnectNamedPipe` failure must surface as `Failed(code)` so
+        /// the accept loop destroys the instance and logs it, instead of being
+        /// swallowed and mistaken for a connection.
+        #[test]
+        fn accept_reports_hard_failure_instead_of_assuming_connected() {
+            // Null handle: ConnectNamedPipe fails with ERROR_INVALID_HANDLE.
+            let outcome = accept_client(HANDLE::default(), HANDLE::default());
+            assert!(
+                matches!(outcome, AcceptOutcome::Failed(_)),
+                "expected a hard failure, got {outcome:?}"
+            );
         }
     }
 }
