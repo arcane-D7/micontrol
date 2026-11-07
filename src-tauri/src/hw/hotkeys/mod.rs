@@ -1342,26 +1342,66 @@ fn handle_hotkey_message(id: i32) {
     }
 }
 
+/// What a HID consumer-control usage means for the microphone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerAudioKey {
+    /// Usage 0x00E2 — "Mute": mutes *playback*. Windows handles it; MiControl
+    /// must not show a microphone OSD or touch the capture endpoint.
+    OutputMute,
+    /// Usage 0x00CF (Microphone) / 0x0169 (AC Mute Microphone): the real
+    /// capture-mute keys (Fn+F4 on the Xiaomi keyboards reports one of these).
+    MicMute,
+    /// Not an audio key for this domain.
+    NotAudio,
+}
+
+/// Classify a HID consumer-control usage before acting on it.
+///
+/// Split out of [`dispatch_consumer_usage`] so the mapping is unit-testable:
+/// conflating [`ConsumerAudioKey::OutputMute`] with [`ConsumerAudioKey::MicMute`]
+/// is exactly the bug that made the mic OSD lie.
+fn classify_consumer_audio_key(usage: u16) -> ConsumerAudioKey {
+    match usage {
+        0x00E2 => ConsumerAudioKey::OutputMute,
+        0x00CF | 0x0169 => ConsumerAudioKey::MicMute,
+        _ => ConsumerAudioKey::NotAudio,
+    }
+}
+
 /// Dispatch action based on a HID Consumer Control usage code.
 ///
 /// Consumer usages come from the physical keyboard's Consumer Controls collection
 /// (UsagePage 0x0C) and from the VirtualControlHID VHF device (if running).
 /// Key → usage mappings for Xiaomi Book Pro 14 2024:
-///   Fn+F4  = mic mute       → 0x00CF (Microphone) or 0x00E2 (Mute)
+///   Fn+F4  = mic mute       → 0x00CF (Microphone) / 0x0169 (AC Mute Microphone)
 ///   Fn+F7  = Xiaomi AI key  → VK_LAUNCH_APP1 (keyboard path) or 0x01B3/0x01B6 (consumer)
 ///   Fn+F10 = keyboard light → 0x0271 (Backlight) or vendor-specific
 /// NOTE: Run app with detect mode (Settings → Hotkeys → "Detect Key") to find exact values.
 fn dispatch_consumer_usage(usage: u16) {
     log::info!("[hotkeys] Consumer usage {:#06X}", usage);
+    match classify_consumer_audio_key(usage) {
+        // 0x00E2 is the *output* mute usage: Windows mutes playback itself. It
+        // is NOT the microphone key — showing a mic OSD here (and toggling an
+        // internal bool) is what made the OSD claim a mute that never happened.
+        ConsumerAudioKey::OutputMute => {
+            log::info!("[hotkeys] Consumer: output mute key → left to Windows (no mic OSD)");
+            return;
+        }
+        // 0x00CF (Microphone) and 0x0169 (AC Mute Microphone) are real capture
+        // mute keys. Read the endpoint's actual state, flip it, and show an OSD
+        // that mirrors what the hardware reports afterwards.
+        ConsumerAudioKey::MicMute => {
+            log::info!("[hotkeys] Consumer: mic mute key → toggle capture endpoint + OSD");
+            // Spawns its own COM thread and returns immediately; the OSD shows
+            // the state the endpoint reports after the toggle.
+            crate::hw::mic::toggle_system_mic_mute_osd();
+            return;
+        }
+        ConsumerAudioKey::NotAudio => {}
+    }
+
     match usage {
         // ── Standard Consumer Controls ────────────────────────────────────────
-        // 0x00E2 = Mute (audio output mute)
-        // 0x00CF = Microphone (mic mute toggle, also seen on Xiaomi Fn+F4)
-        // 0x0169 = AC Mute Microphone (newer standard, same function)
-        0x00E2 | 0x00CF | 0x0169 => {
-            log::info!("[hotkeys] Consumer: mic/audio mute key → show OSD");
-            std::thread::spawn(crate::hw::osd::show_mic_mute_osd_toggle);
-        }
         // 0x0271 = Keyboard Backlight Brightness (HID usage)
         // 0x01BB = Keyboard Backlight toggle (Xiaomi specific, may vary)
         0x0271 | 0x01BB | 0x0073 => {
@@ -2481,9 +2521,13 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
             // Fn+F4: mic mute.  detail[2]: 0x00 = muted, 0x01 = active.
             // (IoTDriver reports the NEW mic state after the key toggles it.)
             let muted = detail.get(2).copied().unwrap_or(1) == 0;
-            log::info!("[hotkeys] WMI Fn+F4 → mic mute OSD (muted={})", muted);
-            crate::hw::osd::show_mic_mute_osd(muted);
-            crate::hw::mic::set_system_mic_mute(muted);
+            log::info!(
+                "[hotkeys] WMI Fn+F4 → mic mute OSD (requested muted={})",
+                muted
+            );
+            // Apply first, then show what the endpoint reports back: the OSD
+            // must never claim a state the capture endpoint did not accept.
+            crate::hw::mic::set_system_mic_mute_osd(muted);
             return;
         }
         ("HID_EVENT20", 0x05) => {
@@ -3359,5 +3403,46 @@ mod hotkey_registration_tests {
         use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
         let hr = windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0);
         assert_eq!(hr.0 as u32, 0x8007_0581);
+    }
+}
+
+#[cfg(test)]
+mod consumer_audio_tests {
+    use super::*;
+
+    /// 0x00E2 is the output-mute usage. Treating it as a microphone key is what
+    /// made the OSD claim a mic mute that never touched the capture endpoint.
+    #[test]
+    fn output_mute_usage_is_not_the_microphone() {
+        assert_eq!(
+            classify_consumer_audio_key(0x00E2),
+            ConsumerAudioKey::OutputMute
+        );
+    }
+
+    /// 0x00CF (Microphone) and 0x0169 (AC Mute Microphone) are the real capture
+    /// keys — Fn+F4 on the Xiaomi keyboards reports one of these.
+    #[test]
+    fn microphone_usages_target_the_capture_endpoint() {
+        assert_eq!(
+            classify_consumer_audio_key(0x00CF),
+            ConsumerAudioKey::MicMute
+        );
+        assert_eq!(
+            classify_consumer_audio_key(0x0169),
+            ConsumerAudioKey::MicMute
+        );
+    }
+
+    /// Backlight / app-launch / volume usages must not reach the mic branch.
+    #[test]
+    fn unrelated_usages_stay_out_of_the_audio_path() {
+        for usage in [0x0271u16, 0x01BB, 0x01B3, 0x01B6, 0x0221, 0x0073, 0x0000] {
+            assert_eq!(
+                classify_consumer_audio_key(usage),
+                ConsumerAudioKey::NotAudio,
+                "usage {usage:#06X} must not be classified as an audio key"
+            );
+        }
     }
 }

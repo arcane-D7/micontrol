@@ -7,10 +7,11 @@
 //! currently called within this crate, but they are available for future
 //! registry operations without requiring API changes.
 
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    KEY_ALL_ACCESS, KEY_READ, REG_CREATE_KEY_DISPOSITION, REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
+    RegCloseKey, RegCreateKeyExW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, KEY_ALL_ACCESS, KEY_READ, REG_CREATE_KEY_DISPOSITION, REG_OPTION_NON_VOLATILE,
+    REG_VALUE_TYPE,
 };
 
 /// A guard that closes the registry key when dropped.
@@ -191,6 +192,47 @@ impl RegKeyGuard {
         Ok(())
     }
 
+    /// Enumerate the immediate subkey names of this key.
+    ///
+    /// Used for capability probes that must not hardcode device-class GUIDs
+    /// (e.g. finding the `ComputeAccelerator` class and its device instances).
+    pub fn enum_subkeys(&self) -> Result<Vec<String>, String> {
+        let mut names = Vec::new();
+        let mut index = 0u32;
+        loop {
+            // Device-class keys hold short names ("0000", "Properties"); 256
+            // UTF-16 code units is well above the 255-char registry limit.
+            let mut buf = [0u16; 256];
+            let mut len = buf.len() as u32;
+            // SAFETY: buf is a stack array of 256 u16 and len is its length in
+            // characters. RegEnumKeyExW writes at most len characters and
+            // updates len with the count written (excluding the NUL).
+            let result = unsafe {
+                RegEnumKeyExW(
+                    self.as_raw(),
+                    index,
+                    PWSTR(buf.as_mut_ptr()),
+                    &mut len,
+                    None,
+                    PWSTR::null(),
+                    None,
+                    None,
+                )
+            };
+            if result.is_err() {
+                // ERROR_NO_MORE_ITEMS (259) terminates the enumeration; any
+                // other error means we could not read the key.
+                const ERROR_NO_MORE_ITEMS: u32 = 259;
+                if result.0 == ERROR_NO_MORE_ITEMS {
+                    return Ok(names);
+                }
+                return Err(format!("RegEnumKeyExW failed: {result:?}"));
+            }
+            names.push(String::from_utf16_lossy(&buf[..len as usize]));
+            index += 1;
+        }
+    }
+
     /// Write a string value to the registry.
     pub fn write_string(&self, name: &str, value: &str) -> Result<(), String> {
         let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -231,4 +273,33 @@ fn ptr_cast_slice<T>(s: &[T]) -> &[u8] {
     // using size_of_val gives a correct byte view of the same memory. The
     // returned slice borrows s and cannot outlive it.
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+    #[test]
+    fn enumerates_subkeys_of_a_known_key() {
+        let key = RegKeyGuard::open_read(
+            HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        )
+        .expect("opening a readable key must not error")
+        .expect("CurrentVersion must exist");
+
+        let names = key.enum_subkeys().expect("enumeration must succeed");
+        assert!(!names.is_empty(), "CurrentVersion always has subkeys");
+    }
+
+    #[test]
+    fn a_missing_key_opens_as_none() {
+        let key = RegKeyGuard::open_read(
+            HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\MiControl\ThisKeyDoesNotExist\Nope",
+        )
+        .expect("a missing key is not an error");
+        assert!(key.is_none());
+    }
 }

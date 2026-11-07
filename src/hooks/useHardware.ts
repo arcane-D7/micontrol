@@ -1162,6 +1162,7 @@ export function useHardware() {
       getAudioState,
       setMasterVolume,
       setMasterMute,
+      setDefaultAudioDevice,
     }),
     [
       fanState,

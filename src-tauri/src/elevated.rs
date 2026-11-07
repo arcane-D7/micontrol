@@ -502,39 +502,6 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
-        "set_mic_noise_canceling" => {
-            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
-                Ok(v) => v,
-                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
-            };
-            match crate::hw::audio_effects::set_mic_noise_canceling(enabled) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
-        "set_speaker_noise_canceling" => {
-            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
-                Ok(v) => v,
-                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
-            };
-            match crate::hw::audio_effects::set_speaker_noise_canceling(enabled) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
-        "set_voice_focus" => {
-            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
-                Ok(v) => v,
-                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
-            };
-            match crate::hw::audio_effects::set_voice_focus(enabled) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
         "clean_junk_files" => {
             let categories: Vec<crate::hw::cleanup::CleanupCategory> =
                 match serde_json::from_value(cmd.args["categories"].clone()) {

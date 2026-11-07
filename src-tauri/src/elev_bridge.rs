@@ -428,10 +428,7 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "set_eye_protection"
         | "set_os_turbo"
         | "refresh_os_turbo"
-        | "set_function_key"
-        | "set_mic_noise_canceling"
-        | "set_speaker_noise_canceling"
-        | "set_voice_focus" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
+        | "set_function_key" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
 
         "clean_junk_files" | "set_sys_opt_tweak" => {
             // S55 FIX 7: set_sys_opt_tweak can run heavy operations — OneDrive

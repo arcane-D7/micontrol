@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
@@ -34,15 +34,12 @@ export default function AudioControl({
   onSetDefaultDevice,
 }: AudioControlProps) {
   const [devices, setDevices] = useState<AudioDeviceList | null>(null);
+  const [switchingId, setSwitchingId] = useState<string | null>(null);
   const { addToast } = useToast();
-  // Dirty flag: while the user is dragging the slider, suppress poll-driven
-  // updates so the thumb doesn't jump back to the stale polled value.
-  const isAdjustingRef = useRef(false);
 
-  // Derive local state from the batched hardware poll (useHardware).
-  // While the user is actively dragging the slider, ignore polled updates so
-  // the thumb stays under the cursor until the optimistic update lands.
-  const volume = isAdjustingRef.current ? (audioState?.volume ?? 50) : (audioState?.volume ?? 50);
+  // Volume comes straight from the batched hardware poll (useHardware); the
+  // optimistic update in `setMasterVolume` keeps it in step while dragging.
+  const volume = audioState?.volume ?? 50;
   const muted = audioState?.muted ?? false;
 
   const loadAudioDevices = async () => {
@@ -62,19 +59,37 @@ export default function AudioControl({
   }, []);
 
   const handleVolumeChange = async (newVolume: number) => {
-    isAdjustingRef.current = true;
     try {
       // onVolumeChange expects 0-1 fraction (setMasterVolume contract)
       await onVolumeChange(newVolume / 100);
     } catch (e) {
       addToast(`Volume error: ${String(e)}`, 'error');
-    } finally {
-      // Re-enable sync after a short delay to let the 2s poll catch up.
-      setTimeout(() => {
-        isAdjustingRef.current = false;
-      }, 500);
     }
   };
+
+  /**
+   * Switch the default playback endpoint, then re-enumerate so the ✓ moves to
+   * the device that actually became default (Windows may refuse or pick a
+   * different device than requested).
+   */
+  async function handleSetDefaultDevice(deviceId: string) {
+    if (!onSetDefaultDevice || switchingId !== null) return;
+    setSwitchingId(deviceId);
+    try {
+      await onSetDefaultDevice(deviceId);
+      await loadAudioDevices();
+    } catch {
+      addToast({
+        message: t('audio.setDefaultError'),
+        type: 'error',
+        onRetry: () => {
+          void handleSetDefaultDevice(deviceId);
+        },
+      });
+    } finally {
+      setSwitchingId(null);
+    }
+  }
 
   const handleMuteToggle = async () => {
     try {
@@ -165,8 +180,13 @@ export default function AudioControl({
             <button
               key={d.id}
               className="stat-row"
-              disabled={d.is_default || !onSetDefaultDevice}
-              onClick={() => onSetDefaultDevice?.(d.id)}
+              disabled={d.is_default || !onSetDefaultDevice || switchingId !== null}
+              onClick={() => void handleSetDefaultDevice(d.id)}
+              aria-label={
+                d.is_default
+                  ? `${d.name} — ${t('audio.defaultDevice')}`
+                  : `${d.name} — ${t('audio.setAsDefault')}`
+              }
               style={{
                 padding: '6px 8px',
                 borderRadius: 'var(--r-xs)',
@@ -178,6 +198,7 @@ export default function AudioControl({
                 cursor: d.is_default || !onSetDefaultDevice ? 'default' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
+                opacity: switchingId === d.id ? 0.6 : 1,
               }}
             >
               <span style={{ flex: 1, fontSize: 13 }}>{d.name}</span>

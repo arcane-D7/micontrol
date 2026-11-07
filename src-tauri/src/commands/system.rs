@@ -837,30 +837,29 @@ pub async fn get_audio_effects(
         .map_err(ErrorResponse::from)
 }
 
+// These three write a per-user preference under HKEY_CURRENT_USER. They must
+// NOT go through `elev_bridge::run_elevated`: its service runs as LocalSystem,
+// so an `HKCU` write lands in `HKU\S-1-5-18` while `get_audio_effects` reads the
+// signed-in user's hive — the toggle appeared to do nothing (always "off").
 #[tauri::command]
 pub async fn set_mic_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
-        "set_mic_noise_canceling",
-        serde_json::json!({ "enabled": enabled }),
-    )
-    .await?;
-    Ok(())
+    run_blocking(move || crate::hw::audio_effects::set_mic_noise_canceling(enabled))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
 pub async fn set_speaker_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
-        "set_speaker_noise_canceling",
-        serde_json::json!({ "enabled": enabled }),
-    )
-    .await?;
-    Ok(())
+    run_blocking(move || crate::hw::audio_effects::set_speaker_noise_canceling(enabled))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
 pub async fn set_voice_focus(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated("set_voice_focus", serde_json::json!({ "enabled": enabled })).await?;
-    Ok(())
+    run_blocking(move || crate::hw::audio_effects::set_voice_focus(enabled))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 // ── System Cleanup ───────────────────────────────────────────────────────────
