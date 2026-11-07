@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import { useToast } from '../../contexts/ToastContext';
+import { OsTurboMeasuredBlock, osTurboCounts } from '../../components/OsTurboMeasured';
 
 interface SysOptStatus {
   id: string;
@@ -14,6 +15,7 @@ interface SysOptStatus {
 interface OsTurboMeasuredStatus {
   inspected: number;
   applied: number;
+  pending: number;
   restored: number;
   skipped: number;
   failures: number;
@@ -25,6 +27,8 @@ interface OsTurboStatus {
   enabled: boolean;
   throttled_processes: number;
   power_plan: string;
+  /** The recovery snapshot references processes that no longer exist. */
+  snapshot_stale?: boolean;
   /** S39-003: truthful readback counts from the last sweep. */
   measured?: OsTurboMeasuredStatus;
 }
@@ -100,6 +104,8 @@ function SystemOptimizationTab() {
     [statuses],
   );
 
+  const turboCounts = osTurboCounts(osTurbo);
+
   return (
     <>
       <PageHeader
@@ -121,7 +127,11 @@ function SystemOptimizationTab() {
             <span className="toggle-desc">
               {osTurbo
                 ? osTurbo.enabled
-                  ? `${t('sysOpt.osTurboOn')} — ${t('sysOpt.osTurboPlan')}: ${osTurbo.power_plan}`
+                  ? `${t('sysOpt.osTurboPlan')}: ${osTurbo.power_plan} — ${
+                      turboCounts.inspected > 0
+                        ? t('sysOpt.osTurboOnSummary', turboCounts)
+                        : t('sysOpt.osTurboOnIdle')
+                    }`
                   : t('sysOpt.osTurboOff')
                 : t('common.unknown')}
             </span>
@@ -154,83 +164,14 @@ function SystemOptimizationTab() {
         </details>
 
         {/* S39-008: measured status — every number comes from a real
-            GetProcessInformation readback, never a guess. */}
-        {osTurbo?.measured && (
-          <div
-            style={{
-              marginTop: 14,
-              paddingTop: 12,
-              borderTop: '1px solid var(--border)',
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 600,
-                color: 'var(--text-dim)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.08em',
-                marginBottom: 8,
-              }}
-            >
-              {t('sysOpt.osTurboMeasuredTitle')}
-            </div>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
-                gap: '8px 14px',
-              }}
-            >
-              {(
-                [
-                  ['osTurboMeasuredInspected', osTurbo.measured.inspected],
-                  ['osTurboMeasuredApplied', osTurbo.measured.applied],
-                  ['osTurboMeasuredRestored', osTurbo.measured.restored],
-                  ['osTurboMeasuredSkipped', osTurbo.measured.skipped],
-                  ['osTurboMeasuredFailures', osTurbo.measured.failures],
-                ] as const
-              ).map(([key, value]) => (
-                <div key={key}>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                    {t(`sysOpt.${key}` as Parameters<typeof t>[0])}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 15,
-                      fontWeight: 600,
-                      fontVariantNumeric: 'tabular-nums',
-                      color: 'var(--text)',
-                    }}
-                  >
-                    {value}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div
-              style={{
-                marginTop: 10,
-                fontSize: 11,
-                color: 'var(--text-dim)',
-                display: 'flex',
-                gap: 12,
-                flexWrap: 'wrap',
-              }}
-            >
-              <span>
-                {osTurbo.measured.worker_active
-                  ? t('sysOpt.osTurboWorkerActive')
-                  : t('sysOpt.osTurboWorkerIdle')}
-              </span>
-              <span>
-                {osTurbo.measured.last_sweep_ms > 0
-                  ? t('sysOpt.osTurboSweepDone')
-                  : t('sysOpt.osTurboSweepNever')}
-              </span>
-            </div>
+            GetProcessInformation readback, never a guess. Shared with the
+            Performance tab so both views can never disagree. */}
+        {osTurbo?.snapshot_stale && (
+          <div className="alert alert-warn" style={{ marginTop: 12 }}>
+            ⚠ {t('performance.osTurboStaleSnapshot')}
           </div>
         )}
+        <OsTurboMeasuredBlock measured={osTurbo?.measured} />
       </div>
 
       {/* ── S55: Windows Debloater card ── */}

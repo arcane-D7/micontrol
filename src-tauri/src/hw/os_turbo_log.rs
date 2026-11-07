@@ -132,6 +132,10 @@ pub struct ActionRecord {
     /// Samples in each window (small integers).
     pub before_samples: Option<u32>,
     pub after_samples: Option<u32>,
+    /// How many processes the action covered. A count, never an identifier:
+    /// it carries no name, pid or path.
+    #[serde(default)]
+    pub processes_affected: Option<u32>,
 }
 
 /// Measured comparison attached to a record. Grouped into a struct so the
@@ -171,6 +175,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -194,6 +199,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -217,6 +223,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -240,6 +247,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -264,6 +272,16 @@ impl ActionRecord {
         self.confidence = Some(summary.confidence);
         self.before_samples = Some(summary.before_samples);
         self.after_samples = Some(summary.after_samples);
+        self
+    }
+
+    /// Attach how many processes the action covered.
+    ///
+    /// A count is not identifying — the record still has no name, pid, path or
+    /// error text — but it is the difference between "something happened" and
+    /// "three background processes were throttled".
+    pub fn with_affected(mut self, count: u32) -> Self {
+        self.processes_affected = Some(count);
         self
     }
 }
@@ -495,6 +513,27 @@ mod tests {
     }
 
     #[test]
+    fn affected_count_round_trips_and_stays_anonymous() {
+        let mut log = ActionLog::new(true);
+        log.push(
+            ActionRecord::applied(
+                TimeBucket::Morning,
+                PolicyAction::ThrottleAllowlistedBackground,
+            )
+            .with_affected(3),
+        );
+        let json = log.to_json();
+        assert!(json.contains("\"processes_affected\":3"), "{json}");
+        let loaded = ActionLog::from_json(&json, true);
+        assert_eq!(loaded.records()[0].processes_affected, Some(3));
+        // A count must not become an identifier: no long digit runs, no names.
+        for token in json.split(|c: char| !c.is_ascii_digit()) {
+            assert!(token.len() < 10, "count field leaked a long identifier");
+        }
+        assert!(!json.to_lowercase().contains(".exe"));
+    }
+
+    #[test]
     fn time_buckets_are_coarse() {
         assert_eq!(TimeBucket::from_hour(0), TimeBucket::Night);
         assert_eq!(TimeBucket::from_hour(5), TimeBucket::Night);
@@ -588,6 +627,7 @@ mod tests {
         let _: Option<ConfidenceBucket> = record.confidence;
         let _: Option<u32> = record.before_samples;
         let _: Option<u32> = record.after_samples;
+        let _: Option<u32> = record.processes_affected;
     }
 
     #[test]
