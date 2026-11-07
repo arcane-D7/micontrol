@@ -355,7 +355,7 @@ fn eq_process_name(entry_name: &str, wanted: &str) -> bool {
 /// (case-insensitive, `.exe` optional). One ToolHelp snapshot, no PowerShell.
 #[cfg(windows)]
 fn process_pids(wanted: &[&str]) -> Vec<u32> {
-    use windows::Win32::Foundation::CloseHandle;
+    use crate::util::win_handle::OwnedHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -364,16 +364,18 @@ fn process_pids(wanted: &[&str]) -> Vec<u32> {
     // SAFETY: the snapshot handle is closed before returning and the entry
     // struct is zero-initialised with its required `dwSize`.
     unsafe {
-        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+        let Ok(raw) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
             return Vec::new();
         };
+        // S67: RAII — the snapshot closes on scope exit even on early return.
+        let snapshot = OwnedHandle::new(raw);
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
 
         let mut pids = Vec::new();
-        let mut has = Process32FirstW(snapshot, &mut entry).is_ok();
+        let mut has = Process32FirstW(snapshot.raw(), &mut entry).is_ok();
         while has {
             let len = entry
                 .szExeFile
@@ -384,10 +386,10 @@ fn process_pids(wanted: &[&str]) -> Vec<u32> {
             if wanted.iter().any(|w| eq_process_name(&exe, w)) {
                 pids.push(entry.th32ProcessID);
             }
-            has = Process32NextW(snapshot, &mut entry).is_ok();
+            has = Process32NextW(snapshot.raw(), &mut entry).is_ok();
         }
 
-        let _ = CloseHandle(snapshot);
+        drop(snapshot); // OwnedHandle closes the kernel handle here
         pids
     }
 }

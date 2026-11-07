@@ -1719,6 +1719,9 @@ mod tests {
 
         /// Create a server/client pipe pair with the requested type, exactly
         /// like `ecram_service` (server) + MiControl (client) do.
+        // leak-check: both HANDLEs are owned by the returned `PipePair`, whose
+        // Drop runs DisconnectNamedPipe(server) + CloseHandle on both. The test
+        // helper intentionally hands ownership to the struct (SendHandle-style).
         fn make_pair(tag: &str, pipe_type: NAMED_PIPE_MODE) -> PipePair {
             let name = format!(
                 r"\\.\pipe\micontrol_test_{}_{}_{}",
