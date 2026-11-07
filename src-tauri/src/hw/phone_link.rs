@@ -82,21 +82,30 @@ pub fn get_phone_link_status() -> PhoneLinkStatus {
     }
 }
 
-/// Launch Phone Link app via URI scheme.
+/// Launch Phone Link app.
 ///
-/// S53 fix: Phone Link is a single-instance app — a fresh `ms-phone:` URI
-/// activation re-initializes the running `PhoneExperienceHost`, which tears
-/// down and re-handles its relay to the phone's Link to Windows service and
-/// breaks sync until the app is fully restarted. We therefore only fire the
-/// URI when the app is NOT already running; when it runs, activation is a
-/// no-op (the window is simply focused by Windows when the user needs it).
+/// S53 fix (kept): Phone Link is a single-instance app — a fresh `ms-phone:`
+/// URI activation re-initializes the running `PhoneExperienceHost`, which
+/// tears down and re-handles its relay to the phone's Link to Windows service
+/// and breaks sync until the app is fully restarted.
+///
+/// That guard used to turn the command into a silent no-op, because
+/// `PhoneExperienceHost` runs in the background almost permanently — so the
+/// UI button (and the five feature tiles) did nothing at all. The guard is
+/// now paired with a real *shell activation* of the running package
+/// (`IApplicationActivationManager::ActivateApplication`), which foregrounds
+/// the existing instance without a new `ms-phone:` launch. If that fails the
+/// error is returned so the UI can show it instead of pretending success.
 pub fn launch_phone_link() -> HardwareResult<()> {
     #[cfg(windows)]
     {
         if check_running() {
-            log::info!("[phone_link] already running — skipping ms-phone: activation (avoids relay reset that breaks sync)");
-            return Ok(());
+            log::info!(
+                "[phone_link] already running — activating existing instance (AUMID {PHONE_LINK_AUMID}) instead of ms-phone:"
+            );
+            return activate_phone_link();
         }
+        log::info!("[phone_link] not running — launching ms-phone:");
         std::process::Command::new("cmd")
             .args(["/c", "start", "", "ms-phone:"])
             .creation_flags(0x0800_0000)
@@ -122,6 +131,12 @@ pub fn launch_phone_link() -> HardwareResult<()> {
 /// S53 fix: same single-instance guard as `launch_phone_link` — a feature
 /// deep link while the app runs re-initializes the host and resets the sync
 /// channel (user-reported: "o app do windows para de sincronizar").
+///
+/// When the app is already running the feature deep link is therefore
+/// skipped, but the command is NOT a no-op any more: the running window is
+/// brought to the foreground through the shell activator and the caller gets
+/// an error if that fails. (Navigating inside Phone Link is not exposed by
+/// the package; the tile opens the app, the user picks the section.)
 pub fn launch_phone_link_feature(feature: &str) -> HardwareResult<()> {
     // Validate feature against allow-list to prevent URI injection
     const ALLOWED_FEATURES: &[&str] = &["Phone", "Messages", "Photos", "ScreenMirror", "Apps"];
@@ -135,13 +150,12 @@ pub fn launch_phone_link_feature(feature: &str) -> HardwareResult<()> {
     {
         if check_running() {
             log::info!(
-                "[phone_link] feature '{feature}' requested while app is running — skipping URI activation (avoids sync reset); opening plain ms-phone: focus instead"
+                "[phone_link] feature '{feature}' requested while running — focusing the existing window (ms-phone:{feature} would reset the relay)"
             );
-            // Plain launch: Windows focuses the existing window without a
-            // full re-activation of the feature session.
-            return launch_phone_link();
+            return activate_phone_link();
         }
         let uri = format!("ms-phone:{}", feature);
+        log::info!("[phone_link] launching deep link {uri}");
         std::process::Command::new("cmd")
             .args(["/c", "start", "", &uri])
             .creation_flags(0x0800_0000)
@@ -249,14 +263,233 @@ pub fn launch_phone_link_pairing(uri: &str) -> HardwareResult<()> {
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+/// Application User Model ID of the Phone Link package. Verified on Windows 11
+/// with `Get-StartApps` → `Microsoft.YourPhone_8wekyb3d8bbwe!App`. Shell
+/// activation through this AUMID foregrounds the running app; it does not
+/// re-run the `ms-phone:` protocol handler, so the Link-to-Windows relay is
+/// not reset.
+#[cfg(windows)]
+const PHONE_LINK_AUMID: &str = "Microsoft.YourPhone_8wekyb3d8bbwe!App";
+
+/// Process images Phone Link runs as: the modern UI host and the legacy proxy.
+#[cfg(windows)]
+const PHONE_LINK_PROCESSES: &[&str] = &["PhoneExperienceHost", "YourPhoneAppProxy"];
+
+/// Bring the already-running Phone Link window to the foreground.
+///
+/// Uses the shell's `IApplicationActivationManager` (the API the Start menu
+/// and taskbar use). This is the documented "activate, don't relaunch" path:
+/// it does not re-enter the `ms-phone:` protocol handler, so sync keeps
+/// working. Returns an error — instead of pretending success — when COM or
+/// the activation fails.
+#[cfg(windows)]
+fn activate_phone_link() -> HardwareResult<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        ApplicationActivationManager, IApplicationActivationManager, AO_NONE,
+    };
+
+    // SAFETY: CoInitializeEx/CoUninitialize are paired on this thread; the
+    // activation manager is an out-of-process shell object released at the
+    // end of the scope. Nothing is cached, so a pool thread that later runs
+    // other work sees a clean apartment.
+    unsafe {
+        let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // RPC_E_CHANGED_MODE means the thread already has another apartment
+        // model; COM is still usable, we just must not uninitialise it.
+        let must_uninit = init.is_ok();
+
+        let activation: windows::core::Result<u32> = (|| {
+            let manager: IApplicationActivationManager =
+                CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_ALL)?;
+            manager.ActivateApplication(&HSTRING::from(PHONE_LINK_AUMID), &HSTRING::new(), AO_NONE)
+        })();
+
+        if must_uninit {
+            CoUninitialize();
+        }
+
+        match activation {
+            Ok(pid) => {
+                log::info!("[phone_link] activation requested (pid {pid}); waiting for a window");
+                // Verification, not faith: the process can be "running" with
+                // no window at all (that was the original bug). A visible
+                // window is the only proof the user's click did something.
+                match wait_for_phone_link_window(std::time::Duration::from_secs(4)) {
+                    Some(title) => {
+                        log::info!("[phone_link] window visible: '{title}'");
+                        Ok(())
+                    }
+                    None => Err(HardwareError::Other(
+                        "Phone Link was activated but no window appeared. It may be running in the background — open it from the tray icon."
+                            .into(),
+                    )),
+                }
+            }
+            Err(e) => Err(HardwareError::Other(format!(
+                "Failed to focus Phone Link ({PHONE_LINK_AUMID}): {e}"
+            ))),
+        }
+    }
+}
+
+/// Case-insensitive executable-name comparison that ignores a `.exe` suffix
+/// on either side (`PROCESSENTRY32W.szExeFile` includes it, the constants here
+/// do not).
+fn eq_process_name(entry_name: &str, wanted: &str) -> bool {
+    fn norm(name: &str) -> String {
+        let trimmed = name.trim();
+        let stem = trimmed
+            .strip_suffix(".exe")
+            .or_else(|| trimmed.strip_suffix(".EXE"))
+            .unwrap_or(trimmed);
+        stem.to_ascii_lowercase()
+    }
+    norm(entry_name) == norm(wanted)
+}
+
+/// PIDs of the running processes whose image name matches `wanted`
+/// (case-insensitive, `.exe` optional). One ToolHelp snapshot, no PowerShell.
+#[cfg(windows)]
+fn process_pids(wanted: &[&str]) -> Vec<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: the snapshot handle is closed before returning and the entry
+    // struct is zero-initialised with its required `dwSize`.
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return Vec::new();
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        let mut pids = Vec::new();
+        let mut has = Process32FirstW(snapshot, &mut entry).is_ok();
+        while has {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let exe = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            if wanted.iter().any(|w| eq_process_name(&exe, w)) {
+                pids.push(entry.th32ProcessID);
+            }
+            has = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+
+        let _ = CloseHandle(snapshot);
+        pids
+    }
+}
+
+/// PIDs of the running Phone Link processes (empty when it is not running).
+#[cfg(windows)]
+fn phone_link_pids() -> Vec<u32> {
+    process_pids(PHONE_LINK_PROCESSES)
+}
+
+/// Is any process from `wanted` running?
+#[cfg(windows)]
+fn process_running_any(wanted: &[&str]) -> bool {
+    !process_pids(wanted).is_empty()
+}
+
+/// Titles of the visible top-level windows owned by Phone Link.
+///
+/// The `MainWindowHandle` of `PhoneExperienceHost` is 0 while the app sits in
+/// the background (its only windows are invisible helpers: the tray icon, a
+/// DDE server, the GDI+ hook). After a shell activation a visible window
+/// appears within a few hundred ms, so its presence is the observable proof
+/// that the button did something.
+#[cfg(windows)]
+fn phone_link_window_titles(pids: &[u32]) -> Vec<String> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible,
+    };
+
+    struct Search<'a> {
+        pids: &'a [u32],
+        titles: Vec<String>,
+    }
+
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` is the `&mut Search` passed to EnumWindows below and
+        // outlives the enumeration.
+        let search = &mut *(lparam.0 as *mut Search);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if search.pids.contains(&pid) && IsWindowVisible(hwnd).as_bool() {
+            let len = GetWindowTextLengthW(hwnd);
+            if len > 0 {
+                let mut buf = vec![0u16; (len + 1) as usize];
+                let copied = GetWindowTextW(hwnd, &mut buf);
+                if copied > 0 {
+                    search
+                        .titles
+                        .push(String::from_utf16_lossy(&buf[..copied as usize]));
+                }
+            }
+        }
+        BOOL(1) // keep enumerating
+    }
+
+    let mut search = Search {
+        pids,
+        titles: Vec::new(),
+    };
+    // SAFETY: EnumWindows only reads `search` through the pointer for the
+    // duration of the synchronous call.
+    unsafe {
+        let _ = EnumWindows(Some(collect), LPARAM(&mut search as *mut _ as isize));
+    }
+    search.titles
+}
+
+/// Wait (bounded) for a visible Phone Link window.
+#[cfg(windows)]
+fn wait_for_phone_link_window(timeout: std::time::Duration) -> Option<String> {
+    let pids = phone_link_pids();
+    if pids.is_empty() {
+        return None;
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(title) = phone_link_window_titles(&pids).into_iter().next() {
+            return Some(title);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 #[cfg(windows)]
 fn get_package_version() -> Option<String> {
+    // The previous command passed an array to `Get-AppxPackage -Name`, which on
+    // this PowerShell build is a scalar parameter:
+    //   Cannot convert 'System.Object[]' to the type 'System.String' ...
+    // → empty stdout → `package_version: null` in the UI. Positional wildcard
+    // matching (with the Microsoft.PhoneExperience fallback for newer builds)
+    // is valid on every build.
     let output = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Get-AppxPackage -Name 'Microsoft.YourPhone','Microsoft.PhoneExperience' | Select-Object -First 1 -ExpandProperty Version",
+            "$p = Get-AppxPackage *YourPhone*; if (-not $p) { $p = Get-AppxPackage *PhoneExperience* }; $p | Select-Object -First 1 -ExpandProperty Version",
         ])
         .creation_flags(0x0800_0000)
         .output()
@@ -462,24 +695,9 @@ fn read_paired_device_name() -> Option<String> {
 #[cfg(windows)]
 fn check_running() -> bool {
     // The modern Phone Link UI runs as PhoneExperienceHost; older builds
-    // use YourPhoneAppProxy. We check both, non-interactively.
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-Process -Name 'PhoneExperienceHost','YourPhoneAppProxy' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id",
-        ])
-        .creation_flags(0x0800_0000)
-        .output();
-
-    match output {
-        Ok(out) => {
-            let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            !pid.is_empty()
-        }
-        Err(_) => false,
-    }
+    // use YourPhoneAppProxy. A ToolHelp snapshot is ~1 ms — the previous
+    // PowerShell probe cost ~1 s and blocked the command thread.
+    process_running_any(PHONE_LINK_PROCESSES)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -496,6 +714,77 @@ mod tests {
     #[test]
     fn test_get_status_does_not_panic() {
         let _ = get_phone_link_status();
+    }
+
+    /// `PROCESSENTRY32W.szExeFile` carries the `.exe` suffix; the constant
+    /// list here does not. Both spellings, in any case, must match.
+    #[test]
+    fn process_name_comparison_ignores_suffix_and_case() {
+        assert!(eq_process_name(
+            "PhoneExperienceHost.exe",
+            "PhoneExperienceHost"
+        ));
+        assert!(eq_process_name(
+            "phoneexperiencehost.EXE",
+            "PhoneExperienceHost"
+        ));
+        assert!(eq_process_name(
+            "PhoneExperienceHost",
+            "PhoneExperienceHost.exe"
+        ));
+        assert!(!eq_process_name(
+            "PhoneExperienceHost.exe",
+            "YourPhoneAppProxy"
+        ));
+        assert!(!eq_process_name(
+            "NotPhoneExperienceHost.exe",
+            "PhoneExperienceHost"
+        ));
+        // Prefixes must not match: "PhoneExperienceHost2" is a different image.
+        assert!(!eq_process_name(
+            "PhoneExperienceHost2.exe",
+            "PhoneExperienceHost"
+        ));
+    }
+
+    /// Read-only process probe: an image name that cannot exist must not be
+    /// reported as running, and a real one must be found.
+    #[test]
+    fn process_probe_is_accurate() {
+        assert!(!process_running_any(&["micontroldefinitelynotrunning"]));
+        assert!(process_running_any(&["explorer"]));
+    }
+
+    /// Manual smoke test for the focus path: it really foregrounds Phone Link,
+    /// so it is `#[ignore]`d and only run on purpose:
+    ///   cargo test --lib hw::phone_link -- --ignored --nocapture
+    #[test]
+    #[ignore = "focuses a real window on the desktop"]
+    fn activates_the_running_phone_link_window() {
+        if !check_running() {
+            eprintln!("Phone Link is not running — nothing to activate");
+            return;
+        }
+        activate_phone_link().expect("ActivateApplication should foreground Phone Link");
+    }
+
+    /// F9 regression: the version must come back, not `None`. Only asserted
+    /// where Phone Link is actually installed (skip on clean CI images).
+    #[test]
+    fn package_version_is_parsed_when_installed() {
+        if !detect_phone_link() {
+            return;
+        }
+        let version = get_package_version();
+        assert!(
+            version.is_some(),
+            "package_version was None with Phone Link installed"
+        );
+        let v = version.unwrap();
+        assert!(
+            v.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "unexpected version string: {v:?}"
+        );
     }
 
     /// Real observed shape (Phone Link 1.26x, Xiaomi 14T): double-nested

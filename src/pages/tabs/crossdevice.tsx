@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { QRCodeCanvas } from 'qrcode.react';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { useToast } from '../../contexts/ToastContext';
 import ToggleRow from '../../components/ToggleRow';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
@@ -153,6 +154,7 @@ export default function CrossDeviceTab() {
   const [status, setStatus] = useState<PhoneLinkStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const { addToast } = useToast();
 
   // BLE presence (MIOT-05)
   const [presence, setPresence] = useState<PresenceStatus | null>(null);
@@ -177,6 +179,8 @@ export default function CrossDeviceTab() {
     name: 'MiControl-PC',
   });
   const [advBusy, setAdvBusy] = useState(false);
+  // Actual publisher state from `ble_advertise_status` (null = unknown yet).
+  const [advActive, setAdvActive] = useState<boolean | null>(null);
 
   // LocalSend (MIOT-06)
   const [peers, setPeers] = useState<LocalSendPeer[]>([]);
@@ -303,6 +307,16 @@ export default function CrossDeviceTab() {
     }
   }, []);
 
+  // Read the *real* publisher state. The config flag only says what the user
+  // asked for; `ble_advertise_status` says whether the radio is advertising.
+  const fetchAdvertiseStatus = useCallback(async () => {
+    try {
+      setAdvActive(await invoke<boolean>('ble_advertise_status'));
+    } catch {
+      setAdvActive(null);
+    }
+  }, []);
+
   // Persist + start/stop the BLE advertiser.
   const handleAdvToggle = async (enabled: boolean) => {
     setAdvBusy(true);
@@ -310,6 +324,9 @@ export default function CrossDeviceTab() {
       const next: BleAdvertiseConfig = { ...advCfg, enabled };
       await invoke('set_ble_advertise_config', { config: next });
       setAdvCfg(next);
+      // The publisher starts or aborts asynchronously on its own COM thread,
+      // so give it a moment before reading the state back.
+      window.setTimeout(() => void fetchAdvertiseStatus(), 400);
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
@@ -325,6 +342,7 @@ export default function CrossDeviceTab() {
     void fetchTranscription();
     void fetchNfc();
     void fetchAdvertise();
+    void fetchAdvertiseStatus();
   }, [
     fetchStatus,
     fetchPresence,
@@ -333,7 +351,18 @@ export default function CrossDeviceTab() {
     fetchTranscription,
     fetchNfc,
     fetchAdvertise,
+    fetchAdvertiseStatus,
   ]);
+
+  // Poll the publisher state while the tab is open: the advertiser can abort
+  // on its own (Bluetooth switched off, radio reclaimed) without any user
+  // action, and the UI must stop claiming it is advertising when it is not.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void fetchAdvertiseStatus();
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [fetchAdvertiseStatus]);
 
   const handleDiscover = async () => {
     setDiscovering(true);
@@ -616,11 +645,16 @@ export default function CrossDeviceTab() {
     }
   };
 
+  // Phone Link actions now do something observable when the app is already
+  // running (it usually is — PhoneExperienceHost is a background process):
+  // the backend activates the existing window and errors if it cannot. Every
+  // action therefore reports a toast instead of failing silently.
   const handleLaunch = async () => {
     try {
       await invoke('launch_phone_link');
+      addToast({ message: t('crossDevice.launchOk'), type: 'success' });
     } catch (e) {
-      setErrorMsg(String(e));
+      addToast({ message: `${t('crossDevice.launchError')}: ${String(e)}`, type: 'error' });
     }
   };
 
@@ -635,8 +669,9 @@ export default function CrossDeviceTab() {
   const handleFeature = async (feature: string) => {
     try {
       await invoke('launch_phone_link_feature', { feature });
+      addToast({ message: t('crossDevice.launchOk'), type: 'success' });
     } catch (e) {
-      setErrorMsg(String(e));
+      addToast({ message: `${t('crossDevice.launchError')}: ${String(e)}`, type: 'error' });
     }
   };
 
@@ -990,9 +1025,25 @@ export default function CrossDeviceTab() {
                 💾 {t('crossDevice.presenceSave')}
               </button>
             </div>
-            <p className="status-ok" style={{ fontSize: 13, marginTop: 10 }}>
-              {t('crossDevice.advActive')}
-            </p>
+            {/* Real publisher state, not the config flag. `ble_advertise_status`
+                is polled every 5 s and re-read after every change, so a radio
+                that refused the publisher (Bluetooth off) is visible instead
+                of the UI claiming "advertising" forever. */}
+            {advActive === true && (
+              <p className="status-ok" style={{ fontSize: 13, marginTop: 10 }}>
+                {t('crossDevice.advActive')}
+              </p>
+            )}
+            {advActive === false && (
+              <p className="status-warn" style={{ fontSize: 13, marginTop: 10 }}>
+                {t('crossDevice.advStopped')}
+              </p>
+            )}
+            {advActive === null && (
+              <p className="text-muted" style={{ fontSize: 13, marginTop: 10 }}>
+                {t('crossDevice.advChecking')}
+              </p>
+            )}
           </>
         )}
       </div>

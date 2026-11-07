@@ -580,23 +580,27 @@
     "noNetworks": "No se encontraron redes. Haga clic en Actualizar para buscar.",
     "refresh": "Actualizar",
     "connected": "Conectado",
-    "hiddenNetwork": "Red oculta — conéctese desde la configuración de WiFi de Windows"
+    "hiddenNetwork": "Red oculta — conéctese desde la configuración de WiFi de Windows",
+    "passwordRequired": "Introduce la contraseña de la red"
   },
   "cast": {
     "title": "Screen Cast",
-    "subtitle": "Proyecte su pantalla a una pantalla inalámbrica",
-    "noDevices": "No se encontraron dispositivos Miracast. Abra el panel de Conexión de Windows.",
+    "subtitle": "Proyecte a una pantalla inalámbrica mediante el panel de Windows",
+    "noDevices": "Aún no hay pantallas emparejadas con este PC. Abra el panel de proyección para descubrir una.",
     "scanError": "Error de búsqueda",
-    "panelOpened": "Panel de conexión abierto — seleccione su dispositivo",
+    "panelOpened": "Panel de proyección abierto: elija la pantalla allí",
     "error": "Error de proyección",
-    "stopped": "Proyección terminada",
-    "start": "Iniciar Proyección",
+    "stopped": "Panel de conexión cerrado",
+    "start": "Abrir panel de proyección",
     "casting": "Proyectando...",
-    "stop": "Parar",
-    "scan": "Buscar Dispositivos",
-    "availableDevices": "Dispositivos Disponibles",
+    "stop": "Cerrar panel",
+    "scan": "Actualizar pantallas emparejadas",
+    "availableDevices": "Pantallas emparejadas con este PC",
     "tip": "Consejo",
-    "tipText": "También puede presionar Win + K para abrir el panel de Conexión de Windows directamente."
+    "tipText": "También puede presionar Win + K para abrir el panel de Conexión de Windows directamente.",
+    "knownOnly": "Solo se listan las pantallas ya emparejadas con este PC. Windows descubre las nuevas desde el panel de proyección (Win + K).",
+    "panelNoteTitle": "Windows gestiona la proyección",
+    "panelNote": "MiControl abre el panel de proyección de Windows; la sesión (iniciar/parar) la gestiona Windows. Cerrar el panel no detiene una proyección en curso."
   },
   "system": {
     "title": "Sistema y Controladores",
@@ -1270,7 +1274,7 @@
     "presenceScanNow": "Escanear ahora",
     "presenceSave": "Guardar",
     "presenceSaved": "Ajustes de presencia guardados",
-    "presencePhoneHint": "Encuéntralo en Configuración de Windows > Bluetooth y dispositivos. Ejemplo: AA:BB:CC:DD:EE:FF",
+    "presencePhoneHint": "Encuéntralo en Configuración de Windows > Bluetooth y dispositivos. Ejemplo: AA:BB:CC:DD:EE:FF: los guiones y los dos puntos funcionan.",
     "presenceNoPhone": "Ningún teléfono configurado: define un MAC o nombre arriba",
     "presenceScanModalTitle": "Buscar dispositivos Bluetooth",
     "presenceScanModalDesc": "Selecciona tu teléfono de la lista. Los dispositivos emparejados aparecen primero; el escaneo activo encuentra dispositivos cercanos que anuncian.",
@@ -1392,7 +1396,11 @@
     "syncPause": "Pausar",
     "syncResume": "Reanudar",
     "syncError": "Error",
-    "syncApiKeyHint": "Configuración → Avanzado → Clave de API"
+    "syncApiKeyHint": "Configuración → Avanzado → Clave de API",
+    "launchOk": "Phone Link traído al frente",
+    "launchError": "No se pudo abrir Phone Link",
+    "advStopped": "Publicidad solicitada pero no está activa: comprueba que el Bluetooth esté encendido (una radio apagada aborta el publisher).",
+    "advChecking": "Comprobando el estado de la publicidad…"
   },
   "color": {
     "title": "Calibración de Color",

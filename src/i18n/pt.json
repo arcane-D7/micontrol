@@ -823,23 +823,27 @@
     "noNetworks": "Nenhuma rede encontrada. Clique em Atualizar para procurar.",
     "refresh": "Atualizar",
     "connected": "Ligado",
-    "hiddenNetwork": "Rede oculta — conecte pelas definições de WiFi do Windows"
+    "hiddenNetwork": "Rede oculta — conecte pelas definições de WiFi do Windows",
+    "passwordRequired": "Introduza a palavra-passe da rede"
   },
   "cast": {
     "title": "Screen Cast",
-    "subtitle": "Projete o seu ecrã para um ecrã sem fios",
-    "noDevices": "Nenhum dispositivo Miracast encontrado. Abra o painel Conexão do Windows.",
+    "subtitle": "Projete para um ecrã sem fios através do painel do Windows",
+    "noDevices": "Ainda não há ecrãs emparelhados com este PC. Abra o painel de projeção para descobrir um.",
     "scanError": "Erro de pesquisa",
-    "panelOpened": "Painel de conexão aberto — selecione o seu dispositivo",
+    "panelOpened": "Painel de projeção aberto — escolha o ecrã aí",
     "error": "Erro de projeção",
-    "stopped": "Projeção terminada",
-    "start": "Iniciar Projeção",
+    "stopped": "Painel de conexão fechado",
+    "start": "Abrir painel de projeção",
     "casting": "A projetar...",
-    "stop": "Parar",
-    "scan": "Procurar Dispositivos",
-    "availableDevices": "Dispositivos Disponíveis",
+    "stop": "Fechar painel",
+    "scan": "Atualizar ecrãs emparelhados",
+    "availableDevices": "Ecrãs emparelhados com este PC",
     "tip": "Dica",
-    "tipText": "Também pode premir Win + K para abrir o painel Conexão do Windows diretamente."
+    "tipText": "Também pode premir Win + K para abrir o painel Conexão do Windows diretamente.",
+    "knownOnly": "Só aparecem ecrãs já emparelhados com este PC. O Windows descobre os novos no painel de projeção (Win + K).",
+    "panelNoteTitle": "A projeção é gerida pelo Windows",
+    "panelNote": "O MiControl abre o painel de projeção do Windows; a sessão em si (iniciar/parar) é gerida pelo Windows. Fechar o painel não interrompe uma projeção em curso."
   },
   "consent": {
     "dialog": {
@@ -1270,7 +1274,7 @@
     "presenceScanNow": "Procurar agora",
     "presenceSave": "Guardar",
     "presenceSaved": "Definições de presença guardadas",
-    "presencePhoneHint": "Encontre-o em Definições do Windows > Bluetooth e dispositivos. Exemplo: AA:BB:CC:DD:EE:FF",
+    "presencePhoneHint": "Encontre-o em Definições do Windows > Bluetooth e dispositivos. Exemplo: AA:BB:CC:DD:EE:FF — hífenes ou dois-pontos, ambos funcionam.",
     "presenceNoPhone": "Nenhum telemóvel configurado — defina um MAC ou nome acima",
     "presenceScanModalTitle": "Procurar dispositivos Bluetooth",
     "presenceScanModalDesc": "Selecione o seu telemóvel na lista. Os dispositivos emparelhados aparecem primeiro; a pesquisa ativa encontra dispositivos próximos a anunciar.",
@@ -1392,7 +1396,11 @@
     "syncPause": "Pausar",
     "syncResume": "Retomar",
     "syncError": "Erro",
-    "syncApiKeyHint": "Configurações → Avançado → Chave de API"
+    "syncApiKeyHint": "Configurações → Avançado → Chave de API",
+    "launchOk": "Phone Link trazido para a frente",
+    "launchError": "Não foi possível abrir o Phone Link",
+    "advStopped": "Anúncio pedido mas não está a correr — verifique se o Bluetooth está ligado (rádio desligado aborta o publisher).",
+    "advChecking": "A verificar o estado do anúncio…"
   },
   "color": {
     "title": "Calibração de Cor",
