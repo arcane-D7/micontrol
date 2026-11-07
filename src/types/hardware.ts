@@ -242,6 +242,12 @@ export interface EramMap {
   display_brightness_level: number;
   keyboard_backlight_level: number;
   raw_hex: string;
+  /**
+   * `false` when the IoT driver denied the ERAM read and the backend fell back
+   * to a zero-filled map. Optional: older backends only signal it through
+   * `raw_hex === 'UNAVAILABLE'` (see `lib/ecram.ts`).
+   */
+  ecram_available?: boolean;
 }
 
 export interface AudioVolumeResult {

@@ -290,6 +290,9 @@
     "charging": "A Carregar",
     "discharging": "A Descarregar",
     "full": "Totalmente Carregada",
+    "powerSource": "Fonte de energia",
+    "acConnected": "AC ligado",
+    "acOnBattery": "Com bateria",
     "unknown": "Desconhecido",
     "timeRemaining": "Tempo restante",
     "hours": "h",
@@ -580,7 +583,9 @@
     "ai_limit_ailm": "Limite IA (AILM)",
     "long_battery_limit": "Limite de bateria prolongada",
     "display_brightness": "Brilho da tela",
-    "kb_backlight": "Retroiluminação do teclado"
+    "kb_backlight": "Retroiluminação do teclado",
+    "ec_unavailable_title": "EC RAM indisponível",
+    "ec_unavailable_hint": "O driver IoT deste modelo bloqueia a leitura da EC RAM, pelo que estes valores não podem ser medidos. São mostrados como — em vez de zeros que parecem leituras."
   },
   "updates": {
     "title": "Drivers & BIOS",

@@ -5,6 +5,7 @@ import type { useHardware } from '../hooks/useHardware';
 import type { PerformanceMode } from '../types/hardware';
 import { useSettings } from '../hooks/useSettings';
 import { BRIGHTNESS_PRESETS, getActivePreset } from '../lib/brightnessPresets';
+import { batteryState, batteryStateBadge } from '../lib/batteryState';
 
 type Hardware = ReturnType<typeof useHardware>;
 
@@ -51,6 +52,12 @@ export default function TrayPopup({ hardware }: Props) {
   const [isAdjustingVolume, setIsAdjustingVolume] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const { isConfigured: hasAiApi, settings, updateKey } = useSettings();
+
+  // Three states: charging / AC connected (plugged, not charging) / discharging.
+  // The two-state form used to claim "Discharging" with the charger plugged in.
+  const trayBatteryState = battery
+    ? batteryState(battery.is_charging, battery.is_plugged)
+    : 'discharging';
 
   const requestTrayResize = useCallback(() => {
     const el = rootRef.current;
@@ -196,9 +203,23 @@ export default function TrayPopup({ hardware }: Props) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600 }}>{battery.level}%</span>
-                  <span className={`badge ${battery.is_charging ? 'success' : 'warning'}`}>
-                    {battery.is_charging ? t('battery.charging') : t('battery.discharging')}
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>
+                    {battery.level}%
+                    {battery.is_plugged && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 500,
+                          color: 'var(--text-dim)',
+                          marginLeft: 6,
+                        }}
+                      >
+                        {t('battery.acConnected')}
+                      </span>
+                    )}
+                  </span>
+                  <span className={`badge ${batteryStateBadge(trayBatteryState)}`}>
+                    {t(`battery.${trayBatteryState}` as Parameters<typeof t>[0])}
                   </span>
                 </div>
                 <div className="progress-bar">
