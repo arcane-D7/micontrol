@@ -12,6 +12,27 @@ export interface AppUpdateInfo {
   body: string;
 }
 
+/**
+ * Window event fired by the settings card when the "Auto-update" switch
+ * changes, so the 4-hour loop reacts immediately instead of at the next tick.
+ */
+export const AUTO_UPDATE_CHANGED_EVENT = 'micontrol:auto-update-changed';
+
+/**
+ * Read the persisted auto-update master switch (`HKCU\SOFTWARE\MiControl\AutoUpdateEnabled`).
+ *
+ * The switch is opt-in: an unreadable value means "disabled", which is also the
+ * documented default.
+ */
+async function readAutoUpdateEnabled(): Promise<boolean> {
+  try {
+    const config = await invoke<{ enabled: boolean }>('get_auto_update_config');
+    return config.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
 export function useAutoUpdate() {
   const [state, setState] = useState<AppUpdateState>('idle');
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -141,20 +162,33 @@ export function useAutoUpdate() {
     setErrorMsg('');
   }, []);
 
-  // Check silently on startup (after 3s delay) and every 4 hours
+  // Check silently on startup (after 3s delay) and every 4 hours.
+  //
+  // F9.2: both checks are gated on the persisted "Auto-update" switch. Before
+  // this, `AutoUpdateEnabled` was written by the settings card and read by
+  // nobody, so turning it off changed nothing — the 4-hour checks kept running.
   useEffect(() => {
-    const initialTimer = setTimeout(() => {
+    let cancelled = false;
+
+    const silentCheck = async () => {
+      if (cancelled) return;
+      if (!(await readAutoUpdateEnabled())) return;
+      if (cancelled) return;
       void checkForUpdate(true);
-    }, 3000);
-    const interval = setInterval(
-      () => {
-        void checkForUpdate(true);
-      },
-      4 * 60 * 60 * 1000,
-    );
+    };
+
+    const initialTimer = setTimeout(() => void silentCheck(), 3000);
+    const interval = setInterval(() => void silentCheck(), 4 * 60 * 60 * 1000);
+    // The settings card announces a toggle so the change is effective now
+    // instead of at the next 4-hour tick.
+    const onToggle = () => void silentCheck();
+    window.addEventListener(AUTO_UPDATE_CHANGED_EVENT, onToggle);
+
     return () => {
+      cancelled = true;
       clearTimeout(initialTimer);
       clearInterval(interval);
+      window.removeEventListener(AUTO_UPDATE_CHANGED_EVENT, onToggle);
     };
   }, [checkForUpdate]);
 

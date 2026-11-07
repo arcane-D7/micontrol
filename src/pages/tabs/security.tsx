@@ -50,6 +50,9 @@ interface ScanResult {
 export default function SecurityTab() {
   const [status, setStatus] = useState<DefenderStatus | null>(null);
   const [threats, setThreats] = useState<ThreatEntry[]>([]);
+  // Distinct from "no threats": the query failed, so the empty list means
+  // "unknown", not "clean" (audit F4.2).
+  const [threatsError, setThreatsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -68,8 +71,10 @@ export default function SecurityTab() {
     try {
       const h = await invoke<ThreatHistory>('get_threat_history');
       setThreats(h.threats || []);
-    } catch {
+      setThreatsError(null);
+    } catch (e) {
       setThreats([]);
+      setThreatsError(String(e));
     }
     setLoading(false);
   }, []);
@@ -286,7 +291,14 @@ export default function SecurityTab() {
       {/* Threat History Card */}
       <div className="card">
         <h3>{t('security.threatHistory')}</h3>
-        {threats.length === 0 ? (
+        {threatsError ? (
+          // The history could not be read. This must be visibly different from
+          // "no threats": the old UI claimed ✓ Nenhuma ameaça on every failure.
+          <div className="alert alert-error">
+            <div>⚠ {t('security.threatHistoryError')}</div>
+            <div style={{ fontSize: 12, marginTop: 4, opacity: 0.85 }}>{threatsError}</div>
+          </div>
+        ) : threats.length === 0 ? (
           <p className="text-muted">✓ {t('security.noThreats')}</p>
         ) : (
           <table className="data-table" style={{ width: '100%' }}>

@@ -125,14 +125,24 @@ export default function CleanupTab() {
 
       {/* Cleanup Results */}
       {results && (
-        <div className="alert alert-success" style={{ marginBottom: 16 }}>
+        <div
+          className={`alert ${results.some((r) => r.errors.length > 0) ? 'alert-warn' : 'alert-success'}`}
+          style={{ marginBottom: 16 }}
+        >
           ✅ {t('cleanup.complete')}
+          {results.some((r) => r.errors.length > 0) && ` — ${t('cleanup.partial')}`}
           <ul style={{ marginTop: 8, fontSize: 12 }}>
             {results.map((r) => (
               <li key={r.category}>
                 {CATEGORY_ICONS[r.category] || '📁'} {r.category}: {formatBytes(r.freed_bytes)}{' '}
                 {t('cleanup.freed')}, {r.files_removed} {t('cleanup.filesRemoved')}
                 {r.files_skipped > 0 && ` (${r.files_skipped} ${t('cleanup.skipped')})`}
+                {r.errors.length > 0 && (
+                  <div style={{ color: 'var(--error, #e5484d)', marginTop: 2 }}>
+                    ⚠ {r.errors[0]}
+                    {r.errors.length > 1 && ` (+${r.errors.length - 1})`}
+                  </div>
+                )}
               </li>
             ))}
           </ul>

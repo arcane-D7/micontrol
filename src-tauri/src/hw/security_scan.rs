@@ -275,8 +275,11 @@ fn get_defender_status_wmi() -> HardwareResult<DefenderStatus> {
         antispyware_enabled: asw,
         real_time_protection: rt,
         definitions_updated: wmi_datetime("AntivirusSignatureLastUpdated"),
-        engine_version: crate::util::wmi_extract::extract_string(&status, "EngineVersion"),
-        product_version: crate::util::wmi_extract::extract_string(&status, "ProductVersion"),
+        // F4.6: `MSFT_MPComputerStatus` exposes AMEngineVersion/AMProductVersion
+        // — the old `EngineVersion`/`ProductVersion` names do not exist on the
+        // class, so both fields were always null in the UI.
+        engine_version: crate::util::wmi_extract::extract_string(&status, "AMEngineVersion"),
+        product_version: crate::util::wmi_extract::extract_string(&status, "AMProductVersion"),
         signature_version: crate::util::wmi_extract::extract_string(
             &status,
             "AntivirusSignatureVersion",
@@ -346,22 +349,79 @@ fn format_unix_secs(secs: i64) -> Option<String> {
     ))
 }
 
+/// PowerShell that returns the Defender detection history as JSON.
+///
+/// Audit F4.2: `MpCmdRun -Restore -ListAll` requires administrator and the app
+/// is not elevated, so the real answer was always an `Access is denied` the old
+/// parser silently discarded. `Get-MpThreatDetection`/`Get-MpThreat` work
+/// unprivileged and return structured objects.
+///
+/// The script reports its own outcome (`ok`): a failed query can never be
+/// mistaken for "no detections". Objects are serialised one by one and joined
+/// so a single detection is still an array (ConvertTo-Json unwraps
+/// single-element arrays at the top level).
+const THREAT_HISTORY_PS: &str = r#"$ErrorActionPreference = 'Stop';
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+try {
+  $meta = @{};
+  foreach ($t in @(Get-MpThreat)) { $meta[[string]$t.ThreatID] = $t }
+  $rows = @();
+  foreach ($d in @(Get-MpThreatDetection)) {
+    $m = $meta[[string]$d.ThreatID];
+    $name = $null; $sev = $null; $cat = $null;
+    if ($m) { $name = [string]$m.ThreatName; $sev = [int]$m.SeverityID; $cat = [int]$m.CategoryID }
+    $init = $null; $rem = $null;
+    if ($d.InitialDetectionTime) { $init = $d.InitialDetectionTime.ToString('yyyy-MM-dd HH:mm:ss') }
+    if ($d.RemediationTime) { $rem = $d.RemediationTime.ToString('yyyy-MM-dd HH:mm:ss') }
+    $res = @();
+    foreach ($r in @($d.Resources)) { if ($r) { $res += [string]$r } }
+    $rows += [pscustomobject]@{
+      threat_name = $name;
+      severity_id = $sev;
+      category_id = $cat;
+      action_id = [int]$d.CleaningActionID;
+      action_success = [bool]$d.ActionSuccess;
+      initial_detection_time = $init;
+      remediation_time = $rem;
+      resources = $res
+    }
+  }
+  $json = ($rows | ForEach-Object { $_ | ConvertTo-Json -Depth 4 -Compress }) -join ','
+  Write-Output ('{"ok":true,"items":[' + $json + ']}')
+} catch {
+  $msg = [string]$_.Exception.Message
+  Write-Output ('{"ok":false,"error":' + (ConvertTo-Json $msg -Compress) + '}')
+}"#;
+
 /// Get threat detection history from Windows Defender.
+///
+/// Returns `Err` when the history cannot be read — never an empty list. The
+/// UI renders an empty list as "✓ no threats", so silence would be a lie.
 pub fn get_threat_history() -> HardwareResult<ThreatHistory> {
-    let exe = find_mpcmdrun()?;
-
-    let exe_str = exe.to_str().ok_or_else(|| {
-        HardwareError::Other("Defender executable path is not valid UTF-8".to_string())
-    })?;
-    let output = no_window_command(exe_str)
-        .args(["-Restore", "-ListAll"])
+    let output = no_window_command("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            THREAT_HISTORY_PS,
+        ])
         .output()
-        .map_err(|e| HardwareError::Other(format!("Failed to get threat history: {e}")))?;
+        .map_err(|e| {
+            HardwareError::Other(format!("Failed to run PowerShell for threat history: {e}"))
+        })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
-    // Parse the output — MpCmdRun -Restore -ListAll outputs a list of threats
-    let threats = parse_threat_list(&stdout);
+    let threats = parse_threat_payload(&stdout).map_err(|e| {
+        if stderr.is_empty() {
+            e
+        } else {
+            HardwareError::Other(format!("{e} (PowerShell stderr: {stderr})"))
+        }
+    })?;
 
     Ok(ThreatHistory {
         total_count: threats.len(),
@@ -437,34 +497,137 @@ fn run_scan(scan_type: ScanType, custom_path: Option<&str>) -> HardwareResult<Se
     })
 }
 
-fn parse_threat_list(output: &str) -> Vec<ThreatEntry> {
-    let mut threats = Vec::new();
+/// Payload emitted by [`THREAT_HISTORY_PS`].
+#[derive(Debug, serde::Deserialize)]
+struct ThreatPayload {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    items: Vec<RawThreat>,
+}
 
-    // MpCmdRun -Restore -ListAll output format varies by version
-    // Look for lines containing threat names
-    for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("MpCmdRun") || line.starts_with("Copyright") {
-            continue;
-        }
-        if line.contains("Threat") || line.contains("Malware") || line.contains("Virus") {
-            threats.push(ThreatEntry {
-                threat_name: line.to_string(),
-                severity_id: None,
-                severity_name: None,
-                category_id: None,
-                category_name: None,
-                action_success: true,
-                action_id: None,
-                action_name: None,
-                initial_detection_time: None,
-                remediation_time: None,
-                resources: vec![],
-            });
-        }
+/// One detection as serialised by the PowerShell script.
+#[derive(Debug, serde::Deserialize)]
+struct RawThreat {
+    #[serde(default)]
+    threat_name: Option<String>,
+    #[serde(default)]
+    severity_id: Option<u32>,
+    #[serde(default)]
+    category_id: Option<u32>,
+    #[serde(default)]
+    action_id: Option<u32>,
+    #[serde(default)]
+    action_success: bool,
+    #[serde(default)]
+    initial_detection_time: Option<String>,
+    #[serde(default)]
+    remediation_time: Option<String>,
+    #[serde(default)]
+    resources: Vec<String>,
+}
+
+/// Parse the JSON contract produced by [`THREAT_HISTORY_PS`].
+///
+/// * `{"ok":true,"items":[]}`  → no detections (the only legitimate empty result)
+/// * `{"ok":false,"error":…}`  → `Err` (history unavailable)
+/// * anything unparsable       → `Err` (contract/PowerShell failure)
+fn parse_threat_payload(stdout: &str) -> HardwareResult<Vec<ThreatEntry>> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Err(HardwareError::Other(
+            "Threat history query returned no output (Defender cmdlets unavailable?)".to_string(),
+        ));
     }
 
-    threats
+    let payload: ThreatPayload = serde_json::from_str(trimmed).map_err(|e| {
+        // Keep the head of the payload in the error: this is what a blocked
+        // script policy or a localised PowerShell error looks like.
+        let head: String = trimmed.chars().take(300).collect();
+        HardwareError::Other(format!(
+            "Threat history payload is not valid JSON: {e} — got: {head}"
+        ))
+    })?;
+
+    if !payload.ok {
+        return Err(HardwareError::Other(format!(
+            "Threat history unavailable: {}",
+            payload
+                .error
+                .unwrap_or_else(|| "unknown Defender query error".to_string())
+        )));
+    }
+
+    Ok(payload
+        .items
+        .into_iter()
+        .map(|raw| ThreatEntry {
+            threat_name: raw
+                .threat_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "Unnamed detection".to_string()),
+            severity_id: raw.severity_id,
+            severity_name: raw.severity_id.map(severity_name),
+            category_id: raw.category_id,
+            category_name: raw.category_id.and_then(category_name),
+            action_success: raw.action_success,
+            action_id: raw.action_id,
+            action_name: raw.action_id.and_then(action_name),
+            initial_detection_time: raw.initial_detection_time,
+            remediation_time: raw.remediation_time,
+            resources: raw.resources,
+        })
+        .collect())
+}
+
+/// `MSFT_MpThreat.SeverityID` → label shown in the severity badge.
+///
+/// Always returns a label: an unmapped ID must not be rendered as "Low" by the
+/// UI's fallback.
+fn severity_name(id: u32) -> String {
+    match id {
+        1 => "Low",
+        2 => "Moderate",
+        4 => "High",
+        5 => "Severe",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+/// `MSFT_MpThreat.CategoryID` → label. `None` for IDs we do not map, so the UI
+/// shows the numeric ID instead of an invented name.
+fn category_name(id: u32) -> Option<String> {
+    let name = match id {
+        1 => "Adware",
+        2 => "Spyware",
+        3 => "Password stealer",
+        4 => "Trojan downloader",
+        5 => "Worm",
+        6 => "Backdoor",
+        7 => "Trojan",
+        8 => "Virus",
+        10 => "Rootkit",
+        11 => "Unwanted software",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
+/// `MSFT_MpThreatDetection.CleaningActionID` → label.
+///
+/// Only the unambiguous actions are mapped; for the rest the UI falls back to
+/// the action-success tick, which is truthful on its own.
+fn action_name(id: u32) -> Option<String> {
+    let name = match id {
+        1 => "Clean",
+        2 => "Quarantine",
+        3 => "Remove",
+        4 => "Allow",
+        _ => return None,
+    };
+    Some(name.to_string())
 }
 
 #[cfg(windows)]
@@ -521,16 +684,74 @@ mod tests {
 
     #[test]
     fn test_parse_threat_list_empty() {
-        let threats = parse_threat_list("");
+        // An explicit, successful "no detections" is the ONLY empty result.
+        let threats = parse_threat_payload("{\"ok\":true,\"items\":[]}").expect("valid payload");
         assert!(threats.is_empty());
     }
 
     #[test]
-    fn test_parse_threat_list_with_entries() {
-        let output = "Threat: Trojan:Win32/Test\nMalware: Win32/Dangerous\n";
-        let threats = parse_threat_list(output);
-        assert_eq!(threats.len(), 2);
-        assert!(threats[0].threat_name.contains("Trojan"));
+    fn test_parse_threat_payload_with_entries() {
+        let payload = r#"{"ok":true,"items":[
+            {"threat_name":"Trojan:Win32/Test","severity_id":4,"category_id":7,"action_id":2,
+             "action_success":true,"initial_detection_time":"2026-11-05 12:00:00",
+             "remediation_time":"2026-11-05 12:01:00","resources":["C:\\tmp\\eicar.com"]}
+        ]}"#;
+        let threats = parse_threat_payload(payload).expect("valid payload");
+        assert_eq!(threats.len(), 1);
+        assert_eq!(threats[0].threat_name, "Trojan:Win32/Test");
+        assert_eq!(threats[0].severity_id, Some(4));
+        assert_eq!(threats[0].severity_name.as_deref(), Some("High"));
+        assert_eq!(threats[0].category_name.as_deref(), Some("Trojan"));
+        assert_eq!(threats[0].action_name.as_deref(), Some("Quarantine"));
+        assert!(threats[0].action_success);
+        assert_eq!(
+            threats[0].initial_detection_time.as_deref(),
+            Some("2026-11-05 12:00:00")
+        );
+        assert_eq!(threats[0].resources, vec!["C:\\tmp\\eicar.com"]);
+    }
+
+    #[test]
+    fn test_parse_threat_payload_missing_optional_fields() {
+        // Defender omits fields the detection does not have; the parser must
+        // not drop the row (the old text parser did exactly that).
+        let payload = r#"{"ok":true,"items":[{"action_success":false}]}"#;
+        let threats = parse_threat_payload(payload).expect("valid payload");
+        assert_eq!(threats.len(), 1);
+        assert_eq!(threats[0].threat_name, "Unnamed detection");
+        assert!(threats[0].severity_name.is_none());
+        assert!(!threats[0].action_success);
+    }
+
+    #[test]
+    fn test_parse_threat_payload_failure_is_an_error() {
+        // This is the audit's F4.2 regression test: an access-denied answer
+        // must NEVER be turned into an empty list.
+        let payload = r#"{"ok":false,"error":"Access is denied."}"#;
+        let err = parse_threat_payload(payload).expect_err("must be an error");
+        assert!(err.to_string().contains("Access is denied"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_threat_payload_empty_output_is_an_error() {
+        let err = parse_threat_payload("   \r\n").expect_err("must be an error");
+        assert!(err.to_string().contains("no output"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_threat_payload_garbage_is_an_error() {
+        let err = parse_threat_payload("You need administrator privilege").expect_err("must fail");
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+    }
+
+    #[test]
+    fn test_severity_and_action_mappings() {
+        assert_eq!(severity_name(1), "Low");
+        assert_eq!(severity_name(5), "Severe");
+        assert_eq!(severity_name(99), "Unknown");
+        assert_eq!(action_name(1).as_deref(), Some("Clean"));
+        assert_eq!(action_name(99), None, "unmapped actions stay unmapped");
+        assert_eq!(category_name(99), None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
+import { AUTO_UPDATE_CHANGED_EVENT } from '../hooks/useAutoUpdate';
 import ToggleSwitch from './ToggleSwitch';
 
 interface AutoUpdateConfig {
@@ -46,6 +47,9 @@ export default function AutoUpdateCard() {
     setConfig((c) => ({ ...c, enabled }));
     try {
       await invoke('set_auto_update_enabled', { enabled });
+      // F9.2: the hook that owns the 4-hour checks listens for this, so the
+      // switch is effective immediately instead of at the next cycle.
+      window.dispatchEvent(new CustomEvent(AUTO_UPDATE_CHANGED_EVENT, { detail: { enabled } }));
     } catch {
       setConfig((c) => ({ ...c, enabled: !enabled }));
     }

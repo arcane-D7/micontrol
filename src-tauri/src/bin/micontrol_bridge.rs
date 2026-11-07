@@ -133,6 +133,7 @@ fn main() {
             //     <url> optional — overrides the persisted beta feed URL.
             //   micontrol_bridge auto-update --url <url>
             let url_arg = args.get(2).map(|s| s.as_str());
+            let explicit_url = url_arg.is_some();
             let url = if let Some(a) = url_arg {
                 if a == "--url" {
                     args.get(3).cloned()
@@ -142,6 +143,17 @@ fn main() {
             } else {
                 micontrol_lib::util::auto_update::beta_feed_url()
             };
+            // F9.2: the "Auto-update" switch finally gates the unattended
+            // updater. An explicit URL on the command line is an intentional
+            // override (dev/MCP: "aponta para esta build beta"), so it is
+            // honoured even when the switch is off; the persisted-feed path is
+            // the unattended one and must respect it.
+            if !explicit_url && !micontrol_lib::util::auto_update::is_enabled() {
+                println!(
+                    "auto-update is disabled in settings (HKCU\\SOFTWARE\\MiControl\\AutoUpdateEnabled=0) — nothing to do"
+                );
+                std::process::exit(0);
+            }
             match relay_auto_update(url) {
                 Ok(printed) => {
                     println!("{printed}");

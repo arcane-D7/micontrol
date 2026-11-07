@@ -650,15 +650,16 @@ NOT RECOMMENDED — Out of scope
 - `CleanupItem` struct: `category`, `description`, `size_bytes`, `file_count`
 - `CleanupResult` struct: `category`, `freed_bytes`, `files_removed`, `files_skipped`, `errors`
 - `scan_junk_files()` — enumerates known temp/cache directories and calculates total size
-- `clean_junk_files(categories)` — recursively deletes files in selected categories
-- Browser cache paths: Chrome, Edge, Firefox profile caches
-- Recycle Bin: emptied via `SHEmptyRecycleBinW` FFI (`shell32.dll`)
-- Tauri commands: `scan_junk_files` (read-only, non-elevated), `clean_junk_files` (elevated, returns `Vec<CleanupResult>`)
-- Elevated dispatch: `elevated.rs` — `clean_junk_files` case
-- Timeout: `elev_bridge.rs` — `ELEV_TIMEOUT_SLOW_SECS` (90s)
+- `clean_user_junk(categories)` — user-owned categories (temp, browser caches, thumbnails, Recycle Bin), **unprivileged, in the app process** so `%TEMP%`/`%LOCALAPPDATA%`/`%APPDATA%` resolve to the interactive user's profile
+- `clean_system_junk(categories)` — machine-wide categories only (Windows Update cache, Windows logs), elevated, by absolute path
+- Browser cache paths: Chrome/Edge `Default` + `Profile N` × `Cache`, `Code Cache`, `GPUCache`, `Service Worker\CacheStorage`, `ShaderCache`; Firefox `%LOCALAPPDATA%\Mozilla\Firefox\Profiles\*\cache2`
+- Recycle Bin: measured with `SHQueryRecycleBinW` and emptied via `SHEmptyRecycleBinW` FFI (`shell32.dll`)
+- Tauri commands: `scan_junk_files` (read-only, non-elevated), `clean_junk_files` (partitions the request per execution context, returns `Vec<CleanupResult>` including per-category errors)
+- Elevated dispatch: `elevated.rs` — `clean_system_junk` case
+- Timeout: `elev_bridge.rs` — `ELEV_TIMEOUT_SLOW_SECS` (90s); the unprivileged half uses a 180 s budget in `commands/system.rs`
 - Registered in `lib.rs` invoke_handler
 
-**Audit fix:** Fixed `clean_junk_files` to properly deserialize and return `Vec<CleanupResult>` from the elevated call instead of returning empty
+**Audit fix (F2.1/F2.2/F2.3):** cleanup used to be dispatched entirely through the LocalSystem bridge, so the user's `%TEMP%` was measured but `C:\Windows\Temp` was cleaned. It is now split by execution context, the Recycle Bin is really measured, and per-file failures reach the UI in `CleanupResult.errors`
 
 **Note:** Security scan not implemented — use Windows Defender instead
 

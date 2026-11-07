@@ -52,7 +52,6 @@ export interface ProcessTaskInfo {
   memory_mb: number;
   gpu_percent: number;
   npu_percent: number;
-  net_bytes_per_sec: number;
   thread_count: number;
 }
 
