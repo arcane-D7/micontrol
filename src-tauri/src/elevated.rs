@@ -519,7 +519,6 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
-
         "set_brightness" => {
             let level: u8 = match serde_json::from_value(cmd.args["level"].clone()) {
                 Ok(v) => v,
