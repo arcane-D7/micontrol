@@ -774,10 +774,18 @@ pub async fn wmi_ec_read_battery_health() -> Result<u32, ErrorResponse> {
 }
 
 /// Read AC adapter power in watts via WMAA (elevated).
+///
+/// P2 (audit 2026-11-07): on machines without the WMAA adapter-power class this
+/// used to fail with `0x80041002` (`WBEM_E_NOT_FOUND`) on every poll — 115
+/// failures in 49 h. It now returns a **structured answer**:
+/// `{ supported: false, watts: null, reason }`. That is a success, not an error,
+/// and the caller can simply hide the field.
 #[tauri::command]
-pub async fn wmi_ec_read_adapter_power() -> Result<u32, ErrorResponse> {
-    let raw = elev_bridge::run_elevated("wmi_ec_read_adapter_power", serde_json::json!({})).await?;
-    Ok(raw.as_u64().unwrap_or(0) as u32)
+pub async fn wmi_ec_read_adapter_power(
+) -> Result<crate::hw::adapter_power::AdapterPowerReading, ErrorResponse> {
+    crate::hw::adapter_power::read_via_bridge()
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 /// Read all EC sensor data in one call via WMAA (elevated).
