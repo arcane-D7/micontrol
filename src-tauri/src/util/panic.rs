@@ -68,11 +68,20 @@ pub fn install_panic_hook() {
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_else(|| "<unknown>".to_string());
 
-        // Log to the application logger (fern → file + stderr)
-        log::error!("PANIC at {}: {}", loc_str, payload_str);
+        // P4: persist a panic marker so the next start can say "previous
+        // session ended in a panic" instead of guessing between crash and kill.
+        // `cfg(not(test))` keeps the crate's own unit tests (which install the
+        // hook globally and panic on purpose) from writing into the real log
+        // directory of the developer/user running the suite.
+        #[cfg(not(test))]
+        crate::util::session_marker::record_panic_from_hook();
+
+        // Log to the application logger (fern → file + stderr) with the
+        // greppable `PANIC:` marker every crash report tool can key on.
+        log::error!(target: "applog", "PANIC: at {}: {}", loc_str, payload_str);
 
         // Also print to stderr directly in case the logger isn't initialized
-        eprintln!("PANIC at {}: {}", loc_str, payload_str);
+        eprintln!("PANIC: at {}: {}", loc_str, payload_str);
 
         // Capture for the crash-report pipeline (no-op when disabled).
         // The location string may contain absolute source paths on debug

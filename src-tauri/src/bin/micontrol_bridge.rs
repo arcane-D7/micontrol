@@ -1230,18 +1230,16 @@ mod pipe_server {
     /// this there was NO way to see whether a client request even reached the
     /// worker — the recurring "No response" loop was undiagnosable.
     ///
-    /// S64: size-based rotation (8 MiB x 3) — this file reached 18 MB in one
-    /// release cycle with no cap.
+    /// S64: size-based rotation (8 MiB x 7 since the 2026-11-07 logging fix) —
+    /// this file reached 18 MB in one release cycle with no cap.
     fn bridge_log(msg: &str) {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
         let dir = std::path::Path::new("C:\\ProgramData\\MiControl\\logs");
         let path = dir.join("bridge.log");
+        // `append_line` adds the RFC 3339 timestamp and writes the record in a
+        // single append — do not prepend a second (epoch) timestamp here.
         if let Err(e) = micontrol_lib::util::log_rotation::append_line(
             &path,
-            &format!("{ts} {msg}"),
+            msg,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
         ) {
@@ -2047,13 +2045,14 @@ mod watchdog {
             .unwrap_or_default()
             .as_secs();
         eprintln!("[{ts}] [watchdog] {msg}");
-        // S64: persist with size-based rotation (the previous comment said
-        // "rotating log" but the implementation was a plain unbounded append).
+        // S64: persist with size-based rotation, 8 MiB x 7 (the previous
+        // comment said "rotating log" but it was a plain unbounded append).
         let dir = marker_dir().join("logs");
         let path = dir.join("watchdog.log");
+        // `append_line` owns the timestamp (RFC 3339) and the whole-line write.
         let _ = micontrol_lib::util::log_rotation::append_line(
             &path,
-            &format!("{ts} {msg}"),
+            msg,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
         );

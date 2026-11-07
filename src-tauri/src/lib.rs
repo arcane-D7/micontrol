@@ -5,7 +5,9 @@
 
 mod bootstrap;
 mod commands;
-mod debug_log;
+// Public so the integration tests (`tests/logging_e2e.rs`) and any future
+// diagnostics command can resolve the log file the app actually writes.
+pub mod debug_log;
 pub mod elev_bridge;
 pub mod elevated;
 mod health_supervisor;
@@ -1062,9 +1064,18 @@ pub fn run() {
                     // Guard 2: record the hide timestamp so toggle_tray_popup can tell
                     //          whether the focus-loss was caused by a tray-icon click
                     //          (mouse-down steals focus before mouse-up fires Click).
-                    let age = now_ms().saturating_sub(TRAY_SHOWN_AT_MS.load(Ordering::Relaxed));
-                    log::info!("[tray] Focused(false): age_since_shown={age}ms");
-                    if age < 500 {
+                    // P6: log a real duration, not the epoch. `0` in the slot
+                    // means "never shown this session" → `age_since_shown=unset`
+                    // (the old code printed `now - 0` = 56.8 years).
+                    let now = now_ms();
+                    let shown_at = TRAY_SHOWN_AT_MS.load(Ordering::Relaxed);
+                    log::info!(
+                        "[tray] Focused(false): {}",
+                        crate::util::log_fields::duration_field("age_since_shown", now, shown_at)
+                    );
+                    // A popup that was never shown has no show-age to protect.
+                    if crate::util::log_fields::elapsed_since(now, shown_at).unwrap_or(u64::MAX) < 500
+                    {
                         return; // too soon after show — ignore this focus-loss
                     }
                     TRAY_HIDDEN_AT_MS.store(now_ms(), Ordering::Relaxed);
@@ -1094,8 +1105,17 @@ pub fn run() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running MiControl");
+        .build(tauri::generate_context!())
+        .expect("error while building MiControl")
+        .run(|_app_handle, event| {
+            // P4: every clean shutdown funnels through `RunEvent::Exit` —
+            // tray Quit, `app.exit(0)` from any command, and the dev-mode
+            // window close. Log the lifecycle marker and persist it so the
+            // next start can tell "clean" from "crash/kill".
+            if let tauri::RunEvent::Exit = event {
+                crate::util::session_marker::mark_clean_shutdown();
+            }
+        });
 }
 
 /// Resize the tray popup window, keeping the bottom edge fixed (grows upward).
@@ -1286,9 +1306,14 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
         // tray area steals focus before mouse-up fires the TrayIconEvent::Click).
         // If hidden less than 300 ms ago, treat this click as a toggle-off and
         // do NOT re-show — the popup should stay closed.
-        let elapsed = now_ms().saturating_sub(TRAY_HIDDEN_AT_MS.load(Ordering::Relaxed));
-        log::info!("[tray] elapsed_since_hidden={elapsed}ms");
-        if elapsed < 300 {
+        // P6: real duration (or `unset` when the popup was never hidden).
+        let now = now_ms();
+        let hidden_at = TRAY_HIDDEN_AT_MS.load(Ordering::Relaxed);
+        log::info!(
+            "[tray] {}",
+            crate::util::log_fields::duration_field("elapsed_since_hidden", now, hidden_at)
+        );
+        if crate::util::log_fields::elapsed_since(now, hidden_at).unwrap_or(u64::MAX) < 300 {
             log::info!("[tray] debounce active, aborting show");
             return;
         }
