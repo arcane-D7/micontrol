@@ -47,6 +47,83 @@ const USER_QUIT_SENTINEL_REL: &str = r"MiControl\watchdog_user_quit";
 #[cfg(windows)]
 const HEARTBEAT_REL: &str = r"MiControl\heartbeat";
 
+/// Consecutive async-runtime probe failures after which the app escalates to
+/// the bridge watchdog by writing [`STARVATION_MARKER`].
+///
+/// One probe takes up to 5 s and the heartbeat ticker sleeps 10 s, so 10
+/// consecutive failures ≈ 2.5 minutes of a wedged tokio runtime — long enough
+/// to rule out a brief thread-pool spike, short enough to matter (the 06-Nov
+/// incident lasted 2 h 46 min because `ui_ok` had no consumer).
+pub const STARVATION_ESCALATE_FAILS: u32 = 10;
+
+/// Machine-readable escalation marker (under `%ProgramData%\MiControl`).
+///
+/// Written by this module when the async runtime has been starved for
+/// [`STARVATION_ESCALATE_FAILS`] consecutive probes; read by the SYSTEM
+/// bridge watchdog, which force-restarts the app. Format:
+/// `"<epoch_ms>\n<pid>\n<fails>\n"` — same shape as the heartbeat, so a
+/// human reading either file sees the same fields.
+pub const STARVATION_MARKER: &str = "runtime_starved";
+
+/// How long a starvation marker is trusted by the watchdog.
+///
+/// The writer refreshes it every [`STARVATION_ESCALATE_FAILS`] failures
+/// (~2.5 min); anything older belongs to a previous session and must be
+/// ignored (`pid` is checked as well).
+pub const STARVATION_MARKER_TTL_MS: u64 = 180_000;
+
+/// Snapshot of the escalation marker (producer: `write_starvation_marker`,
+/// consumer: the bridge watchdog).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StarvationState {
+    /// Wall-clock time the marker was written (epoch ms).
+    pub ts_ms: u64,
+    /// PID of the app that reported the starvation.
+    pub pid: u32,
+    /// Consecutive failed async-runtime probes at the time of writing.
+    pub fails: u32,
+}
+
+/// Serialise a starvation marker. Pure, so the writer and the watchdog's
+/// parser can be tested against the same bytes.
+pub fn format_starvation_marker(state: StarvationState) -> String {
+    format!("{}\n{}\n{}\n", state.ts_ms, state.pid, state.fails)
+}
+
+/// Parse a starvation marker. Strict: all three lines must be present and
+/// valid, otherwise the watchdog ignores the file (never acts on garbage).
+pub fn parse_starvation_marker(content: &str) -> Result<StarvationState, &'static str> {
+    let mut lines = content.lines();
+    let ts_ms = lines
+        .next()
+        .ok_or("missing timestamp")?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "invalid timestamp")?;
+    let pid = lines
+        .next()
+        .ok_or("missing pid")?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "invalid pid")?;
+    let fails = lines
+        .next()
+        .ok_or("missing fails")?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "invalid fails")?;
+    if ts_ms == 0 {
+        return Err("zero timestamp");
+    }
+    if pid == 0 {
+        return Err("zero pid");
+    }
+    if fails == 0 {
+        return Err("zero fails");
+    }
+    Ok(StarvationState { ts_ms, pid, fails })
+}
+
 /// Crash recovery status information.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CrashRecoveryStatus {
@@ -362,6 +439,93 @@ pub fn watchdog_enabled_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(pd).join(r"MiControl\watchdog_enabled"))
 }
 
+/// Machine-wide escalation marker path (see [`STARVATION_MARKER`]).
+#[cfg(windows)]
+pub fn starvation_marker_path() -> Option<std::path::PathBuf> {
+    let pd = std::env::var_os("ProgramData")?;
+    Some(
+        std::path::PathBuf::from(pd)
+            .join("MiControl")
+            .join(STARVATION_MARKER),
+    )
+}
+
+/// Is this failure count an escalation boundary?
+///
+/// The first crossing at [`STARVATION_ESCALATE_FAILS`] writes the marker; every
+/// further multiple refreshes its timestamp so the watchdog keeps trusting it
+/// while the runtime stays wedged.
+fn should_escalate(fails: u32) -> bool {
+    fails >= STARVATION_ESCALATE_FAILS && fails.is_multiple_of(STARVATION_ESCALATE_FAILS)
+}
+
+/// Should this failure be logged?
+///
+/// The 06-Nov starvation produced 666 identical ERROR lines in 2 h 46 min —
+/// the log became useless and nothing acted on it. Log the first two failures
+/// (so a short spike is diagnosable) and then only at escalation boundaries.
+fn should_log_failure(fails: u32) -> bool {
+    fails <= 2 || should_escalate(fails)
+}
+
+/// Write/refresh the escalation marker. Best effort — a read-only ProgramData
+/// only degrades to "no escalation", never a panic.
+#[cfg(windows)]
+fn write_starvation_marker(fails: u32) {
+    let Some(path) = starvation_marker_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let body = format_starvation_marker(StarvationState {
+        ts_ms,
+        pid: std::process::id(),
+        fails,
+    });
+    match std::fs::write(&path, body) {
+        Ok(()) => log::error!(
+            target: "hw::crash_recovery",
+            "async runtime starved {fails} consecutive probes — escalated to the bridge \
+             watchdog ({}); expecting a force-restart",
+            path.display()
+        ),
+        Err(e) => log::warn!(
+            target: "hw::crash_recovery",
+            "async runtime starved {fails} consecutive probes but the escalation \
+             marker could not be written ({}): {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Remove the escalation marker once the runtime schedules tasks again.
+#[cfg(windows)]
+fn clear_starvation_marker(recovered_after: u32) {
+    let Some(path) = starvation_marker_path() else {
+        return;
+    };
+    if path.exists() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => log::info!(
+                target: "hw::crash_recovery",
+                "async runtime recovered after {recovered_after} failed probes — \
+                 escalation marker cleared"
+            ),
+            Err(e) => log::warn!(
+                target: "hw::crash_recovery",
+                "async runtime recovered but the escalation marker could not be \
+                 removed ({}): {e}",
+                path.display()
+            ),
+        }
+    }
+}
+
 /// Enable or disable the MiControlBridge watchdog.
 ///
 /// Called at every startup (mirroring the current autostart state) and by the
@@ -466,6 +630,11 @@ static ASYNC_PROBE_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// Consecutive async-probe failures. ui_ok flips to 0 only after two probes
 /// in a row fail (~20 s of starvation at the 10 s heartbeat cadence), so a
 /// brief worker-thread spike does not trigger a watchdog restart.
+///
+/// The counter also drives escalation: at [`STARVATION_ESCALATE_FAILS`] the
+/// app writes [`STARVATION_MARKER`] for the bridge watchdog. Before 2026-11-07
+/// this counter only produced one ERROR log line per tick — 666 lines over
+/// 2 h 46 min with no action.
 static ASYNC_PROBE_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Is the tokio runtime (the one Tauri commands and poll loops run on) still
@@ -487,23 +656,32 @@ fn async_runtime_alive() -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if ASYNC_PROBE_DONE.load(std::sync::atomic::Ordering::SeqCst) {
-            ASYNC_PROBE_FAILS.store(0, std::sync::atomic::Ordering::SeqCst);
+            let previous = ASYNC_PROBE_FAILS.swap(0, std::sync::atomic::Ordering::SeqCst);
+            if previous > 0 {
+                clear_starvation_marker(previous);
+            }
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     let fails = ASYNC_PROBE_FAILS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    if fails == 1 {
-        log::warn!(
-            target: "hw::crash_recovery",
-            "async runtime probe failed once (workers may be starved)"
-        );
-    } else {
-        log::error!(
-            target: "hw::crash_recovery",
-            "async runtime probe failed {fails} consecutive times — runtime starved"
-        );
+    if should_escalate(fails) {
+        // Crossing the threshold (and every refresh after it) is both the
+        // log line and the machine-readable escalation to the watchdog.
+        write_starvation_marker(fails);
+    } else if should_log_failure(fails) {
+        if fails == 1 {
+            log::warn!(
+                target: "hw::crash_recovery",
+                "async runtime probe failed once (workers may be starved)"
+            );
+        } else {
+            log::error!(
+                target: "hw::crash_recovery",
+                "async runtime probe failed {fails} consecutive times — runtime starved"
+            );
+        }
     }
     fails >= 2
 }
@@ -549,7 +727,19 @@ pub fn write_heartbeat() {
         // its tokio ticker are still running.
         let ui_ok = if ui_is_alive() { 1 } else { 0 };
         let contents = format!("{ts_ms}\n{pid}\n{ui_ok}\n");
-        let ok = std::fs::write(&path, contents).is_ok();
+        // Write-then-rename: the watchdog parses all three lines strictly, so
+        // it must never observe a truncated file mid-write (a torn read would
+        // look like "unreadable heartbeat" and could cost the app a restart).
+        // `fs::rename` replaces the destination on Windows.
+        let tmp = path.with_extension("tmp");
+        let mut ok =
+            std::fs::write(&tmp, &contents).is_ok() && std::fs::rename(&tmp, &path).is_ok();
+        if !ok {
+            // Fallback (e.g. AV holds the temp file): direct write. The
+            // watchdog tolerates a torn read with a short retry.
+            let _ = std::fs::remove_file(&tmp);
+            ok = std::fs::write(&path, contents).is_ok();
+        }
         if !ok {
             log::warn!(
                 target: "hw::crash_recovery",
@@ -586,5 +776,73 @@ pub fn start_heartbeat_ticker() {
                 })
                 .expect("failed to spawn heartbeat thread");
         });
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starvation_marker_round_trips() {
+        let state = StarvationState {
+            ts_ms: 1_794_044_373_192,
+            pid: 2944,
+            fails: 10,
+        };
+        let body = format_starvation_marker(state);
+        assert_eq!(body, "1794044373192\n2944\n10\n");
+        assert_eq!(parse_starvation_marker(&body).expect("round trip"), state);
+        // Trailing whitespace / extra lines must not break the consumer.
+        assert_eq!(
+            parse_starvation_marker("1794044373192\r\n2944\r\n10\r\n").expect("crlf"),
+            state
+        );
+    }
+
+    #[test]
+    fn starvation_marker_rejects_truncated_and_garbage() {
+        for bad in [
+            "",
+            "1794044373192",
+            "1794044373192\n2944",
+            "1794044373192\n2944\n",
+            "garbage\n2944\n12\n",
+            "1794044373192\nnope\n12\n",
+            "1794044373192\n2944\nmany\n",
+            "0\n2944\n12\n",
+            "1794044373192\n0\n12\n",
+            "1794044373192\n2944\n0\n",
+        ] {
+            assert!(parse_starvation_marker(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    /// Escalation must happen at N consecutive failures (and refresh on every
+    /// further multiple), never before.
+    #[test]
+    fn escalation_starts_at_ten_consecutive_failures() {
+        assert_eq!(STARVATION_ESCALATE_FAILS, 10);
+        for fails in 0..STARVATION_ESCALATE_FAILS {
+            assert!(!should_escalate(fails), "fails={fails} must not escalate");
+        }
+        assert!(should_escalate(10));
+        assert!(!should_escalate(11));
+        assert!(should_escalate(20), "the marker must be refreshed");
+        assert!(should_escalate(30));
+    }
+
+    /// The 06-Nov storm was one ERROR line per probe (666 lines). With
+    /// throttling the same 30 failures produce five lines.
+    #[test]
+    fn failure_logs_are_throttled() {
+        let logged: Vec<u32> = (1..=30).filter(|f| should_log_failure(*f)).collect();
+        assert_eq!(
+            logged,
+            vec![1, 2, 10, 20, 30],
+            "only the first spike, the second failure and escalation boundaries are logged"
+        );
     }
 }
