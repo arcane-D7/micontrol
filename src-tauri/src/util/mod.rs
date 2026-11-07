@@ -19,6 +19,7 @@ pub mod mcp_config;
 pub mod panic;
 pub mod registry;
 pub mod retry;
+pub mod webview_retry;
 pub mod win_handle;
 pub mod wmi_extract;
 pub mod xml;
