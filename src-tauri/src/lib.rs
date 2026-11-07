@@ -994,6 +994,17 @@ pub fn run() {
                 crate::hw::ble_presence::start_presence_monitor();
             }
 
+            // MIOT-38: BLE advertising. The publisher lives on its own COM
+            // thread and does not survive a restart, so a persisted
+            // `BleAdvertise\Enabled=1` was silently ignored until the user
+            // toggled it again — while the UI claimed "advertising active".
+            // Re-arm it here and let the UI read `ble_advertise_status` for
+            // the real state.
+            #[cfg(windows)]
+            if crate::hw::ble_advertise::get_config().enabled {
+                crate::hw::ble_advertise::start_advertising();
+            }
+
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
 
