@@ -447,6 +447,12 @@ pub fn rotate_key() -> Result<(), String> {
             .map_err(|e| format!("Failed to backup old HMAC key: {e}"))?;
     }
 
+    // Preserve the audit sub-key derived from the OLD master before it is
+    // replaced. Without this, `consent_audit.log` entries signed with the old
+    // key become permanently unverifiable (observed: all four 2026-09-05
+    // entries failing after the 2026-10-07 rotation).
+    crate::util::consent_audit::pin_key_before_rotation();
+
     // Generate a new key
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
@@ -456,6 +462,10 @@ pub fn rotate_key() -> Result<(), String> {
 
     // Restrict ACL on the new key
     restrict_file_acl(&path)?;
+
+    // Record the audit sub-key of the new master so future entries land on the
+    // current key while `.old` keeps the pre-rotation one verifiable.
+    crate::util::consent_audit::activate_key_after_rotation();
 
     log::info!("HMAC key rotated successfully");
     Ok(())

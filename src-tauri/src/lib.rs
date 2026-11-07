@@ -124,6 +124,72 @@ async fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Build a webview window with the WebView2 UDF-lock retry.
+///
+/// `tauri_runtime_wry` fails with `HRESULT(0x800700AA)` (`ERROR_BUSY`) while a
+/// previous `msedgewebview2.exe` still holds the WebView2 user-data folder —
+/// the exact failure logged twice in production (`22:19:16` / `22:19:40`,
+/// 63 s and 87 s after a crash relaunch). `build()` used to be called as
+/// `let _ = …build()`, so the error was dropped and the app carried on with no
+/// webview at all (the pre-created tray popup then read 0×0). Retrying is safe
+/// because the lock is transient; any other error is returned immediately.
+fn build_webview_with_retry<T>(
+    label: &str,
+    build: impl FnMut() -> Result<T, tauri::Error>,
+) -> Result<T, tauri::Error> {
+    crate::util::webview_retry::retry_webview_create(
+        label,
+        &crate::util::webview_retry::WEBVIEW_RETRY_DELAYS_MS,
+        build,
+        std::thread::sleep,
+    )
+}
+
+/// Build (or rebuild) the main window.
+///
+/// Every path that has to re-create it goes through here: the tray "open" item,
+/// the single-instance relaunch, and the `WindowEvent::Destroyed` self-heal.
+fn build_main_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
+    build_webview_with_retry("main", || {
+        tauri::WebviewWindowBuilder::new(
+            app,
+            "main",
+            tauri::WebviewUrl::App("index.html?window=main".into()),
+        )
+        .title("MiControl")
+        .inner_size(950.0, 660.0)
+        .resizable(true)
+        .decorations(true)
+        .build()
+    })
+}
+
+/// Build the tray quick-access popup (hidden).
+///
+/// Shared by the startup pre-creation, the on-demand path and the 0×0
+/// recreation path so the three cannot drift apart (they were duplicated
+/// before, which is how the pre-created popup kept a size the other paths did
+/// not know about).
+fn build_tray_popup(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
+    build_webview_with_retry("tray", || {
+        tauri::WebviewWindowBuilder::new(
+            app,
+            "tray",
+            tauri::WebviewUrl::App("index.html?window=tray".into()),
+        )
+        .title("")
+        .inner_size(POPUP_W, POPUP_H_DEFAULT)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .build()
+    })
+}
+
 /// Show, un-minimize and focus the main window. Handles the three failure
 /// modes reported by users: window minimized (show() alone does not restore
 /// it), window behind other windows (set_focus alone may not raise it) and
@@ -159,16 +225,10 @@ fn raise_main_window(app: &tauri::AppHandle) {
             });
         }
         None => {
-            let _ = tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::App("index.html?window=main".into()),
-            )
-            .title("MiControl")
-            .inner_size(950.0, 660.0)
-            .resizable(true)
-            .decorations(true)
-            .build();
+            log::warn!("[window] main window missing — rebuilding (UDF-lock retry)");
+            if let Err(e) = build_main_window(app) {
+                log::error!("[window] failed to rebuild main window: {e}");
+            }
         }
     }
 }
@@ -843,40 +903,29 @@ pub fn run() {
 
             // Register focus callback: Xiaomi key / AI key / Copilot key fires this.
             // We toggle the tray quick-access popup, exactly like XiaomiPCManager did.
-            // WebviewWindow show/hide/set_focus are thread-safe in Tauri v2 (dispatched
-            // through the winit event loop internally), so we call them directly here.
-            // Do NOT wrap in run_on_main_thread — the WMI thread is NOT the main thread,
-            // but run_on_main_thread would queue the task and return before it executes,
-            // meaning the TRAY_SHOWN_AT_MS store and focus-loss guard race with each other.
+            //
+            // The whole flow is dispatched to the main thread (the callback runs on
+            // the WMI reader thread): `show_tray_popup` may have to *create* the
+            // window and then read its size, and both are only synchronous on the
+            // main thread. Storing TRAY_SHOWN_AT_MS inside the closure keeps it
+            // ordered with the focus-loss handler that also runs there.
             {
                 let app_handle = app.handle().clone();
                 crate::hw::hotkeys::set_focus_callback(Box::new(move || {
-                    match app_handle.get_webview_window("tray") {
-                        None => log::warn!("[tray] focus_callback: popup window not found (tray pre-creation failed?)"),
-                        Some(popup) => {
-                            if popup.is_visible().unwrap_or(false) {
+                    let app = app_handle.clone();
+                    if let Err(e) = app_handle.run_on_main_thread(move || {
+                        match app.get_webview_window("tray") {
+                            Some(popup) if popup.is_visible().unwrap_or(false) => {
                                 log::info!("[tray] focus_callback: hiding popup");
                                 let _ = popup.hide();
-                            } else {
+                            }
+                            _ => {
                                 log::info!("[tray] focus_callback: showing popup");
-                                position_popup_at_tray(&popup);
-                                TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-                                if let Err(e) = popup.show() {
-                                    log::error!("[tray] popup.show() error: {e}");
-                                } else {
-                                    // Re-position after show: a hidden window may report a
-                                    // wrong scale_factor() / inner_size() before it's been
-                                    // associated with a monitor.  The second call uses the
-                                    // real values now that the window is visible.
-                                    position_popup_at_tray(&popup);
-                                    if let Ok(pos) = popup.outer_position() {
-                                        log::info!("[tray] focus_callback shown at outer_pos=({},{}) is_visible={}",
-                                            pos.x, pos.y, popup.is_visible().unwrap_or(false));
-                                    }
-                                    let _ = popup.set_focus();
-                                }
+                                show_tray_popup(&app, None);
                             }
                         }
+                    }) {
+                        log::error!("[tray] focus_callback: dispatch to main thread failed: {e}");
                     }
                 }));
             }
@@ -1011,22 +1060,11 @@ pub fn run() {
             // Pre-create the tray popup window (hidden) so the first click is instant.
             // WebView2 initialisation takes 2-5 s; doing it eagerly at startup avoids
             // that cold-start delay when the user first clicks the tray icon.
-            match tauri::WebviewWindowBuilder::new(
-                app,
-                "tray",
-                tauri::WebviewUrl::App("index.html?window=tray".into()),
-            )
-            .title("")
-            .inner_size(300.0, 460.0)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .resizable(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            .build() {
-                Ok(_)  => log::info!("[tray] pre-created tray popup OK"),
+            // `build_tray_popup` retries the transient WebView2 UDF lock
+            // (0x800700AA) — otherwise the popup exists but never initialises and
+            // reports 0×0 on the first click.
+            match build_tray_popup(app.handle()) {
+                Ok(_) => log::info!("[tray] pre-created tray popup OK"),
                 Err(e) => log::error!("[tray] FAILED to pre-create tray popup: {e}"),
             }
 
@@ -1271,17 +1309,128 @@ fn open_window_sync(app: &tauri::AppHandle) {
     // z-order raise). Reuses the helper, rebuilding the window when absent.
     if app.get_webview_window("main").is_some() {
         raise_main_window(app);
+    } else if let Err(e) = build_main_window(app) {
+        // UDF lock (0x800700AA) survives all retries, or WebView2 is genuinely
+        // unavailable. Never panic: the watchdog's ui_ok=0 path picks this up.
+        log::error!("[window] failed to create main window: {e}");
+    }
+}
+
+/// True when the popup window handle exists but has never been given a client
+/// area — the signature of a WebView2 that failed to initialise (observed in
+/// production: `[tray] popup physical size looks stale (0x0 px …)` right after
+/// `failed to create webview: HRESULT(0x800700AA)`). `set_size` cannot revive
+/// such a window: only a fresh WebView2 host window can.
+fn popup_is_uninitialised(window: &tauri::WebviewWindow) -> bool {
+    match window.inner_size() {
+        Ok(size) => size.width == 0 && size.height == 0,
+        Err(_) => true,
+    }
+}
+
+/// Return a usable tray popup, destroying and rebuilding a dead one.
+///
+/// The old heal path only forced 300×460 with `set_size` and carried on, so a
+/// 0×0 popup stayed 0×0: it "opened" invisible while Tauri reported
+/// `is_visible=true`, and the next tray click took the toggle-off branch. A
+/// WebView2 that never initialised cannot be resized back to life — recreate it.
+fn ensure_tray_popup(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(popup) = app.get_webview_window("tray") {
+        if !popup_is_uninitialised(&popup) {
+            return Some(popup);
+        }
+        let (w, h) = popup
+            .inner_size()
+            .map(|s| (s.width, s.height))
+            .unwrap_or((0, 0));
+        log::warn!(
+            "[tray] popup webview never initialised ({w}x{h} px) — destroying and recreating"
+        );
+        if let Err(e) = popup.destroy() {
+            log::warn!("[tray] popup.destroy() failed: {e} — reusing the existing window");
+            return Some(popup);
+        }
+        // On the main thread the destroy is synchronous; from another thread it
+        // is queued, so the label may still resolve. Never build a second
+        // window with the same label.
+        if let Some(stale) = app.get_webview_window("tray") {
+            log::warn!("[tray] destroyed popup still registered (destroy queued) — reusing it");
+            return Some(stale);
+        }
     } else {
-        let _ = tauri::WebviewWindowBuilder::new(
-            app,
-            "main",
-            tauri::WebviewUrl::App("index.html?window=main".into()),
-        )
-        .title("MiControl")
-        .inner_size(950.0, 660.0)
-        .resizable(true)
-        .decorations(true)
-        .build();
+        log::warn!(
+            "[tray] popup window not found — creating on-demand (pre-creation must have failed)"
+        );
+    }
+
+    match build_tray_popup(app) {
+        Ok(popup) => {
+            if popup_is_uninitialised(&popup) {
+                log::error!(
+                    "[tray] recreated popup is still 0x0 px — WebView2 runtime unavailable? \
+                     The tray click cannot show a popup this cycle"
+                );
+            } else {
+                log::info!("[tray] tray popup (re)created OK");
+            }
+            Some(popup)
+        }
+        Err(e) => {
+            log::error!("[tray] failed to create tray popup: {e}");
+            None
+        }
+    }
+}
+
+/// Position, show and focus the tray popup, recreating it when necessary.
+///
+/// Called from the tray click (main thread) and, via `run_on_main_thread`,
+/// from the Xiaomi/AI key callback.
+fn show_tray_popup(app: &tauri::AppHandle, click_pos: Option<&tauri::PhysicalPosition<f64>>) {
+    let Some(popup) = ensure_tray_popup(app) else {
+        return;
+    };
+    let place = |w: &tauri::WebviewWindow| match click_pos {
+        Some(pos) => position_popup(w, pos),
+        None => position_popup_at_tray(w),
+    };
+    place(&popup);
+    TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
+    match popup.show() {
+        Ok(_) => {
+            // Re-position after show: a hidden window may have reported a wrong
+            // scale_factor() / inner_size() before it was associated with a monitor.
+            place(&popup);
+            // Verify the healed size actually took effect (the 0×0 regression
+            // was silent: show() succeeded on a window with no client area).
+            let (w, h) = popup
+                .inner_size()
+                .map(|s| (s.width, s.height))
+                .unwrap_or((0, 0));
+            if w == 0 {
+                log::error!(
+                    "[tray] popup shown but still degenerate ({w}x{h} px) — the WebView2 \
+                     host window has no client area"
+                );
+            } else if h == 0 {
+                log::warn!(
+                    "[tray] popup shown with no height yet ({w}x{h} px) — the frontend \
+                     ResizeObserver sets it on first render"
+                );
+            }
+            if let Ok(pos) = popup.outer_position() {
+                log::info!(
+                    "[tray] show() OK — outer_pos=({},{}) size={}x{} is_visible={}",
+                    pos.x,
+                    pos.y,
+                    w,
+                    h,
+                    popup.is_visible().unwrap_or(false)
+                );
+            }
+            let _ = popup.set_focus();
+        }
+        Err(e) => log::error!("[tray] show() FAILED: {e}"),
     }
 }
 
@@ -1317,67 +1466,48 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
             log::info!("[tray] debounce active, aborting show");
             return;
         }
-        // Exists but hidden long enough ago — reposition and show
-        position_popup(&popup, click_pos);
-        TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-        match popup.show() {
-            Ok(_) => {
-                // Re-position after show: a hidden window may have reported a wrong
-                // scale_factor() / inner_size() before it was associated with a monitor.
-                position_popup(&popup, click_pos);
-                if let Ok(pos) = popup.outer_position() {
-                    log::info!(
-                        "[tray] show() OK — outer_pos=({},{}) is_visible={}",
-                        pos.x,
-                        pos.y,
-                        popup.is_visible().unwrap_or(false)
-                    );
-                }
-                let _ = popup.set_focus();
-            }
-            Err(e) => log::error!("[tray] show() FAILED: {e}"),
-        }
-        return;
     }
+    // Exists but hidden long enough ago (or missing) — position and show.
+    // `show_tray_popup` recreates the window when the webview never initialised.
+    show_tray_popup(app, Some(click_pos));
+}
 
-    log::warn!(
-        "[tray] popup window not found — creating on-demand (pre-creation must have failed)"
-    );
-    // Fallback: pre-creation at startup failed — create the window now.
-    let popup = match tauri::WebviewWindowBuilder::new(
-        app,
-        "tray",
-        tauri::WebviewUrl::App("index.html?window=tray".into()),
-    )
-    .title("")
-    .inner_size(300.0, 460.0)
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .resizable(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible(false)
-    .build()
-    {
-        Ok(w) => w,
-        Err(e) => {
-            log::error!("[tray] Failed to build tray popup on-demand: {e}");
-            return;
-        }
-    };
-
-    position_popup(&popup, click_pos);
-    TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-    match popup.show() {
-        Ok(_) => {
-            log::info!(
-                "[tray] on-demand show() OK — is_visible={}",
-                popup.is_visible().unwrap_or(false)
-            );
-            let _ = popup.set_focus();
-        }
-        Err(e) => log::error!("[tray] on-demand show() FAILED: {e}"),
+/// Heal a stale popup physical size and return the height to use for layout.
+///
+/// A previously shown popup can carry a width collapsed to 171 px, or a size
+/// left over from a previous display scale (observed 525×1365 from a 1.75 era
+/// while the current scale was 1.00). A stale physical size makes the Y math
+/// place the popup at the top of the screen (`y≈19`), so the design width is
+/// enforced on every show and the stored height is only trusted when it is
+/// non-zero.
+///
+/// Note this only *heals* an existing window. A window whose WebView2 never
+/// initialised reports 0×0 and ignores `set_size`; `ensure_tray_popup` destroys
+/// and recreates that one before we get here.
+fn heal_popup_size(window: &tauri::WebviewWindow, scale: f64) -> f64 {
+    let (cur_w, cur_h) = window
+        .inner_size()
+        .map(|s| (s.width, s.height))
+        .unwrap_or((0, 0));
+    let want_w = (POPUP_W * scale).round() as u32;
+    if cur_w != want_w {
+        log::warn!(
+            "[tray] popup physical size looks stale ({cur_w}x{cur_h} px, expected width \
+             {want_w}) — healing"
+        );
+        let healed_h = if cur_h > 0 {
+            cur_h
+        } else {
+            (POPUP_H_DEFAULT * scale).round() as u32
+        };
+        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
+    }
+    // A hidden window may report height=0 before its first render; a stale or
+    // zero height must never drive the Y math.
+    if cur_w != want_w || cur_h == 0 {
+        POPUP_H_DEFAULT * scale
+    } else {
+        cur_h as f64
     }
 }
 
@@ -1390,38 +1520,9 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
     // window (which caches a stale value for a hidden/just-shown popup).
     let scale = popup_scale(window, Some(*click_pos));
     let pw = POPUP_W * scale;
-    // S63/S64: heal a stale physical size on every show. A previously shown
-    // popup can carry a width collapsed to 171 px, or a size left over from a
-    // previous display scale (observed 525x1365 from a 1.75 era while the
-    // current scale was 1.00). A stale physical size makes the Y math place the
-    // popup at the top of the screen (`y≈19`). Enforce the design width and
-    // fall back to the default height when the stored size is inconsistent.
-    let cur = window
-        .inner_size()
-        .map(|s| (s.width, s.height))
-        .unwrap_or((0, 0));
-    let want_w = (POPUP_W * scale).round() as u32;
-    let stale = cur.0 != want_w;
-    if stale {
-        log::warn!(
-            "[tray] popup physical size looks stale ({}x{} px, expected width {want_w}) — healing",
-            cur.0,
-            cur.1
-        );
-        let healed_h = if cur.1 > 0 {
-            cur.1
-        } else {
-            (POPUP_H_DEFAULT * scale).round() as u32
-        };
-        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
-    }
-    // Guard: a hidden window may report height=0 before first render, and a
-    // stale physical height must never drive the Y math — fall back to default.
-    let ph = if stale || cur.1 == 0 {
-        POPUP_H_DEFAULT * scale
-    } else {
-        cur.1 as f64
-    };
+    // S63/S64: heal a stale physical size on every show, then use the healed
+    // height for the Y math (see `heal_popup_size`).
+    let ph = heal_popup_size(window, scale);
     let gap = POPUP_GAP * scale;
 
     // Get the work area (screen minus taskbar) in physical pixels for the
@@ -1474,33 +1575,8 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
     // click point) instead of the stale `window.scale_factor()`.
     let scale = popup_scale(window, None);
     let pw = POPUP_W * scale;
-    // S63/S64: same stale-size heal as position_popup — see the note there.
-    let cur = window
-        .inner_size()
-        .map(|s| (s.width, s.height))
-        .unwrap_or((0, 0));
-    let want_w = (POPUP_W * scale).round() as u32;
-    let stale = cur.0 != want_w;
-    if stale {
-        log::warn!(
-            "[tray] popup physical size looks stale ({}x{} px, expected width {want_w}) — healing",
-            cur.0,
-            cur.1
-        );
-        let healed_h = if cur.1 > 0 {
-            cur.1
-        } else {
-            (POPUP_H_DEFAULT * scale).round() as u32
-        };
-        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
-    }
-    // Guard: a hidden window may report height=0 before first render, and a
-    // stale physical height must never drive the Y math — fall back to default.
-    let ph = if stale || cur.1 == 0 {
-        POPUP_H_DEFAULT * scale
-    } else {
-        cur.1 as f64
-    };
+    // S63/S64: same stale-size heal as position_popup — see `heal_popup_size`.
+    let ph = heal_popup_size(window, scale);
     let gap = POPUP_GAP * scale;
 
     #[cfg(windows)]

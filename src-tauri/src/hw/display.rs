@@ -665,7 +665,7 @@ impl Default for AiBrightnessConfig {
 // disabling automation entirely.
 //
 // The offset is:
-//   • stored as a signed integer in the range -100..=100
+//   • stored as a signed integer, clamped to ±MAX_OVERRIDE_OFFSET_PP
 //   • applied before the final clamp(min, max)
 //   • reset whenever the user disables auto-brightness or changes its config
 
@@ -675,6 +675,33 @@ static AUTO_LAST_TARGET: AtomicU8 = AtomicU8::new(50);
 static AUTO_OFFSET: AtomicI16 = AtomicI16::new(0);
 /// Whether the offset was explicitly set by the user (false = use 0).
 static AUTO_OFFSET_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Hard limit on the magnitude of the manual-override offset, in percentage
+/// points.
+///
+/// The offset shifts the whole curve so the automation respects the user's
+/// manual choice, but unbounded it becomes a runaway: production carried
+/// `{"offset": 54, "offset_active": true}` in `brightness_override.json`, which
+/// pinned the curve 54 pp above the formula in *every* light condition (the
+/// loop then clamped at max and fought the user). ±30 pp is wide enough to
+/// express any sane preference on a 0–100 scale — one manual drag rarely moves
+/// more than a third of the range — and small enough that neither a corrupted
+/// state file nor a capture bug can saturate the backlight.
+const MAX_OVERRIDE_OFFSET_PP: i16 = 30;
+
+/// Clamp an offset to ±[`MAX_OVERRIDE_OFFSET_PP`], logging any trim so a bad
+/// input (corrupt file, capture feedback) shows up in the log instead of being
+/// silently absorbed.
+fn clamp_override_offset(offset: i16) -> i16 {
+    let clamped = offset.clamp(-MAX_OVERRIDE_OFFSET_PP, MAX_OVERRIDE_OFFSET_PP);
+    if clamped != offset {
+        log::warn!(
+            "[display] brightness offset {offset:+} pp out of range — clamped to {clamped:+} pp \
+             (limit ±{MAX_OVERRIDE_OFFSET_PP})"
+        );
+    }
+    clamped
+}
 
 // ── Manual-override grace period ─────────────────────────────────────────────
 //
@@ -712,7 +739,7 @@ pub fn user_override_in_grace() -> bool {
 /// "Smart" mode can learn the user's preferred brightness per light level.
 pub fn record_user_brightness_override(user_value: u8) {
     let last_target = AUTO_LAST_TARGET.load(Ordering::Relaxed);
-    let offset = user_value as i16 - last_target as i16;
+    let offset = clamp_override_offset(user_value as i16 - last_target as i16);
     AUTO_OFFSET.store(offset, Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
     AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
@@ -817,12 +844,16 @@ pub fn restore_override_state() {
         return;
     }
     AUTO_LAST_MANUAL_MS.store(state.last_manual_ms, Ordering::Relaxed);
-    AUTO_OFFSET.store(state.offset, Ordering::Relaxed);
+    // Clamp on restore: a state file written by an older build (or edited by
+    // hand) may carry an out-of-range offset such as the `54` found in
+    // production. Never apply it unclamped.
+    let offset = clamp_override_offset(state.offset);
+    AUTO_OFFSET.store(offset, Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(state.offset_active, Ordering::Relaxed);
     log::info!(
         "[adaptive_brightness] restored manual override from crash \
          (age={age}ms, offset={}, active={}) — grace window until manual change",
-        state.offset,
+        offset,
         state.offset_active
     );
 }
@@ -1021,6 +1052,19 @@ const SMART_MIN_SAMPLES: u32 = 3;
 /// Maximum number of buckets cap — protects the file from unbounded growth
 /// if the sensor reports bizarre lux values.
 const SMART_MAX_BUCKETS: usize = 200;
+/// Upper bound on the **total** number of samples kept in
+/// `smart_brightness.json`.
+///
+/// The audit found 1_315_938 samples — 30+ days of the adaptive loop writing a
+/// sample every 2 s (30/min). That is not user preference, it is the loop
+/// learning from its own output. A sane rolling window is 7 days:
+/// 7 × 24 h × 60 min × 30 samples/min = 302_400 samples. When the loaded model
+/// exceeds it, older mass is decayed (see [`prune_smart_model`]).
+const SMART_MAX_TOTAL_SAMPLES: u32 = 302_400;
+/// Upper bound per lux bucket. A single hot bucket (e.g. a desk lamp holding
+/// the sensor at 4 lux) otherwise accumulates hundreds of thousands of samples
+/// on its own — the audit's bin 4 lux had 283_355.
+const SMART_MAX_SAMPLES_PER_BIN: u32 = 20_000;
 
 /// One lux bucket in the smart brightness model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,6 +1090,21 @@ pub struct SmartModel {
     pub bins: std::collections::HashMap<u32, SmartBin>,
 }
 
+impl SmartBin {
+    /// Halve the sample count while preserving the mean and the variance.
+    ///
+    /// `m2` is a *sum* of squared deviations, so it scales linearly with `n`:
+    /// halving both keeps `m2 / (n - 1)` — the variance the UI shows — intact.
+    /// This is the only way to "forget" old samples in an aggregate-only model:
+    /// Welford's statistics carry no timestamps, so a time window cannot be
+    /// applied retroactively. Exponential halving weights recent samples more
+    /// than old ones, which is what a rolling window approximates.
+    fn decay(&mut self) {
+        self.n = (self.n / 2).max(SMART_MIN_SAMPLES);
+        self.m2 *= 0.5;
+    }
+}
+
 impl SmartModel {
     fn new() -> Self {
         Self {
@@ -1068,6 +1127,58 @@ impl SmartModel {
     }
 }
 
+/// Trim a loaded model back inside the retention bounds.
+///
+/// Returns `true` when anything changed, so the caller can rewrite the file
+/// once (migration on load) instead of carrying a 1.3 M-sample JSON forever.
+///
+/// Strategy — exponential decay, not deletion, because the model is
+/// aggregate-only (mean/m2, no per-sample timestamps):
+/// 1. every bucket above [`SMART_MAX_SAMPLES_PER_BIN`] is halved until it fits
+///    (283_355 → 17_709 in four halvings), preserving mean and variance;
+/// 2. while the total exceeds [`SMART_MAX_TOTAL_SAMPLES`], the largest bucket is
+///    halved — repeated halving is a geometric down-weighting of old mass and
+///    keeps the *shape* of the distribution (which buckets are "hot") intact.
+///
+/// `min`/`max` are historical extremes and are kept: they are informational
+/// (the stats panel shows the observed range) and cannot be recomputed without
+/// the dropped samples.
+fn prune_smart_model(model: &mut SmartModel) -> bool {
+    let before = model.total_samples();
+    let mut changed = false;
+
+    for bin in model.bins.values_mut() {
+        while bin.n > SMART_MAX_SAMPLES_PER_BIN {
+            bin.decay();
+            changed = true;
+        }
+    }
+
+    while model.total_samples() > SMART_MAX_TOTAL_SAMPLES {
+        let hottest = model.bins.values().map(|b| b.n).max().unwrap_or(0);
+        if hottest <= SMART_MIN_SAMPLES {
+            break; // nothing left worth decaying
+        }
+        match model.bins.iter_mut().max_by_key(|(_, b)| b.n) {
+            Some((_, bin)) => {
+                bin.decay();
+                changed = true;
+            }
+            None => break,
+        }
+    }
+
+    if changed {
+        log::info!(
+            "[display] smart model pruned on load: {before} → {} samples across {} buckets \
+             (caps: {SMART_MAX_TOTAL_SAMPLES} total, {SMART_MAX_SAMPLES_PER_BIN} per bucket)",
+            model.total_samples(),
+            model.bins.len()
+        );
+    }
+    changed
+}
+
 /// In-memory cache of the smart model. Loaded once at startup (or on demand)
 /// and updated on every sample; persisted on change.
 static SMART_MODEL_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<SmartModel>>> =
@@ -1076,7 +1187,13 @@ static SMART_MODEL_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<SmartModel
 fn load_smart_model() -> SmartModel {
     let path = smart_model_path();
     if let Ok(data) = std::fs::read_to_string(&path) {
-        if let Ok(model) = serde_json::from_str::<SmartModel>(&data) {
+        if let Ok(mut model) = serde_json::from_str::<SmartModel>(&data) {
+            // Migration: an unbounded file (1.3 M samples in production) is
+            // trimmed on load and written back once, so every subsequent start
+            // reads the small version.
+            if prune_smart_model(&mut model) {
+                persist_smart_model(&model);
+            }
             return model;
         }
     }
@@ -1179,6 +1296,34 @@ pub fn record_smart_sample(lux: f32, brightness: u8) {
          → bucket={bin_idx} (total={})",
         model.total_samples()
     );
+}
+
+/// Whether a captured brightness value may be fed to the smart model.
+///
+/// While a user-override offset is active, the loop's own output already
+/// contains that offset. A readback that differs from what we set by ≥2 pp is
+/// then almost always our own write coming back (driver quantisation, smoothing
+/// step, another app echoing the value), not a new user preference. Learning it
+/// teaches the model the curve we just applied, and the next iteration adds the
+/// offset on top of the learned mean — the self-reinforcing loop that produced
+/// 1_315_938 samples and `offset: 54` in production.
+fn should_learn_from_capture() -> bool {
+    if AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed) {
+        log::debug!(
+            "[display] smart sample skipped — brightness_override is active, the captured \
+             value contains the loop's own offset"
+        );
+        return false;
+    }
+    true
+}
+
+/// Record a sample captured from an *external* brightness change, unless the
+/// captured value is the loop's own overlaid output.
+fn record_external_change_sample(lux: f32, brightness: u8) {
+    if should_learn_from_capture() {
+        record_smart_sample(lux, brightness);
+    }
 }
 
 /// Compute the std-dev for a bucket (population std-dev using Welford's M2).
@@ -1652,7 +1797,9 @@ pub async fn adaptive_brightness_loop() {
             let diff = (actual as i16 - prev as i16).abs();
             if diff >= 2 {
                 let raw = AUTO_LAST_TARGET.load(Ordering::Relaxed);
-                let new_offset = actual as i16 - raw as i16;
+                // Clamp: repeated captures used to ratchet this value upwards
+                // (production reached +54 pp), pinning the curve at max.
+                let new_offset = clamp_override_offset(actual as i16 - raw as i16);
                 AUTO_OFFSET.store(new_offset, Ordering::Relaxed);
                 AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
                 AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
@@ -1667,9 +1814,12 @@ pub async fn adaptive_brightness_loop() {
                 );
                 // Smart-mode learning: this external change (Fn key, Windows
                 // slider) carries the user's preference for the current light
-                // level — log it into the smart model.
+                // level — log it into the smart model, but never while the
+                // override offset is active (the captured value then contains
+                // the loop's own output, which is the feedback loop that
+                // produced 1.3 M samples and `offset: 54` in production).
                 if let Some(lux) = get_ambient_lux().filter(|v| *v > MIN_PLAUSIBLE_LUX) {
-                    record_smart_sample(lux, actual);
+                    record_external_change_sample(lux, actual);
                 }
             }
         }
@@ -1780,7 +1930,9 @@ pub async fn adaptive_brightness_loop() {
         // when the user manually sets brightness the automation respects that
         // preference and only adjusts relative to it as light changes.
         let offset = if AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed) {
-            AUTO_OFFSET.load(Ordering::Relaxed) as f32
+            // Defensive clamp at the point of use: a stale process (or an older
+            // build) may have left an out-of-range value in the atomic.
+            clamp_override_offset(AUTO_OFFSET.load(Ordering::Relaxed)) as f32
         } else {
             0.0
         };
@@ -2508,6 +2660,12 @@ mod tests {
     fn isolate_smart_model() {
         let temp = std::env::temp_dir().join("micontrol_test_smart_brightness.json");
         std::env::set_var("MICONTROL_SMART_MODEL_PATH", &temp);
+        // Isolate the manual-override state too: `record_user_brightness_override`
+        // persists it on every call, and unit tests must never rewrite the user's
+        // real `%LOCALAPPDATA%\MiControl\brightness_override.json`.
+        let override_temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
+        std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &override_temp);
+        let _ = std::fs::remove_file(&override_temp);
         // Also isolate any already-cached model so `reset_smart_model()` starts
         // from the (empty) file at the new path.
         if let Some(cache) = SMART_MODEL_CACHE.get() {
@@ -2729,5 +2887,261 @@ mod tests {
             "retry becomes due exactly at the deadline"
         );
         assert!(!retry_due(None, now), "no scheduled retry = not due");
+    }
+    // ── brightness offset clamp (audit: `offset: 54` unclamped) ─────────────
+
+    #[test]
+    fn offset_clamp_limits_range() {
+        assert_eq!(clamp_override_offset(0), 0);
+        assert_eq!(clamp_override_offset(29), 29);
+        assert_eq!(clamp_override_offset(MAX_OVERRIDE_OFFSET_PP), 30);
+        assert_eq!(clamp_override_offset(-MAX_OVERRIDE_OFFSET_PP), -30);
+        // The production value: +54 must never reach the curve.
+        assert_eq!(clamp_override_offset(54), 30);
+        assert_eq!(clamp_override_offset(-54), -30);
+        assert_eq!(clamp_override_offset(i16::MAX), 30);
+        assert_eq!(clamp_override_offset(i16::MIN), -30);
+    }
+
+    #[test]
+    fn user_override_offset_is_clamped() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        // last target 10 %, user asks 100 % → raw delta +90 pp.
+        AUTO_LAST_TARGET.store(10, Ordering::Relaxed);
+        record_user_brightness_override(100);
+        assert_eq!(
+            AUTO_OFFSET.load(Ordering::Relaxed),
+            MAX_OVERRIDE_OFFSET_PP,
+            "raw +90 pp must be clamped to +30 pp"
+        );
+        assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+
+        // last target 90 %, user asks 5 % → raw delta -85 pp.
+        AUTO_LAST_TARGET.store(90, Ordering::Relaxed);
+        record_user_brightness_override(5);
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), -MAX_OVERRIDE_OFFSET_PP);
+
+        // In-range deltas are untouched.
+        AUTO_LAST_TARGET.store(50, Ordering::Relaxed);
+        record_user_brightness_override(62);
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), 12);
+
+        clear_user_brightness_override();
+    }
+
+    #[test]
+    fn restore_override_state_clamps_persisted_offset() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        // Point the override state at a temp file — never the production one.
+        let temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
+        std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &temp);
+        // The exact shape found in production: offset 54, still inside the
+        // 120 s grace window.
+        std::fs::write(
+            &temp,
+            format!(
+                "{{\"last_manual_ms\":{},\"offset\":54,\"offset_active\":true}}",
+                now_ms()
+            ),
+        )
+        .unwrap();
+
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        restore_override_state();
+
+        assert_eq!(
+            AUTO_OFFSET.load(Ordering::Relaxed),
+            MAX_OVERRIDE_OFFSET_PP,
+            "a persisted 54 pp offset must be clamped on restore"
+        );
+        assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+        assert!(user_override_in_grace());
+
+        clear_user_brightness_override();
+        let _ = std::fs::remove_file(&temp);
+        std::env::remove_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH");
+    }
+
+    // ── smart-model prune (audit: 1_315_938 samples) ────────────────────────
+
+    /// A bucket with `n` samples at a fixed value has `m2 = 0`, so decay must
+    /// preserve the mean exactly and the variance at 0.
+    #[test]
+    fn smart_model_prune_caps_hot_bucket() {
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            4,
+            SmartBin {
+                n: 283_355,
+                mean: 76.0,
+                m2: 0.0,
+                min: 40,
+                max: 100,
+            },
+        );
+
+        assert!(prune_smart_model(&mut model), "prune must report a change");
+
+        let bin = model.bins.get(&4).expect("bucket survives pruning");
+        assert!(
+            bin.n <= SMART_MAX_SAMPLES_PER_BIN,
+            "bucket n={} must be ≤ {}",
+            bin.n,
+            SMART_MAX_SAMPLES_PER_BIN
+        );
+        // 283_355 → 141_677 → 70_838 → 35_419 → 17_709 (4 halvings).
+        assert_eq!(bin.n, 17_709);
+        assert!((bin.mean - 76.0).abs() < 1e-4, "mean preserved by decay");
+        assert_eq!(bin.m2, 0.0);
+        // Historical extremes are kept for the stats panel.
+        assert_eq!((bin.min, bin.max), (40, 100));
+    }
+
+    #[test]
+    fn smart_model_prune_caps_total_across_buckets() {
+        let mut model = SmartModel::new();
+        // 40 buckets × 20_000 = 800_000 samples, all below the per-bin cap but
+        // far above the 302_400 total cap.
+        for idx in 0..40u32 {
+            model.bins.insert(
+                idx,
+                SmartBin {
+                    n: 20_000,
+                    mean: 50.0,
+                    m2: 20_000.0 * 4.0, // sd = 2
+                    min: 40,
+                    max: 60,
+                },
+            );
+        }
+        assert!(prune_smart_model(&mut model));
+        let total = model.bins.values().map(|b| b.n).sum::<u32>();
+        assert!(
+            total <= SMART_MAX_TOTAL_SAMPLES,
+            "total {total} must be ≤ {SMART_MAX_TOTAL_SAMPLES}"
+        );
+        // Shape preserved: the 40 buckets all shrink together (largest-first
+        // halving) rather than some being deleted.
+        assert_eq!(model.bins.len(), 40);
+        for bin in model.bins.values() {
+            // Variance (m2 / (n - 1)) unchanged by a balanced halving.
+            let var = bin.m2 / (bin.n - 1) as f32;
+            assert!((var - 4.0).abs() < 0.05, "variance drifted to {var}");
+        }
+    }
+
+    #[test]
+    fn smart_model_prune_is_noop_within_bounds() {
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            1,
+            SmartBin {
+                n: 120,
+                mean: 33.0,
+                m2: 12.0,
+                min: 10,
+                max: 60,
+            },
+        );
+        assert!(
+            !prune_smart_model(&mut model),
+            "small model must not be rewritten"
+        );
+        assert_eq!(model.bins.get(&1).unwrap().n, 120);
+    }
+
+    /// The migration path: an oversized file on disk is trimmed and rewritten
+    /// when the model is first loaded.
+    #[test]
+    fn smart_model_prunes_on_load_and_rewrites_file() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        let path = std::env::temp_dir().join("micontrol_test_smart_brightness.json");
+
+        // 201 buckets × 6_550 samples ≈ 1.316 M — the production shape.
+        let mut json = String::from("{\"schema\":1,\"bins\":{");
+        for idx in 0..201u32 {
+            if idx > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(
+                "\"{idx}\":{{\"n\":6550,\"mean\":76.0,\"m2\":6550.0,\"min\":0,\"max\":100}}"
+            ));
+        }
+        json.push_str("}}");
+        std::fs::write(&path, &json).unwrap();
+
+        // Bust any cached model so `get_smart_model` reloads from disk.
+        if let Some(cache) = SMART_MODEL_CACHE.get() {
+            if let Ok(mut guard) = cache.lock() {
+                *guard = None;
+            }
+        } else {
+            // First initialisation wins the OnceLock; the load still prunes.
+        }
+
+        let model = get_smart_model();
+        let total = model.bins.values().map(|b| b.n).sum::<u32>();
+        assert!(
+            total <= SMART_MAX_TOTAL_SAMPLES,
+            "loaded model still has {total} samples (cap {SMART_MAX_TOTAL_SAMPLES})"
+        );
+        // Decay keeps every bucket (and therefore every lux level's shape);
+        // it only makes them lighter.
+        assert_eq!(model.bins.len(), 201, "decay must not delete buckets");
+        assert!(
+            model.bins.values().any(|b| b.n < 6550),
+            "hot buckets must actually decay"
+        );
+
+        // The trimmed model was written back, so the next start reads it small.
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        let on_disk: SmartModel = serde_json::from_str(&rewritten).unwrap();
+        let disk_total = on_disk.bins.values().map(|b| b.n).sum::<u32>();
+        assert!(
+            disk_total <= SMART_MAX_TOTAL_SAMPLES,
+            "file was not rewritten with the pruned model ({disk_total} samples)"
+        );
+
+        reset_smart_model();
+    }
+
+    // ── anti-feedback guard (audit: loop learns from its own output) ────────
+
+    #[test]
+    fn external_capture_is_not_learned_while_offset_is_active() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_smart_model();
+
+        // Override active → the captured brightness already contains our offset,
+        // so it must not become a training sample.
+        AUTO_OFFSET.store(25, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
+        record_external_change_sample(50.0, 80);
+        assert!(
+            get_smart_model().bins.is_empty(),
+            "no sample may be learned while brightness_override is active"
+        );
+
+        // No override → a genuine external change (Fn key, Windows slider) is
+        // exactly what the model should learn.
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        record_external_change_sample(50.0, 80);
+        let model = get_smart_model();
+        assert_eq!(model.total_samples(), 1);
+        assert_eq!(model.bins.get(&5).map(|b| b.n), Some(1));
+
+        reset_smart_model();
     }
 }
