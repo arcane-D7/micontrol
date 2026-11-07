@@ -867,6 +867,8 @@ mod pipe_server {
     /// stops touching it after the handoff and an unbounded channel has a single
     /// consumer per item — so no two threads ever use the same handle
     /// concurrently.
+    use micontrol_lib::util::win_handle::{OwnedEvent, OwnedHandle};
+
     struct SendHandle(HANDLE);
     unsafe impl Send for SendHandle {}
     struct SendEvent(HANDLE);
@@ -970,8 +972,8 @@ mod pipe_server {
     /// by hand at four different exits). [`PipeInstance::into_handles`] releases
     /// them to the worker that serves the client.
     struct PipeInstance {
-        handle: HANDLE,
-        event: HANDLE,
+        handle: OwnedHandle,
+        event: OwnedEvent,
     }
 
     impl PipeInstance {
@@ -986,7 +988,7 @@ mod pipe_server {
             // `sec_attr`, when present, outlives the call and points to a
             // descriptor the kernel copies into the pipe object (so it does not
             // have to outlive the instance).
-            let handle = unsafe {
+            let handle = OwnedHandle::new(unsafe {
                 CreateNamedPipeW(
                     PCWSTR(name_w.as_ptr()),
                     PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
@@ -997,8 +999,8 @@ mod pipe_server {
                     0,
                     sec_attr.map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
                 )
-            };
-            if handle == INVALID_HANDLE_VALUE {
+            });
+            if handle.is_invalid() {
                 eprintln!(
                     "[micontrol_bridge] CreateNamedPipeW failed: {}",
                     std::io::Error::last_os_error()
@@ -1006,48 +1008,31 @@ mod pipe_server {
                 return None;
             }
 
-            match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
-                Ok(event) => Some(Self { handle, event }),
+            let event = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(event) => OwnedEvent::new(event),
                 Err(_) => {
                     eprintln!(
                         "[micontrol_bridge] CreateEventW failed: {}",
                         std::io::Error::last_os_error()
                     );
-                    // SAFETY: created above, not owned anywhere else yet.
-                    unsafe {
-                        CloseHandle(handle).ok();
-                    }
-                    None
+                    // `handle` (OwnedHandle) closes itself on drop — no manual
+                    // CloseHandle, no leak on this early return.
+                    return None;
                 }
-            }
+            };
+            Some(Self { handle, event })
         }
 
         /// Block until a client is connected on this instance (see
         /// [`accept_client`] for the `ERROR_PIPE_CONNECTED` race).
         fn accept(&self) -> AcceptOutcome {
-            accept_client(self.handle, self.event)
+            accept_client(self.handle.raw(), self.event.raw())
         }
 
         /// Release both handles to the worker that will serve the client. The
         /// instance no longer closes them on drop.
-        fn into_handles(mut self) -> (HANDLE, HANDLE) {
-            let handles = (self.handle, self.event);
-            self.handle = INVALID_HANDLE_VALUE;
-            self.event = INVALID_HANDLE_VALUE;
-            handles
-        }
-    }
-
-    impl Drop for PipeInstance {
-        fn drop(&mut self) {
-            unsafe {
-                if self.handle != INVALID_HANDLE_VALUE {
-                    CloseHandle(self.handle).ok();
-                }
-                if self.event != INVALID_HANDLE_VALUE {
-                    CloseHandle(self.event).ok();
-                }
-            }
+        fn into_handles(self) -> (HANDLE, HANDLE) {
+            (self.handle.into_raw(), self.event.into_raw())
         }
     }
 
@@ -1720,20 +1705,22 @@ mod pipe_server {
         /// Client side. A SYNCHRONOUS handle (no FILE_FLAG_OVERLAPPED) so the
         /// test can use plain blocking WriteFile; the server side stays
         /// overlapped exactly like production.
-        fn connect_client(name: &str) -> HANDLE {
+        fn connect_client(name: &str) -> OwnedHandle {
             let path = wide(name);
-            unsafe {
-                CreateFileW(
-                    PCWSTR(path.as_ptr()),
-                    (GENERIC_READ | GENERIC_WRITE).0,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
-                    None,
-                )
-            }
-            .expect("client CreateFileW failed")
+            OwnedHandle::new(
+                unsafe {
+                    CreateFileW(
+                        PCWSTR(path.as_ptr()),
+                        (GENERIC_READ | GENERIC_WRITE).0,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL,
+                        None,
+                    )
+                }
+                .expect("client CreateFileW failed"),
+            )
         }
 
         fn client_write(handle: HANDLE, payload: &[u8]) {
@@ -1747,10 +1734,12 @@ mod pipe_server {
         /// client is gone (`ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`) —
         /// the condition `handle_client` maps to "read 0 bytes".
         fn server_read(handle: HANDLE, buf: &mut [u8]) -> Option<usize> {
-            let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
-                .expect("server_read: CreateEventW failed");
+            let event = OwnedEvent::new(
+                unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+                    .expect("server_read: CreateEventW failed"),
+            );
             let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-            overlapped.hEvent = event;
+            overlapped.hEvent = event.raw();
             let mut transferred = 0u32;
 
             let started = unsafe {
@@ -1774,7 +1763,7 @@ mod pipe_server {
                         None // client vanished: EOF
                     } else {
                         assert_eq!(
-                            unsafe { WaitForSingleObject(event, 5_000) },
+                            unsafe { WaitForSingleObject(event.raw(), 5_000) },
                             WAIT_OBJECT_0,
                             "server read never completed"
                         );
@@ -1786,7 +1775,7 @@ mod pipe_server {
                 }
             };
 
-            unsafe { CloseHandle(event).ok() };
+            // OwnedEvent closes the event on drop — no manual CloseHandle.
             result
         }
 
@@ -1818,7 +1807,7 @@ mod pipe_server {
             // Client first — this IS the race.
             let client = connect_client(&name);
 
-            let outcome = accept_with_timeout(instance.handle, instance.event);
+            let outcome = accept_with_timeout(instance.handle.raw(), instance.event.raw());
             assert_eq!(
                 outcome,
                 AcceptOutcome::AlreadyConnected,
@@ -1826,12 +1815,12 @@ mod pipe_server {
             );
 
             // And the connection must be USABLE, not merely "not blocked".
-            client_write(client, b"ping");
+            client_write(client.raw(), b"ping");
             let mut buf = [0u8; 16];
-            let n = server_read(instance.handle, &mut buf).expect("server read failed");
+            let n = server_read(instance.handle.raw(), &mut buf).expect("server read failed");
             assert_eq!(&buf[..n], b"ping".as_slice());
 
-            unsafe { CloseHandle(client).ok() };
+            client.close();
         }
 
         /// Normal path: no client yet, so `ConnectNamedPipe` pends
@@ -1843,9 +1832,8 @@ mod pipe_server {
             let instance = listening_instance(&name);
 
             let (tx, rx) = std::sync::mpsc::channel();
-            let (handle, event) = (instance.handle, instance.event);
-            let pipe = SendHandle(handle);
-            let accept_event = SendEvent(event);
+            let pipe = SendHandle(instance.handle.raw());
+            let accept_event = SendEvent(instance.event.raw());
             std::thread::spawn(move || {
                 let _ = tx.send(accept_client(pipe.into_handle(), accept_event.into_event()));
             });
@@ -1864,12 +1852,12 @@ mod pipe_server {
                 .expect("accept step never woke up when the client connected");
             assert_eq!(outcome, AcceptOutcome::Connected);
 
-            client_write(client, b"pong");
+            client_write(client.raw(), b"pong");
             let mut buf = [0u8; 16];
-            let n = server_read(instance.handle, &mut buf).expect("server read failed");
+            let n = server_read(instance.handle.raw(), &mut buf).expect("server read failed");
             assert_eq!(&buf[..n], b"pong".as_slice());
 
-            unsafe { CloseHandle(client).ok() };
+            client.close();
         }
 
         /// A client that connects and immediately disappears must not wedge the
@@ -1885,14 +1873,14 @@ mod pipe_server {
                 let instance = listening_instance(&name);
                 let ghost = connect_client(&name);
                 assert!(matches!(
-                    accept_with_timeout(instance.handle, instance.event),
+                    accept_with_timeout(instance.handle.raw(), instance.event.raw()),
                     AcceptOutcome::Connected | AcceptOutcome::AlreadyConnected
                 ));
-                unsafe { CloseHandle(ghost).ok() };
+                ghost.close();
 
                 let mut buf = [0u8; 16];
                 assert_eq!(
-                    server_read(instance.handle, &mut buf),
+                    server_read(instance.handle.raw(), &mut buf),
                     None,
                     "a vanished client must surface as EOF, never as a hang"
                 );
@@ -1903,16 +1891,16 @@ mod pipe_server {
             let instance = listening_instance(&name);
             let client = connect_client(&name);
             assert_eq!(
-                accept_with_timeout(instance.handle, instance.event),
+                accept_with_timeout(instance.handle.raw(), instance.event.raw()),
                 AcceptOutcome::AlreadyConnected
             );
 
-            client_write(client, b"pong");
+            client_write(client.raw(), b"pong");
             let mut buf = [0u8; 16];
-            let n = server_read(instance.handle, &mut buf).expect("server read failed");
+            let n = server_read(instance.handle.raw(), &mut buf).expect("server read failed");
             assert_eq!(&buf[..n], b"pong".as_slice());
 
-            unsafe { CloseHandle(client).ok() };
+            client.close();
         }
 
         /// A hard `ConnectNamedPipe` failure must surface as `Failed(code)` so
