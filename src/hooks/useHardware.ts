@@ -65,6 +65,7 @@ import type {
   IotEvent,
   WmaaResponse,
   EcSensorData,
+  AdapterPowerReading,
   HqWmiResponse,
   ThermalZoneInfo,
   ProcessTaskInfo,
@@ -996,7 +997,7 @@ export function useHardware() {
   }, []);
 
   const wmiEcReadAdapterPower = useCallback(async () => {
-    return invoke<number>('wmi_ec_read_adapter_power');
+    return invoke<AdapterPowerReading>('wmi_ec_read_adapter_power');
   }, []);
 
   const wmiEcReadSensorData = useCallback(async () => {

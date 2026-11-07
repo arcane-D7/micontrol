@@ -27,6 +27,7 @@
 //!  14     dword FRD3   Extended result data
 //! ```
 
+use crate::hw::adapter_power::AdapterPowerReading;
 use crate::hw::errors::{HardwareError, HardwareResult};
 use serde::{Deserialize, Serialize};
 
@@ -684,6 +685,40 @@ pub fn read_adapter_power() -> HardwareResult<u32> {
     Err(HardwareError::NotSupported(
         "WMI only available on Windows".into(),
     ))
+}
+
+/// Read the AC adapter power as a structured result (P2, audit 2026-11-07).
+///
+/// `WBEM_E_NOT_FOUND` / `WBEM_E_INVALID_CLASS` mean this hardware does not
+/// expose the class at all: that is a permanent capability fact, not a
+/// transient failure. Returning `Ok(supported: false)` lets the elevated
+/// dispatch answer `ok=true` and the app stop logging an error every poll.
+///
+/// The "once per process" log lives here because the dispatch may run inside
+/// the long-lived bridge service (many requests, one process).
+pub fn read_adapter_power_status() -> HardwareResult<AdapterPowerReading> {
+    use crate::hw::adapter_power::{classify_failure, AdapterPowerFailure};
+    use std::sync::Once;
+
+    match read_adapter_power() {
+        Ok(watts) => Ok(AdapterPowerReading::watts(watts)),
+        Err(e) => {
+            let message = e.to_string();
+            if classify_failure(&message) == AdapterPowerFailure::HardwareUnsupported {
+                static LOGGED: Once = Once::new();
+                LOGGED.call_once(|| {
+                    log::info!(
+                        target: "hw::wmi_ec",
+                        "AC adapter power unsupported on this hardware ({message}) — \
+                         returning a structured 'unsupported' result instead of an error"
+                    );
+                });
+                Ok(AdapterPowerReading::unsupported(message))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Set the hotkey brightness data (HBDA).

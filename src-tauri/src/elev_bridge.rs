@@ -13,8 +13,51 @@
 //! The service pipe is the preferred, fully-autonomous path: after
 //! installation the app NEVER prompts for elevation. The scheduled task and
 //! UAC paths remain only for development and for self-healing a broken install.
+//!
+//! # P1 (audit 2026-11-07): availability is decided by the SCM, not the pipe
+//!
+//! Until this was fixed, "is the bridge service available?" was answered with a
+//! single `CreateFileW` on the pipe. When the bridge's accept loop deadlocked
+//! (C-01), the service stayed `RUNNING` while the pipe stayed permanently busy
+//! (`ERROR_PIPE_BUSY`), so the app concluded "not available" **597×** and fired
+//! **702** `install_bridge_service` calls — every one of them a no-op because
+//! the service was, in fact, running.
+//!
+//! The decision now uses [`util::win_service`] (`OpenServiceW` +
+//! `QueryServiceStatusEx` semantics) and is expressed as a pure function,
+//! [`decide_bridge_action`], over an injected [`BridgeProbe`]:
+//!
+//! | SCM state | pipe | action |
+//! |-----------|------|--------|
+//! | `Running` | (ignored) | [`BridgeAction::AlreadyRunning`] — never install |
+//! | `Stopped` / pending | (ignored) | [`BridgeAction::StartService`] |
+//! | `Absent` | (ignored) | [`BridgeAction::Install`] |
+//! | unknown | reachable | [`BridgeAction::AlreadyRunning`] |
+//! | unknown | unreachable | [`BridgeAction::Install`] |
+//!
+//! The pipe is still probed — but as *data-path health*, not as an existence
+//! check, and only when the SCM could not answer.
+//!
+//! # P8 (audit 2026-11-07): why background commands never prompt for UAC
+//!
+//! `disable_copilot_key`, `set_scancode_map`, `ensure_bridge_service` and
+//! `ensure_face_service` run during the first seconds after boot, several of
+//! them from background pollers. Letting those fall back to a `runas` prompt is
+//! what produced the MIOT-38 "UAC storm": a consent dialog every few seconds
+//! when the scheduled task was missing. Keeping the fallback disabled for
+//! **background** commands is therefore intentional, not an oversight.
+//!
+//! The trade-off used to be silent: a timeout logged a one-line WARN from the
+//! caller and nothing else. Now every failure of a no-prompt command emits a
+//! single actionable WARN (`cmd`, elapsed, reason, policy) and a one-time boot
+//! summary ([`spawn_boot_summary`]). For debugging a machine where the
+//! scheduled task is broken, `MICONTROL_ELEV_ALLOW_UAC=1` opts that session into
+//! the UAC fallback; it is off by default and never applies to the two service
+//! `ensure_*` commands, which must never prompt at boot.
 
 use crate::util::auth;
+use crate::util::rate_limit::MessageRateLimiter;
+use crate::util::win_service::{self, ServiceState};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -22,6 +65,8 @@ use tokio::sync::Mutex;
 
 /// Name of the scheduled task registered by the NSIS installer.
 const TASK_NAME: &str = "MiControlElevated";
+/// SCM name of the autonomous elevated service installed at install time.
+const BRIDGE_SERVICE_NAME: &str = "MiControlBridge";
 /// Named pipe of the autonomous elevated service installed at install time.
 const BRIDGE_PIPE_NAME: &str = r"\\.\pipe\micontrol_bridge";
 const POLL_INTERVAL_MS: u64 = 150;
@@ -37,12 +82,114 @@ static ELEV_REQUEST_LOCK: Mutex<()> = Mutex::const_new(());
 /// scheduled task is broken AND the bridge service is absent.
 static UAC_DECLINED: AtomicBool = AtomicBool::new(false);
 
-/// Returns `true` when the autonomous `MiControlBridge` service pipe is
-/// currently available (i.e. the service is installed and running).
+/// SCM state of the bridge service, collapsed for the availability decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeServiceState {
+    Running,
+    Stopped,
+    Absent,
+    Unknown,
+}
+
+impl BridgeServiceState {
+    /// Fold pending/paused states into the closest actionable bucket.
+    ///
+    /// `Pending` is treated as `Stopped` on purpose: asking the SCM to start a
+    /// service that is already starting returns `ERROR_SERVICE_ALREADY_RUNNING`
+    /// (handled as success), whereas installing would be the heavy, wrong move.
+    fn from_scm(state: ServiceState) -> Self {
+        match state {
+            ServiceState::Running => Self::Running,
+            ServiceState::Stopped | ServiceState::Pending | ServiceState::Paused => Self::Stopped,
+            ServiceState::Absent => Self::Absent,
+            ServiceState::Unknown => Self::Unknown,
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Absent => "absent",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Inputs of the availability decision (injected so the rule is testable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeProbe {
+    pub service: BridgeServiceState,
+    /// Result of a `CreateFileW` probe. Only consulted when the SCM could not
+    /// answer; a wedged pipe must never make a running service look missing.
+    pub pipe_reachable: bool,
+}
+
+/// What [`decide_bridge_action`] wants the caller to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeAction {
+    /// Service is (or is believed to be) already running — do nothing.
+    AlreadyRunning,
+    /// Service exists but is stopped — try `StartServiceW`, no install.
+    StartService,
+    /// Service does not exist (or cannot be identified) — dispatch the
+    /// elevated `ensure_bridge_service` installer.
+    Install,
+}
+
+/// P1: decide what to do about the bridge service from its SCM state.
 ///
-/// Cheap check — a single `CreateFileW` on the pipe. Used at startup to
-/// decide whether to install the service.
-pub fn is_bridge_service_available() -> bool {
+/// Pure and total: every combination has a defined outcome. The key property —
+/// the one that fixes the 597-warning loop — is that a `Running` service is
+/// never re-installed, no matter how busy its pipe is.
+pub fn decide_bridge_action(probe: BridgeProbe) -> BridgeAction {
+    match probe.service {
+        BridgeServiceState::Running => BridgeAction::AlreadyRunning,
+        BridgeServiceState::Stopped => BridgeAction::StartService,
+        BridgeServiceState::Absent => BridgeAction::Install,
+        BridgeServiceState::Unknown => {
+            if probe.pipe_reachable {
+                BridgeAction::AlreadyRunning
+            } else {
+                BridgeAction::Install
+            }
+        }
+    }
+}
+
+/// Global rate limiter for the diagnostics that used to repeat thousands of
+/// times (P1). One line per message every 5 minutes; the next emitted line
+/// reports how many identical messages were suppressed.
+static ELEV_LOG_LIMITER: MessageRateLimiter =
+    MessageRateLimiter::new(MessageRateLimiter::DEFAULT_WINDOW);
+
+/// Emit `render(suppressed)` at most once per key per 5 minutes.
+fn log_rate_limited(warn: bool, key: &'static str, render: impl FnOnce(u32) -> String) {
+    if let Some(suppressed) = ELEV_LOG_LIMITER.allow(key) {
+        let suffix = if suppressed > 0 {
+            format!(" [{suppressed} identical message(s) suppressed in the last 5 min]")
+        } else {
+            String::new()
+        };
+        let line = format!("{}{suffix}", render(suppressed));
+        if warn {
+            log::warn!(target: "elev_bridge", "{line}");
+        } else {
+            log::info!(target: "elev_bridge", "{line}");
+        }
+    }
+}
+
+/// Query the SCM for the bridge service state. Cheap (no pipe, no UAC).
+pub fn bridge_service_state() -> BridgeServiceState {
+    BridgeServiceState::from_scm(win_service::query_service_state(BRIDGE_SERVICE_NAME))
+}
+
+/// Cheap `CreateFileW` probe of the bridge pipe.
+///
+/// This answers "can I talk to the bridge right now?", NOT "is the service
+/// installed?". P1 exists because those two questions used to be conflated.
+pub fn is_bridge_pipe_reachable() -> bool {
     // leak-check: audited — every exit path closes the handle explicitly (S67).
     #[cfg(windows)]
     {
@@ -87,24 +234,143 @@ pub fn is_bridge_service_available() -> bool {
     }
 }
 
+/// Data-path health of the bridge: service state plus pipe reachability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeHealth {
+    /// Service `RUNNING` and the pipe accepted a connection.
+    Healthy,
+    /// Service `RUNNING` but the pipe is wedged/busy (the C-01 symptom).
+    ServiceRunningPipeUnavailable,
+    /// Service installed, not running.
+    ServiceStopped,
+    /// Service not installed.
+    ServiceAbsent,
+    /// SCM could not be queried.
+    ServiceUnknown,
+}
+
+impl BridgeHealth {
+    pub fn is_healthy(self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+
+    /// The service itself exists and is running (the pipe may still be wedged).
+    pub fn service_running(self) -> bool {
+        matches!(self, Self::Healthy | Self::ServiceRunningPipeUnavailable)
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Healthy => "service running, pipe reachable",
+            Self::ServiceRunningPipeUnavailable => "service running but pipe unreachable",
+            Self::ServiceStopped => "service stopped",
+            Self::ServiceAbsent => "service absent",
+            Self::ServiceUnknown => "service state unknown",
+        }
+    }
+}
+
+/// Probe both layers. The pipe is only touched when the service is running —
+/// there is nothing to talk to otherwise, and the probe costs a handle.
+pub fn bridge_health() -> BridgeHealth {
+    match bridge_service_state() {
+        BridgeServiceState::Running => {
+            if is_bridge_pipe_reachable() {
+                BridgeHealth::Healthy
+            } else {
+                BridgeHealth::ServiceRunningPipeUnavailable
+            }
+        }
+        BridgeServiceState::Stopped => BridgeHealth::ServiceStopped,
+        BridgeServiceState::Absent => BridgeHealth::ServiceAbsent,
+        BridgeServiceState::Unknown => BridgeHealth::ServiceUnknown,
+    }
+}
+
+/// Returns `true` when the autonomous `MiControlBridge` service exists and is
+/// `RUNNING` **according to the SCM**.
+///
+/// P1: this used to be a pipe probe. The pipe says nothing about whether the
+/// service is installed, and a wedged accept loop (C-01) made this return
+/// `false` forever against a perfectly running service.
+pub fn is_bridge_service_available() -> bool {
+    bridge_service_state() == BridgeServiceState::Running
+}
+
 /// Ensure the autonomous `MiControlBridge` service is installed and running.
 ///
-/// If the service pipe is already available, returns immediately. Otherwise
-/// dispatches `ensure_bridge_service` through the elevated path (scheduled
-/// task, which is already elevated — no UAC). Callers typically invoke this
-/// once at app startup and log the result.
+/// Decision (P1): SCM state first.
+///   * `RUNNING` → return immediately (`already_running`). **No install.**
+///   * `STOPPED` → try `StartServiceW` directly (cheap, usually permitted);
+///     only if that is refused, dispatch the elevated helper.
+///   * absent/unknown → dispatch `ensure_bridge_service` through the elevated
+///     path (scheduled task, already elevated — no UAC).
 ///
-/// IMPORTANT: This never shows a UAC prompt. If the scheduled task is also
-/// unavailable, it returns an error and the app simply falls back to the
-/// scheduled-task path for individual commands — a UAC popup at boot (the
-/// classic "do you want to install this driver?" experience) is exactly what
-/// the autonomous-bridge design is meant to prevent.
+/// Never shows a UAC prompt (see the P8 note in the module docs): a consent
+/// dialog at boot is exactly what the autonomous-bridge design prevents.
 pub async fn ensure_bridge_service() -> Result<Value, String> {
-    if is_bridge_service_available() {
-        return Ok(serde_json::json!({ "status": "already_running" }));
+    let service = bridge_service_state();
+    let probe = BridgeProbe {
+        service,
+        // Only spend a handle probing the pipe when the SCM could not answer.
+        pipe_reachable: service == BridgeServiceState::Unknown && is_bridge_pipe_reachable(),
+    };
+
+    match decide_bridge_action(probe) {
+        BridgeAction::AlreadyRunning => Ok(serde_json::json!({
+            "status": "already_running",
+            "decided_by": "scm",
+            "service_state": service.describe(),
+        })),
+        BridgeAction::StartService => {
+            // `StartServiceW` + the bounded RUNNING wait sleep on the calling
+            // thread — run it on the fixed blocking pool so the async runtime
+            // is never stalled (S69: fixed pool, no thread churn).
+            let start_result: Result<(), String> =
+                match crate::util::fixed_pool::run_blocking_timeout(Duration::from_secs(12), || {
+                    win_service::start_service(BRIDGE_SERVICE_NAME)
+                })
+                .await
+                {
+                    Ok(inner) => inner,
+                    Err(e) => Err(format!("start_service task failed: {e}")),
+                };
+
+            match start_result {
+                Ok(()) => {
+                    log::info!(
+                        target: "elev_bridge",
+                        "MiControlBridge was stopped — started via SCM (no install needed)"
+                    );
+                    Ok(serde_json::json!({
+                        "status": "started",
+                        "decided_by": "scm",
+                        "service_state": "stopped",
+                    }))
+                }
+                Err(e) => {
+                    // A standard user may lack SERVICE_START. Not a failure of
+                    // the app: the elevated helper can start it with SYSTEM
+                    // rights, and that path needs no consent dialog.
+                    log_rate_limited(false, "bridge_start_direct", |_| {
+                        format!(
+                            "MiControlBridge is stopped and could not be started directly ({e}) — \
+                             dispatching the elevated start"
+                        )
+                    });
+                    run_elevated_strict("ensure_bridge_service", serde_json::json!({})).await
+                }
+            }
+        }
+        BridgeAction::Install => {
+            log_rate_limited(false, "bridge_install", |_| {
+                "MiControlBridge service not installed (SCM: absent/unknown) — \
+                 installing via elevated path"
+                    .to_string()
+            });
+            run_elevated_strict("ensure_bridge_service", serde_json::json!({})).await
+        }
     }
-    log::info!("MiControlBridge service not available — installing via elevated path");
-    run_elevated_no_prompt("ensure_bridge_service", serde_json::json!({})).await
 }
 
 /// Post-reboot self-heal for the `MiControlFace` auth service.
@@ -119,10 +385,11 @@ pub async fn ensure_bridge_service() -> Result<Value, String> {
 ///      face service is dead).
 ///   1. Otherwise fall back to the MiControlElevated scheduled task.
 ///
-/// Never prompts UAC. Callers invoke this once at app startup and on the
-/// Face Unlock tab when `service_running` is false.
+/// Never prompts UAC — strictly, even when `MICONTROL_ELEV_ALLOW_UAC=1`, since
+/// this runs unattended at boot. Callers invoke this once at app startup and
+/// on the Face Unlock tab when `service_running` is false.
 pub async fn ensure_face_service() -> Result<Value, String> {
-    run_elevated_no_prompt("ensure_face_service", serde_json::json!({})).await
+    run_elevated_strict("ensure_face_service", serde_json::json!({})).await
 }
 static NEXT_REQ: AtomicU64 = AtomicU64::new(1);
 
@@ -201,14 +468,57 @@ pub async fn run_elevated(cmd: &'static str, args: Value) -> Result<Value, Strin
     run_elevated_impl(cmd, args, true).await
 }
 
-/// Dispatch a privileged command WITHOUT ever showing a UAC prompt.
+/// P8: opt-in for the UAC fallback on **background** commands.
+///
+/// Default `false`. The four boot-time commands that timed out in the audit
+/// (`disable_copilot_key`, `set_scancode_map`, `ensure_bridge_service`,
+/// `ensure_face_service`) run unattended; letting them pop `runas` dialogs is
+/// the MIOT-38 UAC storm. The flag exists so a developer/field engineer can
+/// diagnose a machine with a broken scheduled task without rebuilding:
+///
+/// ```text
+/// set MICONTROL_ELEV_ALLOW_UAC=1 && micontrol.exe
+/// ```
+///
+/// When it is set, the very first background failure that reaches the UAC
+/// fallback logs a WARN so the behaviour is never silent.
+pub fn background_uac_fallback_enabled() -> bool {
+    std::env::var("MICONTROL_ELEV_ALLOW_UAC")
+        .map(|value| parse_bool_flag(&value))
+        .unwrap_or(false)
+}
+
+/// Pure parser for boolean env flags (`1`, `true`, `yes`, `on`; case-insensitive).
+pub fn parse_bool_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Dispatch a privileged command without prompting UAC **by default**.
 ///
 /// Uses the same bridge-first / scheduled-task fallback chain as
 /// [`run_elevated`], but if no path succeeds it returns an error instead of
-/// popping the elevation consent dialog. Use this for non-critical reads
-/// (e.g. thermal/temperature polling at startup) where a UAC prompt at boot
-/// would be a terrible user experience — the worst case is a missing value.
+/// popping the elevation consent dialog. Use this for non-critical reads and
+/// background work (thermal/temperature polling, boot-time policy writes) where
+/// a UAC prompt at boot would be a terrible user experience — the worst case is
+/// a missing value.
+///
+/// P8: the fallback can be enabled for a debugging session with
+/// `MICONTROL_ELEV_ALLOW_UAC=1` (see [`background_uac_fallback_enabled`]). It is
+/// off by default; call [`run_elevated_strict`] behaviour via the service
+/// `ensure_*` entry points, which never prompt.
 pub async fn run_elevated_no_prompt(cmd: &'static str, args: Value) -> Result<Value, String> {
+    run_elevated_impl(cmd, args, background_uac_fallback_enabled()).await
+}
+
+/// Dispatch with the UAC fallback forcibly disabled, ignoring the env opt-in.
+///
+/// Used by the boot-critical service self-heal (`ensure_bridge_service`,
+/// `ensure_face_service`): a consent dialog raised at startup by the app itself
+/// is never acceptable, even in a debugging session.
+async fn run_elevated_strict(cmd: &'static str, args: Value) -> Result<Value, String> {
     run_elevated_impl(cmd, args, false).await
 }
 
@@ -219,7 +529,11 @@ pub async fn run_elevated_no_prompt(cmd: &'static str, args: Value) -> Result<Va
 /// the autonomous service boundary must call this helper instead of the
 /// generic elevation ladder.
 pub async fn run_elevated_bridge_only(cmd: &'static str, args: Value) -> Result<Value, String> {
-    run_via_service_pipe(cmd, args).await
+    let result = run_via_service_pipe(cmd, args).await;
+    if result.is_ok() {
+        note_pipe_success();
+    }
+    result
 }
 
 // ── S51: session circuit breaker for a degraded elevated infrastructure ─────
@@ -280,9 +594,288 @@ pub fn note_elevated_recovery() {
     note_elevated_success();
 }
 
+// ── P8: pipe-health cooldown ────────────────────────────────────────────────
+//
+// C-01 wedges the bridge's accept loop: the service is RUNNING, the pipe exists
+// but never answers. Without a cooldown every elevated command first spends its
+// whole 15 s pipe budget (twice, because of the S66-002 retry) before falling
+// back to the scheduled task — which is why the four boot-time commands in the
+// audit timed out at 15 s/15 s/15 s/45 s instead of reaching the task path
+// immediately. After two consecutive pipe timeouts the pipe is skipped for
+// 60 s; a single successful round-trip resets the streak.
+const PIPE_TIMEOUT_TRIP: u32 = 2;
+const PIPE_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Streak + cooldown state for the bridge pipe.
+///
+/// Pure and clock-injected so the transitions are unit-testable; the process
+/// global below guards one instance.
+#[derive(Debug)]
+struct PipeCooldown {
+    streak: u32,
+    skip_until_ms: u64,
+}
+
+impl PipeCooldown {
+    const fn new() -> Self {
+        Self {
+            streak: 0,
+            skip_until_ms: 0,
+        }
+    }
+
+    /// `true` when the pipe may be attempted at `now_ms`.
+    fn allowed(&self, now_ms: u64) -> bool {
+        now_ms >= self.skip_until_ms
+    }
+
+    /// A working round-trip clears the streak.
+    fn note_success(&mut self) {
+        self.streak = 0;
+    }
+
+    /// Record a timeout. Returns `Some(streak)` **only** when this timeout
+    /// opened a new cooldown window (so the caller logs it once).
+    fn note_timeout(&mut self, now_ms: u64) -> Option<u32> {
+        self.streak = self.streak.saturating_add(1);
+        if self.streak >= PIPE_TIMEOUT_TRIP && self.allowed(now_ms) {
+            self.skip_until_ms = now_ms.saturating_add(PIPE_COOLDOWN.as_millis() as u64);
+            Some(self.streak)
+        } else {
+            None
+        }
+    }
+}
+
+static PIPE_COOLDOWN_STATE: std::sync::Mutex<PipeCooldown> =
+    std::sync::Mutex::new(PipeCooldown::new());
+
+/// Milliseconds since process start (monotonic; immune to clock changes).
+fn process_elapsed_ms() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+/// `false` while the pipe is in its post-timeout cooldown.
+fn pipe_attempt_allowed() -> bool {
+    let state = match PIPE_COOLDOWN_STATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.allowed(process_elapsed_ms())
+}
+
+/// Record a pipe timeout / empty response and open the cooldown on the
+/// transition. `class` names the failure shape for the log line.
+fn note_pipe_timeout(class: &'static str) {
+    let opened = {
+        let mut state = match PIPE_COOLDOWN_STATE.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.note_timeout(process_elapsed_ms())
+    };
+
+    if let Some(streak) = opened {
+        log_rate_limited(true, "pipe_cooldown", |_| {
+            format!(
+                "Bridge pipe did not answer {streak}× in a row ({class}) — skipping it for {} s so \
+                 elevated commands reach the scheduled task without burning their 15 s pipe budget",
+                PIPE_COOLDOWN.as_secs()
+            )
+        });
+    }
+}
+
+/// A working round-trip proves the pipe is fine again.
+fn note_pipe_success() {
+    let mut state = match PIPE_COOLDOWN_STATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.note_success();
+}
+
+// ── P8: boot-time elevated-command report ───────────────────────────────────
+//
+// The audit found four elevated commands failing silently during the first
+// minute after boot, each with a one-line WARN from its caller. Diagnostics are
+// now centralised: every no-prompt failure is recorded, and a one-time summary
+// is emitted 90 s after startup listing command, elapsed and reason.
+const BOOT_WINDOW: Duration = Duration::from_secs(120);
+const BOOT_SUMMARY_DELAY: Duration = Duration::from_secs(90);
+
+/// One failed elevated command inside the boot window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootFailure {
+    pub cmd: &'static str,
+    pub elapsed_ms: u64,
+    pub attempts: u32,
+    pub reason: String,
+}
+
+#[derive(Default)]
+struct BootReport {
+    failures: Vec<BootFailure>,
+    successes: u32,
+    summarised: bool,
+}
+
+static BOOT_REPORT: std::sync::OnceLock<std::sync::Mutex<BootReport>> = std::sync::OnceLock::new();
+
+fn boot_report() -> &'static std::sync::Mutex<BootReport> {
+    BOOT_REPORT.get_or_init(|| std::sync::Mutex::new(BootReport::default()))
+}
+
+/// Record the outcome of an elevated call made during the boot window.
+///
+/// `&'static str` cmd keeps the registry allocation-free for the common
+/// success path; failures store the reason string (bounded, see
+/// [`format_boot_summary`]).
+fn note_boot_outcome(cmd: &'static str, elapsed: Duration, result: &Result<Value, String>) {
+    if process_elapsed_ms() > BOOT_WINDOW.as_millis() as u64 {
+        return;
+    }
+    let mut report = match boot_report().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if report.summarised {
+        return;
+    }
+    match result {
+        Ok(_) => report.successes = report.successes.saturating_add(1),
+        Err(reason) => {
+            let elapsed_ms = elapsed.as_millis().min(u64::MAX as u128) as u64;
+            if let Some(existing) = report.failures.iter_mut().find(|f| f.cmd == cmd) {
+                existing.attempts = existing.attempts.saturating_add(1);
+                existing.elapsed_ms = elapsed_ms;
+                existing.reason = reason.clone();
+            } else {
+                report.failures.push(BootFailure {
+                    cmd,
+                    elapsed_ms,
+                    attempts: 1,
+                    reason: reason.clone(),
+                });
+            }
+        }
+    }
+}
+
+/// Render the one-time boot summary. Pure so the format is unit-tested.
+///
+/// Long reasons are truncated: the summary is a pointer to the per-command WARN
+/// (which carries the full text), not a replacement for it.
+pub fn format_boot_summary(failures: &[BootFailure], successes: u32) -> String {
+    const MAX_REASON: usize = 180;
+    if failures.is_empty() {
+        return format!(
+            "Elevated bootstrap summary (first {} s): {successes} command(s) succeeded, none failed",
+            BOOT_WINDOW.as_secs()
+        );
+    }
+
+    let mut line = format!(
+        "Elevated bootstrap summary (first {} s): {successes} succeeded, {} failed — \
+         UAC fallback is disabled by design for background commands (MIOT-38); \
+         set MICONTROL_ELEV_ALLOW_UAC=1 to enable it for a debugging session",
+        BOOT_WINDOW.as_secs(),
+        failures.len()
+    );
+
+    for failure in failures {
+        let flattened = failure.reason.replace(['\r', '\n'], " ");
+        let mut reason: String = flattened.chars().take(MAX_REASON).collect();
+        if reason.len() < flattened.len() {
+            reason.push('…');
+        }
+        line.push_str(&format!(
+            "; {} (attempt {}, {} ms): {}",
+            failure.cmd, failure.attempts, failure.elapsed_ms, reason
+        ));
+    }
+    line
+}
+
+/// Spawn the one-time boot summary (90 s after startup).
+///
+/// Called once from `lib.rs` setup. If the app is a short-lived dev run the task
+/// dies with the runtime — acceptable: the per-command WARNs are already in the
+/// log.
+pub fn spawn_boot_summary() {
+    if background_uac_fallback_enabled() {
+        log::warn!(
+            target: "elev_bridge",
+            "MICONTROL_ELEV_ALLOW_UAC is set — background elevated failures may now raise a \
+             UAC consent dialog (debug mode)"
+        );
+    }
+
+    tauri::async_runtime::spawn(async {
+        tokio::time::sleep(BOOT_SUMMARY_DELAY).await;
+        let (failures, successes) = {
+            let mut report = match boot_report().lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if report.summarised {
+                return;
+            }
+            report.summarised = true;
+            (report.failures.clone(), report.successes)
+        };
+
+        if failures.is_empty() {
+            log::info!(target: "elev_bridge", "{}", format_boot_summary(&failures, successes));
+        } else {
+            log::warn!(target: "elev_bridge", "{}", format_boot_summary(&failures, successes));
+        }
+    });
+}
+
+/// Measure, report and record an elevated call.
+///
+/// Wrapper around [`run_elevated_inner`] so every exit path (including the
+/// circuit-breaker short-circuit) is accounted for exactly once.
+async fn run_elevated_impl(
+    cmd: &'static str,
+    args: Value,
+    allow_uac: bool,
+) -> Result<Value, String> {
+    let started = Instant::now();
+    let result = run_elevated_inner(cmd, args, allow_uac).await;
+    let elapsed = started.elapsed();
+
+    note_boot_outcome(cmd, elapsed, &result);
+
+    if let Err(reason) = &result {
+        // P8: one actionable line per command per 5 min — command, elapsed,
+        // reason and policy. Callers may log their own context too; this is the
+        // canonical line for triage.
+        log_rate_limited(true, cmd, |_| {
+            format!(
+                "Elevated command '{cmd}' failed after {} ms (uac_fallback={}): {reason}",
+                elapsed.as_millis(),
+                if allow_uac {
+                    "allowed"
+                } else {
+                    "disabled by design for background commands (MIOT-38)"
+                }
+            )
+        });
+    }
+
+    result
+}
+
 /// Shared implementation; `allow_uac` controls whether the function may
 /// escalate via a `ShellExecuteExW("runas")` UAC prompt as a last resort.
-async fn run_elevated_impl(
+async fn run_elevated_inner(
     cmd: &'static str,
     args: Value,
     allow_uac: bool,
@@ -324,9 +917,20 @@ async fn run_elevated_impl(
 
     // ── Preferred path: autonomous MiControlBridge service pipe ─────────────
     // The service runs as SYSTEM since installation — no UAC prompt ever.
-    if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
-        note_elevated_success();
-        return Ok(response);
+    //
+    // P8: honour the pipe-health cooldown. When the service answers but its
+    // pipe is wedged (C-01), attempting it costs the full 15 s budget per try.
+    // After two consecutive timeouts the pipe is skipped for 60 s so the
+    // command reaches the scheduled task immediately.
+    let mut pipe_was_skipped = false;
+    if pipe_attempt_allowed() {
+        if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
+            note_pipe_success();
+            note_elevated_success();
+            return Ok(response);
+        }
+    } else {
+        pipe_was_skipped = true;
     }
 
     // ── S66-002: retry the pipe once before escalating to the task path ────
@@ -337,15 +941,27 @@ async fn run_elevated_impl(
     // used to crash at exit (S66-001) and still costs a process spawn +
     // WER report. A single short retry absorbs the transient failures
     // without measurably delaying the genuine-failure fallback.
-    if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
-        note_elevated_success();
-        log::debug!(
-            target: "elev_bridge",
-            "Elevated command '{cmd}' succeeded on pipe retry (transient failure absorbed)"
-        );
-        return Ok(response);
+    if pipe_attempt_allowed() {
+        if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
+            note_pipe_success();
+            note_elevated_success();
+            log::debug!(
+                target: "elev_bridge",
+                "Elevated command '{cmd}' succeeded on pipe retry (transient failure absorbed)"
+            );
+            return Ok(response);
+        }
+    } else if !pipe_was_skipped {
+        // The first attempt tripped the cooldown mid-call; do not retry.
+        pipe_was_skipped = true;
     }
     // Service pipe unavailable after retry — fall through to the scheduled task.
+    if pipe_was_skipped {
+        log::debug!(
+            target: "elev_bridge",
+            "Pipe attempt skipped for '{cmd}' (post-timeout cooldown active) — using the scheduled task"
+        );
+    }
 
     // ── S51 circuit breaker: short-circuit when the infra is known-degraded ─
     // Only for no-prompt calls: critical user-initiated writes (UAC allowed)
@@ -541,10 +1157,24 @@ async fn run_elevated_impl(
             {
                 if !allow_uac {
                     let _ = tokio::fs::remove_file(&cmd_path).await;
-                    return Err(format!(
-                        "Elevated command '{}' timed out after {} s and UAC fallback is \
-                         disabled for this operation.",
+                    // P8: name the command, the real elapsed time and the
+                    // policy that suppressed the fallback — this line is what
+                    // makes the failure actionable instead of silent.
+                    log::warn!(
+                        target: "elev_bridge",
+                        "Elevated command '{}' produced no result within {} ms (limit {} s); \
+                         UAC fallback disabled by design for background commands (MIOT-38) — \
+                         scheduled task '{}' is broken or not running the helper",
                         cmd,
+                        start.elapsed().as_millis(),
+                        timeout.as_secs(),
+                        TASK_NAME
+                    );
+                    return Err(format!(
+                        "Elevated command '{}' timed out after {} ms (limit {} s) and UAC fallback \
+                         is disabled for this operation (background command, MIOT-38 policy).",
+                        cmd,
+                        start.elapsed().as_millis(),
                         timeout.as_secs()
                     ));
                 }
@@ -676,10 +1306,15 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
         // MIOT-38: this silent failure previously hid WHY the app fell back
         // to the scheduled-task/UAC path — log it so the root cause is
         // visible in tauri-app.log.
-        log::warn!(
-            "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
-             (service did not respond) — falling back to scheduled task path"
-        );
+        // P8: rate-limited (P1 storm: 4.298 identical lines in 49 h) and
+        // counted by the pipe-health cooldown.
+        note_pipe_timeout("round-trip timeout");
+        log_rate_limited(true, "pipe_request_failed", |_| {
+            format!(
+                "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
+                 (service did not respond) — falling back to scheduled task path"
+            )
+        });
         format!(
             "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
              (service did not respond)"
@@ -693,10 +1328,16 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
     let content = match result {
         Ok(c) => c,
         Err(e) => {
-            log::warn!(
-                "Bridge service pipe request failed: {e} — falling back to \
-                 scheduled task path"
-            );
+            if e.starts_with("No response from bridge service") {
+                note_pipe_timeout("empty read");
+            }
+            // Rate-limited: with a wedged pipe (C-01) this line repeated
+            // 4.298 times in 49 h and buried every other signal.
+            log_rate_limited(true, "pipe_request_failed", |_| {
+                format!(
+                    "Bridge service pipe request failed: {e} — falling back to scheduled task path"
+                )
+            });
             return Err(e);
         }
     };
@@ -875,6 +1516,7 @@ fn pipe_request(body: &str) -> Result<String, String> {
             let wait = WaitForSingleObject(event, PIPE_OP_TIMEOUT_MS);
             if wait == WAIT_TIMEOUT {
                 let _ = CancelIoEx(handle, Some(&write_ov));
+                note_pipe_timeout("write timeout");
                 write_result = Err(windows::core::Error::from_win32());
             } else if wait != WAIT_OBJECT_0 {
                 write_result = Err(windows::core::Error::from_win32());
@@ -921,6 +1563,7 @@ fn pipe_request(body: &str) -> Result<String, String> {
                 let wait = WaitForSingleObject(event, PIPE_OP_TIMEOUT_MS);
                 if wait == WAIT_TIMEOUT {
                     let _ = CancelIoEx(handle, Some(&read_ov));
+                    note_pipe_timeout("read timeout");
                     break;
                 }
                 if wait != WAIT_OBJECT_0 {
@@ -1352,4 +1995,209 @@ fn ensure_task_correct_path() -> TaskHealResult {
 #[cfg(not(windows))]
 fn ensure_task_correct_path() -> TaskHealResult {
     TaskHealResult::Failed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── P1: SCM-based availability decision ────────────────────────────────
+
+    /// The regression that caused 597 warnings + 702 no-op installs: a running
+    /// service whose pipe is wedged must never be re-installed.
+    #[test]
+    fn running_service_is_available_even_when_the_pipe_is_wedged() {
+        let action = decide_bridge_action(BridgeProbe {
+            service: BridgeServiceState::Running,
+            pipe_reachable: false,
+        });
+        assert_eq!(action, BridgeAction::AlreadyRunning);
+        assert_eq!(
+            action,
+            decide_bridge_action(BridgeProbe {
+                service: BridgeServiceState::Running,
+                pipe_reachable: true,
+            }),
+            "pipe state must not influence a known-running service"
+        );
+    }
+
+    #[test]
+    fn stopped_service_is_started_not_reinstalled() {
+        assert_eq!(
+            decide_bridge_action(BridgeProbe {
+                service: BridgeServiceState::Stopped,
+                pipe_reachable: false,
+            }),
+            BridgeAction::StartService
+        );
+        assert_eq!(
+            decide_bridge_action(BridgeProbe {
+                service: BridgeServiceState::Stopped,
+                pipe_reachable: true,
+            }),
+            BridgeAction::StartService,
+            "a reachable pipe with a stopped service still needs the service started"
+        );
+    }
+
+    #[test]
+    fn absent_service_is_installed() {
+        assert_eq!(
+            decide_bridge_action(BridgeProbe {
+                service: BridgeServiceState::Absent,
+                pipe_reachable: false,
+            }),
+            BridgeAction::Install
+        );
+    }
+
+    #[test]
+    fn unknown_scm_state_falls_back_to_the_pipe_probe() {
+        assert_eq!(
+            decide_bridge_action(BridgeProbe {
+                service: BridgeServiceState::Unknown,
+                pipe_reachable: true,
+            }),
+            BridgeAction::AlreadyRunning
+        );
+        assert_eq!(
+            decide_bridge_action(BridgeProbe {
+                service: BridgeServiceState::Unknown,
+                pipe_reachable: false,
+            }),
+            BridgeAction::Install
+        );
+    }
+
+    #[test]
+    fn scm_states_collapse_to_actionable_buckets() {
+        assert_eq!(
+            BridgeServiceState::from_scm(ServiceState::Running),
+            BridgeServiceState::Running
+        );
+        assert_eq!(
+            BridgeServiceState::from_scm(ServiceState::Pending),
+            BridgeServiceState::Stopped,
+            "a start-pending service must be asked to start, never reinstalled"
+        );
+        assert_eq!(
+            BridgeServiceState::from_scm(ServiceState::Paused),
+            BridgeServiceState::Stopped
+        );
+        assert_eq!(
+            BridgeServiceState::from_scm(ServiceState::Absent),
+            BridgeServiceState::Absent
+        );
+        assert_eq!(
+            BridgeServiceState::from_scm(ServiceState::Unknown),
+            BridgeServiceState::Unknown
+        );
+    }
+
+    // ── P8: UAC opt-in flag ────────────────────────────────────────────────
+
+    #[test]
+    fn parses_uac_opt_in_flag() {
+        for truthy in ["1", "true", "TRUE", "yes", "on", " 1 "] {
+            assert!(parse_bool_flag(truthy), "{truthy:?} should enable");
+        }
+        for falsy in ["0", "false", "no", "off", "", "2", "yes please"] {
+            assert!(!parse_bool_flag(falsy), "{falsy:?} should not enable");
+        }
+    }
+
+    // ── P8: boot summary ───────────────────────────────────────────────────
+
+    #[test]
+    fn boot_summary_reports_success_without_noise() {
+        let line = format_boot_summary(&[], 7);
+        assert!(line.contains("7 command(s) succeeded"), "{line}");
+        assert!(line.contains("none failed"), "{line}");
+    }
+
+    #[test]
+    fn boot_summary_lists_command_elapsed_and_reason() {
+        let failures = vec![
+            BootFailure {
+                cmd: "disable_copilot_key",
+                elapsed_ms: 15_002,
+                attempts: 1,
+                reason: "timed out after 15002 ms and UAC fallback is disabled".into(),
+            },
+            BootFailure {
+                cmd: "ensure_face_service",
+                elapsed_ms: 45_120,
+                attempts: 2,
+                reason: "scheduled task unavailable".into(),
+            },
+        ];
+        let line = format_boot_summary(&failures, 3);
+        assert!(line.contains("disable_copilot_key"), "{line}");
+        assert!(line.contains("15002 ms"), "{line}");
+        assert!(line.contains("ensure_face_service"), "{line}");
+        assert!(line.contains("attempt 2"), "{line}");
+        assert!(line.contains("MICONTROL_ELEV_ALLOW_UAC=1"), "{line}");
+        assert!(!line.contains('\n'), "summary must stay a single log line");
+    }
+
+    #[test]
+    fn boot_summary_sanitises_and_truncates_reasons() {
+        let long_reason = format!("line one\nline two\r\n{}", "x".repeat(400));
+        let failures = vec![BootFailure {
+            cmd: "set_scancode_map",
+            elapsed_ms: 1,
+            attempts: 1,
+            reason: long_reason,
+        }];
+        let line = format_boot_summary(&failures, 0);
+        assert!(!line.contains('\n'), "newlines must be flattened: {line}");
+        assert!(line.ends_with('…'), "reason must be truncated: {line}");
+        assert!(
+            line.len() < 600,
+            "summary must stay bounded: {}",
+            line.len()
+        );
+    }
+
+    // ── P8: pipe cooldown ──────────────────────────────────────────────────
+
+    #[test]
+    fn pipe_cooldown_opens_after_two_timeouts_and_expires() {
+        let mut cooldown = PipeCooldown::new();
+        assert!(cooldown.allowed(0));
+        assert_eq!(
+            cooldown.note_timeout(100),
+            None,
+            "one timeout is not enough to skip the pipe"
+        );
+        assert!(cooldown.allowed(100));
+
+        assert_eq!(cooldown.note_timeout(200), Some(2));
+        assert!(!cooldown.allowed(201));
+        assert!(!cooldown.allowed(200 + 59_999));
+        assert!(cooldown.allowed(200 + 60_000));
+    }
+
+    #[test]
+    fn pipe_cooldown_does_not_reopen_or_relog_while_active() {
+        let mut cooldown = PipeCooldown::new();
+        cooldown.note_timeout(0);
+        assert_eq!(cooldown.note_timeout(10), Some(2));
+        // Further timeouts inside the window must not log again.
+        assert_eq!(cooldown.note_timeout(20), None);
+        assert_eq!(cooldown.note_timeout(30), None);
+        assert!(!cooldown.allowed(30));
+    }
+
+    #[test]
+    fn pipe_success_resets_the_streak() {
+        let mut cooldown = PipeCooldown::new();
+        cooldown.note_timeout(0);
+        assert_eq!(cooldown.note_timeout(10), Some(2));
+        cooldown.note_success();
+        // After recovery, two new timeouts are needed to skip again.
+        assert_eq!(cooldown.note_timeout(70_000), None);
+        assert_eq!(cooldown.note_timeout(70_100), Some(2));
+    }
 }

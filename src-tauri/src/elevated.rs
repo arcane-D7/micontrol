@@ -1582,8 +1582,8 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
-        "wmi_ec_read_adapter_power" => match crate::hw::wmi_ec::read_adapter_power() {
-            Ok(val) => make_ok(serde_json::json!(val)),
+        "wmi_ec_read_adapter_power" => match crate::hw::wmi_ec::read_adapter_power_status() {
+            Ok(reading) => make_ok(serde_json::to_value(reading).unwrap_or(Value::Null)),
             Err(e) => make_err(e.to_string()),
         },
 
@@ -2000,8 +2000,10 @@ fn install_bridge_service() -> Result<Value, String> {
 
     // S55 FIX 25: if the bridge service is ALREADY installed and running, do
     // nothing. This command can arrive through the pipe itself (the app's
-    // thermal poller calls ensure_bridge_service whenever a transient
-    // ERROR_PIPE_BUSY makes `is_bridge_service_available` return false).
+    // health supervisor calls ensure_bridge_service when the pipe looks dead —
+    // including the C-01 case of a RUNNING service with a wedged accept loop,
+    // which is also why the client-side decision no longer treats the pipe as
+    // proof of absence: see elev_bridge::decide_bridge_action).
     // Without this guard the running service would run `micontrol_bridge.exe
     // install`, whose first step is remove_service_wait — stopping and
     // DELETING the very service executing it. The pipe dies mid-request, the

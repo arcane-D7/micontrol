@@ -374,6 +374,23 @@ export interface EcSensorData {
   current_mode: number;
 }
 
+/**
+ * Structured AC-adapter-power answer (`wmi_ec_read_adapter_power`).
+ *
+ * P2 (audit 2026-11-07): machines without the WMAA adapter-power class used to
+ * produce a hard error (`WBEM_E_NOT_FOUND`, 115× in 49 h). The command now
+ * succeeds with `supported: false`; the UI should hide the wattage field
+ * instead of rendering an error.
+ */
+export interface AdapterPowerReading {
+  /** `false` when this hardware does not expose the WMI class. */
+  supported: boolean;
+  /** Watts when `supported` is true, `null` otherwise. */
+  watts: number | null;
+  /** Diagnostic reason for `supported: false` (not for end users). */
+  reason?: string;
+}
+
 // ── HQWmiCommonInterface (BIOS control via WMI) ────────────────────────────
 //
 // These types match the Rust structs in `src-tauri/src/hw/hq_wmi.rs`.

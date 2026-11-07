@@ -513,7 +513,7 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return 94 as T;
 
     case 'wmi_ec_read_adapter_power':
-      return 65 as T;
+      return { supported: true, watts: 65 } as T;
 
     case 'wmi_ec_read_sensor_data':
       return {

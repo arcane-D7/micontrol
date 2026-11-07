@@ -49,22 +49,27 @@ pub async fn get_battery_info() -> Result<BatteryInfo, ErrorResponse> {
     // local read inside get_battery_info came back None but the machine is
     // plugged in, re-probe via the elevated bridge so the UI gets a real
     // wattage instead of hiding the charging field.
+    //
+    // P2: this goes through `hw::adapter_power` so the "hardware does not
+    // expose the WMI class" verdict is cached (circuit) and logged once,
+    // instead of re-probing WMI and failing 115× as before.
     let mut result = result;
     if let Ok(info) = &mut result {
         if info.is_plugged && info.ac_input_power_mw.is_none() {
-            match elev_bridge::run_elevated_no_prompt(
-                "wmi_ec_read_adapter_power",
-                serde_json::json!({}),
-            )
-            .await
-            {
-                Ok(v) => {
-                    if let Some(watts) = v.as_u64() {
-                        info.ac_input_power_mw = Some((watts.min(i32::MAX as u64)) as i32 * 1000);
+            match crate::hw::adapter_power::read_via_bridge_no_prompt().await {
+                Ok(reading) => {
+                    if let Some(watts) = reading.watts {
+                        info.ac_input_power_mw = Some((watts.min(i32::MAX as u32) as i32) * 1000);
                         log::debug!(
                             target: "cmd::system",
                             "get_battery_info: elevated adapter-power fallback -> {} W",
                             watts
+                        );
+                    } else {
+                        log::debug!(
+                            target: "cmd::system",
+                            "get_battery_info: adapter power not supported by this hardware ({})",
+                            reading.reason.as_deref().unwrap_or("unknown")
                         );
                     }
                 }

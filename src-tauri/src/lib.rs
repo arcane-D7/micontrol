@@ -826,6 +826,12 @@ pub fn run() {
             // processes from the unprivileged UI process.
             crate::health_supervisor::start();
 
+            // P8 (audit 2026-11-07): one-time summary of every elevated command
+            // that failed during the first two minutes — command, elapsed and
+            // reason. Background commands never prompt for UAC (MIOT-38), so
+            // without this summary their failures were silent.
+            crate::elev_bridge::spawn_boot_summary();
+
             // Apply Copilot key interception fixes (disables Windows Shell
             // interception + writes Scancode Map for permanent remap).
             // This is async because it dispatches through the elevated bridge.

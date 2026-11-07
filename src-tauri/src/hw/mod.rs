@@ -4,6 +4,7 @@
 //! fan, audio, etc.) accessed via WMI, IoTService IPC, IOCTL, or
 //! Windows API calls.
 
+pub mod adapter_power;
 pub mod audio;
 pub mod audio_effects;
 pub mod battery;
