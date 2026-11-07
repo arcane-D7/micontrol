@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Audio effects always showed as "off" (audit P1).** `set_mic_noise_canceling`, `set_speaker_noise_canceling` and `set_voice_focus` were dispatched through the elevated bridge, so their `HKEY_CURRENT_USER` writes landed in the SYSTEM profile hive (`HKU\S-1-5-18`) while `get_audio_effects` read the signed-in user's hive. The setters now run in-process; the values older builds stranded are migrated once into `HKCU` (an explicit user value always wins, so turning a toggle off can never be resurrected). The invented `HKCU\...\CurrentVersion\AudioControls\NoiseSuppression` write is gone.
+- **Audio-effects toggles no longer claim to change audio.** They are labelled as saved preferences (`applies_to_audio: false`) and the card copy was rewritten in all four locales. `PKEY_AudioEndpoint_Disable_SysFx` disables *every* DSP on the endpoint (beamforming, AGC, Realtek/Dolby sAPO), and there is no public per-effect Win32 control, so no fake system write is performed.
+- **Voice Clarity detection was always false** — it checked `HKLM\...\AudioControls`, a key that does not exist. It now probes the OS build (≥ 22621) plus the presence of a `ComputeAccelerator` device instance and reports a reason (`detected` / `no-npu` / `os-unsupported` / `unknown-os`).
+- **"Set as Default" was unreachable** — `useHardware` defined `setDefaultAudioDevice` but never returned it (the name only appeared in the memo dependency list), and `audio.tsx` never passed `onSetDefaultDevice`, so every playback row rendered disabled. The hook now exposes it, the card wires it, the device list re-enumerates after the switch (the ✓ follows the device Windows actually selected), and failures surface as a retryable toast.
+- **The mic OSD lied on consumer mute keys.** Usage `0x00E2` is *output* mute and no longer produces a microphone OSD; `0x00CF`/`0x0169` read the capture endpoint's real mute state, flip it, and display the state the endpoint reports back. The WMI Fn+F4 path also displays the read-back state instead of trusting the driver's reported value, and the OSD no longer keeps its own toggle boolean.
+
 ## [0.2.20] - 2026-10-25
 
 ### Fixed

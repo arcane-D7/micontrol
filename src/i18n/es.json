@@ -1118,16 +1118,21 @@
     "playbackDevices": "Dispositivos de Reproducción",
     "defaultDevice": "Predeterminado",
     "setAsDefault": "Establecer como Predeterminado",
-    "effectsTitle": "Cancelación de Ruido AI",
-    "effectsDesc": "Windows Voice Clarity y reducción de ruido con IA para llamadas y grabaciones",
+    "setDefaultError": "No se pudo cambiar el dispositivo de reproducción predeterminado",
+    "effectsTitle": "Efectos de Audio",
+    "effectsDesc": "Guardados por usuario. Esta versión memoriza los interruptores pero no cambia cómo procesa el audio Windows.",
+    "preferenceOnly": "Solo preferencia — no se aplica al audio en esta versión",
     "micNoiseCanceling": "Cancelación de Ruido del Micrófono",
-    "micNoiseCancelingDesc": "Elimina el ruido de fondo de la entrada del micrófono",
+    "micNoiseCancelingDesc": "Supresión de ruido en la entrada del micrófono",
     "speakerNoiseCanceling": "Cancelación de Ruido del Altavoz",
-    "speakerNoiseCancelingDesc": "Elimina el ruido de fondo del audio que escuchas",
+    "speakerNoiseCancelingDesc": "Supresión de ruido en el audio que escuchas",
     "voiceFocus": "Enfoque de Voz",
     "voiceFocusDesc": "Beamforming que aísla tu voz en llamadas",
-    "voiceClarityUnavailable": "Windows Voice Clarity no está disponible en este sistema",
-    "effectsNotAvailable": "Efectos de audio no disponibles en este sistema"
+    "voiceClarityAvailable": "Hardware con Voice Clarity detectado — actívalo en Configuración de Windows → Sonido",
+    "voiceClarityNoNpu": "No se detectó ningún procesador neuronal — Windows Voice Clarity no está disponible",
+    "voiceClarityOsUnsupported": "Windows Voice Clarity requiere Windows 11 22H2 o posterior",
+    "voiceClarityUnknown": "No se pudo determinar si Windows Voice Clarity está disponible",
+    "effectsNotAvailable": "Los efectos de audio no están disponibles en este sistema"
   },
   "error": {
     "boundary": {

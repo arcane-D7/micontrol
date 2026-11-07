@@ -1118,16 +1118,21 @@
     "playbackDevices": "Playback Devices",
     "defaultDevice": "Default",
     "setAsDefault": "Set as Default",
-    "effectsTitle": "AI Noise Cancellation",
-    "effectsDesc": "Windows Voice Clarity and AI-powered noise reduction for calls and recordings",
+    "setDefaultError": "Could not switch the default playback device",
+    "effectsTitle": "Audio Effects",
+    "effectsDesc": "Saved per user. This version stores these switches but does not change how Windows processes your audio.",
+    "preferenceOnly": "Preference only — not applied to the audio pipeline in this version",
     "micNoiseCanceling": "Microphone Noise Cancellation",
-    "micNoiseCancelingDesc": "Removes background noise from your microphone input",
+    "micNoiseCancelingDesc": "Noise suppression for the microphone input",
     "speakerNoiseCanceling": "Speaker Noise Cancellation",
-    "speakerNoiseCancelingDesc": "Removes background noise from audio you hear",
+    "speakerNoiseCancelingDesc": "Noise suppression for the audio you hear",
     "voiceFocus": "Voice Focus",
     "voiceFocusDesc": "Beamforming that isolates your voice in calls",
-    "voiceClarityUnavailable": "Windows Voice Clarity is not available on this system",
-    "effectsNotAvailable": "Audio effects are not available on this system"
+    "voiceClarityAvailable": "Voice Clarity hardware detected — enable it in Windows Settings → Sound",
+    "voiceClarityNoNpu": "No neural processor detected — Windows Voice Clarity is unavailable",
+    "voiceClarityOsUnsupported": "Windows Voice Clarity requires Windows 11 22H2 or newer",
+    "voiceClarityUnknown": "Could not determine whether Windows Voice Clarity is available",
+    "effectsNotAvailable": "Audio effects are unavailable on this system"
   },
   "error": {
     "boundary": {

@@ -54,8 +54,6 @@ struct OsdState {
     spin_frame: Mutex<u8>,
     /// 0 = hidden  1 = entering (fade-in + spin)  2 = showing  3 = leaving (fade-out)
     anim_phase: Mutex<u8>,
-    /// Tracks mic mute state locally.
-    mic_muted: Mutex<bool>,
     /// 0 = brightness  1 = mic-muted  2 = mic-active  3 = keyboard-light  4 = performance-mode
     mode: Mutex<u8>,
     /// Unicode codepoint (u16 stored in u32) of the notification icon to draw.
@@ -80,7 +78,6 @@ fn state() -> &'static OsdState {
         alpha: Mutex::new(0),
         spin_frame: Mutex::new(0),
         anim_phase: Mutex::new(0),
-        mic_muted: Mutex::new(false),
         mode: Mutex::new(0),
         notif_icon: Mutex::new(0),
         kbl_level: Mutex::new(0xFF),
@@ -178,27 +175,8 @@ pub fn show_brightness_osd(level: u8) {
 /// Stores the state and shows the appropriate icon and label.
 /// Safe to call from any thread.
 pub fn show_mic_mute_osd(muted: bool) {
-    *state().mic_muted.lock().unwrap() = muted;
     log::info!("[osd] Mic mute OSD: muted={}", muted);
     // Icon: U+E8D4 = MicOff (Segoe MDL2), U+E720 = Microphone (active)
-    let (mode, icon) = if muted {
-        (1u8, 0xE8D4u16)
-    } else {
-        (2u8, 0xE720u16)
-    };
-    show_notification_osd(mode, icon);
-}
-
-/// Toggle mic mute state and show OSD.
-/// Use from Win32 HID consumer path where the resulting state is not known.
-/// Safe to call from any thread.
-pub fn show_mic_mute_osd_toggle() {
-    let muted = {
-        let mut g = state().mic_muted.lock().unwrap();
-        *g ^= true;
-        *g
-    };
-    log::info!("[osd] Mic mute OSD (toggle): muted={}", muted);
     let (mode, icon) = if muted {
         (1u8, 0xE8D4u16)
     } else {
@@ -270,10 +248,10 @@ fn show_notification_osd(mode: u8, icon_cp: u16) {
     }
 }
 
-// ── WASAPI mic mute query — replaced by local toggle state (see OsdState.mic_muted) ─
-// The mic key is a TOGGLE: pressing it toggles the mute state.
-// We track that toggle locally. This avoids a WASAPI COM dependency and is
-// equally correct once the key has been pressed at least once.
+// The OSD is a pure renderer: it never tracks mic state itself. Callers pass
+// the state the capture endpoint actually reports (`hw::mic::set_system_mic_mute_osd`
+// / `toggle_system_mic_mute_osd`), so a stale internal flag cannot make the icon
+// disagree with the hardware.
 
 // ── Message loop (dedicated thread) ──────────────────────────────────────────
 
@@ -1045,11 +1023,6 @@ mod tests {
     fn test_atomic_initial_osd_mode() {
         // 0 = brightness mode
         assert_eq!(*state().mode.lock().unwrap(), 0);
-    }
-
-    #[test]
-    fn test_atomic_initial_mic_muted() {
-        assert!(!*state().mic_muted.lock().unwrap());
     }
 
     #[test]
