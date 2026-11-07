@@ -205,11 +205,11 @@ fn snapshot_health(alive: u32, expired: u32) -> SnapshotHealth {
 }
 
 /// Snapshot entry for exactly this process incarnation, if one was recorded.
-fn find_snapshot_entry<'a>(
-    snapshot: Option<&'a OsTurboRecoverySnapshot>,
+fn find_snapshot_entry(
+    snapshot: Option<&OsTurboRecoverySnapshot>,
     pid: u32,
     creation_time: u64,
-) -> Option<&'a ProcessRecoverySnapshot> {
+) -> Option<&ProcessRecoverySnapshot> {
     snapshot?
         .processes
         .iter()
