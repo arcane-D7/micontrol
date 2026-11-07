@@ -376,31 +376,50 @@ pub fn get_drivers_detail() -> HardwareResult<Vec<DriverDetail>> {
         use crate::util::wmi_extract;
 
         wmi_cache::with_cimv2(|wmi| {
+            // F5.2: `Win32_PnPSignedDriver` declares `Status` (inherited from
+            // CIM_ManagedSystemElement) but its provider returns NULL for every
+            // row — measured 355/355 NULL on the audit machine — so the old
+            // read fell back to "Unknown" for all 351 devices in the UI.
+            // Device health is published by `Win32_PnPEntity`, joined here by
+            // DeviceID (`ConfigManagerErrorCode` 0 == working, anything else is
+            // the Device Manager problem code).
             let drivers: Vec<HashMap<String, wmi::Variant>> = wmi.raw_query(
-                "SELECT DeviceName, DeviceClass, HardwareID, Manufacturer, \
+                "SELECT DeviceID, DeviceName, DeviceClass, HardwareID, Manufacturer, \
                  DriverVersion, DriverDate, InfName, DriverProviderName, \
-                 IsSigned, Signer, Status \
+                 IsSigned, Signer \
                  FROM Win32_PnPSignedDriver",
             )?;
 
+            let entities: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT DeviceID, Status, ConfigManagerErrorCode FROM Win32_PnPEntity")
+                .unwrap_or_default();
+            let health = build_device_health_map(&entities);
+
             let result = drivers
                 .into_iter()
-                .map(|d| DriverDetail {
-                    device_name: wmi_extract::extract_string_or(&d, "DeviceName", ""),
-                    device_class: wmi_extract::extract_string_or(&d, "DeviceClass", ""),
-                    hardware_id: wmi_extract::extract_string_or(&d, "HardwareID", ""),
-                    manufacturer: wmi_extract::extract_string_or(&d, "Manufacturer", ""),
-                    driver_version: wmi_extract::extract_string_or(&d, "DriverVersion", ""),
-                    driver_date: wmi_extract::extract_string_or(&d, "DriverDate", ""),
-                    inf_name: wmi_extract::extract_string_or(&d, "InfName", ""),
-                    driver_provider_name: wmi_extract::extract_string_or(
-                        &d,
-                        "DriverProviderName",
-                        "",
-                    ),
-                    is_signed: wmi_extract::extract_bool(&d, "IsSigned").unwrap_or(false),
-                    signer: wmi_extract::extract_string_or(&d, "Signer", ""),
-                    status: wmi_extract::extract_string_or(&d, "Status", "Unknown"),
+                .map(|d| {
+                    let device_id = wmi_extract::extract_string_or(&d, "DeviceID", "");
+                    let device_health = health.get(&normalize_device_id(&device_id));
+                    DriverDetail {
+                        device_name: wmi_extract::extract_string_or(&d, "DeviceName", ""),
+                        device_class: wmi_extract::extract_string_or(&d, "DeviceClass", ""),
+                        hardware_id: wmi_extract::extract_string_or(&d, "HardwareID", ""),
+                        manufacturer: wmi_extract::extract_string_or(&d, "Manufacturer", ""),
+                        driver_version: wmi_extract::extract_string_or(&d, "DriverVersion", ""),
+                        driver_date: wmi_extract::extract_string_or(&d, "DriverDate", ""),
+                        inf_name: wmi_extract::extract_string_or(&d, "InfName", ""),
+                        driver_provider_name: wmi_extract::extract_string_or(
+                            &d,
+                            "DriverProviderName",
+                            "",
+                        ),
+                        is_signed: wmi_extract::extract_bool(&d, "IsSigned").unwrap_or(false),
+                        signer: wmi_extract::extract_string_or(&d, "Signer", ""),
+                        status: driver_status_text(
+                            device_health.and_then(|h| h.status.as_deref()),
+                            device_health.and_then(|h| h.config_manager_error_code),
+                        ),
+                    }
                 })
                 .collect();
 
@@ -412,6 +431,64 @@ pub fn get_drivers_detail() -> HardwareResult<Vec<DriverDetail>> {
     Err(HardwareError::NotSupported(
         "Driver details only available on Windows".into(),
     ))
+}
+
+/// Device health as reported by `Win32_PnPEntity`.
+#[cfg(windows)]
+#[derive(Debug, Clone, Default)]
+struct DeviceHealth {
+    status: Option<String>,
+    config_manager_error_code: Option<u32>,
+}
+
+/// Index `Win32_PnPEntity` rows by normalized DeviceID.
+#[cfg(windows)]
+fn build_device_health_map(
+    entities: &[HashMap<String, wmi::Variant>],
+) -> HashMap<String, DeviceHealth> {
+    use crate::util::wmi_extract;
+
+    let mut map = HashMap::with_capacity(entities.len());
+    for entity in entities {
+        let Some(device_id) = wmi_extract::extract_string(entity, "DeviceID") else {
+            continue;
+        };
+        map.insert(
+            normalize_device_id(&device_id),
+            DeviceHealth {
+                status: wmi_extract::extract_string(entity, "Status")
+                    .filter(|status| !status.trim().is_empty()),
+                config_manager_error_code: wmi_extract::extract_u32(
+                    entity,
+                    "ConfigManagerErrorCode",
+                ),
+            },
+        );
+    }
+    map
+}
+
+/// WMI DeviceIDs are case-insensitive; normalise before joining.
+fn normalize_device_id(device_id: &str) -> String {
+    device_id.trim().to_ascii_uppercase()
+}
+
+/// Compose the Status column from Windows' own device status + problem code.
+///
+/// `ConfigManagerErrorCode == 0` is the documented "working properly" value;
+/// any other code is the Device Manager problem number, which is what the user
+/// would see there. `None` for both means Windows published no health record
+/// for this driver (e.g. print queues, which have no PnP entity) — "Unknown"
+/// is then the truthful answer rather than a default.
+fn driver_status_text(status: Option<&str>, config_manager_error_code: Option<u32>) -> String {
+    let status = status.map(str::trim).filter(|status| !status.is_empty());
+    match (status, config_manager_error_code) {
+        (_, Some(0)) => status.unwrap_or("OK").to_string(),
+        (Some(status), Some(code)) => format!("{status} (code {code})"),
+        (None, Some(code)) => format!("Error (code {code})"),
+        (Some(status), None) => status.to_string(),
+        (None, None) => "Unknown".to_string(),
+    }
 }
 
 fn variant_str(map: &HashMap<String, wmi::Variant>, key: &str) -> String {
@@ -496,5 +573,45 @@ Signer Name:        Microsoft Windows\r\n";
             assert!(!bios.manufacturer.is_empty() || bios.manufacturer.is_empty());
             // always true — just checks no panic
         }
+    }
+
+    // ── Driver status mapping (F5.2) ────────────────────────────────────────
+    //
+    // `Win32_PnPSignedDriver.Status` is NULL for every row on real machines
+    // (measured 355/355), so the old code showed "Unknown" ×351. The status is
+    // now derived from `Win32_PnPEntity.ConfigManagerErrorCode`; these tests
+    // pin the mapping without touching WMI.
+
+    #[test]
+    fn driver_status_healthy_device_reports_windows_status() {
+        assert_eq!(driver_status_text(Some("OK"), Some(0)), "OK");
+        assert_eq!(driver_status_text(None, Some(0)), "OK");
+    }
+
+    #[test]
+    fn driver_status_problem_code_is_visible() {
+        // 28 = "The drivers for this device are not installed" (Device Manager).
+        assert_eq!(driver_status_text(None, Some(28)), "Error (code 28)");
+        assert_eq!(
+            driver_status_text(Some("Error"), Some(10)),
+            "Error (code 10)"
+        );
+    }
+
+    #[test]
+    fn driver_status_without_entity_is_unknown_not_ok() {
+        // Print queues have no PnP entity: no data must never read as "OK".
+        assert_eq!(driver_status_text(None, None), "Unknown");
+        assert_eq!(driver_status_text(Some(""), Some(0)), "OK");
+        assert_eq!(driver_status_text(Some("Degraded"), None), "Degraded");
+    }
+
+    #[test]
+    fn device_id_normalisation_is_case_insensitive() {
+        assert_eq!(normalize_device_id("  usb\\vid_1d6b"), "USB\\VID_1D6B");
+        assert_eq!(
+            normalize_device_id(r"PCI\VEN_8086&DEV_7E28"),
+            r"PCI\VEN_8086&DEV_7E28"
+        );
     }
 }

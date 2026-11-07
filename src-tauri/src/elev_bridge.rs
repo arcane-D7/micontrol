@@ -430,7 +430,10 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "refresh_os_turbo"
         | "set_function_key" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
 
-        "clean_junk_files" | "set_sys_opt_tweak" => {
+        // Audit F2.1: the elevated half of a cleanup is now `clean_system_junk`
+        // (Windows Update cache + Windows logs). It walks two trees, so it gets
+        // the slow budget like any other multi-step elevated command.
+        "clean_system_junk" | "set_sys_opt_tweak" => {
             // S55 FIX 7: set_sys_opt_tweak can run heavy operations — OneDrive
             // uninstall (PowerShell + OneDriveSetup wait), services sweep
             // (multiple sc stop), Appx removals. The default 15 s timeout

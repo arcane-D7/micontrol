@@ -514,6 +514,34 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        "clean_system_junk" => {
+            // Audit F2.1: ONLY the machine-wide categories may be cleaned from
+            // this process — it runs as LocalSystem, where TEMP/LOCALAPPDATA
+            // resolve to the service profile instead of the user's. The
+            // function itself refuses user-owned categories, so a bad/injected
+            // payload cannot turn this into a SYSTEM-profile cleanup.
+            let categories: Vec<crate::hw::cleanup::CleanupCategory> =
+                match serde_json::from_value(cmd.args["categories"].clone()) {
+                    Ok(v) => v,
+                    Err(e) => return make_err(format!("Bad categories arg: {e}")),
+                };
+            match crate::hw::cleanup::clean_system_junk(categories) {
+                Ok(results) => make_ok(serde_json::to_value(results).unwrap_or(Value::Null)),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
+            let categories: Vec<crate::hw::cleanup::CleanupCategory> =
+                match serde_json::from_value(cmd.args["categories"].clone()) {
+                    Ok(v) => v,
+                    Err(e) => return make_err(format!("Bad categories arg: {e}")),
+                };
+            match crate::hw::cleanup::clean_system_junk(categories) {
+                Ok(results) => make_ok(serde_json::to_value(results).unwrap_or(Value::Null)),
+                Err(e) => make_err(e.to_string()),
+            }
+        }
+
         "set_brightness" => {
             let level: u8 = match serde_json::from_value(cmd.args["level"].clone()) {
                 Ok(v) => v,

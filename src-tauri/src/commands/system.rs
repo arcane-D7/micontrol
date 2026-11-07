@@ -713,12 +713,19 @@ pub async fn get_defender_status() -> Result<crate::hw::security_scan::DefenderS
 }
 
 /// Get threat detection history.
+///
+/// Runs a PowerShell child process (Defender cmdlets), which is slower than a
+/// WMI query — give it a wider budget than the 15 s default so a busy Defender
+/// does not turn into a spurious error in the UI.
 #[tauri::command]
 pub async fn get_threat_history() -> Result<crate::hw::security_scan::ThreatHistory, ErrorResponse>
 {
-    run_blocking(crate::hw::security_scan::get_threat_history)
-        .await
-        .map_err(ErrorResponse::from)
+    crate::util::blocking::run_blocking_timeout(
+        std::time::Duration::from_secs(45),
+        crate::hw::security_scan::get_threat_history,
+    )
+    .await
+    .map_err(ErrorResponse::from)
 }
 
 /// Open Windows Security app (Windows Defender).
@@ -864,6 +871,13 @@ pub async fn set_voice_focus(enabled: bool) -> Result<(), ErrorResponse> {
 
 // ── System Cleanup ───────────────────────────────────────────────────────────
 
+/// Budget for the unprivileged half of a cleanup.
+///
+/// Deleting ~1.5 GB across 8k+ files legitimately exceeds the 15 s hardware
+/// query budget used elsewhere. The job is idempotent, so a timeout only means
+/// the UI stops waiting — never that the deletion is undone.
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 #[tauri::command]
 pub async fn scan_junk_files() -> Result<Vec<crate::hw::cleanup::CleanupItem>, ErrorResponse> {
     run_blocking(crate::hw::cleanup::scan_junk_files)
@@ -871,20 +885,64 @@ pub async fn scan_junk_files() -> Result<Vec<crate::hw::cleanup::CleanupItem>, E
         .map_err(ErrorResponse::from)
 }
 
+/// Clean the selected categories, each in the process context that matches it.
+///
+/// Audit F2.1: the previous implementation dispatched **every** category to
+/// `run_elevated`, which normally lands on the LocalSystem bridge. There
+/// `%TEMP%` is `C:\Windows\Temp` and `%LOCALAPPDATA%` is the system profile's,
+/// so the button freed ~91 MB of Windows logs and none of the 1.5 GB the scan
+/// had just shown. Now:
+///
+/// * user-owned categories (temp, browser caches, thumbnails, Recycle Bin) run
+///   **in this process**, as the interactive user, unprivileged;
+/// * the two machine-wide categories run **elevated**, by absolute path.
+///
+/// A failure on the elevated half is reported as a per-category error result
+/// instead of aborting the whole call: the user half may already have freed
+/// gigabytes and must not be thrown away.
 #[tauri::command]
 pub async fn clean_junk_files(
     categories: Vec<crate::hw::cleanup::CleanupCategory>,
 ) -> Result<Vec<crate::hw::cleanup::CleanupResult>, ErrorResponse> {
-    let result = elev_bridge::run_elevated(
-        "clean_junk_files",
-        serde_json::json!({ "categories": categories }),
-    )
-    .await?;
-    // The elevated dispatch returns the CleanupResult array as a JSON value
-    match serde_json::from_value::<Vec<crate::hw::cleanup::CleanupResult>>(result) {
-        Ok(results) => Ok(results),
-        Err(_) => Ok(Vec::new()),
+    use crate::hw::cleanup::{partition_context, CleanupResult};
+
+    let (user_categories, system_categories) = partition_context(categories);
+
+    let mut results: Vec<CleanupResult> = Vec::new();
+
+    if !user_categories.is_empty() {
+        let cleaned = crate::util::blocking::run_blocking_timeout(CLEANUP_TIMEOUT, move || {
+            crate::hw::cleanup::clean_user_junk(user_categories)
+        })
+        .await
+        .map_err(ErrorResponse::from)?;
+        results.extend(cleaned);
     }
+
+    if !system_categories.is_empty() {
+        let requested = system_categories.clone();
+        let reply = elev_bridge::run_elevated(
+            "clean_system_junk",
+            serde_json::json!({ "categories": system_categories }),
+        )
+        .await;
+
+        match reply.map(serde_json::from_value::<Vec<CleanupResult>>) {
+            Ok(Ok(cleaned)) => results.extend(cleaned),
+            // A contract change must never look like "nothing to clean".
+            Ok(Err(e)) => results.extend(requested.into_iter().map(|category| {
+                CleanupResult::failure(
+                    category,
+                    format!("elevated cleanup returned an unexpected payload: {e}"),
+                )
+            })),
+            Err(e) => results.extend(requested.into_iter().map(|category| {
+                CleanupResult::failure(category, format!("elevated cleanup unavailable: {e}"))
+            })),
+        }
+    }
+
+    Ok(results)
 }
 
 // ── Error Logging ────────────────────────────────────────────────────────────

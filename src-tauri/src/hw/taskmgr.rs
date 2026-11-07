@@ -527,9 +527,14 @@ pub struct ProcessTaskInfo {
     pub gpu_percent: f64,
     /// NPU % — sum of `engtype_neural` engines for this PID (0–100 style).
     pub npu_percent: f64,
-    /// Combined up+down bytes/sec on all interfaces (if measurable).
-    pub net_bytes_per_sec: f64,
     /// Thread count (windows only).
+    ///
+    /// There is deliberately no per-process network field: Windows does not
+    /// expose per-PID byte counters without an ETW kernel session (which needs
+    /// administrator) or a full TCP-table diff. The old `net_bytes_per_sec`
+    /// was a hardcoded `0.0`, so the UI advertised a NET column that could only
+    /// ever read "—" while still offering to sort by it (audit F7.3). The
+    /// interface-level throughput lives in `get_network_interfaces`.
     pub thread_count: u32,
 }
 
@@ -574,8 +579,9 @@ pub fn kill_process(pid: u32) -> HardwareResult<()> {
     }
 }
 
-/// Fetch the full process list with per-process GPU/NPU/network, sorted by
-/// CPU% descending. Includes all processes (no limit).
+/// Fetch the full process list with per-process GPU/NPU, sorted by CPU%
+/// descending. Includes all processes (no limit) — the UI filters and sorts the
+/// complete list client-side.
 pub fn get_task_manager() -> Vec<ProcessTaskInfo> {
     #[cfg(windows)]
     {
@@ -652,19 +658,19 @@ pub fn get_task_manager() -> Vec<ProcessTaskInfo> {
                     memory_mb,
                     gpu_percent,
                     npu_percent,
-                    net_bytes_per_sec: 0.0,
                     thread_count,
                 })
             })
             .collect();
 
-        // Sort by CPU descending, top 100.
+        // Sort by CPU descending. No truncation (F7.4): the old code kept only
+        // the top-100, so processes outside it could not be seen, filtered or
+        // killed — and sorting by RAM/name/GPU only reordered those 100.
         procs.sort_by(|a, b| {
             b.cpu_percent
                 .partial_cmp(&a.cpu_percent)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        procs.truncate(100);
         procs
     }
     #[cfg(not(windows))]

@@ -8,14 +8,13 @@ interface Props {
   hw: Hardware;
 }
 
-type SortKey = 'cpu' | 'gpu' | 'npu' | 'ram' | 'net' | 'name' | 'pid';
+type SortKey = 'cpu' | 'gpu' | 'npu' | 'ram' | 'name' | 'pid';
 
 const SORT_LABELS: Record<SortKey, string> = {
   cpu: 'CPU',
   gpu: 'GPU',
   npu: 'NPU',
   ram: 'RAM',
-  net: 'NET',
   name: 'Name',
   pid: 'PID',
 };
@@ -34,10 +33,15 @@ const fmtMb = (mb: number) => {
 
 /**
  * Global Task Manager tab:
- *  - live per-process CPU / GPU / NPU / RAM / network columns
+ *  - live per-process CPU / GPU / NPU / RAM columns
  *  - filter box (by name / pid)
  *  - click-to-sort on every column (asc/desc)
  *  - kill process button (with confirmation)
+ *
+ * There is no per-process network column: Windows only exposes per-PID byte
+ * counters through an ETW kernel session (administrator) and the old field was
+ * a hardcoded 0.0, so the column could only ever show "—" (audit F7.3). The
+ * interface-level throughput is still shown in the summary strip.
  */
 function TaskManagerTab({ hw }: Props) {
   const [processes, setProcesses] = useState<ProcessTaskInfo[]>([]);
@@ -95,9 +99,6 @@ function TaskManagerTab({ hw }: Props) {
           break;
         case 'ram':
           r = a.memory_mb - b.memory_mb;
-          break;
-        case 'net':
-          r = a.net_bytes_per_sec - b.net_bytes_per_sec;
           break;
         case 'pid':
           r = a.pid - b.pid;
@@ -280,7 +281,6 @@ function TaskManagerTab({ hw }: Props) {
               {sortableHeader('gpu', 'GPU %')}
               {sortableHeader('npu', 'NPU %')}
               {sortableHeader('ram', 'RAM')}
-              {sortableHeader('net', 'NET')}
               <th
                 style={{
                   padding: '6px 8px',
@@ -302,7 +302,7 @@ function TaskManagerTab({ hw }: Props) {
             {loading && rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={7}
                   style={{ textAlign: 'center', padding: 28, color: 'var(--color-text-dim)' }}
                 >
                   {t('common.loading')}…
@@ -311,14 +311,14 @@ function TaskManagerTab({ hw }: Props) {
             ) : rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={8}
+                  colSpan={7}
                   style={{ textAlign: 'center', padding: 28, color: 'var(--color-text-dim)' }}
                 >
                   {filter ? t('taskmgr.noMatches') : t('taskmgr.noProcesses')}
                 </td>
               </tr>
             ) : (
-              rows.slice(0, 100).map((p) => (
+              rows.map((p) => (
                 <tr
                   key={p.pid}
                   style={{
@@ -388,16 +388,6 @@ function TaskManagerTab({ hw }: Props) {
                       textAlign: 'right',
                       fontVariantNumeric: 'tabular-nums',
                       color: 'var(--color-text-dim)',
-                    }}
-                  >
-                    {fmtBps(p.net_bytes_per_sec)}
-                  </td>
-                  <td
-                    style={{
-                      padding: '5px 8px',
-                      textAlign: 'right',
-                      color: 'var(--color-text-dim)',
-                      fontVariantNumeric: 'tabular-nums',
                     }}
                   >
                     {p.thread_count || '—'}
