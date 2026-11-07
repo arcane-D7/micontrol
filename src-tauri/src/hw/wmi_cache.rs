@@ -10,7 +10,7 @@
 use crate::hw::errors::{HardwareError, HardwareResult};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
-use wmi::{COMLibrary, WMIConnection};
+use wmi::WMIConnection;
 
 /// Namespace for system-level WMI queries (Win32_* classes).
 pub const NS_CIMV2: &str = "ROOT\\CIMV2";
@@ -29,6 +29,150 @@ thread_local! {
 
 static WMI_INVALIDATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Per-thread COM initialisation for WMI.
+///
+/// P3: `COMLibrary::new()` (the `wmi` crate) calls
+/// `CoInitializeEx(None, COINIT_MULTITHREADED)` and turns
+/// `RPC_E_CHANGED_MODE` (0x80010106) into an error. At startup Tauri/WebView2
+/// (and the tray/WinRT code) may already have put the calling thread in a
+/// single-threaded apartment, so the first WMI query failed — 4 times in
+/// 689 ms, once per `util::retry` attempt, each logging a WARN.
+///
+/// This module initialises COM exactly ONCE per thread and accepts either
+/// outcome:
+/// * MTA (`S_OK` / `S_FALSE`) — the model the rest of the hardware layer uses.
+/// * STA (`RPC_E_CHANGED_MODE`) — the thread was already initialised by
+///   another component; WMI works from an STA too, so we reuse it instead of
+///   failing. Re-initialising is impossible by design (COM rejects changing
+///   the apartment after it is set).
+///
+/// `WmiThreadCache::init` then creates all its `WMIConnection`s from this one
+/// `COMLibrary` instead of calling `COMLibrary::new()` three times.
+#[cfg(windows)]
+mod com_init {
+    use std::cell::Cell;
+    use std::sync::OnceLock;
+
+    use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, RPC_E_TOO_LATE};
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoInitializeSecurity, COINIT_MULTITHREADED, EOAC_NONE,
+        RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE,
+    };
+    use wmi::COMLibrary;
+
+    /// Apartment model observed (or established) on the current thread.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Apartment {
+        Uninitialised,
+        MultiThreaded,
+        SingleThreaded,
+    }
+
+    thread_local! {
+        static APARTMENT: Cell<Apartment> = const { Cell::new(Apartment::Uninitialised) };
+    }
+
+    // Counts real `CoInitializeEx` calls on THIS thread, so tests can prove
+    // idempotency without racing other test threads.
+    #[cfg(test)]
+    thread_local! {
+        static COM_INIT_CALLS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn init_calls() -> u32 {
+        COM_INIT_CALLS.with(|c| c.get())
+    }
+
+    /// Process-wide `CoInitializeSecurity` (first call wins; `RPC_E_TOO_LATE`
+    /// means another component — WebView2, the `wmi` crate — set it already).
+    fn init_security_once() {
+        static SECURITY: OnceLock<()> = OnceLock::new();
+        SECURITY.get_or_init(|| {
+            // SAFETY: standard COM process initialisation; all pointer
+            // arguments are NULL, which tells COM to use its defaults.
+            let result = unsafe {
+                CoInitializeSecurity(
+                    None,
+                    -1,
+                    None,
+                    None,
+                    RPC_C_AUTHN_LEVEL_DEFAULT,
+                    RPC_C_IMP_LEVEL_IMPERSONATE,
+                    None,
+                    EOAC_NONE,
+                    None,
+                )
+            };
+            if let Err(e) = result {
+                if e.code() != RPC_E_TOO_LATE {
+                    log::warn!(
+                        "WMI cache: CoInitializeSecurity failed: 0x{:08X} \
+                         (continuing with process defaults)",
+                        e.code().0 as u32
+                    );
+                }
+            }
+        });
+    }
+
+    /// Initialise COM for the calling thread (idempotent) and return a
+    /// `COMLibrary` marker bound to it.
+    ///
+    /// The returned `COMLibrary` is a `Copy` zero-sized marker: it performs no
+    /// `CoUninitialize`, so the apartment stays valid for the thread's life —
+    /// exactly what the per-thread WMI cache needs.
+    pub(super) fn ensure_com() -> anyhow::Result<COMLibrary> {
+        if APARTMENT.with(|state| state.get()) == Apartment::Uninitialised {
+            #[cfg(test)]
+            COM_INIT_CALLS.with(|c| c.set(c.get() + 1));
+
+            // SAFETY: `CoInitializeEx` initialises COM for this thread; the
+            // first caller decides the apartment model.
+            let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+            if hr.is_ok() {
+                APARTMENT.with(|state| state.set(Apartment::MultiThreaded));
+                log::debug!("WMI cache: COM initialised (MTA) for this thread");
+            } else if hr == RPC_E_CHANGED_MODE {
+                // 0x80010106: another component already initialised this
+                // thread (typically STA for Tauri/WebView2/WinRT). WMI works
+                // in an STA, so reuse the existing apartment instead of
+                // failing every query on this thread.
+                APARTMENT.with(|state| state.set(Apartment::SingleThreaded));
+                log::info!(
+                    "WMI cache: thread already COM-initialised in STA \
+                     (RPC_E_CHANGED_MODE) — reusing the existing apartment"
+                );
+            } else {
+                return Err(anyhow::Error::from(
+                    crate::hw::errors::HardwareError::WmiConnection(format!(
+                        "CoInitializeEx failed: 0x{:08X}",
+                        hr.0 as u32
+                    )),
+                ));
+            }
+        }
+        // Process-wide and idempotent: the wmi crate used to do this on every
+        // `COMLibrary::new()`. `RPC_E_TOO_LATE` means another component
+        // (WebView2, the wmi crate) already set it — fine.
+        init_security_once();
+
+        // SAFETY: `ensure_com` has just verified that COM is initialised on
+        // this thread (or found it already initialised), and it never calls
+        // `CoUninitialize`.
+        Ok(unsafe { COMLibrary::assume_initialized() })
+    }
+
+    /// Current apartment for the calling thread (test/diagnostic only).
+    #[cfg(test)]
+    pub(super) fn apartment() -> Apartment {
+        APARTMENT.with(|state| state.get())
+    }
+}
+
+#[cfg(windows)]
+use com_init::ensure_com;
+
 struct WmiThreadCache {
     cimv2: WMIConnection,
     wmi: WMIConnection,
@@ -37,33 +181,25 @@ struct WmiThreadCache {
 
 impl WmiThreadCache {
     fn init() -> anyhow::Result<Self> {
-        // COM is reference-counted per thread, so creating multiple COMLibrary
-        // instances on the same thread is safe — CoInitializeEx is called
-        // per instance and CoUninitialize is called on each drop.
-        let com_cimv2 = COMLibrary::new().map_err(|e| HardwareError::WmiQuery {
-            query: "COMLibrary::new cimv2".into(),
-            source: Box::new(e),
-        })?;
-        let cimv2 = WMIConnection::with_namespace_path(NS_CIMV2, com_cimv2).map_err(|e| {
+        // P3: ONE COM init per thread, tolerant of an existing STA. The
+        // resulting `COMLibrary` is a Copy marker and is reused for every
+        // namespace connection (previously three separate `COMLibrary::new()`
+        // calls, each able to fail with RPC_E_CHANGED_MODE).
+        let com = ensure_com()?;
+        let cimv2 = WMIConnection::with_namespace_path(NS_CIMV2, com).map_err(|e| {
             HardwareError::WmiQuery {
                 query: format!("WMIConnection cimv2 namespace={NS_CIMV2}"),
                 source: Box::new(e),
             }
         })?;
-        let com_wmi = COMLibrary::new().map_err(|e| HardwareError::WmiQuery {
-            query: "COMLibrary::new wmi".into(),
-            source: Box::new(e),
-        })?;
-        let wmi = WMIConnection::with_namespace_path(NS_WMI, com_wmi).map_err(|e| {
+        let wmi = WMIConnection::with_namespace_path(NS_WMI, com).map_err(|e| {
             HardwareError::WmiQuery {
                 query: format!("WMIConnection wmi namespace={NS_WMI}"),
                 source: Box::new(e),
             }
         })?;
         // Defender namespace may not exist on systems without Defender — do not fail.
-        let defender = COMLibrary::new()
-            .ok()
-            .and_then(|com| WMIConnection::with_namespace_path(NS_DEFENDER, com).ok());
+        let defender = WMIConnection::with_namespace_path(NS_DEFENDER, com).ok();
         Ok(Self {
             cimv2,
             wmi,
@@ -219,6 +355,35 @@ where
         }
     });
     result.map_err(HardwareError::from)
+}
+
+/// `WBEM_E_ACCESS_DENIED` (0x80041003): the class exists but the caller lacks
+/// the privilege. Permanent by design for the ESIF/ACPI thermal classes when
+/// queried from the unprivileged UI process — such failures must be logged
+/// once at INFO and retried on a slow schedule, never treated as a bug/new
+/// WARN on every poll (P11).
+pub const WBEM_E_ACCESS_DENIED: u32 = 0x80041003;
+
+/// HRESULT carried by a `wmi::WMIError`, when it has one.
+pub fn wmi_error_hresult(err: &wmi::WMIError) -> Option<u32> {
+    match err {
+        wmi::WMIError::HResultError { hres } => Some(*hres as u32),
+        _ => None,
+    }
+}
+
+/// True when the query failed with `WBEM_E_ACCESS_DENIED`.
+pub fn is_access_denied(err: &wmi::WMIError) -> bool {
+    wmi_error_hresult(err) == Some(WBEM_E_ACCESS_DENIED)
+}
+
+/// Grow a failure retry window (doubling, clamped).
+///
+/// Used by the thermal sources whose WMI classes deny unprivileged callers:
+/// retrying every 60 s forever produced ~2 predictable WARN/min of noise, so
+/// the window grows 60 → 120 → 240 → 480 → 900 s (cap) and resets on success.
+pub fn grow_failure_backoff(current_secs: u64, start_secs: u64, max_secs: u64) -> u64 {
+    current_secs.saturating_mul(2).clamp(start_secs, max_secs)
 }
 
 /// Returns `true` if the error indicates a connection-level failure
@@ -547,5 +712,144 @@ mod tests {
                 "Cache should be invalidated after connection error"
             );
         });
+    }
+
+    // ── P3: COM apartment handling ──────────────────────────────────────────
+
+    /// A thread that already has COM in MTA must not pay a second
+    /// `CoInitializeEx` call: the guard is per-thread and idempotent.
+    #[cfg(windows)]
+    #[test]
+    fn ensure_com_is_idempotent_per_thread() {
+        std::thread::spawn(|| {
+            assert_eq!(com_init::init_calls(), 0);
+            assert!(ensure_com().is_ok(), "first COM init must succeed");
+            assert_eq!(
+                com_init::init_calls(),
+                1,
+                "first call must invoke CoInitializeEx exactly once"
+            );
+            assert!(ensure_com().is_ok(), "second COM init must succeed");
+            assert_eq!(
+                com_init::init_calls(),
+                1,
+                "second call must NOT invoke CoInitializeEx again"
+            );
+            assert_eq!(
+                com_init::apartment(),
+                com_init::Apartment::MultiThreaded,
+                "a fresh thread gets the MTA the rest of the hardware layer uses"
+            );
+        })
+        .join()
+        .expect("COM init test thread panicked");
+    }
+
+    /// P3 regression: the startup thread was already STA (Tauri/WebView2), so
+    /// `COMLibrary::new()` failed with RPC_E_CHANGED_MODE four times in a row.
+    /// `ensure_com` must accept the existing apartment instead of failing.
+    #[cfg(windows)]
+    #[test]
+    fn ensure_com_reuses_an_existing_sta_apartment() {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+        std::thread::spawn(|| {
+            // SAFETY: this thread is dedicated to the test; COM is initialised
+            // in STA before `ensure_com` runs.
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            assert!(hr.is_ok(), "pre-initialising the test thread as STA failed");
+
+            let com = ensure_com();
+            assert!(
+                com.is_ok(),
+                "ensure_com must not fail with RPC_E_CHANGED_MODE on an STA thread: {:?}",
+                com.err()
+            );
+            assert_eq!(
+                com_init::apartment(),
+                com_init::Apartment::SingleThreaded,
+                "the existing STA apartment must be detected, not replaced"
+            );
+        })
+        .join()
+        .expect("STA reuse test thread panicked");
+    }
+
+    /// `ensure_com` must keep returning the same working marker on repeated
+    /// calls in the same thread (callers invoke it for every namespace).
+    #[cfg(windows)]
+    #[test]
+    fn ensure_com_returns_usable_com_library_twice() {
+        std::thread::spawn(|| {
+            let a = ensure_com().expect("first ensure_com");
+            let b = ensure_com().expect("second ensure_com");
+            // COMLibrary is a Copy marker; both values refer to the same
+            // thread apartment and can be passed to WMIConnection.
+            let _ = (a, b);
+        })
+        .join()
+        .expect("ensure_com test thread panicked");
+    }
+
+    /// P3 end-to-end check of the fix: a thread that was already STA (the
+    /// startup case) must be able to run a real WMI query through the cache.
+    /// Ignored by default (needs a live WMI service) — run explicitly with
+    /// `cargo test --lib -- --ignored sta_thread_can_query_wmi`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a live WMI service (Windows host)"]
+    fn sta_thread_can_query_wmi() {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+        std::thread::spawn(|| {
+            // SAFETY: dedicated test thread; STA before the cache initialises.
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            assert!(hr.is_ok(), "pre-initialising the thread as STA failed");
+            assert!(ensure_com().is_ok(), "ensure_com must reuse the STA");
+
+            let rows = with_cimv2(|conn| {
+                let rows: Vec<std::collections::HashMap<String, wmi::Variant>> =
+                    conn.raw_query("SELECT Caption FROM Win32_OperatingSystem")?;
+                Ok(rows)
+            })
+            .expect("WMI query on an STA thread must succeed");
+            assert!(!rows.is_empty(), "Win32_OperatingSystem returned no rows");
+        })
+        .join()
+        .expect("STA WMI test thread panicked");
+    }
+
+    // ── P11: expected-ACCESS_DENIED classification and slow retry ──────────
+
+    #[test]
+    fn access_denied_classifies_only_0x80041003() {
+        let denied = wmi::WMIError::HResultError {
+            hres: 0x80041003u32 as i32,
+        };
+        assert!(is_access_denied(&denied));
+        assert_eq!(wmi_error_hresult(&denied), Some(WBEM_E_ACCESS_DENIED));
+
+        let not_found = wmi::WMIError::HResultError {
+            hres: 0x80041002u32 as i32,
+        };
+        assert!(!is_access_denied(&not_found));
+
+        let other = wmi::WMIError::SerdeError("not an HRESULT".into());
+        assert!(!is_access_denied(&other));
+        assert_eq!(wmi_error_hresult(&other), None);
+    }
+
+    #[test]
+    fn failure_backoff_doubles_and_caps() {
+        assert_eq!(grow_failure_backoff(60, 60, 900), 120);
+        assert_eq!(grow_failure_backoff(120, 60, 900), 240);
+        assert_eq!(grow_failure_backoff(240, 60, 900), 480);
+        assert_eq!(grow_failure_backoff(480, 60, 900), 900);
+        assert_eq!(grow_failure_backoff(900, 60, 900), 900, "capped");
+        assert_eq!(
+            grow_failure_backoff(10, 60, 900),
+            60,
+            "never below the start window"
+        );
     }
 }

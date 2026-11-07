@@ -96,6 +96,42 @@ const BATTERY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 static LAST_GOOD_BATTERY: Mutex<Option<BatteryInfo>> = Mutex::new(None);
 
+/// Wall-clock duration of the last COMPLETED WMI battery query, in ms.
+///
+/// The caller can only observe "the reply did not arrive within the timeout",
+/// which is always >= the threshold and therefore useless for diagnosis
+/// (production log: 798 lines all saying "exceeded 5000 ms"). The worker
+/// measures the real query duration and stores it here so the timeout path can
+/// report how long queries actually take (P-battery).
+#[cfg(windows)]
+static LAST_QUERY_LATENCY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A completed battery WMI query slower than this is logged with its measured
+/// duration (the normal path is ~10-100 ms; multi-second queries explain the
+/// timeouts).
+#[cfg(windows)]
+const BATTERY_SLOW_QUERY_LOG_MS: u64 = 1_000;
+
+/// Format the timeout warning with the MEASURED wait instead of the constant
+/// threshold. Pure so the format is unit-tested (the old code printed
+/// `BATTERY_QUERY_TIMEOUT` — always 5000 ms — for every timeout).
+#[cfg(windows)]
+fn battery_timeout_message(
+    waited: Duration,
+    limit: Duration,
+    last_completed: Option<Duration>,
+) -> String {
+    let last = last_completed
+        .map(|d| format!("{} ms", d.as_millis()))
+        .unwrap_or_else(|| "none completed yet".to_string());
+    format!(
+        "battery WMI query exceeded {waited_ms} ms (timeout {limit_ms} ms, \
+         previous query took {last})",
+        waited_ms = waited.as_millis(),
+        limit_ms = limit.as_millis(),
+    )
+}
+
 /// S64: minimum interval between two *real* WMI battery queries.
 ///
 /// Battery state changes slowly, but `get_battery_info` is called every 5 s by
@@ -150,6 +186,7 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
         // No snapshot yet (first call of the session) — fall through and query.
     }
 
+    let started = Instant::now();
     let (result_tx, result_rx) = mpsc::channel::<HardwareResult<BatteryInfo>>();
     {
         let mut guard = crate::util::panic::lock_or_recover(&BATTERY_WORKER_TX);
@@ -173,18 +210,25 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
             result
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
+            // P-battery: log the MEASURED wait, not the constant threshold.
+            // `recv_timeout` returns at (at least) the limit, so `waited` also
+            // proves whether the caller was delayed beyond the timeout; the
+            // previous completed query's real duration comes from the worker.
+            let waited = started.elapsed();
+            let last_completed = last_query_latency();
             log::warn!(
                 target: "hw::battery",
-                "battery WMI query exceeded {} ms — returning last known-good snapshot",
-                BATTERY_QUERY_TIMEOUT.as_millis()
+                "{} — returning last known-good snapshot",
+                battery_timeout_message(waited, BATTERY_QUERY_TIMEOUT, last_completed)
             );
             let cached = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone();
             if let Some(info) = cached {
                 Ok(info)
             } else {
-                Err(HardwareError::Timeout(
-                    "battery WMI query exceeded 5 s (no cached snapshot yet)".into(),
-                ))
+                Err(HardwareError::Timeout(format!(
+                    "{} (no cached snapshot yet)",
+                    battery_timeout_message(waited, BATTERY_QUERY_TIMEOUT, last_completed)
+                )))
             }
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -207,13 +251,37 @@ struct BatteryRequest {
 #[cfg(windows)]
 static BATTERY_WORKER_TX: Mutex<Option<std::sync::mpsc::Sender<BatteryRequest>>> = Mutex::new(None);
 
+/// Real duration of the last completed battery WMI query (`None` before the
+/// first query finishes).
+#[cfg(windows)]
+fn last_query_latency() -> Option<Duration> {
+    match LAST_QUERY_LATENCY_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        ms => Some(Duration::from_millis(ms)),
+    }
+}
+
 /// Persistent battery WMI worker loop. Runs `get_battery_info_inner` for each
 /// request and replies. The thread never exits; a dropped result channel
 /// (caller timed out) is simply ignored.
+///
+/// The real query duration is measured HERE (the caller's `recv_timeout` only
+/// sees ">= 5 s") and stored in [`LAST_QUERY_LATENCY_MS`] so the timeout path
+/// can report actual latencies instead of the constant threshold.
 #[cfg(windows)]
 fn battery_worker_loop(rx: std::sync::mpsc::Receiver<BatteryRequest>) {
     for req in rx {
+        let started = Instant::now();
         let result = get_battery_info_inner();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        LAST_QUERY_LATENCY_MS.store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+        if elapsed_ms >= BATTERY_SLOW_QUERY_LOG_MS {
+            log::info!(
+                target: "hw::battery",
+                "battery WMI query took {elapsed_ms} ms (slow threshold {BATTERY_SLOW_QUERY_LOG_MS} ms, {})",
+                if result.is_ok() { "ok" } else { "failed" }
+            );
+        }
         let _ = req.result_tx.send(result);
     }
 }
@@ -712,5 +780,51 @@ mod tests {
 
         probe_thread.join().expect("probe thread panicked");
         clear_thread.join().expect("clear thread panicked");
+    }
+
+    /// The timeout line must contain the MEASURED wait, not the constant
+    /// threshold. Production logged "exceeded 5000 ms" 798 times because the
+    /// format used `BATTERY_QUERY_TIMEOUT`.
+    #[cfg(windows)]
+    #[test]
+    fn timeout_message_reports_measured_latency_not_the_threshold() {
+        let msg = battery_timeout_message(
+            Duration::from_millis(7_812),
+            Duration::from_secs(5),
+            Some(Duration::from_millis(9_431)),
+        );
+        assert!(
+            msg.contains("exceeded 7812 ms"),
+            "measured wait missing from: {msg}"
+        );
+        assert!(
+            msg.contains("timeout 5000 ms"),
+            "threshold should be labelled as such: {msg}"
+        );
+        assert!(
+            msg.contains("previous query took 9431 ms"),
+            "real previous latency missing from: {msg}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn timeout_message_handles_no_completed_query() {
+        let msg =
+            battery_timeout_message(Duration::from_millis(5_003), Duration::from_secs(5), None);
+        assert!(msg.contains("exceeded 5003 ms"), "{msg}");
+        assert!(msg.contains("none completed yet"), "{msg}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn last_query_latency_is_none_before_first_completed_query() {
+        // The worker has not run in this test process; the sentinel 0 means
+        // "no measurement yet" (never a real 0 ms query).
+        LAST_QUERY_LATENCY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(last_query_latency(), None);
+        LAST_QUERY_LATENCY_MS.store(2_345, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(last_query_latency(), Some(Duration::from_millis(2_345)));
+        LAST_QUERY_LATENCY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }

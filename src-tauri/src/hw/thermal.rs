@@ -35,32 +35,38 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
 
         // S37-005: Mirror of fan.rs — the MSAcpi_ThermalZoneTemperature WMI
         // class is also denied to unprivileged callers (0x80041003). Cache the
-        // failure for 60 s so the 2 s fan poll doesn't spam WMI + the log.
+        // failure so the 2 s fan poll doesn't spam WMI + the log.
+        //
+        // P11: ACCESS_DENIED is expected before the elevated path is usable —
+        // log it ONCE at INFO and grow the retry window 60 → 120 → … → 900 s
+        // instead of retrying every minute forever.
         static LAST_FAILURE: OnceLock<AtomicU64> = OnceLock::new();
-        // S37-005b: log WARN only on the FIRST failure of the process. This
-        // query fails PERMANENTLY while unprivileged (access denied by design;
-        // thermal data comes via the elevated bridge), so logging WARN on
-        // every 60 s cache expiry buried real errors under ~2 WARN/min of
-        // predictable noise. The retry still runs (in case we relaunch as
-        // admin); only the log level drops to debug.
-        static FIRST_FAILURE_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
-        const FAILURE_CACHE_SECS: u64 = 60;
+        static DENIED_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+        static OTHER_FAILURE_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+        /// Current retry window; doubles on every consecutive failure.
+        static BACKOFF_SECS: OnceLock<AtomicU64> = OnceLock::new();
+        const BACKOFF_START_SECS: u64 = 60;
+        const BACKOFF_MAX_SECS: u64 = 900;
         let last_fail = LAST_FAILURE.get_or_init(|| AtomicU64::new(0));
+        let backoff = BACKOFF_SECS.get_or_init(|| AtomicU64::new(BACKOFF_START_SECS));
         let now_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if last_fail
-            .load(AtomicOrdering::Relaxed)
-            .saturating_add(FAILURE_CACHE_SECS)
-            > now_epoch
-        {
-            log::debug!(target: "hw::thermal", "ACPI thermal WMI query in failure cache — skipping");
+        let window = backoff.load(AtomicOrdering::Relaxed);
+        let failed_at = last_fail.load(AtomicOrdering::Relaxed);
+        if failed_at.saturating_add(window) > now_epoch {
+            log::debug!(
+                target: "hw::thermal",
+                "ACPI thermal WMI query in failure window — skipping (retry in {}s)",
+                failed_at.saturating_add(window).saturating_sub(now_epoch)
+            );
             return Err(HardwareError::Wmi(
                 "MSAcpi_ThermalZoneTemperature denied (cached)".into(),
             ));
         }
 
+        let access_denied = std::cell::Cell::new(false);
         let query_result = wmi_cache::with_wmi(|wmi| {
             match wmi.raw_query(
                 "SELECT InstanceName, Active, CurrentTemperature, CriticalTripPoint \
@@ -68,23 +74,50 @@ pub fn get_thermal_zones() -> HardwareResult<Vec<ThermalZoneInfo>> {
             ) {
                 Ok(r) => Ok(r),
                 Err(e) => {
-                    // No WARN here — single log on the outer error path below.
+                    // P11: classify the raw WMI error before it is erased.
+                    if wmi_cache::is_access_denied(&e) {
+                        access_denied.set(true);
+                    }
+                    // No log here — a single line is emitted below.
                     last_fail.store(now_epoch, AtomicOrdering::Relaxed);
                     Err(anyhow::Error::from(e))
                 }
             }
         });
         let results: Vec<HashMap<String, wmi::Variant>> = match query_result {
-            Ok(r) => r,
+            Ok(r) => {
+                backoff.store(BACKOFF_START_SECS, AtomicOrdering::Relaxed);
+                r
+            }
             Err(e) => {
                 last_fail.store(now_epoch, AtomicOrdering::Relaxed);
-                let first = FIRST_FAILURE_LOGGED
-                    .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
-                    .swap(true, AtomicOrdering::Relaxed);
-                if !first {
-                    log::warn!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
+                let next_window =
+                    wmi_cache::grow_failure_backoff(window, BACKOFF_START_SECS, BACKOFF_MAX_SECS);
+                backoff.store(next_window, AtomicOrdering::Relaxed);
+                if access_denied.get() {
+                    // Expected while unprivileged: INFO once per process.
+                    let first = DENIED_LOGGED
+                        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+                        .swap(true, AtomicOrdering::Relaxed);
+                    if !first {
+                        log::info!(
+                            target: "hw::thermal",
+                            "MSAcpi_ThermalZoneTemperature access denied (0x80041003) — expected \
+                             while unprivileged (thermal data comes from the elevated bridge); \
+                             retry window grows to {next_window}s"
+                        );
+                    } else {
+                        log::debug!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature denied (retry in {next_window}s): {e}");
+                    }
                 } else {
-                    log::debug!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (cached; retrying in {FAILURE_CACHE_SECS}s): {e}");
+                    let first = OTHER_FAILURE_LOGGED
+                        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+                        .swap(true, AtomicOrdering::Relaxed);
+                    if !first {
+                        log::warn!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (next retry in {next_window}s): {e}");
+                    } else {
+                        log::debug!(target: "hw::thermal", "MSAcpi_ThermalZoneTemperature query failed (retry in {next_window}s): {e}");
+                    }
                 }
                 return Err(e);
             }

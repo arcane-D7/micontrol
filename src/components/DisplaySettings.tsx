@@ -91,6 +91,18 @@ export default function DisplaySettings({
         />
         <span className="slider-value">{brightness}%</span>
       </div>
+      {display.brightness_source === 'wmi-fallback' && capabilities?.has_igcl === true && (
+        <div
+          style={{
+            fontSize: 12,
+            color: 'var(--color-text-muted)',
+            marginTop: -12,
+            marginBottom: 16,
+          }}
+        >
+          {t('display.brightnessSourceWmi')}
+        </div>
+      )}
       <ToggleRow
         label={t('display.hdr')}
         desc={
