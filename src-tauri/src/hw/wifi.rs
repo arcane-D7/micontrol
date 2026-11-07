@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
+use std::time::{Duration, Instant};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -351,7 +352,246 @@ pub fn get_status() -> HardwareResult<WifiStatus> {
     ))
 }
 
-/// Connect to a WiFi network.
+/// How long `connect` waits for the OS to confirm the association.
+const ASSOCIATION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Poll interval while waiting for the association.
+const ASSOCIATION_POLL: Duration = Duration::from_millis(400);
+
+/// Build a WLAN profile XML for `ssid`.
+///
+/// `Some(password)` produces a WPA2-PSK/AES profile; `None` produces an open
+/// (`open`/`none`) profile. The profile name is the SSID — that is the key
+/// both `netsh wlan connect name=` and `WlanConnect` address.
+///
+/// Only WPA2-PSK is generated on purpose: the security type of the target is
+/// not known here (the UI does not pass it), and guessing WPA3/SAE or 802.1X
+/// would produce a profile that cannot associate. When the generated profile
+/// is rejected, the error carries the WLAN reason code instead of a silent
+/// failure.
+fn build_profile_xml(ssid: &str, password: Option<&str>) -> String {
+    let escaped_ssid = xml::escape_xml(ssid);
+    let security = match password {
+        Some(pwd) => format!(
+            r#"<security>
+            <authEncryption>
+                <authentication>WPA2PSK</authentication>
+                <encryption>AES</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+            <sharedKey>
+                <keyType>passPhrase</keyType>
+                <protected>false</protected>
+                <keyMaterial>{}</keyMaterial>
+            </sharedKey>
+        </security>"#,
+            xml::escape_xml(pwd)
+        ),
+        None => r#"<security>
+            <authEncryption>
+                <authentication>open</authentication>
+                <encryption>none</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+        </security>"#
+            .to_string(),
+    };
+
+    format!(
+        r#"<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+    <name>{escaped_ssid}</name>
+    <SSIDConfig>
+        <SSID>
+            <name>{escaped_ssid}</name>
+        </SSID>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>auto</connectionMode>
+    <MSM>
+        {security}
+    </MSM>
+</WLANProfile>"#
+    )
+}
+
+/// Install a profile from memory (no temporary file, so the passphrase never
+/// reaches the disk). Per-user profile (`WLAN_PROFILE_USER`) — same scope as
+/// `netsh wlan add profile` for a non-elevated caller.
+#[cfg(windows)]
+fn set_profile_in_memory(profile_xml: &str, overwrite: bool) -> HardwareResult<()> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{BOOL, HANDLE};
+    use windows::Win32::NetworkManagement::WiFi::{
+        WlanCloseHandle, WlanEnumInterfaces, WlanFreeMemory, WlanOpenHandle, WlanSetProfile,
+        WLAN_API_VERSION_2_0, WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_USER,
+    };
+
+    let wide: Vec<u16> = profile_xml
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: every handle allocated here is released before returning; the
+    // wide buffer outlives the WlanSetProfile call; the reason-code pointer is
+    // a valid stack slot.
+    unsafe {
+        let mut handle = HANDLE::default();
+        let mut negotiated = 0u32;
+        let ret = WlanOpenHandle(WLAN_API_VERSION_2_0, None, &mut negotiated, &mut handle);
+        if ret != 0 {
+            return Err(HardwareError::Wifi(format!(
+                "WlanOpenHandle failed with error code {ret}"
+            )));
+        }
+
+        let mut list_ptr: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
+        let ret = WlanEnumInterfaces(handle, None, &mut list_ptr);
+        if ret != 0 || list_ptr.is_null() {
+            WlanCloseHandle(handle, None);
+            return Err(HardwareError::Wifi(format!(
+                "WlanEnumInterfaces failed with error code {ret}"
+            )));
+        }
+        let iface_count = (*list_ptr).dwNumberOfItems;
+        let guid = if iface_count > 0 {
+            Some((*list_ptr).InterfaceInfo[0].InterfaceGuid)
+        } else {
+            None
+        };
+        WlanFreeMemory(list_ptr as *const std::ffi::c_void);
+
+        let Some(guid) = guid else {
+            WlanCloseHandle(handle, None);
+            return Err(HardwareError::Wifi(
+                "no wireless interface to add the profile to".into(),
+            ));
+        };
+
+        let mut reason_code = 0u32;
+        let ret = WlanSetProfile(
+            handle,
+            &guid,
+            WLAN_PROFILE_USER,
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            BOOL::from(overwrite),
+            None,
+            &mut reason_code,
+        );
+        WlanCloseHandle(handle, None);
+
+        if ret != 0 {
+            return Err(HardwareError::Wifi(format!(
+                "WlanSetProfile failed (error {ret}, reason {reason_code})"
+            )));
+        }
+        log::info!("[wifi] profile installed in memory (overwrite={overwrite})");
+        Ok(())
+    }
+}
+
+/// Ask the WLAN service to associate with the profile named `ssid`.
+///
+/// `netsh` is kept for this one call (it needs no elevation and returns as
+/// soon as the request is queued); the caller verifies the real association.
+fn request_association(ssid: &str) -> HardwareResult<()> {
+    let mut cmd = Command::new("netsh");
+    // One `name=<ssid>` token: Command quotes it, so SSIDs with spaces or '&'
+    // stay intact (the process is spawned directly, never through cmd.exe, so
+    // '&' is not reinterpreted).
+    cmd.args(["wlan", "connect"]).arg(format!("name={ssid}"));
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
+        .output()
+        .map_err(|e| HardwareError::Wifi(format!("Failed to connect: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(HardwareError::Wifi(format!(
+            "Failed to connect to '{ssid}': {}",
+            if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            }
+        )));
+    }
+    Ok(())
+}
+
+/// Does the reported SSID denote the network we asked for?
+fn ssid_eq(reported: Option<&str>, wanted: &str) -> bool {
+    match reported {
+        Some(s) => s == wanted,
+        None => false,
+    }
+}
+
+/// Same as `ssid_eq`, but tolerates surrounding whitespace differences (some
+/// callers trim the SSID). Logged when it changes the outcome.
+fn ssid_eq_loose(reported: Option<&str>, wanted: &str) -> bool {
+    ssid_eq(reported, wanted)
+        || reported.is_some_and(|s| s.trim() == wanted.trim() && !s.trim().is_empty())
+}
+
+/// Poll until the OS reports "connected to `ssid`", or the timeout expires.
+///
+/// This is what turns `wifi_connect` from "the request was accepted" into
+/// "the association happened": `netsh wlan connect` returns before the
+/// 802.11 association completes, so the old code could toast "Connected"
+/// while the radio was still failing authentication.
+fn wait_for_association_with<F>(
+    ssid: &str,
+    timeout: Duration,
+    interval: Duration,
+    mut poll: F,
+) -> HardwareResult<()>
+where
+    F: FnMut() -> HardwareResult<WifiStatus>,
+{
+    let started = Instant::now();
+    let mut last: Option<WifiStatus> = None;
+
+    loop {
+        match poll() {
+            Ok(status) => {
+                if status.connected && ssid_eq(status.ssid.as_deref(), ssid) {
+                    log::info!("[wifi] associated with '{ssid}'");
+                    return Ok(());
+                }
+                if status.connected && ssid_eq_loose(status.ssid.as_deref(), ssid) {
+                    log::warn!(
+                        "[wifi] associated with '{ssid}' (matched after trimming whitespace)"
+                    );
+                    return Ok(());
+                }
+                last = Some(status);
+            }
+            Err(e) => log::debug!("[wifi] status poll failed during connect: {e}"),
+        }
+
+        if started.elapsed() >= timeout {
+            break;
+        }
+        std::thread::sleep(interval);
+    }
+
+    let detail = match last {
+        Some(st) if st.connected => format!(
+            "the adapter is still associated with '{}'",
+            st.ssid.unwrap_or_default()
+        ),
+        _ => "the adapter is not associated".to_string(),
+    };
+    Err(HardwareError::Wifi(format!(
+        "Association to '{ssid}' was not confirmed within {} s ({detail}). The password or the security type may be wrong, or the access point is out of range.",
+        timeout.as_secs()
+    )))
+}
+
+/// Connect to a WiFi network and confirm the association.
 ///
 /// The SSID and password are validated and XML-escaped before being
 /// interpolated into the WLAN profile template to prevent XML injection.
@@ -365,100 +605,51 @@ pub fn connect(ssid: &str, password: Option<&str>) -> HardwareResult<()> {
             .map_err(|e| HardwareError::Wifi(format!("Invalid WPA2 passphrase: {e}")))?;
     }
 
-    // Create profile XML and connect
-    if let Some(pwd) = password {
-        // Escape SSID and password to prevent XML injection.
-        let escaped_ssid = xml::escape_xml(ssid);
-        let escaped_pwd = xml::escape_xml(pwd);
-
-        let profile_xml = format!(
-            r#"<?xml version="1.0"?>
-<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-    <name>{escaped_ssid}</name>
-    <SSIDConfig>
-        <SSID>
-            <name>{escaped_ssid}</name>
-        </SSID>
-    </SSIDConfig>
-    <connectionType>ESS</connectionType>
-    <connectionMode>auto</connectionMode>
-    <MSM>
-        <security>
-            <authEncryption>
-                <authentication>WPA2PSK</authentication>
-                <encryption>AES</encryption>
-                <useOneX>false</useOneX>
-            </authEncryption>
-            <sharedKey>
-                <keyType>passPhrase</keyType>
-                <protected>false</protected>
-                <keyMaterial>{escaped_pwd}</keyMaterial>
-            </sharedKey>
-        </security>
-    </MSM>
-</WLANProfile>"#
-        );
-
-        // Write profile to a temp file with a random suffix to prevent
-        // path collision with attacker-controlled names.
-        let temp_dir = std::env::temp_dir();
-        let random_suffix: String = (0..8)
-            .map(|_| {
-                let n = rand::random::<u8>() % 36;
-                if n < 10 {
-                    (b'0' + n) as char
-                } else {
-                    (b'a' + n - 10) as char
-                }
-            })
-            .collect();
-        let profile_path = temp_dir.join(format!("micontrol_wifi_{random_suffix}.xml"));
-
-        // Use a cleanup guard to ensure the temp file is deleted even on error.
-        let result = (|| -> HardwareResult<()> {
-            std::fs::write(&profile_path, &profile_xml).map_err(HardwareError::Io)?;
-
-            // Add profile
-            let mut cmd = Command::new("netsh");
-            cmd.args(["wlan", "add", "profile", "filename"])
-                .arg(&profile_path);
-            #[cfg(windows)]
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let add = cmd
-                .output()
-                .map_err(|e| HardwareError::Wifi(format!("Failed to add profile: {e}")))?;
-
-            if !add.status.success() {
-                let stderr = String::from_utf8_lossy(&add.stderr);
-                return Err(HardwareError::Wifi(format!(
-                    "Failed to add WiFi profile: {stderr}"
-                )));
-            }
-
-            Ok(())
-        })();
-
-        // Always clean up the temp file, even on error.
-        let _ = std::fs::remove_file(&profile_path);
-
-        result?;
+    // Fast path: already associated to this network.
+    if let Ok(status) = get_status() {
+        if status.connected && ssid_eq(status.ssid.as_deref(), ssid) {
+            log::info!("[wifi] connect '{ssid}': already associated");
+            return Ok(());
+        }
     }
 
-    // Connect
-    let mut cmd = Command::new("netsh");
-    cmd.args(["wlan", "connect", "name"]).arg(ssid);
+    log::info!(
+        "[wifi] connect '{ssid}' (password supplied: {})",
+        password.is_some()
+    );
+
+    // 1. Materialise the profile — in memory. The passphrase used to be
+    //    written in clear text to `%TEMP%\micontrol_wifi_<rand>.xml`; it never
+    //    touches the disk now.
+    let profile_xml = build_profile_xml(ssid, password);
     #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let connect = cmd
-        .output()
-        .map_err(|e| HardwareError::Wifi(format!("Failed to connect: {e}")))?;
+    let profile_err = {
+        // A password means "(re)configure this profile"; no password must
+        // never overwrite a saved profile with an open one (that would
+        // downgrade a secured network), so it is only installed if absent.
+        set_profile_in_memory(&profile_xml, password.is_some()).err()
+    };
+    #[cfg(not(windows))]
+    let profile_err: Option<HardwareError> = Some(HardwareError::NotSupported(
+        "WiFi connect is Windows-only".into(),
+    ));
 
-    if !connect.status.success() {
-        let stderr = String::from_utf8_lossy(&connect.stderr);
-        return Err(HardwareError::Wifi(format!("Failed to connect: {stderr}")));
+    // 2. Ask for the association. If no password was supplied and the profile
+    //    did not exist, the open profile installed above is the one used.
+    if let Err(e) = request_association(ssid) {
+        if password.is_some() {
+            return Err(e);
+        }
+        // Surfaces the profile reason when the connect itself failed for the
+        // same cause (e.g. WPA3-only AP).
+        if let Some(profile_err) = profile_err {
+            return Err(HardwareError::Wifi(format!("{e} (profile: {profile_err})")));
+        }
+        return Err(e);
     }
 
-    Ok(())
+    // 3. Success means "the OS says we are associated to that SSID".
+    wait_for_association_with(ssid, ASSOCIATION_TIMEOUT, ASSOCIATION_POLL, get_status)
 }
 
 /// Disconnect from current WiFi network.
@@ -582,10 +773,11 @@ mod tests {
         let _ = get_status();
     }
 
-    #[test]
-    fn test_scan_networks_does_not_panic() {
-        let _ = scan_networks();
-    }
+    // NOTE: there used to be a `test_scan_networks_does_not_panic` here. It
+    // called `scan_networks()`, which issues a real `WlanScan` on the radio
+    // and blocks for 4 s — a unit test must not touch the airwaves. The
+    // parsing/FFI paths it covered are exercised by `get_status` (read-only)
+    // and by the profile/association tests below.
 
     #[test]
     fn test_parse_empty_scan() {
@@ -650,27 +842,7 @@ mod tests {
         // validate_wpa2_passphrase should pass (it's > 8 chars)
         assert!(xml::validate_wpa2_passphrase(pwd).is_ok());
 
-        let escaped_ssid = xml::escape_xml(ssid);
-        let escaped_pwd = xml::escape_xml(pwd);
-
-        let profile_xml = format!(
-            r#"<?xml version="1.0"?>
-<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-    <name>{escaped_ssid}</name>
-    <SSIDConfig>
-        <SSID>
-            <name>{escaped_ssid}</name>
-        </SSID>
-    </SSIDConfig>
-    <MSM>
-        <security>
-            <sharedKey>
-                <keyMaterial>{escaped_pwd}</keyMaterial>
-            </sharedKey>
-        </security>
-    </MSM>
-</WLANProfile>"#
-        );
+        let profile_xml = build_profile_xml(ssid, Some(pwd));
 
         // The profile XML should not contain any raw injection tags
         assert!(!profile_xml.contains("</name><name>evil"));
@@ -678,5 +850,114 @@ mod tests {
         // It should contain the escaped versions
         assert!(profile_xml.contains("&lt;/name&gt;"));
         assert!(profile_xml.contains("&lt;/keyMaterial&gt;"));
+    }
+
+    #[test]
+    fn profile_xml_uses_wpa2psk_only_when_a_password_is_given() {
+        let secured = build_profile_xml("Home", Some("correct horse battery staple"));
+        assert!(secured.contains("<authentication>WPA2PSK</authentication>"));
+        assert!(secured.contains("<encryption>AES</encryption>"));
+        assert!(secured.contains("<keyMaterial>correct horse battery staple</keyMaterial>"));
+        assert!(secured.contains("<name>Home</name>"));
+
+        let open = build_profile_xml("Cafe", None);
+        assert!(open.contains("<authentication>open</authentication>"));
+        assert!(open.contains("<encryption>none</encryption>"));
+        assert!(!open.contains("keyMaterial"));
+    }
+
+    /// The SSID actually in use on this machine has a trailing space: the exact
+    /// comparison must accept it and the loose fallback must only bridge
+    /// whitespace differences.
+    #[test]
+    fn ssid_comparison_is_exact_then_whitespace_tolerant() {
+        assert!(ssid_eq(Some("Ramtula & Freitas "), "Ramtula & Freitas "));
+        assert!(!ssid_eq(Some("Ramtula & Freitas "), "Ramtula & Freitas"));
+        assert!(ssid_eq_loose(
+            Some("Ramtula & Freitas "),
+            "Ramtula & Freitas"
+        ));
+        assert!(!ssid_eq(None, "Ramtula & Freitas"));
+        assert!(!ssid_eq(Some("Other"), "Ramtula & Freitas"));
+        // Whitespace-only SSIDs are degenerate: they still compare exactly
+        // (the strings are equal), but the loose fallback must never turn an
+        // empty SSID into a match.
+        assert!(ssid_eq_loose(Some("   "), "   "));
+        assert!(!ssid_eq_loose(Some(""), "Home"));
+        assert!(!ssid_eq(Some(""), "Home"));
+    }
+
+    fn status(connected: bool, ssid: Option<&str>) -> WifiStatus {
+        WifiStatus {
+            connected,
+            ssid: ssid.map(str::to_string),
+            signal: connected.then_some(70),
+            interface: Some("test".into()),
+        }
+    }
+
+    /// netsh returns before the 802.11 association completes. Success must be
+    /// reported only once the OS confirms the target SSID.
+    #[test]
+    fn association_wait_succeeds_only_after_the_target_ssid_is_reported() {
+        let mut polls = 0;
+        let result = wait_for_association_with(
+            "Home",
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            || {
+                polls += 1;
+                Ok(match polls {
+                    1 => status(false, None),
+                    2 => status(true, Some("Neighbour")),
+                    _ => status(true, Some("Home")),
+                })
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(polls, 3, "must not short-circuit before the SSID matches");
+    }
+
+    /// Staying on another network must fail — the old code toasted success.
+    #[test]
+    fn association_wait_fails_when_another_ssid_remains() {
+        let err = wait_for_association_with(
+            "Home",
+            Duration::from_millis(30),
+            Duration::from_millis(1),
+            || Ok(status(true, Some("Neighbour"))),
+        )
+        .expect_err("associated to the wrong SSID must not be reported as success");
+        let msg = format!("{err}");
+        assert!(msg.contains("Home"), "error should name the target: {msg}");
+        assert!(
+            msg.contains("Neighbour"),
+            "error should say what we are still associated with: {msg}"
+        );
+    }
+
+    #[test]
+    fn association_wait_fails_when_never_connected() {
+        let err = wait_for_association_with(
+            "Home",
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+            || Ok(status(false, None)),
+        )
+        .expect_err("disconnected must not be reported as success");
+        assert!(format!("{err}").contains("not associated"));
+    }
+
+    /// A failing status poll is not a success either.
+    #[test]
+    fn association_wait_fails_when_status_poll_errors() {
+        let err = wait_for_association_with(
+            "Home",
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+            || Err(crate::hw::errors::HardwareError::Wifi("boom".into())),
+        )
+        .expect_err("status errors must not be reported as success");
+        assert!(format!("{err}").contains("not confirmed"));
     }
 }
