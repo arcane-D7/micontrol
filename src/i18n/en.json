@@ -573,23 +573,27 @@
     "noNetworks": "No networks found. Click Refresh to scan.",
     "refresh": "Refresh",
     "connected": "Connected",
-    "hiddenNetwork": "Hidden network — connect via Windows WiFi settings"
+    "hiddenNetwork": "Hidden network — connect via Windows WiFi settings",
+    "passwordRequired": "Enter the network password"
   },
   "cast": {
     "title": "Screen Cast",
-    "subtitle": "Project your screen to a wireless display",
-    "noDevices": "No Miracast devices found. Open Windows Connect panel.",
+    "subtitle": "Project to a wireless display through the Windows panel",
+    "noDevices": "No displays are paired with this PC yet. Open the projection panel to discover one.",
     "scanError": "Scan error",
-    "panelOpened": "Connect panel opened — select your device",
+    "panelOpened": "Projection panel opened — pick your display there",
     "error": "Cast error",
-    "stopped": "Casting stopped",
-    "start": "Start Casting",
+    "stopped": "Connect panel closed",
+    "start": "Open projection panel",
     "casting": "Casting...",
-    "stop": "Stop",
-    "scan": "Scan for Devices",
-    "availableDevices": "Available Devices",
+    "stop": "Close panel",
+    "scan": "Refresh paired displays",
+    "availableDevices": "Displays paired with this PC",
     "tip": "Tip",
-    "tipText": "You can also press Win + K to open the Windows Connect panel directly."
+    "tipText": "You can also press Win + K to open the Windows Connect panel directly.",
+    "knownOnly": "Only displays already paired with this PC can be listed here. Windows discovers new ones from the projection panel (Win + K).",
+    "panelNoteTitle": "Windows owns the projection",
+    "panelNote": "MiControl opens the Windows projection panel; the session itself (start/stop) is handled by Windows. Closing the panel does not end a running projection."
   },
   "system": {
     "title": "System & Drivers",
@@ -1250,7 +1254,7 @@
     "presenceScanNow": "Scan now",
     "presenceSave": "Save",
     "presenceSaved": "Presence settings saved",
-    "presencePhoneHint": "Find it in Windows Settings > Bluetooth & devices. Example: AA:BB:CC:DD:EE:FF",
+    "presencePhoneHint": "Find it in Windows Settings > Bluetooth & devices. Example: AA:BB:CC:DD:EE:FF — dashes or colons, both work.",
     "presenceNoPhone": "No phone configured — set a MAC or name above",
     "presenceScanModalTitle": "Scan for Bluetooth devices",
     "presenceScanModalDesc": "Select your phone from the list. Paired devices appear first; the active scan finds nearby advertised devices.",
@@ -1372,7 +1376,11 @@
     "syncPause": "Pause",
     "syncResume": "Resume",
     "syncError": "Error",
-    "syncApiKeyHint": "Settings → Advanced → API key"
+    "syncApiKeyHint": "Settings → Advanced → API key",
+    "launchOk": "Phone Link brought to the front",
+    "launchError": "Could not open Phone Link",
+    "advStopped": "Advertising requested but not running — check that Bluetooth is on (an off radio aborts the publisher).",
+    "advChecking": "Checking advertising state…"
   },
   "color": {
     "title": "Color Calibration",

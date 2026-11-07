@@ -573,23 +573,27 @@
     "noNetworks": "Aucun réseau trouvé. Cliquez sur Actualiser pour rechercher.",
     "refresh": "Actualiser",
     "connected": "Connecté",
-    "hiddenNetwork": "Réseau caché — connectez-vous via les paramètres WiFi de Windows"
+    "hiddenNetwork": "Réseau caché — connectez-vous via les paramètres WiFi de Windows",
+    "passwordRequired": "Saisissez le mot de passe du réseau"
   },
   "cast": {
     "title": "Screen Cast",
-    "subtitle": "Projetez votre écran sur un écran sans fil",
-    "noDevices": "Aucun appareil Miracast trouvé. Ouvrez le panneau de connexion Windows.",
+    "subtitle": "Projetez vers un écran sans fil via le panneau Windows",
+    "noDevices": "Aucun écran n'est encore appairé à ce PC. Ouvrez le panneau de projection pour en découvrir un.",
     "scanError": "Erreur de recherche",
-    "panelOpened": "Panneau de connexion ouvert — sélectionnez votre appareil",
+    "panelOpened": "Panneau de projection ouvert — choisissez l'écran",
     "error": "Erreur de projection",
-    "stopped": "Projection terminée",
-    "start": "Démarrer la Projection",
+    "stopped": "Panneau de connexion fermé",
+    "start": "Ouvrir le panneau de projection",
     "casting": "Projection en cours...",
-    "stop": "Arrêter",
-    "scan": "Rechercher des Appareils",
-    "availableDevices": "Appareils Disponibles",
+    "stop": "Fermer le panneau",
+    "scan": "Actualiser les écrans appairés",
+    "availableDevices": "Écrans appairés à ce PC",
     "tip": "Astuce",
-    "tipText": "Vous pouvez également appuyer sur Win + K pour ouvrir directement le panneau de connexion Windows."
+    "tipText": "Vous pouvez également appuyer sur Win + K pour ouvrir directement le panneau de connexion Windows.",
+    "knownOnly": "Seuls les écrans déjà appairés à ce PC sont listés. Windows découvre les nouveaux depuis le panneau de projection (Win + K).",
+    "panelNoteTitle": "Windows gère la projection",
+    "panelNote": "MiControl ouvre le panneau de projection Windows ; la session (démarrer/arrêter) est gérée par Windows. Fermer le panneau n'interrompt pas une projection en cours."
   },
   "system": {
     "title": "Système et Pilotes",
@@ -1250,7 +1254,7 @@
     "presenceScanNow": "Analyser maintenant",
     "presenceSave": "Enregistrer",
     "presenceSaved": "Paramètres de présence enregistrés",
-    "presencePhoneHint": "Trouvez-le dans Paramètres Windows > Bluetooth et appareils. Exemple : AA:BB:CC:DD:EE:FF",
+    "presencePhoneHint": "Trouvez-le dans Paramètres Windows > Bluetooth et appareils. Exemple : AA:BB:CC:DD:EE:FF — tirets ou deux-points, au choix.",
     "presenceNoPhone": "Aucun téléphone configuré — définissez un MAC ou un nom ci-dessus",
     "presenceScanModalTitle": "Rechercher des appareils Bluetooth",
     "presenceScanModalDesc": "Sélectionnez votre téléphone dans la liste. Les appareils appariés apparaissent en premier ; l'analyse active trouve les appareils à proximité qui diffusent.",
@@ -1372,7 +1376,11 @@
     "syncPause": "Pause",
     "syncResume": "Reprendre",
     "syncError": "Erreur",
-    "syncApiKeyHint": "Paramètres → Avancé → Clé API"
+    "syncApiKeyHint": "Paramètres → Avancé → Clé API",
+    "launchOk": "Phone Link ramené au premier plan",
+    "launchError": "Impossible d'ouvrir Phone Link",
+    "advStopped": "Diffusion demandée mais inactive — vérifiez que le Bluetooth est activé (une radio éteinte annule le publisher).",
+    "advChecking": "Vérification de l'état de la diffusion…"
   },
   "color": {
     "title": "Calibration des Couleurs",

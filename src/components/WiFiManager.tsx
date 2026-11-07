@@ -17,6 +17,13 @@ interface WifiStatus {
   interface: string | null;
 }
 
+/// The backend only creates WPA2-PSK profiles (with a passphrase) or open
+/// ones, and reports security accordingly — an empty password can only fail
+/// for a secured network, so the UI blocks it.
+function requiresPassword(security: string): boolean {
+  return security !== 'Open' && security !== 'Unknown';
+}
+
 export default function WiFiManager() {
   const [networks, setNetworks] = useState<WifiNetwork[]>([]);
   const [status, setStatus] = useState<WifiStatus | null>(null);
@@ -44,6 +51,12 @@ export default function WiFiManager() {
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  // The password box is shared by every row, so switching networks must not
+  // carry the previous network's passphrase over to the next one.
+  useEffect(() => {
+    setNewPassword('');
+  }, [selectedSsid]);
 
   const handleConnect = async (ssid: string) => {
     setSelectedSsid(ssid);
@@ -184,7 +197,15 @@ export default function WiFiManager() {
                         e.stopPropagation();
                         void handleConnect(n.ssid);
                       }}
-                      disabled={connecting}
+                      // An empty password on a secured network can only fail;
+                      // don't send the request (and don't overwrite a saved
+                      // profile with an open one).
+                      disabled={connecting || (requiresPassword(n.security) && !newPassword)}
+                      title={
+                        requiresPassword(n.security) && !newPassword
+                          ? t('wifi.passwordRequired')
+                          : undefined
+                      }
                       style={{ padding: '4px 10px', fontSize: 12 }}
                     >
                       {connecting ? '...' : t('wifi.connect')}
