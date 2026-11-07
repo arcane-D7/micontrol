@@ -698,24 +698,18 @@ mod service {
                     pipe_server::run(shutdown_clone);
                 });
 
-                // S55 FIX 19: watchdog DISABLED.
-                //
-                // The watchdog thread crashes the whole SYSTEM service with
-                // 0xc0000005 ~40 s after every start (its first poll — WTS
-                // token / CreateProcessAsUserW path in launch_app). Access
-                // violations in Win32 FFI cannot be caught by Rust panics, so
-                // every restart reproduced the crash within a minute: the pipe
-                // went down ~90% of the time → all elevated tabs stuck in
-                // "Loading" and the app fell back to the broken scheduled-task
-                // path → UAC prompts.
-                //
-                // The watchdog is redundant anyway: the app self-restarts via
-                // RegisterApplicationRestart (Restart Manager) and the Run-key
-                // autostart covers boot. It stays in the codebase behind this
-                // opt-in flag until the AV in its Win32 path is root-caused
-                // with a dump.
-                let watchdog_enabled =
-                    std::env::var("MCONTROL_WATCHDOG").ok().as_deref() == Some("1");
+                // S55 FIX 19 disabled the watchdog unconditionally after an
+                // access violation in the Win32 launch path (~40 s after every
+                // start), which left `ui_ok` with NO consumer: the 06-Nov-2026
+                // starvation ran 2 h 46 min with zero restarts. Arming now
+                // follows the user's autostart mirror (`watchdog_enabled`,
+                // written by the app since 2026-11-06 22:19) or the
+                // `MCONTROL_WATCHDOG` env override; `MCONTROL_WATCHDOG=0`
+                // forces it off without touching the marker. The poll body is
+                // wrapped in catch_unwind and only touches the Win32 launch
+                // path when the app is actually unhealthy, so a healthy system
+                // never executes it.
+                let watchdog_enabled = watchdog::start_enabled();
                 let watchdog_thread = if watchdog_enabled {
                     let wd_shutdown = shutdown.clone();
                     Some(std::thread::spawn(move || {
@@ -723,7 +717,8 @@ mod service {
                     }))
                 } else {
                     eprintln!(
-                        "[micontrol_bridge] watchdog disabled (MCONTROL_WATCHDOG=1 to enable)"
+                        "[micontrol_bridge] watchdog disabled (no watchdog_enabled marker, \
+                         MCONTROL_WATCHDOG not set to 1)"
                     );
                     None
                 };
@@ -1957,8 +1952,11 @@ mod pipe_server {
 //   whenever it disappears unexpectedly.
 //
 // Relaunch is gated on TWO machine-wide markers in `%ProgramData%\MiControl`:
-//   - `watchdog_enabled`   — present iff the user has autostart enabled
-//                            (mirrored by the app at every startup/toggle).
+//   - `watchdog_enabled`   — present AND `"1"` iff the user has autostart
+//                            enabled (mirrored by the app at every startup and
+//                            toggled with it). This is the production arming
+//                            source: the file has existed since 2026-11-06
+//                            22:19 but the service ignored it until now.
 //   - `watchdog_user_quit` — sentinel written by the app on INTENTIONAL quit
 //                            (tray Quit, dev window close). Its presence keeps
 //                            the watchdog silent indefinitely; the app REMOVES
@@ -1967,6 +1965,10 @@ mod pipe_server {
 //                            a manual quit stops MiControl for good (until the
 //                            user starts it again), while any other death is
 //                            auto-relaunched.
+//
+// The watchdog thread itself starts when either the `MCONTROL_WATCHDOG=1`
+// environment variable (operator override) or the `watchdog_enabled` marker is
+// present; `MCONTROL_WATCHDOG=0` force-disables it even when the marker exists.
 mod watchdog {
     use super::*;
     use std::ffi::OsString;
@@ -1993,7 +1995,33 @@ mod watchdog {
     /// A heartbeat older than this (without the app refreshing it) means the
     /// process exists but its UI is dead (frozen zombie after a WebView2
     /// crash/relaunch). The watchdog force-restarts such instances.
+    ///
+    /// The app's ticker is a dedicated OS thread with a 10 s period, so 45 s
+    /// is 4.5 missed ticks — no healthy process ever trips this.
     const HEARTBEAT_STALE_MS: u64 = 45_000;
+    /// How long `ui_ok=0` must be observed before acting.
+    ///
+    /// The app reports `ui_ok=0` from the very first heartbeat after process
+    /// start (the window does not exist yet), so acting on the first sample
+    /// would kill every launch. 60 s is two poll periods — the confirmation
+    /// window the stale path has always used, now explicit and time-based.
+    const UI_DEAD_GRACE_MS: u64 = 60_000;
+    /// After a watchdog-initiated relaunch, ignore missing/stale heartbeats
+    /// for this long while the app boots WebView2.
+    const STARTUP_GRACE_MS: u64 = 120_000;
+    /// Consecutive polls of a stale/unreadable heartbeat required to act.
+    const ZOMBIE_CONFIRMATIONS: u32 = 2;
+    /// Max restart actions without a sustained healthy period ([`HEALTHY_RESET_MS`]).
+    /// Bounds a kill loop if the app cannot recover.
+    const MAX_RESTARTS: u32 = 3;
+    /// Continuous healthy time that resets the restart budget.
+    const HEALTHY_RESET_MS: u64 = 600_000;
+    /// Consecutive "app not running" polls before relaunching (~2 min).
+    const DEAD_MISSES_BEFORE_LAUNCH: u32 = 4;
+    /// Read attempts for the heartbeat file. Writer uses write-then-rename,
+    /// but a fallback direct write can be observed mid-truncation; retrying
+    /// for ~50 ms avoids misreading a torn file as a dead UI.
+    const HEARTBEAT_READ_ATTEMPTS: u32 = 3;
     /// Default install location fallback.
     const DEFAULT_EXE: &str = r"C:\Program Files\MiControl\micontrol.exe";
     /// Uninstall registry keys (DisplayIcon / InstallLocation) to find a
@@ -2039,51 +2067,57 @@ mod watchdog {
     /// means exactly that: a manual quit is armed forever, until the user
     /// starts the app again themselves.
     fn user_quit_pending() -> bool {
-        let path = marker_path(QUIT_MARKER);
-        if path.exists() {
-            write_log("user quit sentinel present — watchdog stays silent");
-            true
-        } else {
-            false
-        }
+        // Logging is done by `log_gate_transition` — one line per transition,
+        // not one line every 30 s poll.
+        marker_path(QUIT_MARKER).exists()
     }
 
-    /// True if the watchdog should be armed (autostart mirror present).
+    /// True if the watchdog should be armed (autostart mirror says `"1"`).
+    ///
+    /// The app writes exactly `1` (`crash_recovery::set_watchdog_enabled`) and
+    /// removes the file when autostart is off. Treat an empty file as armed
+    /// (older builds wrote it before the content mattered) and `"0"` as
+    /// explicitly disarmed.
     fn watchdog_armed() -> bool {
-        marker_path(ENABLED_MARKER).exists()
+        let path = marker_path(ENABLED_MARKER);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => content.trim() != "0",
+            Err(_) => false,
+        }
     }
 
-    /// True if a process named `micontrol.exe` is currently running anywhere.
-    fn app_is_running() -> bool {
-        // leak-check: audited — every exit path closes the handle explicitly (S67).
-        let target: Vec<u16> = "micontrol.exe".encode_utf16().collect();
-        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-            return false;
-        };
-        let snapshot_ok = snapshot != INVALID_HANDLE_VALUE;
-        if !snapshot_ok {
-            return false;
+    /// Should the watchdog thread start at all?
+    ///
+    /// `MCONTROL_WATCHDOG=1` / `=0` is an explicit operator override and wins
+    /// over the marker; otherwise the app's `watchdog_enabled` file decides.
+    /// S55 FIX 19 disabled the thread unconditionally after an access violation
+    /// in the Win32 launch path, which left `ui_ok` with no consumer: the
+    /// 06-Nov-2026 starvation ran for 2 h 46 min before the user quit the app.
+    pub fn start_enabled() -> bool {
+        match std::env::var("MCONTROL_WATCHDOG")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("1") => return true,
+            Some("0") => return false,
+            _ => {}
         }
-        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        watchdog_armed()
+    }
 
-        let mut found = false;
-        let mut has = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
-        while has {
-            let mut name: Vec<u16> = entry.szExeFile[..].to_vec();
-            while let Some(&0) = name.last() {
-                name.pop();
-            }
-            if name.len() == target.len() && name == target {
-                found = true;
-                break;
-            }
-            has = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    /// Which source armed the watchdog (for the startup log line).
+    fn arm_source() -> &'static str {
+        match std::env::var("MCONTROL_WATCHDOG")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("1") => "env MCONTROL_WATCHDOG=1",
+            Some("0") => "env MCONTROL_WATCHDOG=0 (forced off)",
+            _ if watchdog_armed() => "marker watchdog_enabled",
+            _ => "none",
         }
-        unsafe {
-            CloseHandle(snapshot).ok();
-        }
-        found
     }
 
     /// Returns the PID of a running `micontrol.exe`, if any.
@@ -2118,48 +2152,534 @@ mod watchdog {
         result
     }
 
-    /// Read millisecond timestamp (`<unix_ms>` first line) from the app's
-    /// heartbeat file. `None` if missing/unreadable.
-    fn read_heartbeat_ms() -> Option<u64> {
-        let path = marker_path(HEARTBEAT_FILE);
-        let content = std::fs::read_to_string(path).ok()?;
-        let first = content.lines().next()?.trim();
-        first.parse::<u64>().ok().filter(|&v| v > 0)
+    /// Wall-clock now in epoch milliseconds.
+    fn epoch_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
     }
 
-    /// Read the third heartbeat line: `ui_ok` flag written by the app.
-    /// `1` = main window (WebView2) exists; `0` = process alive but UI dead
-    /// (WebView2 crashed / window destroyed) — a zombie that keeps its
-    /// timestamp fresh via the tokio ticker but cannot show UI.
-    fn read_ui_ok() -> Option<u8> {
-        let path = marker_path(HEARTBEAT_FILE);
-        let content = std::fs::read_to_string(path).ok()?;
-        content.lines().nth(2)?.trim().parse::<u8>().ok()
+    /// Parsed contents of `%ProgramData%\MiControl\heartbeat`.
+    ///
+    /// Writer: `hw::crash_recovery::write_heartbeat`; format
+    /// `<epoch_ms>\n<pid>\n<ui_ok>\n`. All three fields are mandatory.
+    ///
+    /// Before 2026-11-07 `app_heartbeat_fresh()` read **only** line 1, so a
+    /// fresh timestamp with `ui_ok=0` — a process whose tokio runtime is
+    /// starved and whose UI cannot answer — looked perfectly healthy. The
+    /// 06-Nov starvation ran 2 h 46 min that way.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Heartbeat {
+        ts_ms: u64,
+        pid: u32,
+        ui_ok: u8,
     }
 
-    /// A "healthy" app refreshes its heartbeat every 10 s AND reports
-    /// `ui_ok=1` (main window alive). Missing/stale heartbeat, or a fresh
-    /// heartbeat with `ui_ok=0`, means the process is a zombie (UI dead) →
-    /// force-restart it. `ui_ok` needs consecutive confirmation so a transient
-    /// hiccup during the app's own startup (before the first write includes
-    /// the window) doesn't cause a kill loop.
-    fn app_heartbeat_fresh() -> bool {
-        match heartbeat_age_ms() {
-            Some(age) => age < HEARTBEAT_STALE_MS,
-            None => false,
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HeartbeatError {
+        Missing,
+        Empty,
+        BadTimestamp,
+        MissingPid,
+        BadPid,
+        MissingUiOk,
+        BadUiOk,
+    }
+
+    impl HeartbeatError {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Missing => "missing",
+                Self::Empty => "empty",
+                Self::BadTimestamp => "invalid timestamp",
+                Self::MissingPid => "missing pid",
+                Self::BadPid => "invalid pid",
+                Self::MissingUiOk => "missing ui_ok",
+                Self::BadUiOk => "invalid ui_ok",
+            }
         }
     }
 
-    /// Age of the app's heartbeat in milliseconds (0 if in the future).
-    /// `None` if missing/unreadable. Used both for the freshness check and
-    /// for diagnostic logging (how stale was the heartbeat when we killed).
-    fn heartbeat_age_ms() -> Option<u64> {
-        let hb = read_heartbeat_ms()?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis() as u64;
-        Some(now_ms.saturating_sub(hb))
+    /// Strict three-line parse. Garbage in any field rejects the whole file:
+    /// acting on a half-understood heartbeat is how a watchdog kills a healthy
+    /// app. Extra trailing lines are ignored (forward-compatible).
+    fn parse_heartbeat(content: &str) -> Result<Heartbeat, HeartbeatError> {
+        let mut lines = content.lines();
+        let ts = lines.next().ok_or(HeartbeatError::Empty)?.trim();
+        if ts.is_empty() {
+            return Err(HeartbeatError::Empty);
+        }
+        let ts_ms = ts
+            .parse::<u64>()
+            .map_err(|_| HeartbeatError::BadTimestamp)?;
+        if ts_ms == 0 {
+            return Err(HeartbeatError::BadTimestamp);
+        }
+        let pid = lines
+            .next()
+            .ok_or(HeartbeatError::MissingPid)?
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| HeartbeatError::BadPid)?;
+        if pid == 0 {
+            return Err(HeartbeatError::BadPid);
+        }
+        let ui_ok = lines
+            .next()
+            .ok_or(HeartbeatError::MissingUiOk)?
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| HeartbeatError::BadUiOk)?;
+        if ui_ok > 1 {
+            return Err(HeartbeatError::BadUiOk);
+        }
+        Ok(Heartbeat { ts_ms, pid, ui_ok })
+    }
+
+    /// Read + parse the heartbeat, retrying briefly.
+    ///
+    /// The app writes it with write-then-rename, but the fallback direct write
+    /// can be observed mid-truncation; ~50 ms of retries keeps a torn read
+    /// from being misdiagnosed as a dead UI.
+    fn read_heartbeat() -> Result<Heartbeat, HeartbeatError> {
+        let path = marker_path(HEARTBEAT_FILE);
+        let mut last = HeartbeatError::Missing;
+        for attempt in 0..HEARTBEAT_READ_ATTEMPTS {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match parse_heartbeat(&content) {
+                    Ok(hb) => return Ok(hb),
+                    Err(e) => last = e,
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(HeartbeatError::Missing)
+                }
+                Err(_) => last = HeartbeatError::Missing,
+            }
+            if attempt + 1 < HEARTBEAT_READ_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        Err(last)
+    }
+
+    /// What the heartbeat says about the running process.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HeartbeatHealth {
+        /// Fresh, same pid, `ui_ok=1`.
+        Healthy,
+        /// Fresh, same pid, `ui_ok=0` — main window gone (WebView2 crash) or
+        /// the async runtime is starved. Needs the grace period, then restart.
+        UiNotReady,
+        /// Fresh timestamp, but written by another process — typically the
+        /// previous instance right after a relaunch, before the new one has
+        /// written its first heartbeat.
+        ForeignPid { pid: u32 },
+        /// Timestamp older than [`HEARTBEAT_STALE_MS`].
+        Stale { age_ms: u64 },
+        /// Missing, empty or malformed.
+        Unreadable { why: &'static str },
+    }
+
+    impl HeartbeatHealth {
+        fn is_healthy(self) -> bool {
+            matches!(self, Self::Healthy)
+        }
+
+        fn describe(self) -> String {
+            match self {
+                Self::Healthy => "healthy".to_string(),
+                Self::UiNotReady => "ui_ok=0".to_string(),
+                Self::ForeignPid { pid } => format!("heartbeat from other pid {pid}"),
+                Self::Stale { age_ms } => format!("stale {age_ms}ms"),
+                Self::Unreadable { why } => format!("unreadable ({why})"),
+            }
+        }
+    }
+
+    /// Classify a heartbeat against the running pid and the clock.
+    fn heartbeat_health(
+        heartbeat: Result<Heartbeat, HeartbeatError>,
+        app_pid: Option<u32>,
+        now_ms: u64,
+    ) -> HeartbeatHealth {
+        let hb = match heartbeat {
+            Ok(hb) => hb,
+            Err(e) => return HeartbeatHealth::Unreadable { why: e.as_str() },
+        };
+        match app_pid {
+            Some(pid) if hb.pid == pid => {}
+            Some(_) => {
+                return HeartbeatHealth::ForeignPid { pid: hb.pid };
+            }
+            None => {
+                return HeartbeatHealth::Unreadable {
+                    why: "no running pid",
+                }
+            }
+        }
+        // A future timestamp (clock skew) is treated as age 0.
+        let age_ms = now_ms.saturating_sub(hb.ts_ms);
+        if age_ms > HEARTBEAT_STALE_MS {
+            return HeartbeatHealth::Stale { age_ms };
+        }
+        if hb.ui_ok == 1 {
+            HeartbeatHealth::Healthy
+        } else {
+            HeartbeatHealth::UiNotReady
+        }
+    }
+
+    /// Escalation marker written by `hw::crash_recovery` after N consecutive
+    /// failed async-runtime probes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct StarvationSignal {
+        pid: u32,
+        fails: u32,
+        age_ms: u64,
+    }
+
+    fn read_starvation(now_ms: u64) -> Option<StarvationSignal> {
+        use micontrol_lib::hw::crash_recovery as cr;
+        let path = cr::starvation_marker_path()?;
+        let content = std::fs::read_to_string(path).ok()?;
+        let state = cr::parse_starvation_marker(&content).ok()?;
+        if state.fails < cr::STARVATION_ESCALATE_FAILS {
+            return None;
+        }
+        Some(StarvationSignal {
+            pid: state.pid,
+            fails: state.fails,
+            age_ms: now_ms.saturating_sub(state.ts_ms),
+        })
+    }
+
+    /// A signal is actionable only for the *current* app pid and while fresh;
+    /// a leftover marker from a previous session must never trigger a restart.
+    fn starvation_actionable(signal: StarvationSignal, app_pid: u32) -> bool {
+        use micontrol_lib::hw::crash_recovery as cr;
+        signal.pid == app_pid
+            && signal.fails >= cr::STARVATION_ESCALATE_FAILS
+            && signal.age_ms <= cr::STARVATION_MARKER_TTL_MS
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RestartCause {
+        /// No `micontrol.exe` at all.
+        Missing,
+        /// Process alive, heartbeat stale/foreign/unreadable.
+        Stale,
+        /// Fresh heartbeat with `ui_ok=0`.
+        UiDead,
+        /// `crash_recovery` escalated a starved async runtime.
+        Starved,
+    }
+
+    impl RestartCause {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Missing => "app not running",
+                Self::Stale => "heartbeat stale",
+                Self::UiDead => "UI dead (ui_ok=0)",
+                Self::Starved => "async runtime starved",
+            }
+        }
+    }
+
+    /// Why a poll decided to wait instead of acting — logged and asserted by
+    /// the decision-matrix tests.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WaitDetail {
+        Missing { misses: u32 },
+        StartupGrace,
+        UiDeadGrace { since_ms: u64 },
+        Confirm { count: u32 },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WatchdogAction {
+        Idle,
+        Wait {
+            cause: RestartCause,
+            detail: WaitDetail,
+        },
+        Relaunch {
+            misses: u32,
+        },
+        Restart {
+            cause: RestartCause,
+        },
+        GiveUp {
+            cause: RestartCause,
+        },
+    }
+
+    /// Which gate is currently blocking supervision (for one-line logging on
+    /// transitions instead of a line every 30 s).
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    enum GateState {
+        #[default]
+        Armed,
+        QuitPending,
+        Disarmed,
+    }
+
+    /// Counters and timers that survive between polls.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    struct WatchdogState {
+        dead_misses: u32,
+        zombie_confirmations: u32,
+        ui_dead_since_ms: Option<u64>,
+        last_launch_ms: Option<u64>,
+        restarts: u32,
+        healthy_since_ms: Option<u64>,
+        gave_up: bool,
+        gate: GateState,
+    }
+
+    /// Everything a poll observes. Kept as plain data so [`decide`] is pure
+    /// and the whole matrix is unit-testable without Win32 or files.
+    struct WatchdogInput {
+        quit_pending: bool,
+        armed: bool,
+        app_pid: Option<u32>,
+        heartbeat: HeartbeatHealth,
+        starvation: Option<StarvationSignal>,
+        now_ms: u64,
+    }
+
+    /// The watchdog decision matrix.
+    ///
+    /// Order matters:
+    /// 1. quit sentinel / not armed → stand down (reset counters);
+    /// 2. app absent → 4 misses, then relaunch;
+    /// 3. healthy (fresh **and** `ui_ok=1` **and** matching pid) → reset;
+    /// 4. escalated starvation → restart immediately (the app itself waited
+    ///    for 10 consecutive probe failures ≈ 2.5 min);
+    /// 5. fresh but `ui_ok=0` → 60 s grace, then restart;
+    /// 6. stale/foreign/unreadable → startup grace after our own relaunch,
+    ///    then 2 confirmations, then restart;
+    /// 7. restart budget exhausted → give up until a sustained healthy period.
+    fn decide(input: &WatchdogInput, state: &mut WatchdogState) -> WatchdogAction {
+        if input.quit_pending {
+            *state = WatchdogState {
+                gate: GateState::QuitPending,
+                ..WatchdogState::default()
+            };
+            return WatchdogAction::Idle;
+        }
+        if !input.armed {
+            *state = WatchdogState {
+                gate: GateState::Disarmed,
+                ..WatchdogState::default()
+            };
+            return WatchdogAction::Idle;
+        }
+        state.gate = GateState::Armed;
+
+        let Some(pid) = input.app_pid else {
+            state.dead_misses += 1;
+            state.zombie_confirmations = 0;
+            state.ui_dead_since_ms = None;
+            state.healthy_since_ms = None;
+            if state.dead_misses < DEAD_MISSES_BEFORE_LAUNCH {
+                return WatchdogAction::Wait {
+                    cause: RestartCause::Missing,
+                    detail: WaitDetail::Missing {
+                        misses: state.dead_misses,
+                    },
+                };
+            }
+            let misses = state.dead_misses;
+            state.dead_misses = 0;
+            return start_restart(RestartCause::Missing, state, input.now_ms, misses);
+        };
+
+        if input.heartbeat.is_healthy() {
+            state.dead_misses = 0;
+            state.zombie_confirmations = 0;
+            state.ui_dead_since_ms = None;
+            let since = *state.healthy_since_ms.get_or_insert(input.now_ms);
+            if state.restarts > 0 && input.now_ms.saturating_sub(since) >= HEALTHY_RESET_MS {
+                state.restarts = 0;
+                state.gave_up = false;
+            }
+            return WatchdogAction::Idle;
+        }
+        state.healthy_since_ms = None;
+
+        // crash_recovery already counted 10 consecutive failed probes; that is
+        // stronger evidence than any confirmation we could add.
+        if let Some(signal) = input
+            .starvation
+            .filter(|signal| starvation_actionable(*signal, pid))
+        {
+            return start_restart(RestartCause::Starved, state, input.now_ms, signal.fails);
+        }
+
+        if input.heartbeat == HeartbeatHealth::UiNotReady {
+            state.dead_misses = 0;
+            state.zombie_confirmations = 0;
+            // A freshly relaunched app reports ui_ok=0 until WebView2 creates
+            // the main window; never count that against it.
+            if let Some(launched) = state.last_launch_ms {
+                if input.now_ms.saturating_sub(launched) < STARTUP_GRACE_MS {
+                    return WatchdogAction::Wait {
+                        cause: RestartCause::UiDead,
+                        detail: WaitDetail::StartupGrace,
+                    };
+                }
+            }
+            let since = state.ui_dead_since_ms.unwrap_or(input.now_ms);
+            state.ui_dead_since_ms = Some(since);
+            if input.now_ms.saturating_sub(since) < UI_DEAD_GRACE_MS {
+                return WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: since },
+                };
+            }
+            return start_restart(RestartCause::UiDead, state, input.now_ms, 0);
+        }
+
+        state.dead_misses = 0;
+        state.ui_dead_since_ms = None;
+        // After a relaunch the app needs a moment to create its window and
+        // write the first heartbeat; never kill it inside that window.
+        if let Some(launched) = state.last_launch_ms {
+            if input.now_ms.saturating_sub(launched) < STARTUP_GRACE_MS {
+                return WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::StartupGrace,
+                };
+            }
+        }
+        state.zombie_confirmations += 1;
+        if state.zombie_confirmations < ZOMBIE_CONFIRMATIONS {
+            return WatchdogAction::Wait {
+                cause: RestartCause::Stale,
+                detail: WaitDetail::Confirm {
+                    count: state.zombie_confirmations,
+                },
+            };
+        }
+        start_restart(RestartCause::Stale, state, input.now_ms, 0)
+    }
+
+    /// Common bookkeeping for both "launch because absent" and "kill+relaunch".
+    fn start_restart(
+        cause: RestartCause,
+        state: &mut WatchdogState,
+        now_ms: u64,
+        detail: u32,
+    ) -> WatchdogAction {
+        if state.restarts >= MAX_RESTARTS {
+            if !state.gave_up {
+                state.gave_up = true;
+                return WatchdogAction::GiveUp { cause };
+            }
+            return WatchdogAction::Idle;
+        }
+        state.restarts += 1;
+        state.dead_misses = 0;
+        state.zombie_confirmations = 0;
+        state.ui_dead_since_ms = None;
+        state.last_launch_ms = Some(now_ms);
+        state.healthy_since_ms = None;
+        if cause == RestartCause::Missing {
+            WatchdogAction::Relaunch { misses: detail }
+        } else {
+            WatchdogAction::Restart { cause }
+        }
+    }
+
+    /// Execute a decision. All Win32/process work lives here; the decision
+    /// itself is pure.
+    fn apply_action(action: WatchdogAction, input: &WatchdogInput) {
+        match action {
+            WatchdogAction::Idle => {}
+            WatchdogAction::Wait { cause, detail } => match detail {
+                WaitDetail::Missing { misses } => {
+                    write_log(&format!("micontrol.exe NOT running (miss #{misses})"));
+                }
+                WaitDetail::StartupGrace => {
+                    write_log(&format!(
+                        "{} — startup grace ({}ms) after relaunch, waiting",
+                        cause.as_str(),
+                        STARTUP_GRACE_MS
+                    ));
+                }
+                WaitDetail::UiDeadGrace { since_ms } => {
+                    write_log(&format!(
+                        "{} for {}ms (grace {}ms) — waiting",
+                        cause.as_str(),
+                        input.now_ms.saturating_sub(since_ms),
+                        UI_DEAD_GRACE_MS
+                    ));
+                }
+                WaitDetail::Confirm { count } => {
+                    write_log(&format!(
+                        "{} — confirmation {count}/{ZOMBIE_CONFIRMATIONS}",
+                        cause.as_str()
+                    ));
+                }
+            },
+            WatchdogAction::Relaunch { misses } => {
+                write_log(&format!(
+                    "micontrol.exe not running after {misses} misses — relaunching (minimized)"
+                ));
+                if let Some(exe) = find_app_exe() {
+                    launch_app(&exe, true);
+                }
+            }
+            WatchdogAction::Restart { cause } => {
+                let escalation = match (cause, input.starvation) {
+                    (RestartCause::Starved, Some(signal)) => {
+                        format!(", crash_recovery fails={}", signal.fails)
+                    }
+                    _ => String::new(),
+                };
+                write_log(&format!(
+                    "{} ({}{escalation}) — killing micontrol.exe (pid {}) and relaunching",
+                    cause.as_str(),
+                    input.heartbeat.describe(),
+                    input
+                        .app_pid
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                ));
+                if kill_app() {
+                    if let Some(exe) = find_app_exe() {
+                        // Visible window: the user must see that the UI is back.
+                        launch_app(&exe, false);
+                    }
+                } else {
+                    write_log("could not kill the app — waiting for the next poll");
+                }
+            }
+            WatchdogAction::GiveUp { cause } => {
+                write_log(&format!(
+                    "{} — {MAX_RESTARTS} restarts without a sustained healthy period; \
+                     giving up until the next user launch",
+                    cause.as_str()
+                ));
+            }
+        }
+    }
+
+    /// Log a gate transition once, not on every 30 s poll.
+    fn log_gate_transition(previous: GateState, current: GateState) {
+        if previous == current {
+            return;
+        }
+        match current {
+            GateState::Armed => write_log("watchdog armed — supervising micontrol.exe"),
+            GateState::QuitPending => {
+                write_log("user quit sentinel present — watchdog stays silent");
+            }
+            GateState::Disarmed => {
+                write_log("watchdog disabled (autostart off) — sleeping");
+            }
+        }
     }
 
     /// Force-terminate the running micontrol.exe instance(s). Returns true if
@@ -2401,16 +2921,18 @@ mod watchdog {
 
     /// Watchdog main loop.
     pub fn run(shutdown: Arc<AtomicBool>, delay_start_ms: u64) {
-        write_log("watchdog thread started");
+        write_log(&format!(
+            "watchdog thread started (armed by: {}; poll {}ms, stale {}ms, ui_ok grace {}ms)",
+            arm_source(),
+            POLL_MS,
+            HEARTBEAT_STALE_MS,
+            UI_DEAD_GRACE_MS
+        ));
         // Give the app time to have (re)started before first probe.
         if delay_start_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay_start_ms));
         }
-        let mut consecutive_dead = 0u32;
-        // Consecutive "running but zombie (stale heartbeat)" detections.
-        // Bounded: after MAX_ZOMBIE_RESETS force-restarts in a row we stop
-        // hammering the machine and wait for the user or app to act.
-        let mut consecutive_zombie = 0u32;
+        let mut state = WatchdogState::default();
         while !shutdown.load(Ordering::SeqCst) {
             // S55 FIX 18: the whole poll body runs inside catch_unwind. A
             // panic anywhere here (WTS token paths, registry reads, process
@@ -2421,12 +2943,11 @@ mod watchdog {
             // UAC fallback storms the user saw). A panicked poll is now just
             // a skipped tick: the service survives and the next poll retries.
             let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                watchdog_poll(&mut consecutive_dead, &mut consecutive_zombie);
+                watchdog_poll(&mut state);
             }));
             if poll_result.is_err() {
                 write_log("watchdog poll PANICKED — tick skipped, service kept alive");
-                consecutive_dead = 0;
-                consecutive_zombie = 0;
+                state = WatchdogState::default();
             }
             // Sleep in small steps so shutdown is prompt.
             let step = std::time::Duration::from_millis(250);
@@ -2439,71 +2960,412 @@ mod watchdog {
         write_log("watchdog thread stopped");
     }
 
-    /// One watchdog poll: quit-pending check, armed check, app-liveness
-    /// check (relaunch after 4 misses) and stale-heartbeat zombie handling
-    /// (kill + relaunch after 2 confirmations, bounded by MAX_ZOMBIE_RESETS).
+    /// One watchdog poll: observe everything, decide (pure), then act.
+    ///
     /// S55 FIX 18: extracted so the watchdog loop can run it inside
     /// catch_unwind — a panic here must skip the tick, not kill the service.
-    fn watchdog_poll(consecutive_dead: &mut u32, consecutive_zombie: &mut u32) {
-        const MAX_ZOMBIE_RESETS: u32 = 3;
-        if user_quit_pending() {
-            *consecutive_dead = 0;
-            *consecutive_zombie = 0;
-        } else if !watchdog_armed() {
-            write_log("watchdog disabled (autostart off) — sleeping");
-            *consecutive_dead = 0;
-            *consecutive_zombie = 0;
-        } else if !app_is_running() {
-            *consecutive_dead += 1;
-            write_log(&format!(
-                "micontrol.exe NOT running (miss #{consecutive_dead})"
-            ));
-            *consecutive_zombie = 0;
-            // Require 4 consecutive misses (~2 min) before relaunching.
-            // Gives Windows Restart Manager (RegisterApplicationRestart)
-            // and any in-flight user launch time to bring the process up,
-            // avoiding a redundant launch racing the WER restart dialog.
-            if *consecutive_dead >= 4 {
-                if let Some(exe) = find_app_exe() {
-                    launch_app(&exe, true);
-                }
-                *consecutive_dead = 0;
+    fn watchdog_poll(state: &mut WatchdogState) {
+        let now_ms = epoch_ms();
+        let quit_pending = user_quit_pending();
+        let armed = watchdog_armed();
+        let app_pid = app_pid();
+        let heartbeat = heartbeat_health(read_heartbeat(), app_pid, now_ms);
+        let starvation = read_starvation(now_ms);
+        let input = WatchdogInput {
+            quit_pending,
+            armed,
+            app_pid,
+            heartbeat,
+            starvation,
+            now_ms,
+        };
+
+        let previous_gate = state.gate;
+        let action = decide(&input, state);
+        log_gate_transition(previous_gate, state.gate);
+        apply_action(action, &input);
+    }
+
+    // ── Tests ───────────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const T0: u64 = 1_794_044_373_192;
+        const PID: u32 = 2944;
+
+        fn hb(age_ms: u64, ui_ok: u8) -> HeartbeatHealth {
+            heartbeat_health(
+                Ok(Heartbeat {
+                    ts_ms: T0 - age_ms,
+                    pid: PID,
+                    ui_ok,
+                }),
+                Some(PID),
+                T0,
+            )
+        }
+
+        fn input(now_ms: u64, heartbeat: HeartbeatHealth) -> WatchdogInput {
+            WatchdogInput {
+                quit_pending: false,
+                armed: true,
+                app_pid: Some(PID),
+                heartbeat,
+                starvation: None,
+                now_ms,
             }
-        } else if !app_heartbeat_fresh() {
-            // S32-005: Process alive but the UI heartbeat is stale → frozen
-            // zombie. Force-kill and fresh-relaunch instead of leaving a dead
-            // UI. S32-005b: require TWO consecutive stale detections before
-            // killing (a single transient miss recovers on the next tick).
-            *consecutive_dead = 0;
-            *consecutive_zombie += 1;
-            let hb_age = heartbeat_age_ms();
-            let ui_ok = read_ui_ok();
-            write_log(&format!(
-                "micontrol.exe running but heartbeat STALE (zombie #{consecutive_zombie}, \
-                 age={}ms, ui_ok={ui_ok:?})",
-                hb_age.unwrap_or(0)
+        }
+
+        fn signal(age_ms: u64, fails: u32) -> StarvationSignal {
+            StarvationSignal {
+                pid: PID,
+                fails,
+                age_ms,
+            }
+        }
+
+        // ── Heartbeat parsing ───────────────────────────────────────────────
+
+        #[test]
+        fn parses_the_production_heartbeat_format() {
+            let parsed = parse_heartbeat("1794044373192\n2944\n1\n").expect("valid");
+            assert_eq!(
+                parsed,
+                Heartbeat {
+                    ts_ms: 1_794_044_373_192,
+                    pid: 2944,
+                    ui_ok: 1
+                }
+            );
+            // CRLF and trailing junk lines are tolerated.
+            assert!(parse_heartbeat("1794044373192\r\n2944\r\n0\r\n").is_ok());
+            assert!(parse_heartbeat("1794044373192\n2944\n1\nextra\n").is_ok());
+        }
+
+        #[test]
+        fn rejects_empty_garbage_and_partial_heartbeats() {
+            for bad in [
+                "",
+                "\n\n\n",
+                "garbage\n2944\n1\n",
+                "0\n2944\n1\n",
+                "1794044373192\nnope\n1\n",
+                "1794044373192\n0\n1\n",
+                "1794044373192\n2944\n",
+                "1794044373192\n2944\n2\n",
+                "1794044373192\n2944\nmaybe\n",
+            ] {
+                assert!(
+                    parse_heartbeat(bad).is_err(),
+                    "must reject heartbeat {bad:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn health_classifies_fresh_stale_ui_and_foreign_pid() {
+            assert_eq!(hb(0, 1), HeartbeatHealth::Healthy);
+            assert_eq!(
+                hb(HEARTBEAT_STALE_MS + 1, 1),
+                HeartbeatHealth::Stale {
+                    age_ms: HEARTBEAT_STALE_MS + 1
+                }
+            );
+            assert_eq!(hb(5_000, 0), HeartbeatHealth::UiNotReady);
+            // Clock skew (heartbeat timestamp in the future) is treated as
+            // age 0 rather than as stale.
+            assert_eq!(
+                heartbeat_health(
+                    Ok(Heartbeat {
+                        ts_ms: T0 + 5_000,
+                        pid: PID,
+                        ui_ok: 1
+                    }),
+                    Some(PID),
+                    T0
+                ),
+                HeartbeatHealth::Healthy
+            );
+            // A heartbeat from another pid is never trusted.
+            assert_eq!(
+                heartbeat_health(
+                    Ok(Heartbeat {
+                        ts_ms: T0,
+                        pid: 999,
+                        ui_ok: 1
+                    }),
+                    Some(PID),
+                    T0
+                ),
+                HeartbeatHealth::ForeignPid { pid: 999 }
+            );
+            assert!(matches!(
+                heartbeat_health(Err(HeartbeatError::Missing), Some(PID), T0),
+                HeartbeatHealth::Unreadable { .. }
             ));
-            if *consecutive_zombie >= 2 && *consecutive_zombie <= MAX_ZOMBIE_RESETS {
-                if kill_app() {
-                    if let Some(exe) = find_app_exe() {
-                        // Zombie: relaunch with a VISIBLE window so the
-                        // user sees the UI is back and can confirm it.
-                        launch_app(&exe, false);
+        }
+
+        /// The exact 06-Nov-2026 failure: fresh timestamp, `ui_ok=0`.
+        #[test]
+        fn fresh_heartbeat_with_ui_ok_zero_is_not_healthy() {
+            let health = hb(1_000, 0);
+            assert!(!health.is_healthy());
+            assert_eq!(health, HeartbeatHealth::UiNotReady);
+        }
+
+        // ── Decision matrix ────────────────────────────────────────────────
+
+        #[test]
+        fn healthy_app_is_left_alone() {
+            let mut state = WatchdogState::default();
+            assert_eq!(
+                decide(&input(T0, HeartbeatHealth::Healthy), &mut state),
+                WatchdogAction::Idle
+            );
+            assert_eq!(state.restarts, 0);
+        }
+
+        #[test]
+        fn quit_sentinel_and_disarmed_stand_down() {
+            let mut state = WatchdogState {
+                restarts: 2,
+                dead_misses: 3,
+                ..WatchdogState::default()
+            };
+            let mut quit = input(T0, HeartbeatHealth::Stale { age_ms: 90_000 });
+            quit.quit_pending = true;
+            assert_eq!(decide(&quit, &mut state), WatchdogAction::Idle);
+            assert_eq!(state.gate, GateState::QuitPending);
+            assert_eq!(state.restarts, 0, "counters reset while quit is pending");
+
+            let mut disarmed = input(T0, HeartbeatHealth::Healthy);
+            disarmed.armed = false;
+            assert_eq!(decide(&disarmed, &mut state), WatchdogAction::Idle);
+            assert_eq!(state.gate, GateState::Disarmed);
+        }
+
+        #[test]
+        fn missing_app_relaunches_after_four_misses() {
+            let mut state = WatchdogState::default();
+            let mut gone = input(T0, HeartbeatHealth::Unreadable { why: "missing" });
+            gone.app_pid = None;
+            for miss in 1..DEAD_MISSES_BEFORE_LAUNCH {
+                assert_eq!(
+                    decide(&gone, &mut state),
+                    WatchdogAction::Wait {
+                        cause: RestartCause::Missing,
+                        detail: WaitDetail::Missing { misses: miss }
                     }
-                } else {
-                    write_log("could not kill zombie — waiting for next poll");
-                }
-            } else if *consecutive_zombie > MAX_ZOMBIE_RESETS {
-                write_log(&format!(
-                    "zombie detected {consecutive_zombie}x in a row — giving up until \
-                     next user launch (bounded)"
-                ));
-            } else {
-                write_log("stale once — waiting for next poll to confirm");
+                );
             }
-        } else {
-            *consecutive_dead = 0;
-            *consecutive_zombie = 0;
+            assert_eq!(
+                decide(&gone, &mut state),
+                WatchdogAction::Relaunch {
+                    misses: DEAD_MISSES_BEFORE_LAUNCH
+                }
+            );
+            assert_eq!(state.restarts, 1);
+            assert_eq!(state.last_launch_ms, Some(T0));
+        }
+
+        /// ui_ok=0 must be observed for the grace period before killing:
+        /// the app reports ui_ok=0 on the very first heartbeat of every start.
+        #[test]
+        fn ui_ok_zero_waits_for_the_grace_period_then_restarts() {
+            let mut state = WatchdogState::default();
+            assert_eq!(
+                decide(&input(T0, hb(0, 0)), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: T0 }
+                }
+            );
+            assert_eq!(
+                decide(&input(T0 + 30_000, hb(0, 0)), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: T0 }
+                }
+            );
+            assert_eq!(
+                decide(&input(T0 + UI_DEAD_GRACE_MS, hb(0, 0)), &mut state),
+                WatchdogAction::Restart {
+                    cause: RestartCause::UiDead
+                }
+            );
+            assert_eq!(state.restarts, 1);
+        }
+
+        /// A single ui_ok=0 sample that recovers must not restart anything.
+        #[test]
+        fn transient_ui_ok_zero_recovers_without_a_restart() {
+            let mut state = WatchdogState::default();
+            let _ = decide(&input(T0, hb(0, 0)), &mut state);
+            assert_eq!(
+                decide(&input(T0 + 30_000, hb(0, 1)), &mut state),
+                WatchdogAction::Idle
+            );
+            assert_eq!(state.ui_dead_since_ms, None);
+            assert_eq!(state.restarts, 0);
+        }
+
+        /// A freshly relaunched app reports ui_ok=0 until its window exists.
+        #[test]
+        fn ui_ok_zero_inside_startup_grace_never_kills() {
+            let mut state = WatchdogState {
+                last_launch_ms: Some(T0),
+                ..WatchdogState::default()
+            };
+            assert_eq!(
+                decide(&input(T0 + 30_000, hb(0, 0)), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::StartupGrace
+                }
+            );
+            assert_eq!(state.restarts, 0);
+        }
+
+        #[test]
+        fn stale_heartbeat_needs_two_confirmations() {
+            let mut state = WatchdogState::default();
+            let stale = HeartbeatHealth::Stale { age_ms: 60_000 };
+            assert_eq!(
+                decide(&input(T0, stale), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::Confirm { count: 1 }
+                }
+            );
+            assert_eq!(
+                decide(&input(T0 + 30_000, stale), &mut state),
+                WatchdogAction::Restart {
+                    cause: RestartCause::Stale
+                }
+            );
+        }
+
+        #[test]
+        fn startup_grace_after_our_own_relaunch_blocks_a_kill() {
+            let mut state = WatchdogState {
+                last_launch_ms: Some(T0),
+                ..WatchdogState::default()
+            };
+            let stale = HeartbeatHealth::Stale { age_ms: 50_000 };
+            assert_eq!(
+                decide(&input(T0 + 30_000, stale), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::StartupGrace
+                }
+            );
+            // Once the grace expires the normal confirmation applies.
+            assert_eq!(
+                decide(&input(T0 + STARTUP_GRACE_MS, stale), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::Confirm { count: 1 }
+                }
+            );
+        }
+
+        /// crash_recovery already waited 10 probe failures (~2.5 min): the
+        /// watchdog acts on the first poll that sees a fresh marker.
+        #[test]
+        fn escalated_starvation_restarts_immediately() {
+            let mut state = WatchdogState::default();
+            let mut starved = input(T0, hb(0, 0));
+            starved.starvation = Some(signal(30_000, 10));
+            assert_eq!(
+                decide(&starved, &mut state),
+                WatchdogAction::Restart {
+                    cause: RestartCause::Starved
+                }
+            );
+            assert_eq!(state.restarts, 1);
+        }
+
+        #[test]
+        fn starvation_marker_from_another_pid_or_too_old_is_ignored() {
+            assert!(!starvation_actionable(signal(0, 10), PID + 1));
+            assert!(starvation_actionable(signal(0, 10), PID));
+            assert!(!starvation_actionable(
+                signal(
+                    micontrol_lib::hw::crash_recovery::STARVATION_MARKER_TTL_MS + 1,
+                    10
+                ),
+                PID
+            ));
+            assert!(!starvation_actionable(signal(0, 9), PID));
+
+            let mut state = WatchdogState::default();
+            let mut stale_marker = input(T0, hb(0, 0));
+            stale_marker.starvation = Some(signal(
+                micontrol_lib::hw::crash_recovery::STARVATION_MARKER_TTL_MS + 1,
+                10,
+            ));
+            // Falls back to the normal ui_ok grace — no immediate restart.
+            assert_eq!(
+                decide(&stale_marker, &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: T0 }
+                }
+            );
+        }
+
+        #[test]
+        fn restart_budget_is_bounded_then_gives_up() {
+            let mut state = WatchdogState::default();
+            let mut starved = input(T0, hb(0, 0));
+            starved.starvation = Some(signal(0, 10));
+            for _ in 0..MAX_RESTARTS {
+                assert!(matches!(
+                    decide(&starved, &mut state),
+                    WatchdogAction::Restart {
+                        cause: RestartCause::Starved
+                    }
+                ));
+            }
+            assert_eq!(
+                decide(&starved, &mut state),
+                WatchdogAction::GiveUp {
+                    cause: RestartCause::Starved
+                }
+            );
+            // The give-up line is logged once, then the watchdog stays quiet.
+            assert_eq!(decide(&starved, &mut state), WatchdogAction::Idle);
+        }
+
+        #[test]
+        fn sustained_health_resets_the_restart_budget() {
+            let mut state = WatchdogState::default();
+            let mut starved = input(T0, hb(0, 0));
+            starved.starvation = Some(signal(0, 10));
+            for _ in 0..MAX_RESTARTS {
+                let _ = decide(&starved, &mut state);
+            }
+            assert_eq!(state.restarts, MAX_RESTARTS);
+
+            let healthy_at = T0 + 1_000;
+            assert_eq!(
+                decide(&input(healthy_at, HeartbeatHealth::Healthy), &mut state),
+                WatchdogAction::Idle
+            );
+            assert_eq!(
+                state.restarts, MAX_RESTARTS,
+                "budget only decays after a while"
+            );
+            assert_eq!(
+                decide(
+                    &input(healthy_at + HEALTHY_RESET_MS, HeartbeatHealth::Healthy),
+                    &mut state
+                ),
+                WatchdogAction::Idle
+            );
+            assert_eq!(state.restarts, 0);
         }
     }
 }
