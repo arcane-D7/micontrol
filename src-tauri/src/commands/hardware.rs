@@ -201,10 +201,12 @@ pub async fn write_iot_hex(address: String, hex_data: String) -> Result<(), Erro
     .map_err(ErrorResponse::from)
 }
 
-/// Read `count` bytes (1–256) from ECRAM at `address` via direct IoTDriver IOCTL.
+/// Read `count` bytes (1–256) from ECRAM at `address`.
 ///
-/// Returns the bytes as a lowercase hex string.  Requires the process to be
-/// running elevated (administrator).
+/// Tries the direct IoTDriver IOCTL first; the unprivileged app is refused by
+/// the driver's process-name check, so it falls back to the ecram_service JSON
+/// pipe (which runs as SYSTEM from the DriverStore). Returns the bytes as a
+/// lowercase hex string.
 #[tauri::command]
 pub async fn read_ecram_raw(address: String, count: u32) -> Result<String, ErrorResponse> {
     run_blocking(move || {
@@ -223,7 +225,34 @@ pub async fn read_ecram_raw(address: String, count: u32) -> Result<String, Error
             )));
         }
 
-        let bytes = crate::hw::ecram::read_ecram(addr, count as usize)?;
+        // The direct IOCTL requires the caller to be the DriverStore
+        // `IoTService.exe`; the unprivileged app is always refused ("Open IoT
+        // driver device"). The same address is readable through the
+        // ecram_service JSON pipe, so fall back to it instead of failing.
+        let count = count as usize;
+        let bytes = match crate::hw::ecram::read_ecram(addr, count) {
+            Ok(bytes) => bytes,
+            Err(direct_err) => {
+                log::debug!(
+                    target: "commands::hardware",
+                    "read_ecram_raw: direct IOCTL failed for 0x{addr:08X} ({direct_err}); trying ecram_service pipe"
+                );
+                match crate::hw::ecram::read_ecram_via_pipe(addr, count) {
+                    Some(bytes) if bytes.len() == count => bytes,
+                    Some(bytes) => {
+                        return Err(HardwareError::Ecram(format!(
+                            "Short read from ecram_service pipe at 0x{addr:08X}: {} of {count} bytes",
+                            bytes.len()
+                        )));
+                    }
+                    None => {
+                        return Err(HardwareError::Ecram(format!(
+                            "Failed to read 0x{addr:08X} ({count} bytes): direct driver: {direct_err}; ecram_service pipe: unavailable or refused"
+                        )));
+                    }
+                }
+            }
+        };
         Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
     })
     .await

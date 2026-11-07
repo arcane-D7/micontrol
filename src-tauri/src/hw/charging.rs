@@ -7,9 +7,6 @@ use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-/// Named pipe path to the IoTService IPC broker.
-const IOT_PIPE: &str = r"\\.\pipe\LOCAL\IoTService_IPC_Broker";
-
 /// Registry fallback for charging threshold.
 #[cfg(windows)]
 const CHARGE_REG_KEY: &str = r"SOFTWARE\MI\IoTDriver";
@@ -181,10 +178,9 @@ fn send_via_pipe(threshold: u8) -> HardwareResult<()> {
         };
         use windows::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_READMODE_MESSAGE};
 
-        // Use the IoT pipe path discovered at startup; fall back to the default constant.
-        let pipe_path = crate::hw::discovery::global_profile()
-            .and_then(|p| p.iot_pipe_path)
-            .unwrap_or_else(|| IOT_PIPE.to_string());
+        // Use the MCPI pipe path discovered at startup; the ecram_service JSON
+        // pipe is filtered out by resolve_pipe_path (different protocol).
+        let pipe_path = crate::hw::iotservice::resolve_pipe_path();
 
         // Open the pipe using CreateFileW so we can set MESSAGE mode.
         let path_w: Vec<u16> = std::ffi::OsStr::new(&pipe_path)
