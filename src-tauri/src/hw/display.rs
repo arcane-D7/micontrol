@@ -8,9 +8,184 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicU8, Ordering};
 
-/// Set to `false` after the first `set_brightness_igcl` failure so we never
-/// retry a DLL that cannot load — avoids a WARN log on every brightness change.
+/// `false` while IGCL writes are known to fail, so a broken ControlLib is not
+/// retried on every brightness change. It is re-armed by the slow retry
+/// (`IGCL_RETRY_SECS`) and by a successful device re-enumeration (P10).
 static IGCL_SET_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+// ── Brightness source state (P10) ────────────────────────────────────────────
+//
+// IGCL can be present (ControlLib.dll loads) yet enumerate ZERO devices, which
+// silently pins brightness to the WMI path for the whole session. The old code
+// logged two WARNs ("no IGCL devices enumerated" + "falling back to WMI
+// permanently") with no state, no reason and no retry. This block keeps the
+// live source, exposes it through `DisplayInfo`, logs one clear transition and
+// persists it so a post-mortem (or the next session's UI) still shows why the
+// machine is on the fallback.
+const SOURCE_UNKNOWN: u8 = 0;
+const SOURCE_IGCL: u8 = 1;
+const SOURCE_WMI_FALLBACK: u8 = 2;
+static BRIGHTNESS_SOURCE: AtomicU8 = AtomicU8::new(SOURCE_UNKNOWN);
+
+/// Retry IGCL slowly after a failure: a driver update / GPU re-enumeration can
+/// restore it without restarting the app. (P10 requirement: ~10 min.)
+const IGCL_RETRY_SECS: u64 = 600;
+
+fn igcl_retry_at() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
+    static RETRY_AT: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    RETRY_AT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn schedule_igcl_retry() {
+    let mut guard = crate::util::panic::lock_or_recover(igcl_retry_at());
+    *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(IGCL_RETRY_SECS));
+}
+
+/// Pure deadline check so the slow-retry window is unit-testable with an
+/// injected `now` (no sleeps).
+fn retry_due(deadline: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    deadline.is_some_and(|at| now >= at)
+}
+
+/// True once the slow IGCL retry window has elapsed (and consumes it).
+fn igcl_retry_due() -> bool {
+    let mut guard = crate::util::panic::lock_or_recover(igcl_retry_at());
+    let due = retry_due(*guard, std::time::Instant::now());
+    if due {
+        *guard = None;
+    }
+    due
+}
+
+fn brightness_source_name(source: u8) -> &'static str {
+    match source {
+        SOURCE_IGCL => "igcl",
+        SOURCE_WMI_FALLBACK => "wmi-fallback",
+        _ => "unknown",
+    }
+}
+
+/// Current brightness backend, for logs / `DisplayInfo` / the UI.
+pub fn brightness_source() -> &'static str {
+    let current = BRIGHTNESS_SOURCE.load(Ordering::Relaxed);
+    if current != SOURCE_UNKNOWN {
+        return brightness_source_name(current);
+    }
+    persisted_brightness_source()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BrightnessSourceState {
+    source: String,
+    reason: String,
+    updated_at_ms: u64,
+}
+
+fn brightness_source_path() -> std::path::PathBuf {
+    if let Ok(override_path) = std::env::var("MICONTROL_BRIGHTNESS_SOURCE_PATH") {
+        return std::path::PathBuf::from(override_path);
+    }
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base)
+        .join("MiControl")
+        .join("brightness_source.json")
+}
+
+fn persist_brightness_source(source: &str, reason: &str) {
+    let state = BrightnessSourceState {
+        source: source.to_string(),
+        reason: reason.to_string(),
+        updated_at_ms: now_ms(),
+    };
+    let path = brightness_source_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match serde_json::to_string_pretty(&state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::debug!(target: "hw::display", "failed to persist brightness source: {e}");
+            }
+        }
+        Err(e) => log::debug!(target: "hw::display", "failed to serialize brightness source: {e}"),
+    }
+}
+
+/// Last persisted source (previous session), used only until the first live
+/// brightness operation records the current one.
+fn persisted_brightness_source() -> &'static str {
+    static CACHED: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    CACHED.get_or_init(|| {
+        let Ok(data) = std::fs::read_to_string(brightness_source_path()) else {
+            return "unknown";
+        };
+        let Ok(state) = serde_json::from_str::<BrightnessSourceState>(&data) else {
+            return "unknown";
+        };
+        match state.source.as_str() {
+            "igcl" => "igcl",
+            "wmi-fallback" => "wmi-fallback",
+            _ => "unknown",
+        }
+    })
+}
+
+/// Record a source transition. Logs exactly ONE line per change (the previous
+/// code emitted a WARN on every failed brightness write) and persists the state.
+fn set_brightness_source(source: u8, reason: &str) {
+    let previous = BRIGHTNESS_SOURCE.swap(source, Ordering::Relaxed);
+    if previous == source {
+        return;
+    }
+    let name = brightness_source_name(source);
+    if source == SOURCE_WMI_FALLBACK {
+        log::info!(
+            target: "hw::display",
+            "brightness source: {name} ({reason}); writes use WMI, IGCL retried every {IGCL_RETRY_SECS}s"
+        );
+    } else {
+        log::info!(target: "hw::display", "brightness source: {name} ({reason})");
+    }
+    persist_brightness_source(name, reason);
+}
+
+/// Called by the IGCL session when ControlLib.dll loads but no device is
+/// usable (P10). Keeps the diagnostic to a single line via
+/// `set_brightness_source` (which only logs on transitions).
+#[cfg(windows)]
+fn report_igcl_unavailable(reason: &str) {
+    set_brightness_source(SOURCE_WMI_FALLBACK, reason);
+    schedule_igcl_retry();
+}
+
+/// Called by the IGCL session when a device shows up again.
+#[cfg(windows)]
+fn report_igcl_available(reason: &str) {
+    IGCL_SET_AVAILABLE.store(true, Ordering::Relaxed);
+    *crate::util::panic::lock_or_recover(igcl_retry_at()) = None;
+    set_brightness_source(SOURCE_IGCL, reason);
+}
+
+/// Probe IGCL once per process so `DisplayInfo.brightness_source` reports the
+/// live backend instead of the value persisted by the previous session.
+///
+/// Cheap: it opens the (already cached, load-once) IGCL session and reads the
+/// current brightness; subsequent calls are a no-op because the source is then
+/// known.
+#[cfg(windows)]
+fn probe_brightness_source_once() {
+    if BRIGHTNESS_SOURCE.load(Ordering::Relaxed) != SOURCE_UNKNOWN {
+        return;
+    }
+    match get_brightness_igcl() {
+        Ok(_) => report_igcl_available("IGCL brightness read succeeded"),
+        Err(e) => set_brightness_source(SOURCE_WMI_FALLBACK, &format!("IGCL unavailable: {e}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn probe_brightness_source_once() {}
 
 /// Persistent IGCL session (load-once, never-close).
 ///
@@ -40,7 +215,12 @@ mod igcl_session {
         /// unload ControlLib.dll (its internal threads keep executing it).
         #[allow(dead_code)]
         lib: Library,
+        /// API handle returned by `ctlInit`. Kept so re-enumeration (P10) does
+        /// not need a second `ctlInit`.
+        api: CtlApiHandle,
         device: *mut std::ffi::c_void,
+        /// Last `ctlEnumerateDevices` attempt — throttles recovery retries.
+        last_enum: std::time::Instant,
     }
 
     // SAFETY: the session is opened once at first use; the handles are opaque
@@ -51,6 +231,40 @@ mod igcl_session {
 
     pub static IGG_SESSION: LazyLock<Mutex<Option<IgclSession>>> =
         LazyLock::new(|| Mutex::new(None));
+
+    /// Minimum interval between `ctlEnumerateDevices` recovery attempts when
+    /// the session has no usable device (P10). Brightness writes additionally
+    /// gate on a 10-minute retry, so the driver is never hammered.
+    const REENUM_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Enumerate IGCL display devices.
+    ///
+    /// * `Ok(Some(device))` — usable device handle.
+    /// * `Ok(None)` — the driver reports zero devices (driver/device not
+    ///   supported by IGCL, e.g. no Intel GPU exposed to ControlLib).
+    /// * `Err(msg)` — symbol missing or a hard HRESULT.
+    fn enumerate_devices(
+        lib: &Library,
+        api: CtlApiHandle,
+    ) -> Result<Option<*mut std::ffi::c_void>, String> {
+        let ctl_enumerate: libloading::Symbol<FnCtlEnumerateDevices> =
+            unsafe { lib.get(b"ctlEnumerateDevices\0") }
+                .map_err(|e| format!("ctlEnumerateDevices symbol missing: {e}"))?;
+        let mut count: u32 = 0;
+        let rc = unsafe { ctl_enumerate(api, &mut count, std::ptr::null_mut()) };
+        if rc != 0 && (rc & 0x8000_0000) != 0 {
+            return Err(format!("ctlEnumerateDevices count failed rc=0x{rc:08X}"));
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
+        let rc2 = unsafe { ctl_enumerate(api, &mut count, devices.as_mut_ptr()) };
+        if rc2 != 0 && (rc2 & 0x8000_0000) != 0 {
+            return Err(format!("ctlEnumerateDevices fill failed rc=0x{rc2:08X}"));
+        }
+        Ok(devices.first().copied().filter(|d| !d.is_null()))
+    }
 
     /// Open (or reuse) a persistent IGCL session. Returns the stored handles
     /// without ever calling `ctlClose` or unloading the library.
@@ -70,7 +284,24 @@ mod igcl_session {
     /// Library so the DLL stays mapped.
     pub fn get_session() -> Result<(Library, *mut std::ffi::c_void), String> {
         let mut guard = IGG_SESSION.lock().map_err(|e| e.to_string())?;
-        if let Some(s) = guard.as_ref() {
+        if let Some(s) = guard.as_mut() {
+            // P10: a null device used to stick for the whole session ("falling
+            // back to WMI permanently"). Re-enumerate slowly — never reload or
+            // unload the DLL — so a driver re-init or GPU re-enumeration can
+            // restore hardware brightness without restarting the app.
+            if s.device.is_null() && s.last_enum.elapsed() >= REENUM_MIN_INTERVAL {
+                s.last_enum = std::time::Instant::now();
+                match enumerate_devices(&s.lib, s.api) {
+                    Ok(Some(device)) => {
+                        s.device = device;
+                        super::report_igcl_available("IGCL device appeared on re-enumeration");
+                    }
+                    Ok(None) => {
+                        log::debug!("[igcl_session] re-enumeration still reports 0 IGCL devices");
+                    }
+                    Err(e) => log::debug!("[igcl_session] re-enumeration failed: {e}"),
+                }
+            }
             // Session already stored — its `lib` handle keeps ControlLib.dll
             // mapped for the whole process. A failed reload here only means
             // the caller falls back to WMI; the DLL stays mapped regardless.
@@ -104,9 +335,14 @@ mod igcl_session {
                     );
                     let s = IgclSession {
                         lib,
+                        api: std::ptr::null_mut(),
                         device: std::ptr::null_mut(),
+                        last_enum: std::time::Instant::now(),
                     };
                     *guard = Some(s);
+                    super::report_igcl_unavailable(
+                        "ControlLib.dll has no ctlInit symbol (incompatible IGCL build)",
+                    );
                     let lib_for_caller = loader_reload(&path).ok_or_else(|| {
                         "ControlLib.dll reload failed after ctlInit symbol error".to_string()
                     })?;
@@ -137,52 +373,39 @@ mod igcl_session {
             }
         }
 
-        // ── ctlEnumerateDevices: best-effort ────────────────────────────────
+        // ── ctlEnumerateDevices: best-effort, one clear diagnostic ──────────
         // Warnings are non-fatal; a failed enumerate leaves a null device and
         // runtime ops fall back to WMI — but the DLL stays mapped either way.
-        let mut device: *mut std::ffi::c_void = std::ptr::null_mut();
-        let ctl_enumerate: libloading::Symbol<FnCtlEnumerateDevices> = unsafe {
-            match lib.get(b"ctlEnumerateDevices\0") {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("[igcl_session] ctlEnumerateDevices symbol missing: {e}");
-                    // Still store the session (DLL stays mapped for the whole
-                    // process) and return a reloaded caller handle.
-                    let s = IgclSession { lib, device };
-                    *guard = Some(s);
-                    let lib_for_caller = loader_reload(&path).ok_or_else(|| {
-                        "ControlLib.dll reload failed after enumerate symbol error".to_string()
-                    })?;
-                    return Ok((lib_for_caller, device));
-                }
+        // P10: ONE diagnostic line (via the brightness-source transition) and a
+        // slow retry, instead of a WARN here plus a "falls back permanently"
+        // WARN from the caller.
+        let device = match enumerate_devices(&lib, api_handle) {
+            Ok(Some(device)) => {
+                super::report_igcl_available("IGCL device enumerated at session start");
+                device
+            }
+            Ok(None) => {
+                super::report_igcl_unavailable(&format!(
+                    "ControlLib.dll loaded ({path}) but ctlEnumerateDevices returned 0 devices — \
+                     this Intel display driver does not expose IGCL devices"
+                ));
+                std::ptr::null_mut()
+            }
+            Err(e) => {
+                super::report_igcl_unavailable(&format!(
+                    "ControlLib.dll loaded ({path}) but IGCL enumeration failed: {e}"
+                ));
+                std::ptr::null_mut()
             }
         };
-        let mut count: u32 = 0;
-        let erc = unsafe { ctl_enumerate(api_handle, &mut count, std::ptr::null_mut()) };
-        if erc != 0 && (erc & 0x8000_0000) != 0 {
-            log::warn!(
-                "[igcl_session] ctlEnumerateDevices count failed rc=0x{erc:08X} — \
-                 storing session with null device (DLL stays mapped)"
-            );
-        } else if count > 0 {
-            let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
-            let erc2 = unsafe { ctl_enumerate(api_handle, &mut count, devices.as_mut_ptr()) };
-            if erc2 != 0 && (erc2 & 0x8000_0000) != 0 {
-                log::warn!(
-                    "[igcl_session] ctlEnumerateDevices fill failed rc=0x{erc2:08X} — \
-                     keeping null device (DLL stays mapped)"
-                );
-            } else {
-                device = devices[0];
-            }
-        } else {
-            log::warn!(
-                "[igcl_session] no IGCL devices enumerated — storing session with null device"
-            );
-        }
 
         // ALWAYS store the session: the Library must never be dropped.
-        let s = IgclSession { lib, device };
+        let s = IgclSession {
+            lib,
+            api: api_handle,
+            device,
+            last_enum: std::time::Instant::now(),
+        };
         *guard = Some(s);
         // Re-load for the caller so the stored session keeps its own refcount:
         // LoadLibrary increments the module refcount and does NOT unload it.
@@ -361,6 +584,11 @@ pub struct DisplayInfo {
     pub ai_brightness_config: AiBrightnessConfig,
     /// Current ambient illuminance from the light sensor (lux). None when unavailable.
     pub ambient_lux: Option<f32>,
+    /// Which backend actually writes brightness: "igcl", "wmi-fallback" or
+    /// "unknown" (P10). When it is "wmi-fallback" the UI can explain that
+    /// hardware brightness control is unavailable on this driver.
+    #[serde(default)]
+    pub brightness_source: String,
 }
 
 const IGCL_DLL: &str = r"C:\Windows\System32\ControlLib.dll";
@@ -614,6 +842,9 @@ pub fn current_brightness() -> u8 {
 pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     // WMI brightness = what Windows Display Settings slider shows (ground truth).
     let brightness = get_brightness_wmi().unwrap_or_else(|_| get_brightness_igcl().unwrap_or(80));
+    // P10: make sure `brightness_source` reflects the LIVE backend instead of
+    // the value persisted by the previous session.
+    probe_brightness_source_once();
     let hdr_enabled = get_hdr_state();
     let refresh_rate_hz = get_refresh_rate().unwrap_or(120);
     // S25-009: Don't let refresh-rate enumeration failure nuke the entire display info.
@@ -641,17 +872,31 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
         ai_brightness,
         ai_brightness_config,
         ambient_lux,
+        brightness_source: brightness_source().to_string(),
     })
 }
 
 pub fn set_brightness(level: u8) -> HardwareResult<()> {
     let level = level.clamp(10, 100);
-    // Only try IGCL if it has not already failed permanently.
-    if IGCL_SET_AVAILABLE.load(Ordering::Relaxed) {
-        if let Err(e) = set_brightness_igcl(level) {
-            log::warn!("IGCL brightness failed: {e}, falling back to WMI permanently");
-            IGCL_SET_AVAILABLE.store(false, Ordering::Relaxed);
-            set_brightness_wmi(level)?;
+    // P10: do not disable IGCL for the whole process on the first failure.
+    // Retry it slowly (IGCL_RETRY_SECS) so a driver re-enumeration can restore
+    // hardware brightness without restarting the app.
+    if IGCL_SET_AVAILABLE.load(Ordering::Relaxed) || igcl_retry_due() {
+        match set_brightness_igcl(level) {
+            Ok(()) => {
+                report_igcl_available("IGCL brightness write succeeded");
+            }
+            Err(e) => {
+                IGCL_SET_AVAILABLE.store(false, Ordering::Relaxed);
+                // One clear transition line (set_brightness_source logs only
+                // when the source actually changes) instead of a WARN per write.
+                set_brightness_source(
+                    SOURCE_WMI_FALLBACK,
+                    &format!("IGCL brightness write failed: {e}"),
+                );
+                schedule_igcl_retry();
+                set_brightness_wmi(level)?;
+            }
         }
     } else {
         set_brightness_wmi(level)?;
@@ -2414,5 +2659,75 @@ mod tests {
         record_smart_sample(12.0, 44);
         assert_eq!(smart_predict_brightness(10.5), Some(42));
         reset_smart_model();
+    }
+
+    // ── P10: brightness source state ────────────────────────────────────────
+
+    /// The source string is part of the `DisplayInfo` JSON contract (UI).
+    #[test]
+    fn brightness_source_names_are_stable() {
+        assert_eq!(brightness_source_name(SOURCE_IGCL), "igcl");
+        assert_eq!(brightness_source_name(SOURCE_WMI_FALLBACK), "wmi-fallback");
+        assert_eq!(brightness_source_name(SOURCE_UNKNOWN), "unknown");
+    }
+
+    /// A source change must persist `source` + `reason` so a post-mortem (or
+    /// the next session's UI) can explain why brightness is on WMI.
+    #[test]
+    fn brightness_source_transition_is_persisted_with_reason() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = std::env::temp_dir().join("micontrol_test_brightness_source.json");
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("MICONTROL_BRIGHTNESS_SOURCE_PATH", &path);
+
+        set_brightness_source(
+            SOURCE_WMI_FALLBACK,
+            "ctlEnumerateDevices returned 0 devices (test)",
+        );
+
+        let data = std::fs::read_to_string(&path).expect("state file must be written");
+        let state: BrightnessSourceState =
+            serde_json::from_str(&data).expect("state file must be valid JSON");
+        assert_eq!(state.source, "wmi-fallback");
+        assert!(
+            state.reason.contains("0 devices"),
+            "reason must survive: {}",
+            state.reason
+        );
+        assert!(state.updated_at_ms > 0);
+
+        // Reset the live state and clean up.
+        BRIGHTNESS_SOURCE.store(SOURCE_UNKNOWN, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&path);
+        std::env::remove_var("MICONTROL_BRIGHTNESS_SOURCE_PATH");
+    }
+
+    /// The slow retry is a 10-minute window: IGCL must not be retried on every
+    /// brightness write while the driver has no device (P10).
+    #[test]
+    fn igcl_retry_window_is_ten_minutes_and_blocks_until_then() {
+        assert_eq!(IGCL_RETRY_SECS, 600);
+        let now = std::time::Instant::now();
+        let deadline = now + std::time::Duration::from_secs(IGCL_RETRY_SECS);
+
+        assert!(
+            !retry_due(Some(deadline), now),
+            "fresh failure blocks retry"
+        );
+        assert!(
+            !retry_due(
+                Some(deadline),
+                now + std::time::Duration::from_secs(IGCL_RETRY_SECS - 1)
+            ),
+            "still inside the window"
+        );
+        assert!(
+            retry_due(
+                Some(deadline),
+                now + std::time::Duration::from_secs(IGCL_RETRY_SECS)
+            ),
+            "retry becomes due exactly at the deadline"
+        );
+        assert!(!retry_due(None, now), "no scheduled retry = not due");
     }
 }

@@ -365,6 +365,7 @@
     "hdrEnabled": "HDR activé",
     "hdrDisabled": "HDR désactivé",
     "igclNotAvailable": "Nécessite Intel IGCL — non trouvé sur cet appareil",
+    "brightnessSourceWmi": "La luminosité est contrôlée par WMI — ce pilote Intel n'expose pas de périphériques IGCL",
     "refreshRate": "Fréquence de rafraîchissement",
     "hz": "Hz",
     "aiAdaptiveBrightness": "Luminosité adaptative",

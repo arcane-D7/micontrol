@@ -111,6 +111,12 @@ export interface DisplayInfo {
   ai_brightness_config: AiBrightnessConfig;
   /** Current ambient illuminance from the light sensor (lux). Null when unavailable. */
   ambient_lux: number | null;
+  /**
+   * Which backend actually writes brightness (P10). `wmi-fallback` means the
+   * Intel driver loaded ControlLib.dll but exposed no IGCL device, so hardware
+   * brightness control is unavailable and WMI is used instead.
+   */
+  brightness_source?: 'igcl' | 'wmi-fallback' | 'unknown';
 }
 
 export interface FanInfo {

@@ -802,6 +802,76 @@ pub fn stop_hook() {
 
 // ── Hook thread ───────────────────────────────────────────────────────────────
 
+/// `ERROR_HOTKEY_ALREADY_REGISTERED` (0x80070581) as an HRESULT.
+///
+/// Raised when the exact (modifiers, VK) pair is already owned by another
+/// window or process — the P7 case: `Win+Shift+F23` failed on every startup.
+fn is_hotkey_already_registered(code: windows::core::HRESULT) -> bool {
+    use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
+    code == windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0)
+}
+
+/// Register a global hotkey, recovering from a stale registration.
+///
+/// P7: `RegisterHotKey(Win+Shift+F23)` returned 0x80070581 (already
+/// registered) once per startup. The registration can belong to:
+/// * a previous MiControl instance that has not exited yet (watchdog
+///   relaunch / user restart), or
+/// * another process that permanently owns the combination.
+///
+/// Strategy: unregister our own id, register, and on ALREADY_REGISTERED wait
+/// briefly and retry once — a dying previous instance releases the hotkey
+/// within a few hundred ms. If it is still taken we emit ONE clear WARN
+/// naming the key and continue (Raw Input / the low-level hook still see the
+/// key); never crash, never retry on every poll.
+#[cfg(windows)]
+fn register_hotkey_with_recovery(
+    hwnd: windows::Win32::Foundation::HWND,
+    id: i32,
+    mods: windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS,
+    vk: u32,
+    label: &str,
+) -> bool {
+    use std::time::Duration;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+
+    // Clear a stale registration left by a previous instance. Ignored: it
+    // fails when the hotkey belongs to another process (then the driver/Shell
+    // owns it and our register below reports ALREADY_REGISTERED).
+    let _ = unsafe { UnregisterHotKey(hwnd, id) };
+
+    for attempt in 0..2 {
+        match unsafe { RegisterHotKey(hwnd, id, mods, vk) } {
+            Ok(()) => {
+                log::info!("[hotkeys] RegisterHotKey {label} id={id} OK");
+                return true;
+            }
+            Err(e) if is_hotkey_already_registered(e.code()) => {
+                if attempt == 0 {
+                    // A previous MiControl instance may still be tearing down;
+                    // give it a moment and retry exactly once.
+                    std::thread::sleep(Duration::from_millis(200));
+                    let _ = unsafe { UnregisterHotKey(hwnd, id) };
+                    continue;
+                }
+                log::warn!(
+                    "[hotkeys] RegisterHotKey {label} id={id} unavailable: \
+                     ERROR_HOTKEY_ALREADY_REGISTERED (0x{:08X}) — another process \
+                     owns this hotkey; key detection still works via Raw Input / \
+                     WH_KEYBOARD_LL (not retrying)",
+                    e.code().0 as u32
+                );
+                return false;
+            }
+            Err(e) => {
+                log::warn!("[hotkeys] RegisterHotKey {label} id={id} failed: {e}");
+                return false;
+            }
+        }
+    }
+    false
+}
+
 fn hook_thread_main() {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HINSTANCE, HMODULE};
@@ -921,7 +991,7 @@ fn hook_thread_main() {
     // revisions emit that raw sequence instead of synthesising VK 0xC3.
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+            HOT_KEY_MODIFIERS, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
         };
         // Standard VK registrations (AI key, Xiaomi key, Copilot key).
         for (id, vk) in [
@@ -929,31 +999,15 @@ fn hook_thread_main() {
             (102i32, VK_XIAOMI_KEY),
             (103i32, VK_COPILOT),
         ] {
-            // SAFETY: RegisterHotKey takes a valid HWND (created via
-            // CreateWindowExW), a unique ID, and a VK code. The HWND is alive
-            // for the duration of the hook thread.
             let mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
-            // Best-effort: unregister first in case a previous instance left
-            // a stale registration (common after app restart without reboot).
-            let _ = unsafe { UnregisterHotKey(hwnd, id) };
-            match unsafe { RegisterHotKey(hwnd, id, mods, vk) } {
-                Ok(()) => log::info!("[hotkeys] RegisterHotKey VK={:#04X} id={id} OK", vk),
-                Err(e) => log::warn!(
-                    "[hotkeys] RegisterHotKey VK={:#04X} id={id} failed: {e}",
-                    vk
-                ),
-            }
+            let label = format!("VK={vk:#04X}");
+            // P7: unregister + single retry on ALREADY_REGISTERED, one clear log.
+            register_hotkey_with_recovery(hwnd, id, mods, vk, &label);
         }
         // Also register Win+Shift+F23 (alternate Copilot key path on some boards).
         // VK_F23 = 0x86.  MOD_WIN | MOD_SHIFT | MOD_NOREPEAT.
-        // Best-effort: unregister first to clear stale registrations from
-        // previous app instances (0x80070581 = ERROR_HOTKEY_ALREADY_REGISTERED).
-        let _ = unsafe { UnregisterHotKey(hwnd, 104i32) };
         let copilot_alt_mods = HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0);
-        match unsafe { RegisterHotKey(hwnd, 104i32, copilot_alt_mods, 0x86) } {
-            Ok(()) => log::info!("[hotkeys] RegisterHotKey Win+Shift+F23 id=104 OK"),
-            Err(e) => log::warn!("[hotkeys] RegisterHotKey Win+Shift+F23 id=104 failed: {e}"),
-        }
+        register_hotkey_with_recovery(hwnd, 104i32, copilot_alt_mods, 0x86, "Win+Shift+F23");
 
         // Also register the PLAIN F23 (VK 0x86) hotkey with no modifiers.
         // Xiaomi Book Pro 14 2024 and other OEM boards emit the raw F23 scan
@@ -961,14 +1015,10 @@ fn hook_thread_main() {
         // RegisterHotKey claims the plain VK at the Win32 level BEFORE the
         // Windows Shell can intercept it and open the "Copilot key" Settings
         // page.  Best-effort: if the Shell or another app already claimed it
-        // (ERROR_HOTKEY_ALREADY_REGISTERED) we log and continue — the
-        // WH_KEYBOARD_LL hook path still covers the plain F23.
-        let _ = unsafe { UnregisterHotKey(hwnd, 105i32) };
+        // the helper logs once and continues — the WH_KEYBOARD_LL hook path
+        // still covers the plain F23.
         let plain_f23_mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
-        match unsafe { RegisterHotKey(hwnd, 105i32, plain_f23_mods, 0x86) } {
-            Ok(()) => log::info!("[hotkeys] RegisterHotKey plain F23 (0x86) id=105 OK"),
-            Err(e) => log::warn!("[hotkeys] RegisterHotKey plain F23 (0x86) id=105 failed: {e}"),
-        }
+        register_hotkey_with_recovery(hwnd, 105i32, plain_f23_mods, 0x86, "plain F23 (0x86)");
     }
 
     // ── Install WH_KEYBOARD_LL for key suppression (best-effort) ─────────────
@@ -3279,5 +3329,35 @@ mod wmi_debounce_tests {
             wmi_key_debounced(key_a),
             "key_a second fire should be debounced"
         );
+    }
+}
+
+#[cfg(test)]
+mod hotkey_registration_tests {
+    use super::*;
+
+    /// P7: only `ERROR_HOTKEY_ALREADY_REGISTERED` (1409 / 0x80070581) is
+    /// treated as "owned by someone else". Other failures must still be
+    /// reported as-is, otherwise we would silently swallow real errors.
+    #[test]
+    fn already_registered_hresult_is_recognised() {
+        use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
+        let already = windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0);
+        assert!(is_hotkey_already_registered(already));
+
+        let access_denied = windows::core::HRESULT::from_win32(5); // ERROR_ACCESS_DENIED
+        assert!(!is_hotkey_already_registered(access_denied));
+
+        let invalid_window = windows::core::HRESULT::from_win32(1400); // ERROR_INVALID_WINDOW_HANDLE
+        assert!(!is_hotkey_already_registered(invalid_window));
+    }
+
+    /// The constant must match the value observed in production logs
+    /// (`0x80070581`).
+    #[test]
+    fn already_registered_code_is_0x80070581() {
+        use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
+        let hr = windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0);
+        assert_eq!(hr.0 as u32, 0x8007_0581);
     }
 }

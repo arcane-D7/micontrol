@@ -365,6 +365,7 @@
     "hdrEnabled": "HDR Enabled",
     "hdrDisabled": "HDR Disabled",
     "igclNotAvailable": "Requires Intel IGCL — not found on this device",
+    "brightnessSourceWmi": "Brightness is controlled by WMI — this Intel driver does not expose IGCL devices",
     "refreshRate": "Refresh Rate",
     "hz": "Hz",
     "aiAdaptiveBrightness": "Adaptive Brightness",

@@ -6,7 +6,7 @@
 use crate::hw::errors::{HardwareError, HardwareResult};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 
@@ -70,40 +70,54 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
         // so this query is *expected* to fail on every poll. Before the cache,
         // each 2 s fan poll issued a doomed WMI round-trip AND logged a WARN —
         // flooding the log and wasting a WMI connection. We remember a failure
-        // for 60 s and short-circuit afterwards.
+        // and short-circuit afterwards.
+        //
+        // P11: ACCESS_DENIED is not a bug — it simply means the elevated path
+        // is not usable yet (or the process is unprivileged by design). It is
+        // logged ONCE at INFO and the retry window grows 60 → 120 → … → 900 s
+        // instead of hammering WMI every minute forever. Any other error still
+        // logs a single WARN.
         static LAST_FAILURE: OnceLock<AtomicU64> = OnceLock::new();
-        // S37-005b: log WARN only on the FIRST failure of the process. This
-        // query fails PERMANENTLY while unprivileged (access denied by
-        // design; thermal data comes via the elevated bridge), so logging
-        // WARN on every 60 s cache expiry buried real errors under WARN
-        // noise. The retry still runs; only the log level drops to debug.
-        static FIRST_FAILURE_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
-        const FAILURE_CACHE_SECS: u64 = 60;
+        static DENIED_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+        static OTHER_FAILURE_LOGGED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+        /// Current retry window; doubles on every consecutive failure.
+        static BACKOFF_SECS: OnceLock<AtomicU64> = OnceLock::new();
+        const BACKOFF_START_SECS: u64 = 60;
+        const BACKOFF_MAX_SECS: u64 = 900;
         let last_fail = LAST_FAILURE.get_or_init(|| AtomicU64::new(0));
+        let backoff = BACKOFF_SECS.get_or_init(|| AtomicU64::new(BACKOFF_START_SECS));
         let now_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         // Skip the doomed query while we're inside the failure window.
-        if last_fail
-            .load(AtomicOrdering::Relaxed)
-            .saturating_add(FAILURE_CACHE_SECS)
-            > now_epoch
-        {
-            log::debug!(target: "hw::fan", "ESIF WMI query in failure cache — skipping");
+        let window = backoff.load(AtomicOrdering::Relaxed);
+        let failed_at = last_fail.load(AtomicOrdering::Relaxed);
+        if failed_at.saturating_add(window) > now_epoch {
+            log::debug!(
+                target: "hw::fan",
+                "ESIF WMI query in failure window — skipping (retry in {}s)",
+                failed_at.saturating_add(window).saturating_sub(now_epoch)
+            );
             return Err(crate::hw::errors::HardwareError::Other(
                 "ESIF WMI denied (cached)".into(),
             ));
         }
 
+        let access_denied = std::cell::Cell::new(false);
         let query_result = wmi_cache::with_wmi(|wmi| {
             match wmi
                 .raw_query("SELECT InstanceName, Temperature, Power FROM EsifDeviceInformation")
             {
                 Ok(r) => Ok(r),
                 Err(e) => {
-                    // Only debug-log here — the WARN is logged once per window
-                    // on the outer error path (below).
+                    // Classify the raw WMI error here, where the HRESULT is
+                    // still available (P11).
+                    if wmi_cache::is_access_denied(&e) {
+                        access_denied.set(true);
+                    }
+                    // Only debug-log here — the single log is emitted on the
+                    // outer error path (below).
                     last_fail.store(now_epoch, AtomicOrdering::Relaxed);
                     Err(anyhow::Error::from(e))
                 }
@@ -111,16 +125,41 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
         });
 
         let results: Vec<HashMap<String, wmi::Variant>> = match query_result {
-            Ok(r) => r,
+            Ok(r) => {
+                // Success — reset the retry window to its starting value.
+                backoff.store(BACKOFF_START_SECS, AtomicOrdering::Relaxed);
+                r
+            }
             Err(e) => {
                 last_fail.store(now_epoch, AtomicOrdering::Relaxed);
-                let first = FIRST_FAILURE_LOGGED
-                    .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
-                    .swap(true, AtomicOrdering::Relaxed);
-                if !first {
-                    log::warn!(target: "hw::fan", "ESIF WMI query failed (retrying in {FAILURE_CACHE_SECS}s): {e}");
+                let next_window =
+                    wmi_cache::grow_failure_backoff(window, BACKOFF_START_SECS, BACKOFF_MAX_SECS);
+                backoff.store(next_window, AtomicOrdering::Relaxed);
+                if access_denied.get() {
+                    // Expected while unprivileged: INFO once per process, then
+                    // debug. Thermal data comes from the elevated bridge.
+                    let first = DENIED_LOGGED
+                        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+                        .swap(true, AtomicOrdering::Relaxed);
+                    if !first {
+                        log::info!(
+                            target: "hw::fan",
+                            "ESIF WMI access denied (0x80041003) — expected while \
+                             unprivileged (thermal data comes from the elevated bridge); \
+                             retry window grows to {next_window}s"
+                        );
+                    } else {
+                        log::debug!(target: "hw::fan", "ESIF WMI access denied (retry in {next_window}s): {e}");
+                    }
                 } else {
-                    log::debug!(target: "hw::fan", "ESIF WMI query failed (cached; retrying in {FAILURE_CACHE_SECS}s): {e}");
+                    let first = OTHER_FAILURE_LOGGED
+                        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+                        .swap(true, AtomicOrdering::Relaxed);
+                    if !first {
+                        log::warn!(target: "hw::fan", "ESIF WMI query failed (next retry in {next_window}s): {e}");
+                    } else {
+                        log::debug!(target: "hw::fan", "ESIF WMI query failed (retry in {next_window}s): {e}");
+                    }
                 }
                 return Err(e);
             }
@@ -204,14 +243,203 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
 /// WMI query returns no usable data.
 ///
 /// # Failure backoff (circuit breaker)
+///
 /// An elevated round-trip is comparatively expensive (service pipe or a
+/// scheduled-task launch). When it fails repeatedly — e.g. the bridge service
+/// is not installed or its pipe denies access — retrying on every 2s/15s poll
+/// wasted resources and, in the worst case, spawned a crashing helper every
+/// cycle. We therefore back off after consecutive failures:
+/// [`MAX_CONSECUTIVE_FAILURES`] failures in a row open the circuit and skip
+/// elevated attempts for [`BACKOFF_SECS`] (60s).
 // ── Elevated thermal circuit-breaker state ──────────────────────────────────
 // Module-level so it can be reset on power-resume (sleep/wake) — see
 // `reset_elevated_thermal_circuit`. Without the reset, a sleep cycle that
 // kills the bridge service leaves the circuit open for 60 s, repeating on
 // every poll and permanently suppressing temperatures (S37-006).
-static CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
-static BACKOFF_UNTIL: OnceLock<StdMutex<Option<StdInstant>>> = OnceLock::new();
+/// Consecutive failures that open the elevated-thermal circuit.
+const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+/// How long the circuit stays open once the failure threshold is reached.
+const BACKOFF_SECS: u64 = 60;
+
+/// Decision returned by [`ThermalCircuit::begin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CircuitDecision {
+    /// Circuit closed and no attempt in flight — do the elevated round-trip.
+    Proceed,
+    /// Circuit open; skip without any elevated attempt until `resumes_in`.
+    SkipOpen { resumes_in: StdDuration },
+    /// Another caller already has an elevated read in flight — coalesce.
+    SkipInFlight,
+}
+
+/// Circuit breaker for the elevated thermal read.
+///
+/// P15: the previous implementation kept a bare failure counter plus a
+/// "backoff until" instant that was only consulted at the top of
+/// `get_elevated_thermal_readings`. Every caller that was already in flight
+/// when the circuit opened still incremented the counter and re-emitted
+/// "opening circuit for 60s" (production: 6 WARN in 18 s, N=3→8) because the
+/// counter was never reset, and concurrent 2 s polls kept entering before the
+/// backoff was stored. This type makes the state machine explicit:
+///
+/// * `begin()` is the single gate and runs BEFORE the elevated attempt; it
+///   also marks the attempt in flight so parallel callers coalesce instead of
+///   stampeding the bridge.
+/// * `failure()` resets the counter when it opens the circuit, so the WARN is
+///   emitted exactly once per open window.
+/// * `cooldown` is constructor-injected so tests can use a short window and
+///   pass explicit `now` values (no sleeps, no flakes).
+struct ThermalCircuit {
+    failures: u32,
+    open_until: Option<StdInstant>,
+    in_flight: bool,
+    max_failures: u32,
+    cooldown: StdDuration,
+}
+
+impl ThermalCircuit {
+    fn new(max_failures: u32, cooldown: StdDuration) -> Self {
+        Self {
+            failures: 0,
+            open_until: None,
+            in_flight: false,
+            max_failures,
+            cooldown,
+        }
+    }
+
+    /// Gate an attempt: `Proceed` only when the circuit is closed and nothing
+    /// else is in flight.
+    fn begin(&mut self, now: StdInstant) -> CircuitDecision {
+        if let Some(until) = self.open_until {
+            if now < until {
+                return CircuitDecision::SkipOpen {
+                    resumes_in: until.saturating_duration_since(now),
+                };
+            }
+            // Cooldown elapsed — close the circuit and start a fresh window.
+            self.open_until = None;
+            self.failures = 0;
+        }
+        if self.in_flight {
+            return CircuitDecision::SkipInFlight;
+        }
+        self.in_flight = true;
+        CircuitDecision::Proceed
+    }
+
+    /// Record a successful attempt. Closes the circuit.
+    fn success(&mut self) {
+        self.in_flight = false;
+        self.failures = 0;
+        self.open_until = None;
+    }
+
+    /// Record a failed attempt. Returns `true` when this failure opened the
+    /// circuit (so the caller logs the transition exactly once).
+    fn failure(&mut self, now: StdInstant) -> bool {
+        self.in_flight = false;
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= self.max_failures {
+            // Reset so the next open window needs another full run of
+            // failures; otherwise every later failure would re-log "opening".
+            self.failures = 0;
+            self.open_until = Some(now + self.cooldown);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Release the in-flight marker without recording an outcome (the caller
+    /// returned early between `begin` and success/failure).
+    fn abandon(&mut self) {
+        self.in_flight = false;
+    }
+
+    /// Force-close the circuit (sleep/wake: the bridge may be alive again).
+    fn reset(&mut self) {
+        let max_failures = self.max_failures;
+        let cooldown = self.cooldown;
+        *self = Self::new(max_failures, cooldown);
+    }
+
+    fn was_active(&self) -> bool {
+        self.open_until.is_some() || self.failures > 0
+    }
+}
+
+static THERMAL_CIRCUIT: OnceLock<StdMutex<ThermalCircuit>> = OnceLock::new();
+
+fn thermal_circuit() -> &'static StdMutex<ThermalCircuit> {
+    THERMAL_CIRCUIT.get_or_init(|| {
+        StdMutex::new(ThermalCircuit::new(
+            MAX_CONSECUTIVE_FAILURES,
+            StdDuration::from_secs(BACKOFF_SECS),
+        ))
+    })
+}
+
+/// RAII token for an in-flight elevated read. Dropping it without calling
+/// [`ThermalAttempt::success`]/[`ThermalAttempt::failure`] releases the
+/// in-flight marker — a stuck marker would coalesce every later read into a
+/// permanent skip.
+struct ThermalAttempt {
+    finished: bool,
+}
+
+impl ThermalAttempt {
+    fn success(mut self) {
+        self.finished = true;
+        thermal_circuit()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .success();
+    }
+
+    /// Returns `true` when this failure opened the circuit.
+    fn failure(mut self) -> bool {
+        self.finished = true;
+        thermal_circuit()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .failure(StdInstant::now())
+    }
+}
+
+impl Drop for ThermalAttempt {
+    fn drop(&mut self) {
+        if !self.finished {
+            thermal_circuit()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .abandon();
+        }
+    }
+}
+
+/// Outcome of trying to start an elevated read.
+enum ThermalGate {
+    /// Perform the elevated round-trip with this token.
+    Proceed(ThermalAttempt),
+    /// Circuit open; skip until the cooldown elapses.
+    SkipOpen(StdDuration),
+    /// Another caller is already reading — coalesce.
+    SkipInFlight,
+}
+
+fn begin_thermal_attempt() -> ThermalGate {
+    let decision = thermal_circuit()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .begin(StdInstant::now());
+    match decision {
+        CircuitDecision::Proceed => ThermalGate::Proceed(ThermalAttempt { finished: false }),
+        CircuitDecision::SkipOpen { resumes_in } => ThermalGate::SkipOpen(resumes_in),
+        CircuitDecision::SkipInFlight => ThermalGate::SkipInFlight,
+    }
+}
+
 /// Set when the bridge service is detected as unavailable after a thermal
 /// failure. On the next backoff expiry, `get_elevated_thermal_readings`
 /// attempts `ensure_bridge_service()` once to recover (S37-006).
@@ -220,21 +448,33 @@ static HEAL_BRIDGE_NEEDED: AtomicBool = AtomicBool::new(false);
 /// elevated round-trip per cache window is made — the 2s fan poll reuses it.
 static THERMAL_CACHE: OnceLock<StdMutex<Option<(StdInstant, EsifReadings)>>> = OnceLock::new();
 const THERMAL_CACHE_SECS: u64 = 15;
+
+impl EsifReadings {
+    /// No reading available (circuit open / attempt coalesced / query failed).
+    fn unavailable() -> Self {
+        Self {
+            cpu_temp: None,
+            gpu_temp: None,
+            tdp_watts: None,
+        }
+    }
+}
+
 /// Reset the elevated-thermal circuit-breaker (called on power resume).
 ///
 /// After sleep/resume, the MiControlBridge service may be momentarily gone;
 /// previously-open circuits now retry immediately instead of waiting out the
 /// 60 s backoff — so temperatures recover right after wake.
 pub fn reset_elevated_thermal_circuit() {
-    CONSECUTIVE_FAILURES.store(0, AtomicOrdering::Relaxed);
     HEAL_BRIDGE_NEEDED.store(false, AtomicOrdering::Relaxed);
-    if let Some(b) = BACKOFF_UNTIL.get() {
-        if let Ok(mut guard) = b.lock() {
-            if guard.is_some() {
-                log::info!(target: "hw::fan", "Reset thermal circuit-breaker (sleep/wake)");
-                *guard = None;
-            }
-        }
+    let was_active = {
+        let mut circuit = thermal_circuit().lock().unwrap_or_else(|p| p.into_inner());
+        let active = circuit.was_active();
+        circuit.reset();
+        active
+    };
+    if was_active {
+        log::info!(target: "hw::fan", "Reset thermal circuit-breaker (sleep/wake)");
     }
     // Also drop the TTL cache so the first post-resume read is fresh.
     if let Some(c) = THERMAL_CACHE.get() {
@@ -244,11 +484,6 @@ pub fn reset_elevated_thermal_circuit() {
     }
 }
 
-/// scheduled-task launch). When it fails repeatedly — e.g. the bridge service
-/// is not installed or its pipe denies access — retrying on every 2s/15s poll
-/// wasted resources and, in the worst case, spawned a crashing helper every
-/// cycle. We therefore back off after consecutive failures: 3 failures in a
-/// row open the circuit and skip elevated attempts for `BACKOFF_SECS` (60s).
 pub async fn get_elevated_thermal_readings() -> EsifReadings {
     // (TTL cache is module-level: THERMAL_CACHE / THERMAL_CACHE_SECS.)
 
@@ -267,28 +502,27 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
         *guard = None; // Expired — re-fetch.
     }
 
-    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
-    const BACKOFF_SECS: u64 = 60;
-
-    // Circuit open? Skip the elevated round-trip entirely.
-    let backoff_until = BACKOFF_UNTIL.get_or_init(|| std::sync::Mutex::new(None));
-    if let Some(until) = *backoff_until.lock().unwrap_or_else(|p| p.into_inner()) {
-        if until > StdInstant::now() {
+    // P15: the ONLY entry gate. Checked BEFORE the elevated round-trip, so an
+    // open circuit really means "no elevated attempt for BACKOFF_SECS" —
+    // and an in-flight attempt makes parallel polls coalesce instead of
+    // stampeding the bridge.
+    let attempt = match begin_thermal_attempt() {
+        ThermalGate::Proceed(attempt) => attempt,
+        ThermalGate::SkipOpen(resumes_in) => {
             log::debug!(
                 target: "hw::fan",
-                "Elevated thermal read in backoff — skipping (resumes in {:?})",
-                until.saturating_duration_since(StdInstant::now())
+                "Elevated thermal read in backoff — skipping (circuit resumes in {resumes_in:?})"
             );
-            return EsifReadings {
-                cpu_temp: None,
-                gpu_temp: None,
-                tdp_watts: None,
-            };
+            return EsifReadings::unavailable();
         }
-        // Backoff expired — reset state and try again.
-        *backoff_until.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        CONSECUTIVE_FAILURES.store(0, AtomicOrdering::Relaxed);
-    }
+        ThermalGate::SkipInFlight => {
+            log::debug!(
+                target: "hw::fan",
+                "Elevated thermal read already in flight — coalescing, skipping this poll"
+            );
+            return EsifReadings::unavailable();
+        }
+    };
 
     // S37-006: Heal the bridge service once the backoff expires.
     if HEAL_BRIDGE_NEEDED.swap(false, AtomicOrdering::Relaxed) {
@@ -313,13 +547,16 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
     {
         Ok(v) => v,
         Err(e) => {
-            // Failure path — count towards the circuit breaker.
-            let failures = CONSECUTIVE_FAILURES.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-            if failures >= MAX_CONSECUTIVE_FAILURES {
+            // Failure path — count towards the circuit breaker. `failure()`
+            // returns true exactly once per open window (the counter is reset
+            // when the circuit opens), so this WARN cannot repeat for every
+            // in-flight attempt (P15: 6 WARN in 18 s, N=3→8 in production).
+            let opened = attempt.failure();
+            if opened {
                 log::warn!(
                     target: "hw::fan",
-                    "Elevated thermal read failed {failures} consecutive times — \
-                     opening circuit for {BACKOFF_SECS}s"
+                    "Elevated thermal read failed {MAX_CONSECUTIVE_FAILURES} consecutive times — \
+                     opening circuit for {BACKOFF_SECS}s (no elevated attempts until then)"
                 );
                 // S37-006: The service may have died (overnight idle / sleep).
                 // Opening the circuit is fine, but don't leave temps suppressed
@@ -332,24 +569,18 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
                         "Bridge service unavailable after thermal failure — will attempt heal"
                     );
                 }
-                *backoff_until.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Some(StdInstant::now() + StdDuration::from_secs(BACKOFF_SECS));
             } else {
                 log::debug!(
                     target: "hw::fan",
-                    "Elevated thermal read unavailable ({failures}/{MAX_CONSECUTIVE_FAILURES}): {e}"
+                    "Elevated thermal read unavailable: {e}"
                 );
             }
-            return EsifReadings {
-                cpu_temp: None,
-                gpu_temp: None,
-                tdp_watts: None,
-            };
+            return EsifReadings::unavailable();
         }
     };
 
-    // Success — reset the failure counter.
-    CONSECUTIVE_FAILURES.store(0, AtomicOrdering::Relaxed);
+    // Success — close the circuit and reset the failure counter.
+    attempt.success();
     let mut cpu_temp: Option<f32> = None;
     let mut gpu_temp: Option<f32> = None;
     let mut tdp_watts: Option<f32> = None;
@@ -913,4 +1144,140 @@ fn set_fan_fixed_igcl(speed_percent: u8) -> HardwareResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P15: with an injected short cooldown the circuit must actually block
+    /// attempts for the whole window — the production bug was "opening circuit
+    /// for 60s" followed by a retry 2.2 s later.
+    #[test]
+    fn circuit_opens_after_threshold_and_blocks_for_the_full_cooldown() {
+        let cooldown = StdDuration::from_millis(50);
+        let mut circuit = ThermalCircuit::new(3, cooldown);
+        let t0 = StdInstant::now();
+
+        for i in 0..3 {
+            assert_eq!(
+                circuit.begin(t0 + StdDuration::from_millis(i)),
+                CircuitDecision::Proceed,
+                "failure {i} should be allowed"
+            );
+            let opened = circuit.failure(t0 + StdDuration::from_millis(i));
+            assert_eq!(opened, i == 2, "only the third failure opens the circuit");
+        }
+
+        // Inside the window: no elevated attempt, and the remaining time is
+        // reported from the injected clock (no sleeps involved).
+        // The third failure happened at t0+2 ms, so the circuit is open until
+        // t0+52 ms (2 ms + 50 ms cooldown).
+        match circuit.begin(t0 + StdDuration::from_millis(10)) {
+            CircuitDecision::SkipOpen { resumes_in } => {
+                assert_eq!(resumes_in, StdDuration::from_millis(42));
+            }
+            other => panic!("expected SkipOpen, got {other:?}"),
+        }
+        // Just before expiry.
+        assert!(matches!(
+            circuit.begin(t0 + StdDuration::from_millis(51)),
+            CircuitDecision::SkipOpen { .. }
+        ));
+        // At expiry the circuit closes and the attempt proceeds.
+        assert_eq!(
+            circuit.begin(t0 + cooldown + StdDuration::from_millis(3)),
+            CircuitDecision::Proceed
+        );
+    }
+
+    /// P15: the failure counter is reset when the circuit opens, so a later
+    /// window needs another full run of failures before logging again.
+    #[test]
+    fn failure_counter_resets_when_circuit_opens() {
+        let cooldown = StdDuration::from_secs(60);
+        let mut circuit = ThermalCircuit::new(3, cooldown);
+        let t0 = StdInstant::now();
+
+        for _ in 0..3 {
+            assert_eq!(circuit.begin(t0), CircuitDecision::Proceed);
+            circuit.failure(t0);
+        }
+        let after_open = t0 + cooldown + StdDuration::from_millis(1);
+
+        // First and second failure of the new window must NOT re-open (this is
+        // exactly the N=4..8 spam seen in production).
+        assert_eq!(circuit.begin(after_open), CircuitDecision::Proceed);
+        assert!(!circuit.failure(after_open));
+        assert_eq!(circuit.begin(after_open), CircuitDecision::Proceed);
+        assert!(!circuit.failure(after_open));
+        // The third one opens again.
+        assert_eq!(circuit.begin(after_open), CircuitDecision::Proceed);
+        assert!(circuit.failure(after_open));
+    }
+
+    /// P15: concurrent callers (2 s fan poll + performance monitor + UI
+    /// command) must coalesce — only one elevated round-trip at a time.
+    #[test]
+    fn concurrent_attempts_are_coalesced() {
+        let mut circuit = ThermalCircuit::new(3, StdDuration::from_secs(60));
+        let now = StdInstant::now();
+
+        assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+        assert_eq!(circuit.begin(now), CircuitDecision::SkipInFlight);
+        // A failure clears the in-flight marker (and counts once).
+        assert!(!circuit.failure(now));
+        assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+    }
+
+    /// A dropped/abandoned attempt must not leave the circuit permanently
+    /// "in flight" (that would silently disable elevated reads forever).
+    #[test]
+    fn abandon_releases_in_flight_without_counting_a_failure() {
+        let mut circuit = ThermalCircuit::new(3, StdDuration::from_secs(60));
+        let now = StdInstant::now();
+
+        assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+        circuit.abandon();
+        // Still closed, still no failures recorded: three failures are needed.
+        assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+        assert!(!circuit.failure(now));
+        assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+        assert!(!circuit.failure(now));
+        assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+        assert!(circuit.failure(now), "third failure after abandon opens");
+    }
+
+    /// A success closes an open circuit and clears the failure count.
+    #[test]
+    fn success_closes_the_circuit_and_resets_failures() {
+        let cooldown = StdDuration::from_millis(10);
+        let mut circuit = ThermalCircuit::new(2, cooldown);
+        let t0 = StdInstant::now();
+        circuit.begin(t0);
+        circuit.failure(t0);
+        circuit.begin(t0);
+        assert!(circuit.failure(t0));
+
+        let after = t0 + cooldown + StdDuration::from_millis(1);
+        assert_eq!(circuit.begin(after), CircuitDecision::Proceed);
+        circuit.success();
+        // Closed with zero failures: a single failure must not open it.
+        assert_eq!(circuit.begin(after), CircuitDecision::Proceed);
+        assert!(!circuit.failure(after));
+    }
+
+    /// Sleep/wake reset must close the circuit and drop the failure history.
+    #[test]
+    fn reset_force_closes_the_circuit() {
+        let mut circuit = ThermalCircuit::new(1, StdDuration::from_secs(60));
+        let now = StdInstant::now();
+        circuit.begin(now);
+        assert!(circuit.failure(now));
+        assert!(circuit.was_active());
+
+        circuit.reset();
+        assert!(!circuit.was_active());
+        assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+    }
 }
