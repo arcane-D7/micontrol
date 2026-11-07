@@ -134,6 +134,12 @@ pub struct PresenceStatus {
 struct PresenceState {
     running: AtomicBool,
     status: std::sync::Mutex<PresenceStatus>,
+    /// Wall-clock instant of the last successful sighting. Kept out of
+    /// `PresenceStatus` (a serialised snapshot) so `last_seen_seconds_ago`
+    /// can be computed on read instead of being incremented per scan cycle
+    /// (cycles are 30 s apart, so the old counter reported "seconds" that
+    /// were really half-minutes).
+    last_seen: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 static STATE: OnceLock<PresenceState> = OnceLock::new();
@@ -149,7 +155,21 @@ fn state() -> &'static PresenceState {
             phone: None,
             scan_ok: false,
         }),
+        last_seen: std::sync::Mutex::new(None),
     })
+}
+
+fn lock_last_seen() -> std::sync::MutexGuard<'static, Option<std::time::Instant>> {
+    state()
+        .last_seen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Seconds since the phone was last seen, or `None` if it never was.
+fn last_seen_seconds_ago() -> Option<u64> {
+    let last = *lock_last_seen();
+    last.map(|t| t.elapsed().as_secs())
 }
 
 /// Start the presence monitor. Idempotent. Spawns the WinRT scanner on a
@@ -208,29 +228,40 @@ async fn scan_once() -> Result<(), String> {
         return Ok(());
     }
 
-    let needle = cfg
-        .phone_mac
-        .clone()
-        .map(|m| normalize_mac(&m))
-        .filter(|m| !m.is_empty())
-        .or_else(|| cfg.phone_name.clone().map(|n| n.to_ascii_lowercase()));
-
-    let Some(needle) = needle else {
+    let Some(target) = MatchTarget::from_config(&cfg) else {
         log::info!("[ble_presence] enabled but no phone configured");
         return Ok(());
     };
+    if cfg.phone_mac.is_some() && target.mac.is_none() {
+        log::warn!(
+            "[ble_presence] configured PhoneMac '{}' is not a 12-digit hex address — matching by name only",
+            cfg.phone_mac.as_deref().unwrap_or_default()
+        );
+    }
 
-    match scan_for_device(&needle).await {
-        Ok(Some(rssi)) => {
-            let far = rssi < cfg.rssi_lock_dbm;
+    match scan_for_device(&target).await {
+        Ok(Some(found)) => {
+            // A phone that advertises without RSSI is still *present*; the
+            // threshold only applies when we actually measured a signal.
+            let far = found.rssi.is_some_and(|rssi| rssi < cfg.rssi_lock_dbm);
             let new_state = if far { "far" } else { "near" };
             let mut st = lock_status();
             st.state = new_state.to_string();
-            st.last_rssi_dbm = Some(rssi);
+            st.last_rssi_dbm = found.rssi;
             st.last_seen_seconds_ago = Some(0);
             st.scan_ok = true;
-            st.phone = cfg.phone_name.clone().or_else(|| cfg.phone_mac.clone());
-            log::info!("[ble_presence] phone seen rssi={rssi} state={new_state}");
+            st.phone = cfg
+                .phone_name
+                .clone()
+                .or(found.name.clone())
+                .or(Some(found.address.clone()));
+            log::info!(
+                "[ble_presence] phone seen rssi={:?} state={new_state} matched={:?} addr={}",
+                found.rssi,
+                found.matched,
+                found.address
+            );
+            *lock_last_seen() = Some(std::time::Instant::now());
             if far && cfg.lock_enabled {
                 request_lock();
             }
@@ -246,7 +277,7 @@ async fn scan_once() -> Result<(), String> {
                     request_lock();
                 }
             }
-            st.last_seen_seconds_ago = st.last_seen_seconds_ago.map(|s| s + 1);
+            st.last_seen_seconds_ago = last_seen_seconds_ago();
             log::debug!("[ble_presence] phone not seen this cycle");
         }
         Err(e) => {
@@ -270,6 +301,8 @@ pub fn get_presence_status() -> PresenceStatus {
     let cfg = PresenceConfig::load();
     let mut st = lock_status().clone();
     st.enabled = cfg.enabled;
+    // Recompute on read: the scanner only refreshes every 30 s.
+    st.last_seen_seconds_ago = last_seen_seconds_ago();
     st
 }
 
@@ -282,40 +315,116 @@ fn request_lock() {
     });
 }
 
-/// Normalise a MAC address to uppercase with '-' separators (btleplug uses
-/// uppercase hex with '-' on Windows).
-fn normalize_mac(mac: &str) -> String {
-    mac.trim().replace([':', ' '], "-").to_ascii_uppercase()
+/// Canonical form of a Bluetooth address: exactly 12 uppercase hex digits,
+/// no separators.
+///
+/// Three formats are in play and they must all compare equal:
+///   - `AA:BB:CC:DD:EE:FF` — what `btleplug` prints for `BDAddr` on Windows
+///     (`Display` impl in `bdaddr.rs`), i.e. every address the scan sees;
+///   - `AA-BB-CC-DD-EE-FF` — what this module used to store and what the BLE
+///     picker (`ble_scan::extract_address_from_id`) writes to the registry;
+///   - `AABBCCDDEEFF` — no separators.
+///
+/// Returns `None` for anything that is not 12 hex digits (e.g. a synthetic
+/// `"Bluetooth device"` placeholder), so callers can tell "unparseable" from
+/// "does not match".
+fn canonical_mac(raw: &str) -> Option<String> {
+    let hex: String = raw.chars().filter(char::is_ascii_hexdigit).collect();
+    (hex.len() == 12).then(|| hex.to_ascii_uppercase())
 }
 
-/// Does the given btleplug peripheral match our needle (MAC or name)?
-async fn peripheral_matches(peripheral: &btleplug::platform::Peripheral, needle: &str) -> bool {
+/// How a peripheral matched the configured phone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchKind {
+    Mac,
+    Name,
+}
+
+/// What the scan is looking for: the configured MAC (canonical) and/or name
+/// (trimmed, lower-case). Both are held at once on purpose — the MAC is the
+/// precise key, the name is the fallback for phones that advertise a
+/// randomised BLE address (see H2 in the audit), and a phone may be
+/// identified by either.
+#[derive(Debug, Clone, PartialEq)]
+struct MatchTarget {
+    mac: Option<String>,
+    name: Option<String>,
+}
+
+impl MatchTarget {
+    fn from_config(cfg: &PresenceConfig) -> Option<Self> {
+        let mac = cfg.phone_mac.as_deref().and_then(canonical_mac);
+        let name = cfg
+            .phone_name
+            .as_deref()
+            .map(normalize_name)
+            .filter(|n| !n.is_empty());
+        if mac.is_none() && name.is_none() {
+            None
+        } else {
+            Some(Self { mac, name })
+        }
+    }
+
+    /// Match a device identity. `address` is whatever the backend prints
+    /// (dashes or colons — both are canonicalised); `local_name` is the
+    /// advertisement's local name, when present.
+    fn matches(&self, address: &str, local_name: Option<&str>) -> Option<MatchKind> {
+        if let (Some(want), Some(got)) = (self.mac.as_deref(), canonical_mac(address)) {
+            if want == got {
+                return Some(MatchKind::Mac);
+            }
+        }
+        if let (Some(want), Some(got)) = (self.name.as_deref(), local_name) {
+            if want == normalize_name(got) {
+                return Some(MatchKind::Name);
+            }
+        }
+        None
+    }
+}
+
+/// Name comparison basis: case-insensitive, surrounding whitespace ignored.
+fn normalize_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// A peripheral that matched the configured phone.
+#[derive(Debug, Clone)]
+struct FoundDevice {
+    rssi: Option<i32>,
+    /// Address as reported by btleplug (colon-separated on Windows).
+    address: String,
+    name: Option<String>,
+    matched: MatchKind,
+}
+
+/// Does the given btleplug peripheral match our target (MAC or name)?
+async fn peripheral_match(
+    peripheral: &btleplug::platform::Peripheral,
+    target: &MatchTarget,
+) -> Option<FoundDevice> {
     use btleplug::api::Peripheral;
 
-    let Some(props) = peripheral
+    let props = peripheral
         .properties()
         .await
         .map_err(|e| log::debug!("[ble_presence] props error: {e}"))
         .ok()
-        .flatten()
-    else {
-        return false;
-    };
-    let addr = props.address.to_string();
-    if addr.eq_ignore_ascii_case(needle) {
-        return true;
-    }
-    if let Some(name) = props.local_name.as_ref() {
-        if name.to_ascii_lowercase() == needle {
-            return true;
-        }
-    }
-    false
+        .flatten()?;
+    let address = props.address.to_string();
+    let matched = target.matches(&address, props.local_name.as_deref())?;
+    Some(FoundDevice {
+        rssi: props.rssi.map(i32::from),
+        address,
+        name: props.local_name,
+        matched,
+    })
 }
 
-/// One discovery pass returning the RSSI of the target if found.
-async fn scan_for_device(needle: &str) -> Result<Option<i32>, String> {
-    use btleplug::api::{Central, Manager as _, Peripheral, ScanFilter};
+/// One discovery pass returning the target device (with its RSSI) if found.
+async fn scan_for_device(target: &MatchTarget) -> Result<Option<FoundDevice>, String> {
+    use btleplug::api::{Central, Manager as _, ScanFilter};
 
     let manager = btleplug::platform::Manager::new()
         .await
@@ -336,17 +445,10 @@ async fn scan_for_device(needle: &str) -> Result<Option<i32>, String> {
 
         if let Ok(peripherals) = central.peripherals().await {
             for p in peripherals {
-                if peripheral_matches(&p, needle).await {
-                    let rssi = p
-                        .properties()
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|props| props.rssi)
-                        .map(i32::from);
+                if let Some(found) = peripheral_match(&p, target).await {
                     // Best effort stop before returning.
                     let _ = central.stop_scan().await;
-                    return Ok(rssi);
+                    return Ok(Some(found));
                 }
             }
         }
@@ -469,10 +571,112 @@ mod tests {
     }
 
     #[test]
-    fn normalize_mac_handles_colons_and_case() {
-        assert_eq!(normalize_mac("aa:bb:cc:dd:ee:ff"), "AA-BB-CC-DD-EE-FF");
-        assert_eq!(normalize_mac(" AA:BB:cc:DD:EE:ff "), "AA-BB-CC-DD-EE-FF");
-        assert_eq!(normalize_mac(""), "");
+    fn canonical_mac_accepts_every_separator_format() {
+        let cases = [
+            ("aa:bb:cc:dd:ee:ff", "AABBCCDDEEFF"),
+            ("AA:BB:CC:DD:EE:FF", "AABBCCDDEEFF"),
+            ("AA-BB-CC-DD-EE-FF", "AABBCCDDEEFF"),
+            ("aa-bb-cc-dd-ee-ff", "AABBCCDDEEFF"),
+            ("AABBCCDDEEFF", "AABBCCDDEEFF"),
+            (" AA:BB:CC:DD:EE:FF ", "AABBCCDDEEFF"),
+            // btleplug prints BDAddr exactly like this on Windows.
+            ("FC:43:45:81:4B:9A", "FC4345814B9A"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                canonical_mac(raw).as_deref(),
+                Some(expected),
+                "unexpected canonical form for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_mac_of_the_real_phone_in_both_formats_is_equal() {
+        // Regression: the registry held `FC-43-45-81-4B-9A` while btleplug
+        // reported `FC:43:45:81:4B:9A`; the comparison compared the raw
+        // strings and never matched. Both must canonicalise identically.
+        assert_eq!(
+            canonical_mac("FC-43-45-81-4B-9A"),
+            canonical_mac("FC:43:45:81:4B:9A")
+        );
+    }
+
+    #[test]
+    fn canonical_mac_rejects_non_addresses() {
+        assert_eq!(canonical_mac(""), None);
+        assert_eq!(canonical_mac("Bluetooth device"), None);
+        // 11 and 13 hex digits are not addresses.
+        assert_eq!(canonical_mac("FC:43:45:81:4B:9"), None);
+        assert_eq!(canonical_mac("FC:43:45:81:4B:9A:00"), None);
+    }
+
+    fn target(mac: Option<&str>, name: Option<&str>) -> Option<MatchTarget> {
+        MatchTarget::from_config(&PresenceConfig {
+            enabled: true,
+            phone_mac: mac.map(str::to_string),
+            phone_name: name.map(str::to_string),
+            rssi_lock_dbm: -70,
+            lock_enabled: false,
+        })
+    }
+
+    /// The regression test the audit asked for: the stored (dash) form must
+    /// match the address btleplug actually reports (colons).
+    #[test]
+    fn target_matches_btleplug_colon_address_against_stored_dash_mac() {
+        let t = target(Some("FC-43-45-81-4B-9A"), Some("Xiaomi 14T")).unwrap();
+        assert_eq!(t.matches("FC:43:45:81:4B:9A", None), Some(MatchKind::Mac));
+        // Case-insensitive as well.
+        assert_eq!(t.matches("fc:43:45:81:4b:9a", None), Some(MatchKind::Mac));
+    }
+
+    /// H2: a phone that advertises a randomised BLE address must still be
+    /// recognised by name even when a MAC is configured.
+    #[test]
+    fn target_falls_back_to_name_when_the_advertised_address_differs() {
+        let t = target(Some("FC-43-45-81-4B-9A"), Some("Xiaomi 14T")).unwrap();
+        assert_eq!(
+            t.matches("6E:11:22:33:44:55", Some("Xiaomi 14T")),
+            Some(MatchKind::Name)
+        );
+        assert_eq!(
+            t.matches("6E:11:22:33:44:55", Some("  xiaomi 14t ")),
+            Some(MatchKind::Name)
+        );
+    }
+
+    #[test]
+    fn target_does_not_match_other_devices() {
+        let t = target(Some("FC-43-45-81-4B-9A"), Some("Xiaomi 14T")).unwrap();
+        assert_eq!(t.matches("FC:43:45:81:4B:9B", Some("TV Box")), None);
+        // Same name, different case-insensitive compare still works — but an
+        // unrelated name must not match.
+        assert_eq!(t.matches("FC:43:45:81:4B:9B", Some("Xiaomi 14")), None);
+    }
+
+    #[test]
+    fn target_by_name_only_when_mac_is_blank_or_unparseable() {
+        // No MAC configured: name-only target (the old code's behaviour).
+        let by_name = target(None, Some("Xiaomi 14T")).unwrap();
+        assert_eq!(
+            by_name.matches("FC:43:45:81:4B:9A", Some("Xiaomi 14T")),
+            Some(MatchKind::Name)
+        );
+        // A MAC that is not an address must not poison the name fallback.
+        let garbage = target(Some("Xiaomi 14T's MAC"), Some("Xiaomi 14T")).unwrap();
+        assert_eq!(garbage.mac, None);
+        assert_eq!(
+            garbage.matches("FC:43:45:81:4B:9A", Some("Xiaomi 14T")),
+            Some(MatchKind::Name)
+        );
+    }
+
+    #[test]
+    fn target_is_none_when_nothing_usable_is_configured() {
+        assert_eq!(target(None, None), None);
+        assert_eq!(target(Some("   "), Some("")), None);
+        assert_eq!(target(Some("not-a-mac"), None), None);
     }
 
     #[test]
