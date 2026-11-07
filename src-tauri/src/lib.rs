@@ -997,6 +997,14 @@ pub fn run() {
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
 
+            // F5: reconcile the persisted flag with the machine before the
+            // worker starts. A stale snapshot (every recorded process exited)
+            // is recaptured and re-applied through the bridge; a flag that is
+            // off while recovery state is still on disk finishes its disable.
+            // The old `restore_os_turbo()` was an empty body with no caller,
+            // which is how the feature stayed dead for 12 days.
+            crate::hw::os_turbo::restore_os_turbo();
+
             // S39-003: bounded periodic OS Turbo measurement worker. Idempotent;
             // the worker self-gates on the persisted enabled flag, so starting it
             // while OS Turbo is disabled is a no-op. It only reads back process

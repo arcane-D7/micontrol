@@ -6,6 +6,11 @@ import PerformanceMonitor from '../../components/PerformanceMonitor';
 import PerformanceModeSelector from '../../components/PerformanceModeSelector';
 import FunctionExplain from '../../components/FunctionExplain';
 import { useToast } from '../../contexts/ToastContext';
+import {
+  OsTurboMeasuredBlock,
+  osTurboCounts,
+  type OsTurboMeasuredData,
+} from '../../components/OsTurboMeasured';
 import type { Hardware, AiSettings, PerfDebugInfo } from './shared';
 
 interface Props {
@@ -601,6 +606,10 @@ interface OsTurboStatus {
   enabled: boolean;
   throttled_processes: number;
   power_plan: string;
+  /** The recovery snapshot references processes that no longer exist. */
+  snapshot_stale?: boolean;
+  /** Truthful readback counts from the last sweep (S39-003). */
+  measured?: OsTurboMeasuredData;
 }
 
 function OsTurboCard() {
@@ -624,6 +633,13 @@ function OsTurboCard() {
     void fetchStatus();
   }, [fetchStatus]);
 
+  // The quadro is measured, so it has to stay measured: refresh it while the
+  // tab is open instead of showing whatever was true at mount time.
+  useEffect(() => {
+    const timer = window.setInterval(() => void fetchStatus(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [fetchStatus]);
+
   const handleToggle = async () => {
     if (!status) return;
     setToggling(true);
@@ -641,6 +657,8 @@ function OsTurboCard() {
   };
 
   if (loading) return null;
+
+  const { applied, inspected } = osTurboCounts(status ?? undefined);
 
   return (
     <div className="card">
@@ -679,11 +697,28 @@ function OsTurboCard() {
       {status?.enabled && (
         <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
           <div>
-            📊 {t('performance.osTurboThrottled')}: {status.throttled_processes}
+            📊{' '}
+            {inspected > 0
+              ? t('performance.osTurboLimitSummary', { applied, inspected })
+              : t('performance.osTurboNoCandidates')}
           </div>
           <div>
             🔌 {t('performance.osTurboPowerPlan')}: {status.power_plan}
           </div>
+          {status.snapshot_stale && (
+            <div className="alert alert-warn" style={{ marginTop: 8 }}>
+              ⚠ {t('performance.osTurboStaleSnapshot')}
+            </div>
+          )}
+          {(status.measured?.failures ?? 0) > 0 && (
+            <div className="alert alert-warn" style={{ marginTop: 8 }}>
+              ⚠{' '}
+              {t('performance.osTurboFailuresHint', {
+                failures: status.measured?.failures ?? 0,
+              })}
+            </div>
+          )}
+          <OsTurboMeasuredBlock measured={status.measured} />
         </div>
       )}
       <FunctionExplain
