@@ -665,8 +665,12 @@ impl Default for AiBrightnessConfig {
 // disabling automation entirely.
 //
 // The offset is:
-//   • stored as a signed integer, clamped to ±MAX_OVERRIDE_OFFSET_PP
-//   • applied before the final clamp(min, max)
+//   • stored as a signed integer
+//   • bounded by its ORIGIN — ±100 pp for an explicit user action
+//     (MAX_USER_OFFSET_PP), ±30 pp for an offset captured from the loop
+//     (MAX_CAPTURED_OFFSET_PP)
+//   • applied before the final clamp(min, max) — the final target is the only
+//     thing the backlight sees clamped
 //   • reset whenever the user disables auto-brightness or changes its config
 
 /// Last lux-based target (before offset) stored so we can compute the delta.
@@ -675,32 +679,201 @@ static AUTO_LAST_TARGET: AtomicU8 = AtomicU8::new(50);
 static AUTO_OFFSET: AtomicI16 = AtomicI16::new(0);
 /// Whether the offset was explicitly set by the user (false = use 0).
 static AUTO_OFFSET_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Origin of the current `AUTO_OFFSET` (`0` = captured, `1` = user intent).
+/// Kept separate so `AUTO_OFFSET` remains the single source of the value; the
+/// origin only decides which bound applies to it.
+static AUTO_OFFSET_ORIGIN: AtomicU8 = AtomicU8::new(0);
 
-/// Hard limit on the magnitude of the manual-override offset, in percentage
-/// points.
+/// Hard limit on an offset the **user** asked for (slider, OSD, hotkey,
+/// Windows slider), in percentage points.
 ///
-/// The offset shifts the whole curve so the automation respects the user's
-/// manual choice, but unbounded it becomes a runaway: production carried
-/// `{"offset": 54, "offset_active": true}` in `brightness_override.json`, which
-/// pinned the curve 54 pp above the formula in *every* light condition (the
-/// loop then clamped at max and fought the user). ±30 pp is wide enough to
-/// express any sane preference on a 0–100 scale — one manual drag rarely moves
-/// more than a third of the range — and small enough that neither a corrupted
-/// state file nor a capture bug can saturate the backlight.
-const MAX_OVERRIDE_OFFSET_PP: i16 = 30;
+/// The offset is `user_value - raw_curve_target`, so asking for 100 % while the
+/// curve sits at 26 % needs **+74 pp**. Bounding this at ±30 pp (the previous
+/// `MAX_OVERRIDE_OFFSET_PP`) capped the reachable brightness at `raw + 30` —
+/// 56 % at 29 lux — and made the top 44 % of the slider decorative: the value
+/// was silently trimmed and the loop reverted it once the grace window
+/// expired. Production log: `brightness offset +74 pp out of range — clamped
+/// to +30 pp`, `target=56.1`, panel at 57 %.
+///
+/// The user's intent is absolute, so this bound is the whole 0–100 scale
+/// (±100 pp). The *final* target is still clamped to
+/// `[min_brightness, max_brightness]` by the loop ([`effective_target`]) — that
+/// clamp is the only one the backlight is allowed to see.
+const MAX_USER_OFFSET_PP: i16 = 100;
 
-/// Clamp an offset to ±[`MAX_OVERRIDE_OFFSET_PP`], logging any trim so a bad
-/// input (corrupt file, capture feedback) shows up in the log instead of being
-/// silently absorbed.
-fn clamp_override_offset(offset: i16) -> i16 {
-    let clamped = offset.clamp(-MAX_OVERRIDE_OFFSET_PP, MAX_OVERRIDE_OFFSET_PP);
+/// Hard limit on offsets **captured automatically** from the loop, in
+/// percentage points.
+///
+/// The loop treats any ≥2 pp difference between what it last wrote and what the
+/// panel reports as an external change (Fn key, Windows slider, another app)
+/// and shifts the curve to match. That path is a feedback loop: every capture
+/// is measured *after* the previous offset was applied, so an unbounded offset
+/// ratchets upwards until the curve is pinned at max (production reached
+/// `offset: 54`, which is why a clamp was introduced). ±30 pp is wide enough
+/// for a genuine preference shift and small enough that a capture bug or a
+/// corrupted state file cannot saturate the backlight.
+const MAX_CAPTURED_OFFSET_PP: i16 = 30;
+
+/// Where a stored offset came from. The two origins have different bounds (see
+/// [`MAX_USER_OFFSET_PP`] / [`MAX_CAPTURED_OFFSET_PP`]) and must survive a
+/// crash/relaunch, so the origin is persisted alongside the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum OffsetOrigin {
+    /// Captured automatically by the adaptive loop (`diff >= 2` path).
+    ///
+    /// Also the default for state files written before the split: every offset
+    /// those builds persisted came from the capture path, so treating them as
+    /// captured keeps the old anti-runaway guard.
+    #[default]
+    Captured,
+    /// Derived from an explicit user action (slider / OSD / hotkey).
+    User,
+}
+
+impl OffsetOrigin {
+    /// Bound to apply to an offset of this origin, in percentage points.
+    fn limit(self) -> i16 {
+        match self {
+            OffsetOrigin::User => MAX_USER_OFFSET_PP,
+            OffsetOrigin::Captured => MAX_CAPTURED_OFFSET_PP,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            OffsetOrigin::User => "user",
+            OffsetOrigin::Captured => "captured",
+        }
+    }
+
+    fn as_u8(self) -> u8 {
+        match self {
+            OffsetOrigin::User => 1,
+            OffsetOrigin::Captured => 0,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        if value == 1 {
+            OffsetOrigin::User
+        } else {
+            OffsetOrigin::Captured
+        }
+    }
+}
+
+/// Clamp an offset to ±`limit`, logging any trim so a bad input (corrupt file,
+/// capture feedback) shows up in the log instead of being silently absorbed.
+fn clamp_offset(offset: i16, limit: i16, origin: &str) -> i16 {
+    let clamped = offset.clamp(-limit, limit);
     if clamped != offset {
         log::warn!(
-            "[display] brightness offset {offset:+} pp out of range — clamped to {clamped:+} pp \
-             (limit ±{MAX_OVERRIDE_OFFSET_PP})"
+            "[display] {origin} brightness offset {offset:+} pp out of range — clamped to \
+             {clamped:+} pp (limit ±{limit})"
         );
     }
     clamped
+}
+
+/// Clamp an explicit user-intent offset (full 0–100 scale, ±100 pp).
+fn clamp_user_offset(offset: i16) -> i16 {
+    clamp_offset(offset, MAX_USER_OFFSET_PP, OffsetOrigin::User.label())
+}
+
+/// Clamp an offset captured automatically by the loop (±30 pp).
+fn clamp_captured_offset(offset: i16) -> i16 {
+    clamp_offset(
+        offset,
+        MAX_CAPTURED_OFFSET_PP,
+        OffsetOrigin::Captured.label(),
+    )
+}
+
+/// Clamp an offset according to its recorded origin.
+fn clamp_offset_for(offset: i16, origin: OffsetOrigin) -> i16 {
+    clamp_offset(offset, origin.limit(), origin.label())
+}
+
+/// The brightness the loop should drive to: the raw curve target plus the
+/// override offset, clamped to the configured range.
+///
+/// Kept pure and separate from the loop so the "user intent reaches 100 %"
+/// guarantee is unit-testable without touching the backlight.
+fn effective_target(raw: f32, offset: f32, min: u8, max: u8) -> f32 {
+    (raw + offset).clamp(min as f32, max as f32)
+}
+
+/// How many percentage points an observed brightness may differ from the value
+/// the current user offset already explains before the loop treats it as a new
+/// preference rather than its own write coming back.
+///
+/// The loop writes the target and reads it back one iteration later; a
+/// smoothing step, driver quantisation or a slightly stale WMI read can all
+/// move the readback by a point or two without any user action.
+const OFFSET_ECHO_TOLERANCE_PP: i16 = 3;
+
+/// What an observed brightness change means for the curve offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureOutcome {
+    /// Offset to apply to the curve.
+    offset: i16,
+    /// Bound to store it under.
+    origin: OffsetOrigin,
+    /// True when the observation was our own output (keep the curve as-is).
+    echo: bool,
+}
+
+/// Decide what an observed brightness change (`diff >= 2` against the value the
+/// loop last wrote) means, given the override currently in force.
+///
+/// Two very different things can produce that difference:
+///   • the user acted (slider, Fn key, Windows slider) — a new preference; or
+///   • the loop's own write came back a step late, quantised, or mid-smoothing.
+///
+/// While an explicit **user** offset is in force (±100 pp), re-deriving it with
+/// the capture bound would silently undo the top of the slider: at 29 lux the
+/// curve gives 26 %, the user picks 100 % (+74 pp), the next iteration reads
+/// 100 %, and `clamp_captured(100 − 26 = 74)` = +30 → 56 %. That is exactly the
+/// regression being fixed, so a user offset is classified with the user bound
+/// and an observation that reproduces it is ignored (echo). A value that does
+/// not reproduce it is a genuinely new preference and is recorded as user
+/// intent, still at full scale.
+///
+/// With no user offset in force, the old feedback rule applies unchanged: the
+/// capture path keeps ±30 pp so repeated captures cannot ratchet the curve to
+/// max (production reached `offset: 54` that way).
+fn classify_capture(
+    observed: u8,
+    raw_target: u8,
+    current_offset: i16,
+    origin: OffsetOrigin,
+    active: bool,
+) -> CaptureOutcome {
+    let candidate = observed as i16 - raw_target as i16;
+    if active && origin == OffsetOrigin::User {
+        let bounded = clamp_user_offset(candidate);
+        if (bounded - current_offset).abs() <= OFFSET_ECHO_TOLERANCE_PP {
+            // Our own write, or a rounding/smoothing step: leave the curve.
+            CaptureOutcome {
+                offset: current_offset,
+                origin: OffsetOrigin::User,
+                echo: true,
+            }
+        } else {
+            CaptureOutcome {
+                offset: bounded,
+                origin: OffsetOrigin::User,
+                echo: false,
+            }
+        }
+    } else {
+        CaptureOutcome {
+            offset: clamp_captured_offset(candidate),
+            origin: OffsetOrigin::Captured,
+            echo: false,
+        }
+    }
 }
 
 // ── Manual-override grace period ─────────────────────────────────────────────
@@ -739,8 +912,12 @@ pub fn user_override_in_grace() -> bool {
 /// "Smart" mode can learn the user's preferred brightness per light level.
 pub fn record_user_brightness_override(user_value: u8) {
     let last_target = AUTO_LAST_TARGET.load(Ordering::Relaxed);
-    let offset = clamp_override_offset(user_value as i16 - last_target as i16);
+    // Explicit user intent: the offset may be the whole scale (±100 pp) so the
+    // full 10–100 slider is reachable whatever the curve is doing. Only the
+    // final target is clamped (to min/max) by the loop.
+    let offset = clamp_user_offset(user_value as i16 - last_target as i16);
     AUTO_OFFSET.store(offset, Ordering::Relaxed);
+    AUTO_OFFSET_ORIGIN.store(OffsetOrigin::User.as_u8(), Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
     AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
     // Persist so a crash/relaunch right after the manual change does not
@@ -761,6 +938,7 @@ pub fn record_user_brightness_override(user_value: u8) {
 /// Reset the offset — call when auto-brightness is toggled or config changes.
 pub fn clear_user_brightness_override() {
     AUTO_OFFSET.store(0, Ordering::Relaxed);
+    AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
     AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
     persist_override_state();
@@ -800,6 +978,11 @@ struct OverrideState {
     offset: i16,
     /// Whether the offset is active (user has expressed a preference).
     offset_active: bool,
+    /// Where the offset came from — decides the clamp applied on restore.
+    /// Absent in files written before the user/captured split; those only ever
+    /// held captured offsets, so the default (`Captured`, ±30 pp) is correct.
+    #[serde(default)]
+    origin: OffsetOrigin,
 }
 
 /// Persist the current manual-override statics to disk (crash survival).
@@ -808,6 +991,7 @@ fn persist_override_state() {
         last_manual_ms: AUTO_LAST_MANUAL_MS.load(Ordering::Relaxed),
         offset: AUTO_OFFSET.load(Ordering::Relaxed),
         offset_active: AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed),
+        origin: OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed)),
     };
     let path = brightness_override_path();
     if let Some(parent) = path.parent() {
@@ -844,16 +1028,21 @@ pub fn restore_override_state() {
         return;
     }
     AUTO_LAST_MANUAL_MS.store(state.last_manual_ms, Ordering::Relaxed);
-    // Clamp on restore: a state file written by an older build (or edited by
-    // hand) may carry an out-of-range offset such as the `54` found in
-    // production. Never apply it unclamped.
-    let offset = clamp_override_offset(state.offset);
+    // Clamp on restore with the bound of the offset's ORIGIN: a user-intent
+    // offset may legitimately be ±100 pp (the slider's full range), while a
+    // captured offset stays at ±30 pp. State files written before the split
+    // carry no origin and came from the capture path → ±30 pp, exactly as the
+    // old build did. Never apply an offset unclamped: the historical `54` in
+    // production came from the capture feedback loop and pinned the curve.
+    let offset = clamp_offset_for(state.offset, state.origin);
     AUTO_OFFSET.store(offset, Ordering::Relaxed);
+    AUTO_OFFSET_ORIGIN.store(state.origin.as_u8(), Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(state.offset_active, Ordering::Relaxed);
     log::info!(
         "[adaptive_brightness] restored manual override from crash \
-         (age={age}ms, offset={}, active={}) — grace window until manual change",
+         (age={age}ms, offset={}, origin={}, active={}) — grace window until manual change",
         offset,
+        state.origin.label(),
         state.offset_active
     );
 }
@@ -877,13 +1066,23 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     // the value persisted by the previous session.
     probe_brightness_source_once();
     let hdr_enabled = get_hdr_state();
-    let refresh_rate_hz = get_refresh_rate().unwrap_or(120);
-    // S25-009: Don't let refresh-rate enumeration failure nuke the entire display info.
-    // If we can't enumerate rates, fall back to the current rate as the only option.
-    let available_refresh_rates = get_available_refresh_rates().unwrap_or_else(|e| {
-        log::warn!(target: "hw::display", "get_available_refresh_rates failed: {e}, using current rate as fallback");
-        vec![refresh_rate_hz]
-    });
+    // One enumeration, one display: `refresh_rate_hz` and
+    // `available_refresh_rates` must describe the SAME device, otherwise the
+    // UI shows a current rate from one monitor and chips from another (the
+    // audit's "120 Hz" over a [50, 85] list, where no chip was active).
+    let (refresh_rate_hz, available_refresh_rates) = match refresh_rate_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            // S25-009: Don't let refresh-rate enumeration failure nuke the
+            // entire display info — fall back to the (GPU-level) WMI rate.
+            log::warn!(
+                target: "hw::display",
+                "refresh-rate enumeration failed: {e}, falling back to the WMI controller rate"
+            );
+            let hz = get_refresh_rate_wmi().unwrap_or(120);
+            (hz, vec![hz])
+        }
+    };
     // DRR is active when the display is set to its highest supported refresh rate.
     let dynamic_refresh_rate_capable = available_refresh_rates
         .last()
@@ -1797,10 +1996,18 @@ pub async fn adaptive_brightness_loop() {
             let diff = (actual as i16 - prev as i16).abs();
             if diff >= 2 {
                 let raw = AUTO_LAST_TARGET.load(Ordering::Relaxed);
-                // Clamp: repeated captures used to ratchet this value upwards
-                // (production reached +54 pp), pinning the curve at max.
-                let new_offset = clamp_override_offset(actual as i16 - raw as i16);
-                AUTO_OFFSET.store(new_offset, Ordering::Relaxed);
+                let current_offset = AUTO_OFFSET.load(Ordering::Relaxed);
+                let active = AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed);
+                let origin = OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed));
+                // Classify before writing: an active user offset (±100 pp) must
+                // not be re-derived with the capture bound (±30 pp) — that is
+                // what silently trimmed "100 %" to 56 % within one iteration.
+                // A value that reproduces the current offset is our own write
+                // coming back and leaves the curve alone.
+                let outcome = classify_capture(actual, raw, current_offset, origin, active);
+
+                AUTO_OFFSET.store(outcome.offset, Ordering::Relaxed);
+                AUTO_OFFSET_ORIGIN.store(outcome.origin.as_u8(), Ordering::Relaxed);
                 AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
                 AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
                 // S38: persist so a crash/relaunch within the grace window
@@ -1808,9 +2015,16 @@ pub async fn adaptive_brightness_loop() {
                 persist_override_state();
                 // Snap smoothed to actual so we don't animate back.
                 smoothed = Some(actual as f32);
+                // Self-clearing: the next iteration must not re-detect the
+                // difference we just absorbed (`last_set` is otherwise only
+                // refreshed by an actual write, which the grace window skips).
+                last_set = Some(actual);
                 log::debug!(
                     "auto_brightness: external change detected \
-                     prev={prev}% actual={actual}% → offset={new_offset:+}, grace armed"
+                     prev={prev}% actual={actual}% raw={raw}% origin={} → offset={:+}{}, grace armed",
+                    outcome.origin.label(),
+                    outcome.offset,
+                    if outcome.echo { " (echo — curve unchanged)" } else { "" }
                 );
                 // Smart-mode learning: this external change (Fn key, Windows
                 // slider) carries the user's preference for the current light
@@ -1929,15 +2143,20 @@ pub async fn adaptive_brightness_loop() {
         // Apply user-override offset: shifts the entire curve up/down so that
         // when the user manually sets brightness the automation respects that
         // preference and only adjusts relative to it as light changes.
+        //
+        // Bound by ORIGIN, never by the capture limit: a user-intent offset of
+        // +74 pp (100 % chosen at 29 lux, raw target 26 %) is legitimate and
+        // must reach the panel. Only the final target is clamped, to
+        // [min_brightness, max_brightness].
         let offset = if AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed) {
+            let origin = OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed));
             // Defensive clamp at the point of use: a stale process (or an older
             // build) may have left an out-of-range value in the atomic.
-            clamp_override_offset(AUTO_OFFSET.load(Ordering::Relaxed)) as f32
+            clamp_offset_for(AUTO_OFFSET.load(Ordering::Relaxed), origin) as f32
         } else {
             0.0
         };
-        let target =
-            (raw_target + offset).clamp(cfg.min_brightness as f32, cfg.max_brightness as f32);
+        let target = effective_target(raw_target, offset, cfg.min_brightness, cfg.max_brightness);
 
         let current = match smoothed {
             Some(s) => s,
@@ -2440,90 +2659,325 @@ pub fn set_intel_drrs(enabled: bool) -> HardwareResult<()> {
     Ok(())
 }
 
-// ── Refresh rate ──────────────────────────────────────────────────────────────
-///
-/// Uses `EnumDisplaySettingsExW` (Win32 GDI) which is the same source the
-/// Windows Display Settings page uses when building the "Choose a refresh
-/// rate" dropdown.
-pub fn get_available_refresh_rates() -> HardwareResult<Vec<u32>> {
-    #[cfg(windows)]
-    {
-        use std::collections::HashSet;
-        use windows::Win32::Graphics::Gdi::{
-            EnumDisplaySettingsExW, DEVMODEW, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
-            ENUM_DISPLAY_SETTINGS_MODE,
-        };
+// ── Refresh rate (per display device) ─────────────────────────────────────────
+//
+// Refresh rate is a PER-DISPLAY property, but the old implementation mixed two
+// sources: `get_available_refresh_rates()` enumerated the GDI *primary* display
+// (`EnumDisplaySettingsExW(NULL)` → the external LG, 3440×1440@85 → [50, 85])
+// while `get_refresh_rate()` read `Win32_VideoController` (the internal panel,
+// 3120×2080@120). On a laptop + external monitor that produced a UI showing
+// "120 Hz" with chips [50, 85] — no chip active — and clicking a chip called
+// `ChangeDisplaySettingsExW(NULL)`, i.e. it changed the EXTERNAL monitor while
+// the user was looking at the laptop panel. The panel's 60 Hz mode was
+// unreachable from the app.
+//
+// Fix: enumerate every attached GDI device once, mark the internal panel from
+// the CCD topology (`outputTechnology`), and route *both* the reads and the
+// write through [`select_refresh_target`], so the current rate, the chips and
+// the write always describe the same device. Until the UI grows a display
+// selector (audit 2.7), the edited display is the laptop's own panel, falling
+// back to the GDI primary on desktops.
 
-        unsafe {
-            // SAFETY: DEVMODEW is a POD struct with dmSize correctly set. EnumDisplaySettingsExW
-            // writes to the struct and does not retain the pointer. Comparison of dmPelsWidth,
-            // dmPelsHeight, dmBitsPerPel, and dmDisplayFrequency reads the fields Windows
-            // populated — no uninitialized data is read.
-            let mut cur = DEVMODEW {
-                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
-                ..Default::default()
-            };
-            // Query current mode to know the active resolution.
-            let _ = EnumDisplaySettingsExW(
-                None,
+/// Refresh-rate capabilities of one attached GDI display device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisplayRefreshModes {
+    /// GDI device name (`\\.\DISPLAY1`) — the handle used by both the read and
+    /// the write (`EnumDisplaySettingsExW` / `ChangeDisplaySettingsExW`).
+    device: String,
+    /// Monitor / adapter description, for logs only.
+    label: String,
+    /// Refresh rate currently in effect for this device.
+    current_hz: u32,
+    /// Refresh rates available at the device's current resolution.
+    rates: Vec<u32>,
+    /// Windows reports an embedded output (CCD `outputTechnology`), i.e. the
+    /// laptop's built-in panel.
+    is_internal: bool,
+    /// This device is the GDI primary (what `EnumDisplaySettingsW(NULL)` means).
+    is_primary: bool,
+}
+
+/// The display the refresh-rate control edits: the internal panel when there is
+/// one, else the GDI primary, else the first attached device.
+///
+/// Everything that touches refresh rate goes through this function — reading
+/// the current rate, listing the supported rates and changing the mode — so the
+/// three can never disagree about which monitor they mean.
+fn select_refresh_target(modes: &[DisplayRefreshModes]) -> Option<&DisplayRefreshModes> {
+    modes
+        .iter()
+        .find(|m| m.is_internal)
+        .or_else(|| modes.iter().find(|m| m.is_primary))
+        .or_else(|| modes.first())
+}
+
+/// Resolve the device `set_refresh_rate` will write to.
+///
+/// Pure and shared with the read path (`select_refresh_target`), so a chip can
+/// only ever move the display whose rates produced that chip: a rate the target
+/// does not advertise is refused instead of being applied to another monitor.
+fn resolve_refresh_write(
+    modes: &[DisplayRefreshModes],
+    hz: u32,
+) -> Result<&DisplayRefreshModes, String> {
+    let target = select_refresh_target(modes)
+        .ok_or_else(|| "no attached display device could be enumerated".to_string())?;
+    if !target.rates.contains(&hz) {
+        return Err(format!(
+            "{hz} Hz is not supported by {} ({}) — available: {:?}",
+            target.device, target.label, target.rates
+        ));
+    }
+    Ok(target)
+}
+
+/// Enumerate, pick the display the UI edits, and return `(current_hz, rates)`.
+///
+/// One enumeration for both values: calling two functions that each enumerate
+/// their own device is exactly the bug being fixed.
+fn refresh_rate_snapshot() -> HardwareResult<(u32, Vec<u32>)> {
+    let modes = enumerate_refresh_modes()?;
+    let target = select_refresh_target(&modes).ok_or_else(|| {
+        HardwareError::Display("no attached display device could be enumerated".to_string())
+    })?;
+    if target.rates.is_empty() {
+        return Err(HardwareError::Display(format!(
+            "No refresh rates found for {} at its current mode",
+            target.device
+        )));
+    }
+    log::debug!(
+        target: "hw::display",
+        "refresh-rate source: {} ({}) current={} Hz rates={:?} internal={} primary={}",
+        target.device,
+        target.label,
+        target.current_hz,
+        target.rates,
+        target.is_internal,
+        target.is_primary
+    );
+    Ok((target.current_hz, target.rates.clone()))
+}
+
+/// All Hz values supported by the display the refresh-rate control edits.
+///
+/// Uses `EnumDisplaySettingsExW` (Win32 GDI) — the same source the Windows
+/// Display Settings page uses for its "Choose a refresh rate" dropdown — but
+/// per device instead of `NULL` (⇒ GDI primary).
+pub fn get_available_refresh_rates() -> HardwareResult<Vec<u32>> {
+    refresh_rate_snapshot().map(|(_, rates)| rates)
+}
+
+#[cfg(windows)]
+fn wide_to_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// True for CCD output technologies that are soldered to the machine (laptop
+/// panel): internal, eDP, LVDS or UDI-embedded.
+#[cfg(windows)]
+fn is_embedded_output_technology(
+    tech: windows::Win32::Devices::Display::DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY,
+) -> bool {
+    use windows::Win32::Devices::Display::{
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED,
+    };
+    matches!(
+        tech,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS
+    )
+}
+
+/// GDI device names (`\\.\DISPLAYn`) whose CCD target is an embedded panel.
+///
+/// Best effort: if the CCD query fails (or the machine has no embedded output)
+/// the set is empty and [`select_refresh_target`] falls back to the GDI primary.
+#[cfg(windows)]
+unsafe fn internal_gdi_devices() -> std::collections::HashSet<String> {
+    use windows::Win32::Devices::Display::{
+        DisplayConfigGetDeviceInfo, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+        DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+    };
+
+    let mut internal = std::collections::HashSet::new();
+    // SAFETY: paths come from a successful QueryDisplayConfig; the header of
+    // each request struct points at its own base address and the struct
+    // outlives the call (DisplayConfigGetDeviceInfo does not retain it).
+    let Ok((np, _nm, paths, _modes)) = query_display_config_retry() else {
+        return internal;
+    };
+    for path in paths.iter().take(np as usize) {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        if DisplayConfigGetDeviceInfo(&mut source.header as *mut _) != 0 {
+            continue;
+        }
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        if DisplayConfigGetDeviceInfo(&mut target.header as *mut _) != 0 {
+            continue;
+        }
+        if is_embedded_output_technology(target.outputTechnology) {
+            internal.insert(wide_to_string(&source.viewGdiDeviceName));
+        }
+    }
+    internal
+}
+
+/// Enumerate the attached display devices with their current and supported
+/// refresh rates at the current resolution.
+#[cfg(windows)]
+fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
+    use std::collections::HashSet;
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayDevicesW, EnumDisplaySettingsExW, DEVMODEW, DISPLAY_DEVICEW,
+        DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_MIRRORING_DRIVER,
+        DISPLAY_DEVICE_PRIMARY_DEVICE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
+        ENUM_DISPLAY_SETTINGS_MODE,
+    };
+
+    // SAFETY: every struct is a POD with `cb`/`dmSize` set; the API calls write
+    // into them and do not retain the pointers. `dev_name` is copied out of
+    // `DISPLAY_DEVICEW` and stays alive (NUL-terminated) for the calls that use
+    // it as a PCWSTR.
+    let internal = unsafe { internal_gdi_devices() };
+    let mut out: Vec<DisplayRefreshModes> = Vec::new();
+    let mut idx = 0u32;
+    loop {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), idx, &mut dd, 0).as_bool() } {
+            break;
+        }
+        idx += 1;
+        if dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == 0 {
+            continue;
+        }
+        // The mirroring driver is a pseudo-device: it has no modes of its own.
+        if dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER != 0 {
+            continue;
+        }
+        let dev_name = dd.DeviceName;
+        let name = PCWSTR::from_raw(dev_name.as_ptr());
+
+        let mut cur = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        if !unsafe {
+            EnumDisplaySettingsExW(
+                name,
                 ENUM_CURRENT_SETTINGS,
                 &mut cur,
                 ENUM_DISPLAY_SETTINGS_FLAGS(0),
-            );
-            let (w, h, bpp) = (cur.dmPelsWidth, cur.dmPelsHeight, cur.dmBitsPerPel);
+            )
+        }
+        .as_bool()
+        {
+            continue;
+        }
+        let (w, h, bpp) = (cur.dmPelsWidth, cur.dmPelsHeight, cur.dmBitsPerPel);
+        let current_hz = cur.dmDisplayFrequency;
 
-            let mut seen: HashSet<u32> = HashSet::new();
-            let mut idx = 0u32;
-            loop {
-                let mut m = DEVMODEW {
-                    dmSize: std::mem::size_of::<DEVMODEW>() as u16,
-                    ..Default::default()
-                };
-                if !EnumDisplaySettingsExW(
-                    None,
-                    ENUM_DISPLAY_SETTINGS_MODE(idx),
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut mode_idx = 0u32;
+        loop {
+            let mut m = DEVMODEW {
+                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
+            if !unsafe {
+                EnumDisplaySettingsExW(
+                    name,
+                    ENUM_DISPLAY_SETTINGS_MODE(mode_idx),
                     &mut m,
                     ENUM_DISPLAY_SETTINGS_FLAGS(0),
                 )
-                .as_bool()
-                {
-                    break;
-                }
-                if m.dmPelsWidth == w
-                    && m.dmPelsHeight == h
-                    && m.dmBitsPerPel == bpp
-                    && m.dmDisplayFrequency > 0
-                {
-                    seen.insert(m.dmDisplayFrequency);
-                }
-                idx += 1;
             }
-            let mut rates: Vec<u32> = seen.into_iter().collect();
-            rates.sort_unstable();
-            // S25-009: Return error if no refresh rates were found.
-            if rates.is_empty() {
-                return Err(HardwareError::Display(
-                    "No refresh rates found for current display mode".to_string(),
-                ));
+            .as_bool()
+            {
+                break;
             }
-            Ok(rates)
+            if m.dmPelsWidth == w
+                && m.dmPelsHeight == h
+                && m.dmBitsPerPel == bpp
+                && m.dmDisplayFrequency > 0
+            {
+                seen.insert(m.dmDisplayFrequency);
+            }
+            mode_idx += 1;
         }
+        let mut rates: Vec<u32> = seen.into_iter().collect();
+        rates.sort_unstable();
+        if rates.is_empty() && current_hz > 0 {
+            // Devices that report no enumerable modes still have a current one.
+            rates.push(current_hz);
+        }
+
+        let device = wide_to_string(&dev_name);
+        out.push(DisplayRefreshModes {
+            is_internal: internal.contains(&device),
+            is_primary: dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0,
+            label: wide_to_string(&dd.DeviceString),
+            device,
+            current_hz,
+            rates,
+        });
     }
-    #[cfg(not(windows))]
-    {
-        Ok(vec![60, 120])
-    }
+    Ok(out)
 }
 
-/// Change the primary display's refresh rate.
+#[cfg(not(windows))]
+fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
+    Ok(vec![DisplayRefreshModes {
+        device: r"\\.\DISPLAY1".to_string(),
+        label: "display".to_string(),
+        current_hz: 60,
+        rates: vec![60, 120],
+        is_internal: true,
+        is_primary: true,
+    }])
+}
+
+/// Change the refresh rate of the display the UI edits.
 ///
-/// `hz` must be one of the values returned by `get_available_refresh_rates()`.
-/// The change is persisted to the registry (`CDS_UPDATEREGISTRY`) so it
-/// survives reboots.  Returns an error if the rate is not supported or if
-/// Windows rejects the mode change.
+/// The target device is resolved by [`resolve_refresh_write`] — the same
+/// selection the current rate and the chips come from — and passed explicitly
+/// to `ChangeDisplaySettingsExW`, so a chip can never move a different monitor
+/// (the old code passed `NULL` = GDI primary, i.e. the external LG, while the
+/// UI showed the internal panel's rate).
+///
+/// `hz` must be one of the values returned by `get_available_refresh_rates()`;
+/// anything else is refused before touching the display. The change is
+/// persisted to the registry (`CDS_UPDATEREGISTRY`) so it survives reboots.
 pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
     #[cfg(windows)]
     {
+        use windows::core::PCWSTR;
         use windows::Win32::Graphics::Gdi::{
             ChangeDisplaySettingsExW, EnumDisplaySettingsExW, CDS_TYPE, DEVMODEW,
             DEVMODE_FIELD_FLAGS, DISP_CHANGE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
@@ -2532,32 +2986,50 @@ pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
         const DM_DISPLAYFREQUENCY: u32 = 0x00400000;
         const CDS_UPDATEREGISTRY_VAL: u32 = 0x00000001;
 
+        let modes = enumerate_refresh_modes()?;
+        let target = resolve_refresh_write(&modes, hz).map_err(HardwareError::Display)?;
+        // NUL-terminated copy: the PCWSTR must outlive every call below.
+        let device: Vec<u16> = target
+            .device
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let name = PCWSTR::from_raw(device.as_ptr());
+        log::info!(
+            "set_refresh_rate: {hz} Hz → {} ({}, currently {} Hz, supported {:?})",
+            target.device,
+            target.label,
+            target.current_hz,
+            target.rates
+        );
+
         unsafe {
             // SAFETY: DEVMODEW is POD with dmSize set. EnumDisplaySettingsExW populates the
-            // current mode; we modify dmDisplayFrequency and dmFields before passing it to
-            // ChangeDisplaySettingsExW which does not retain the pointer.
+            // current mode of `device`; we modify dmDisplayFrequency and dmFields before
+            // passing it to ChangeDisplaySettingsExW which does not retain the pointer.
             let mut mode = DEVMODEW {
                 dmSize: std::mem::size_of::<DEVMODEW>() as u16,
                 ..Default::default()
             };
             if !EnumDisplaySettingsExW(
-                None,
+                name,
                 ENUM_CURRENT_SETTINGS,
                 &mut mode,
                 ENUM_DISPLAY_SETTINGS_FLAGS(0),
             )
             .as_bool()
             {
-                return Err(HardwareError::Display(
-                    "EnumDisplaySettingsExW(CURRENT) failed".to_string(),
-                ));
+                return Err(HardwareError::Display(format!(
+                    "EnumDisplaySettingsExW(CURRENT) failed for {}",
+                    target.device
+                )));
             }
             mode.dmDisplayFrequency = hz;
             // Tell Windows we're only changing the refresh rate field.
             mode.dmFields = DEVMODE_FIELD_FLAGS(DM_DISPLAYFREQUENCY);
 
             let result = ChangeDisplaySettingsExW(
-                None,
+                name,
                 Some(&mode),
                 None,
                 CDS_TYPE(CDS_UPDATEREGISTRY_VAL),
@@ -2566,7 +3038,10 @@ pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
             if result == DISP_CHANGE(0) {
                 Ok(())
             } else {
-                Err(HardwareError::Display(format!("ChangeDisplaySettingsExW failed ({result:?}); requested {hz} Hz may not be supported")))
+                Err(HardwareError::Display(format!(
+                    "ChangeDisplaySettingsExW({}) failed ({result:?}); requested {hz} Hz",
+                    target.device
+                )))
             }
         }
     }
@@ -2577,7 +3052,15 @@ pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
     }
 }
 
-fn get_refresh_rate() -> HardwareResult<u32> {
+/// Last-resort refresh-rate read, used only when the per-device GDI
+/// enumeration fails.
+///
+/// `Win32_VideoController.CurrentRefreshRate` describes the GPU, not a display:
+/// on the measured machine it reported the internal panel (120 Hz) while the
+/// GDI primary was the external LG (85 Hz) — the mismatch that made the UI show
+/// "120 Hz" over a [50, 85] chip list. It must never be the primary source; it
+/// is kept so a failed enumeration still yields a number instead of 0.
+fn get_refresh_rate_wmi() -> HardwareResult<u32> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
@@ -2888,43 +3371,133 @@ mod tests {
         );
         assert!(!retry_due(None, now), "no scheduled retry = not due");
     }
-    // ── brightness offset clamp (audit: `offset: 54` unclamped) ─────────────
+    // ── brightness offset clamp (audit: `offset: 54` unclamped; regression:
+    //    user intent pinned at +30 pp → top 44 % of the slider reverted) ────
 
     #[test]
-    fn offset_clamp_limits_range() {
-        assert_eq!(clamp_override_offset(0), 0);
-        assert_eq!(clamp_override_offset(29), 29);
-        assert_eq!(clamp_override_offset(MAX_OVERRIDE_OFFSET_PP), 30);
-        assert_eq!(clamp_override_offset(-MAX_OVERRIDE_OFFSET_PP), -30);
-        // The production value: +54 must never reach the curve.
-        assert_eq!(clamp_override_offset(54), 30);
-        assert_eq!(clamp_override_offset(-54), -30);
-        assert_eq!(clamp_override_offset(i16::MAX), 30);
-        assert_eq!(clamp_override_offset(i16::MIN), -30);
+    fn captured_offset_clamp_limits_range() {
+        // Offsets captured by the loop keep the anti-runaway ±30 pp bound.
+        assert_eq!(clamp_captured_offset(0), 0);
+        assert_eq!(clamp_captured_offset(29), 29);
+        assert_eq!(clamp_captured_offset(MAX_CAPTURED_OFFSET_PP), 30);
+        assert_eq!(clamp_captured_offset(-MAX_CAPTURED_OFFSET_PP), -30);
+        // The historical production value (from the capture feedback loop).
+        assert_eq!(clamp_captured_offset(54), 30);
+        assert_eq!(clamp_captured_offset(-54), -30);
+        assert_eq!(clamp_captured_offset(i16::MAX), 30);
+        assert_eq!(clamp_captured_offset(i16::MIN), -30);
     }
 
     #[test]
-    fn user_override_offset_is_clamped() {
+    fn user_offset_clamp_keeps_full_scale() {
+        // Explicit user intent spans the whole 0–100 slider: 26 % curve + 74 pp
+        // = 100 %. The old ±30 pp clamp is what made >56 % unreachable.
+        assert_eq!(clamp_user_offset(74), 74);
+        assert_eq!(clamp_user_offset(54), 54);
+        assert_eq!(clamp_user_offset(MAX_USER_OFFSET_PP), 100);
+        assert_eq!(clamp_user_offset(-95), -95);
+        // Still bounded so a corrupt value cannot overflow the atomic's range
+        // or produce nonsense at the point of use.
+        assert_eq!(clamp_user_offset(140), 100);
+        assert_eq!(clamp_user_offset(-140), -100);
+        assert_eq!(clamp_user_offset(i16::MAX), 100);
+        assert_eq!(clamp_user_offset(i16::MIN), -100);
+    }
+
+    #[test]
+    fn effective_target_reaches_100_and_respects_config_range() {
+        // Regression case: 29 lux gives raw 26.1 %; the user picks 100 %.
+        assert_eq!(effective_target(26.1, 74.0, 5, 100), 100.0);
+        // The final clamp still applies — the backlight never exceeds max.
+        assert_eq!(effective_target(100.0, 74.0, 5, 100), 100.0);
+        assert_eq!(effective_target(26.1, -30.0, 5, 100), 5.0);
+        assert_eq!(effective_target(26.1, 0.0, 10, 40), 26.1); // inside range: untouched
+        assert_eq!(effective_target(56.1, 0.0, 10, 40), 40.0);
+        assert_eq!(effective_target(26.1, 74.0, 10, 40), 40.0);
+    }
+
+    #[test]
+    fn capture_echo_does_not_undo_a_user_offset() {
+        // The regression: the user picks 100 % at 29 lux (raw 26 %) → +74 pp.
+        // One iteration later the loop reads 100 % back. Re-deriving the offset
+        // with the capture bound would store +30 → 56 %, i.e. the user's choice
+        // is thrown away within 2 s, long before the grace window expires.
+        let outcome = classify_capture(100, 26, 74, OffsetOrigin::User, true);
+        assert!(outcome.echo, "the loop's own output must be recognised");
+        assert_eq!(outcome.offset, 74);
+        assert_eq!(outcome.origin, OffsetOrigin::User);
+        assert_eq!(
+            effective_target(26.0, outcome.offset as f32, 5, 100),
+            100.0,
+            "the user's 100 % must survive the capture pass"
+        );
+    }
+
+    #[test]
+    fn capture_echo_within_tolerance_is_ignored() {
+        // Rounding / smoothing / stale read: 98 % instead of 100 %.
+        let outcome = classify_capture(98, 26, 74, OffsetOrigin::User, true);
+        assert!(outcome.echo);
+        assert_eq!(outcome.offset, 74);
+    }
+
+    #[test]
+    fn capture_of_a_new_value_while_user_offset_active_keeps_full_range() {
+        // A genuinely new preference (Fn key / Windows slider) while a user
+        // offset is active is recorded as user intent, not clamped to ±30 pp.
+        let outcome = classify_capture(60, 26, 74, OffsetOrigin::User, true);
+        assert!(!outcome.echo);
+        assert_eq!(outcome.offset, 34);
+        assert_eq!(outcome.origin, OffsetOrigin::User);
+        assert_eq!(effective_target(26.0, outcome.offset as f32, 5, 100), 60.0);
+    }
+
+    #[test]
+    fn capture_without_user_offset_keeps_the_capture_clamp() {
+        // No override yet: this is the loop's feedback path (production reached
+        // +54 pp and pinned the curve), so ±30 pp still applies.
+        let outcome = classify_capture(100, 26, 0, OffsetOrigin::Captured, false);
+        assert!(!outcome.echo);
+        assert_eq!(outcome.offset, MAX_CAPTURED_OFFSET_PP);
+        assert_eq!(outcome.origin, OffsetOrigin::Captured);
+
+        // Same with a captured offset already active.
+        let outcome = classify_capture(100, 26, 20, OffsetOrigin::Captured, true);
+        assert!(!outcome.echo);
+        assert_eq!(outcome.offset, MAX_CAPTURED_OFFSET_PP);
+    }
+
+    #[test]
+    fn user_override_offset_is_not_capped_at_the_capture_limit() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         isolate_smart_model();
         AUTO_OFFSET.store(0, Ordering::Relaxed);
         AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
         AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
 
-        // last target 10 %, user asks 100 % → raw delta +90 pp.
-        AUTO_LAST_TARGET.store(10, Ordering::Relaxed);
+        // 29 lux: raw curve target 26 %, user asks 100 % → +74 pp (not +30).
+        AUTO_LAST_TARGET.store(26, Ordering::Relaxed);
         record_user_brightness_override(100);
         assert_eq!(
             AUTO_OFFSET.load(Ordering::Relaxed),
-            MAX_OVERRIDE_OFFSET_PP,
-            "raw +90 pp must be clamped to +30 pp"
+            74,
+            "the +74 pp needed to reach 100 % from a 26 % curve must survive"
         );
         assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+        assert_eq!(
+            AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed),
+            OffsetOrigin::User.as_u8(),
+            "an explicit user value is recorded as user intent"
+        );
+        assert_eq!(
+            effective_target(26.0, AUTO_OFFSET.load(Ordering::Relaxed) as f32, 5, 100),
+            100.0
+        );
 
-        // last target 90 %, user asks 5 % → raw delta -85 pp.
+        // Negative direction: raw 90 %, user asks 5 % → -85 pp.
         AUTO_LAST_TARGET.store(90, Ordering::Relaxed);
         record_user_brightness_override(5);
-        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), -MAX_OVERRIDE_OFFSET_PP);
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), -85);
 
         // In-range deltas are untouched.
         AUTO_LAST_TARGET.store(50, Ordering::Relaxed);
@@ -2935,14 +3508,35 @@ mod tests {
     }
 
     #[test]
-    fn restore_override_state_clamps_persisted_offset() {
+    fn captured_offset_keeps_the_anti_runaway_clamp() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The loop's capture path (external change ≥2 pp) must not inherit the
+        // ±100 pp user bound: it is a feedback loop and ratchets.
+        let raw: i16 = 26;
+        let captured = clamp_captured_offset(100 - raw); // user asked 100 %
+        assert_eq!(captured, MAX_CAPTURED_OFFSET_PP);
+        // And a captured offset is recorded as such, so a restart re-clamps it.
+        AUTO_OFFSET.store(captured, Ordering::Relaxed);
+        AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
+        assert_eq!(
+            clamp_offset_for(AUTO_OFFSET.load(Ordering::Relaxed), OffsetOrigin::Captured),
+            30
+        );
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
+    }
+
+    #[test]
+    fn restore_override_state_clamps_legacy_captured_offset() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         isolate_smart_model();
         // Point the override state at a temp file — never the production one.
         let temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
         std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &temp);
         // The exact shape found in production: offset 54, still inside the
-        // 120 s grace window.
+        // 120 s grace window, and NO origin field (written before the
+        // user/captured split). Every offset those builds persisted came from
+        // the capture loop, so it must keep the ±30 pp bound.
         std::fs::write(
             &temp,
             format!(
@@ -2960,11 +3554,55 @@ mod tests {
 
         assert_eq!(
             AUTO_OFFSET.load(Ordering::Relaxed),
-            MAX_OVERRIDE_OFFSET_PP,
-            "a persisted 54 pp offset must be clamped on restore"
+            MAX_CAPTURED_OFFSET_PP,
+            "a legacy (origin-less) 54 pp offset came from the capture loop and must stay clamped"
+        );
+        assert_eq!(
+            AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed),
+            OffsetOrigin::Captured.as_u8()
         );
         assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
         assert!(user_override_in_grace());
+
+        clear_user_brightness_override();
+        let _ = std::fs::remove_file(&temp);
+        std::env::remove_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH");
+    }
+
+    #[test]
+    fn restore_override_state_keeps_persisted_user_offset() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        let temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
+        std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &temp);
+        // A user-intent offset (+74 pp = 100 % at 29 lux) must survive a
+        // crash/relaunch: the relaunched loop may not trim it back to +30.
+        std::fs::write(
+            &temp,
+            format!(
+                "{{\"last_manual_ms\":{},\"offset\":74,\"offset_active\":true,\"origin\":\"user\"}}",
+                now_ms()
+            ),
+        )
+        .unwrap();
+
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        restore_override_state();
+
+        assert_eq!(
+            AUTO_OFFSET.load(Ordering::Relaxed),
+            74,
+            "a persisted user-intent offset is valid up to ±100 pp"
+        );
+        assert_eq!(
+            AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed),
+            OffsetOrigin::User.as_u8()
+        );
+        assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
 
         clear_user_brightness_override();
         let _ = std::fs::remove_file(&temp);
@@ -3143,5 +3781,138 @@ mod tests {
         assert_eq!(model.bins.get(&5).map(|b| b.n), Some(1));
 
         reset_smart_model();
+    }
+
+    // ── refresh-rate device selection (audit 2.7: chips changed the wrong
+    //    monitor because current and rates came from different displays) ────
+
+    /// The machine as measured in the audit: internal panel `\\.\DISPLAY1`
+    /// 3120×2080 @120 (rates [60, 120]) and the *external* LG ULTRAGEAR as the
+    /// GDI primary @85 (rates [50, 85]). This is the exact layout that made the
+    /// UI show "120 Hz" with chips [50, 85] and no active chip.
+    fn measured_refresh_layout() -> Vec<DisplayRefreshModes> {
+        vec![
+            DisplayRefreshModes {
+                device: r"\\.\DISPLAY3".to_string(),
+                label: "LG ULTRAGEAR".to_string(),
+                current_hz: 85,
+                rates: vec![50, 85],
+                is_internal: false,
+                is_primary: true,
+            },
+            DisplayRefreshModes {
+                device: r"\\.\DISPLAY1".to_string(),
+                label: "EDO".to_string(),
+                current_hz: 120,
+                rates: vec![60, 120],
+                is_internal: true,
+                is_primary: false,
+            },
+            DisplayRefreshModes {
+                device: r"\\.\DISPLAY2".to_string(),
+                label: "LG ULTRAWIDE".to_string(),
+                current_hz: 60,
+                rates: vec![50, 60, 75],
+                is_internal: false,
+                is_primary: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn refresh_target_is_the_internal_panel_not_the_gdi_primary() {
+        let modes = measured_refresh_layout();
+        let target = select_refresh_target(&modes).expect("an attached display");
+        assert_eq!(target.device, r"\\.\DISPLAY1");
+        assert_eq!(target.current_hz, 120);
+        assert_eq!(target.rates, vec![60, 120]);
+        // The bug in one line: the current rate must be one of the offered
+        // rates (it used to be 120 Hz over a [50, 85] chip list).
+        assert!(
+            target.rates.contains(&target.current_hz),
+            "current rate {} Hz must appear among {:?}",
+            target.current_hz,
+            target.rates
+        );
+    }
+
+    #[test]
+    fn refresh_target_falls_back_to_gdi_primary_without_internal_panel() {
+        let modes: Vec<DisplayRefreshModes> = measured_refresh_layout()
+            .into_iter()
+            .map(|mut m| {
+                m.is_internal = false;
+                m
+            })
+            .collect();
+        let target = select_refresh_target(&modes).expect("an attached display");
+        assert_eq!(target.device, r"\\.\DISPLAY3");
+        assert_eq!(target.current_hz, 85);
+        assert_eq!(target.rates, vec![50, 85]);
+        assert!(target.rates.contains(&target.current_hz));
+    }
+
+    #[test]
+    fn refresh_target_without_any_attached_device_is_none() {
+        assert!(select_refresh_target(&[]).is_none());
+        assert!(resolve_refresh_write(&[], 60).is_err());
+    }
+
+    #[test]
+    fn refresh_write_targets_the_same_display_the_ui_shows() {
+        let modes = measured_refresh_layout();
+        let shown = select_refresh_target(&modes).expect("an attached display");
+        let shown_device = shown.device.clone();
+        let shown_rates = shown.rates.clone();
+
+        // A rate the edited display advertises is written to that display.
+        let plan = resolve_refresh_write(&modes, 60).expect("60 Hz is supported by the panel");
+        assert_eq!(plan.device, shown_device);
+        assert!(shown_rates.contains(&60));
+
+        // The old chips (50/85 Hz, from the external LG) must be refused, not
+        // silently applied to the external monitor.
+        for hz in [50u32, 85] {
+            let err = resolve_refresh_write(&modes, hz).unwrap_err();
+            assert!(
+                err.contains("is not supported by") && err.contains(r"\\.\DISPLAY1"),
+                "unexpected error for {hz} Hz: {err}"
+            );
+        }
+    }
+
+    /// Read-only smoke test against the live topology: never writes a mode, but
+    /// proves the enumeration returns coherent data on the machine running the
+    /// tests (skips silently on a headless host with no attached displays).
+    #[test]
+    fn live_refresh_enumeration_is_coherent() {
+        let modes = enumerate_refresh_modes().expect("enumeration must not fail");
+        for m in &modes {
+            // Diagnostic only: visible with `cargo test -- --nocapture`.
+            println!(
+                "{} '{}' {} Hz {:?} internal={} primary={}",
+                m.device, m.label, m.current_hz, m.rates, m.is_internal, m.is_primary
+            );
+        }
+        if modes.is_empty() {
+            return; // headless CI runner
+        }
+        for m in &modes {
+            assert!(!m.device.is_empty());
+            assert!(
+                m.rates.is_empty() || m.rates.contains(&m.current_hz),
+                "{} current {} Hz not in {:?}",
+                m.device,
+                m.current_hz,
+                m.rates
+            );
+        }
+        if let Some(target) = select_refresh_target(&modes) {
+            assert!(
+                !target.rates.is_empty(),
+                "the edited display {} must advertise at least one rate",
+                target.device
+            );
+        }
     }
 }
