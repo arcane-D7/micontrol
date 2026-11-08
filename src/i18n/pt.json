@@ -1122,6 +1122,9 @@
     "tabSwitch": "Alt+1 a Alt+9 para alternar separadores"
   },
   "audio": {
+    "volume": "Volume",
+    "unmutedByVolume": "Som reativado — o volume mudou com o áudio silenciado",
+    "volumeError": "Não foi possível alterar o volume",
     "loadingDevices": "Carregando dispositivos de áudio...",
     "noDevices": "Nenhum dispositivo de áudio encontrado",
     "loadDevicesError": "Falha ao carregar dispositivos de áudio",

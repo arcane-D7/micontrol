@@ -1122,6 +1122,9 @@
     "tabSwitch": "Alt+1 a Alt+9 para cambiar de pestaña"
   },
   "audio": {
+    "volume": "Volumen",
+    "unmutedByVolume": "Sonido reactivado — el volumen cambió con el audio silenciado",
+    "volumeError": "No se pudo cambiar el volumen",
     "loadingDevices": "Cargando dispositivos de audio...",
     "noDevices": "No se encontraron dispositivos de audio",
     "loadDevicesError": "Error al cargar dispositivos de audio",

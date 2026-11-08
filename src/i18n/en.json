@@ -1122,6 +1122,9 @@
     "tabSwitch": "Alt+1 to Alt+9 to switch tabs"
   },
   "audio": {
+    "volume": "Volume",
+    "unmutedByVolume": "Sound re-enabled — the volume changed while muted",
+    "volumeError": "Could not change the volume",
     "loadingDevices": "Loading audio devices...",
     "noDevices": "No audio devices found",
     "loadDevicesError": "Failed to load audio devices",

@@ -1122,6 +1122,9 @@
     "tabSwitch": "Alt+1 à Alt+9 pour changer d'onglet"
   },
   "audio": {
+    "volume": "Volume",
+    "unmutedByVolume": "Son réactivé — le volume a changé alors que le son était coupé",
+    "volumeError": "Impossible de modifier le volume",
     "loadingDevices": "Chargement des périphériques audio...",
     "noDevices": "Aucun périphérique audio trouvé",
     "loadDevicesError": "Échec du chargement des périphériques audio",
