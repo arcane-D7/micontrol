@@ -63,9 +63,11 @@ describe('Card', () => {
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
-  it('loading marca aria-busy', () => {
+  it('loading marca o cartão com a variante ocupada', () => {
     render(<Card title="A ler" loading />);
-    expect(document.querySelector('.mc-card')).toHaveAttribute('aria-busy', 'true');
+    // O markup canónico exprime o loading pela classe; o título continua exposto.
+    expect(document.querySelector('.mc-card')).toHaveClass('mc-card--loading');
+    expect(screen.getByRole('heading', { name: 'A ler' })).toBeInTheDocument();
   });
 });
 
@@ -86,14 +88,14 @@ describe('StatRow', () => {
       </StatGroup>,
     );
     expect(screen.getByText('Tensão')).toBeInTheDocument();
-    expect(screen.getByText('17,28')).toHaveClass('mc-stat-row__value--mono');
-    expect(screen.getByText('V')).toHaveClass('mc-stat-row__unit');
-    expect(screen.getByText('AC')).toHaveClass('mc-stat-row__hint');
+    expect(screen.getByText('17,28')).toHaveClass('mc-stat__v--mono');
+    expect(screen.getByText('V')).toHaveClass('mc-stat__unit');
+    expect(screen.getByText('AC')).toHaveClass('mc-stat__hint');
   });
 
   it('estado "sem leitura" é uma variante, não um valor inventado', () => {
     render(<StatRow label="Tensão do carregador" value="não exposto" empty />);
-    expect(document.querySelector('.mc-stat-row--empty')).toBeTruthy();
+    expect(document.querySelector('.mc-stat--empty')).toBeTruthy();
   });
 });
 
@@ -149,13 +151,13 @@ describe('Button', () => {
 });
 
 describe('Switch', () => {
-  it('é um switch com aria-checked e um input real por baixo', () => {
+  it('é um botão com role=switch e aria-checked', () => {
     render(
       <Switch checked={false} onChange={() => {}} label="Limitar carga" desc="Pausa aos 80%" />,
     );
     const control = screen.getByRole('switch');
     expect(control).not.toBeChecked();
-    expect(control.tagName).toBe('INPUT');
+    expect(control.tagName).toBe('BUTTON');
     expect(screen.getByText('Limitar carga')).toBeInTheDocument();
     expect(screen.getByText('Pausa aos 80%')).toBeInTheDocument();
   });
@@ -193,8 +195,9 @@ describe('Switch', () => {
 
   it('bare (ToggleSwitch) fica só com o controlo', () => {
     render(<ToggleSwitch checked onChange={() => {}} ariaLabel="Wi-Fi" />);
-    expect(screen.getByRole('switch', { name: 'Wi-Fi' })).toBeInTheDocument();
-    expect(document.querySelector('.mc-switch--bare')).toBeTruthy();
+    const control = screen.getByRole('switch', { name: 'Wi-Fi' });
+    expect(control).toHaveClass('mc-switch');
+    expect(document.querySelector('.mc-switchrow')).toBeNull();
   });
 
   it('ToggleRow mantém a API antiga sobre o primitivo', () => {
@@ -333,7 +336,7 @@ describe('Skeleton', () => {
       </SkeletonSwap>,
     );
     expect(screen.getByRole('status')).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByText('A ler a bateria')).toHaveClass('sr-only');
+    expect(screen.getByText('A ler a bateria')).toHaveClass('mc-sr-only');
     rerender(
       <SkeletonSwap loading={false} fallback={<Skeleton shape="block" />} label="A ler a bateria">
         <span>96%</span>
@@ -386,26 +389,26 @@ describe('Segmented', () => {
     { value: 80, label: '80%', badge: 'recomendado' },
   ];
 
-  it('marca o escolhido com aria-pressed, não com uma classe', () => {
+  it('marca o escolhido com aria-checked, não com uma classe', () => {
     render(<Segmented label="Limite" options={options} value={80} onChange={() => {}} />);
-    expect(screen.getByRole('button', { name: /80%/ })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: '40%' })).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.getByText('recomendado')).toHaveClass('mc-segmented__badge');
+    expect(screen.getByRole('radio', { name: /80%/ })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('radio', { name: '40%' })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByText('recomendado')).toHaveClass('mc-seg__badge');
   });
 
   it('clique aplica o valor', async () => {
     const onChange = vi.fn();
     render(<Segmented options={options} value={80} onChange={onChange} />);
-    await userEvent.click(screen.getByRole('button', { name: '60%' }));
+    await userEvent.click(screen.getByRole('radio', { name: '60%' }));
     expect(onChange).toHaveBeenCalledWith(60);
   });
 
   it('teclado ←/→ anda entre opções', () => {
     const onChange = vi.fn();
     render(<Segmented options={options} value={60} onChange={onChange} ariaLabel="Limite" />);
-    fireEvent.keyDown(screen.getByRole('group', { name: 'Limite' }), { key: 'ArrowRight' });
+    fireEvent.keyDown(screen.getByRole('radiogroup', { name: 'Limite' }), { key: 'ArrowRight' });
     expect(onChange).toHaveBeenCalledWith(80);
-    fireEvent.keyDown(screen.getByRole('group', { name: 'Limite' }), { key: 'ArrowLeft' });
+    fireEvent.keyDown(screen.getByRole('radiogroup', { name: 'Limite' }), { key: 'ArrowLeft' });
     expect(onChange).toHaveBeenLastCalledWith(40);
   });
 
@@ -420,7 +423,7 @@ describe('Segmented', () => {
       />,
     );
     expect(screen.getByText('Ligue a proteção para escolher o limite')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '40%' })).toBeDisabled();
+    expect(document.querySelector('.mc-seg--disabled')).toBeTruthy();
   });
 });
 
@@ -429,7 +432,7 @@ describe('Icon', () => {
     render(<Icon name="battery" />);
     const svg = document.querySelector('svg.mc-icon') as SVGElement;
     expect(svg).toHaveAttribute('aria-hidden', 'true');
-    expect(svg).toHaveAttribute('stroke-width', '1.6');
+    expect(svg).toHaveAttribute('stroke-width', '1.5');
     expect(svg).toHaveAttribute('stroke-linecap', 'round');
     expect(svg).toHaveAttribute('viewBox', '0 0 24 24');
   });
