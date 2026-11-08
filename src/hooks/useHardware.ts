@@ -20,6 +20,7 @@ export type {
   AiBrightnessConfig,
   DisplayInfo,
   FanInfo,
+  FanModeResult,
   AiPerfLogEntry,
   TouchpadInfo,
   BiosInfo,
@@ -53,6 +54,7 @@ import type {
   AiBrightnessConfig,
   DisplayInfo,
   FanInfo,
+  FanModeResult,
   AiPerfLogEntry,
   TouchpadInfo,
   UpdateStatus,
@@ -505,21 +507,41 @@ export function useHardware() {
     }
   }, []);
 
-  const setFanMode = useCallback(async (mode: 'auto' | 'fixed' | 'off', speedPercent?: number) => {
-    const snap = fanRef.current;
-    setFan((prev) =>
-      prev ? { ...prev, mode, speed_percent: speedPercent ?? prev.speed_percent } : null,
-    );
-    try {
-      await invoke('set_fan_mode', { mode, speed_percent: speedPercent ?? 50 });
-      setError(null);
-    } catch (e) {
-      setFan(snap);
-      console.error('[fan] set_fan_mode failed:', e);
-      setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
-      throw e;
-    }
-  }, []);
+  /**
+   * Apply a fan mode and return what actually happened.
+   *
+   * The optimistic update only touches `mode` and the *requested* percentage —
+   * measured RPM/percentage stay untouched, because they are readback values
+   * and only the next poll can change them.
+   */
+  const setFanMode = useCallback(
+    async (mode: 'auto' | 'fixed' | 'off', speedPercent?: number): Promise<FanModeResult> => {
+      const snap = fanRef.current;
+      setFan((prev) =>
+        prev
+          ? {
+              ...prev,
+              mode,
+              requested_speed_percent: speedPercent ?? prev.requested_speed_percent,
+            }
+          : null,
+      );
+      try {
+        const result = await invoke<FanModeResult>('set_fan_mode', {
+          mode,
+          speed_percent: speedPercent ?? 50,
+        });
+        setError(null);
+        return result;
+      } catch (e) {
+        setFan(snap);
+        console.error('[fan] set_fan_mode failed:', e);
+        setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+        throw e;
+      }
+    },
+    [],
+  );
 
   // Keep stable refs so error-revert closures (with empty deps) can restore
   // the previous snapshot of any state that supports optimistic updates.

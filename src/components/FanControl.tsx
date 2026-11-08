@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import { t } from '../hooks/useI18n';
-import type { FanInfo } from '../types/hardware';
+import type { FanInfo, FanModeResult } from '../types/hardware';
 import { useToast } from '../contexts/ToastContext';
 
 interface Props {
   fan: FanInfo | null;
-  onModeChange: (mode: 'auto' | 'fixed' | 'off', speedPercent?: number) => Promise<void>;
+  onModeChange: (
+    mode: 'auto' | 'fixed' | 'off',
+    speedPercent?: number,
+  ) => Promise<FanModeResult | void>;
 }
 
 function FanSpeedVisual({ speedPct }: { speedPct: number }) {
@@ -25,16 +28,27 @@ function FanSpeedVisual({ speedPct }: { speedPct: number }) {
 }
 
 export default function FanControl({ fan, onModeChange }: Props) {
-  const [speed, setSpeed] = useState(fan?.speed_percent ?? 50);
+  const [speed, setSpeed] = useState(fan?.requested_speed_percent ?? 50);
   const [mode, setMode] = useState<'auto' | 'fixed' | 'off'>(fan?.mode ?? 'auto');
+  const [lastResult, setLastResult] = useState<FanModeResult | null>(null);
   const { addToast } = useToast();
 
   const handleModeChange = async (m: 'auto' | 'fixed' | 'off') => {
+    const previous = mode;
     setMode(m);
     try {
-      await onModeChange(m, m === 'fixed' ? speed : undefined);
-      addToast({ message: t('fan.applied'), type: 'success' });
+      const result = await onModeChange(m, m === 'fixed' ? speed : undefined);
+      setLastResult(result ?? null);
+      // The command reports what actually changed. When the platform cannot
+      // honour the request (no RPM control, no fan stop) the toast carries the
+      // caveat instead of a bare "applied".
+      addToast({
+        message: result?.warning ?? t('fan.applied'),
+        type: result?.warning ? 'info' : 'success',
+      });
     } catch (e) {
+      // Nothing was applied — don't leave the button highlighted as if it were.
+      setMode(previous);
       addToast({
         message: `${t('fan.error')}: ${String(e)}`,
         type: 'error',
@@ -51,6 +65,10 @@ export default function FanControl({ fan, onModeChange }: Props) {
       </div>
     );
   }
+
+  // `speed_rpm === null` means the platform exposes no tachometer — not that
+  // the fan has stopped. Nothing measured is shown as a number.
+  const hasRpmReading = fan.speed_rpm != null;
 
   return (
     <div className="card">
@@ -73,19 +91,42 @@ export default function FanControl({ fan, onModeChange }: Props) {
       </div>
 
       {mode === 'fixed' && (
-        <div className="slider-row" style={{ marginBottom: 16 }}>
-          <span className="slider-label">{t('fan.speed')}</span>
-          <input
-            type="range"
-            min={20}
-            max={100}
-            step={5}
-            value={speed}
-            onChange={(e) => setSpeed(Number(e.target.value))}
-            onMouseUp={() => void onModeChange('fixed', speed)}
-          />
-          <span className="slider-value">{speed}%</span>
-        </div>
+        <>
+          <div className="slider-row" style={{ marginBottom: 8 }}>
+            <span className="slider-label">{t('fan.speed')}</span>
+            <input
+              type="range"
+              min={20}
+              max={100}
+              step={5}
+              value={speed}
+              onChange={(e) => setSpeed(Number(e.target.value))}
+              onMouseUp={() => void handleModeChange('fixed')}
+              onTouchEnd={() => void handleModeChange('fixed')}
+            />
+            <span className="slider-value">{speed}%</span>
+          </div>
+          {/* The slider selects an EC fan-profile band; it does not pin an
+              exact RPM on hardware without an IGCL fan handle. */}
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 16px' }}>
+            {t('fan.fixedProfileNote')}
+          </p>
+        </>
+      )}
+
+      {lastResult?.warning && (
+        <p
+          style={{
+            fontSize: 11,
+            color: 'var(--text-muted)',
+            margin: '0 0 16px',
+            padding: '8px 10px',
+            background: 'var(--surface-2)',
+            borderRadius: 'var(--r-sm)',
+          }}
+        >
+          ℹ️ {lastResult.warning}
+        </p>
       )}
 
       <div className="grid-2">
@@ -93,10 +134,27 @@ export default function FanControl({ fan, onModeChange }: Props) {
           <div className="stat-label" style={{ marginBottom: 8 }}>
             {t('fan.current')}
           </div>
-          <FanSpeedVisual speedPct={fan.speed_percent} />
-          <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>
-            {fan.speed_rpm} {t('fan.rpm')}
-          </div>
+          {hasRpmReading ? (
+            <>
+              <FanSpeedVisual speedPct={fan.speed_percent ?? 0} />
+              <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>
+                {fan.speed_rpm?.toLocaleString()} {t('fan.rpm')}
+              </div>
+            </>
+          ) : (
+            <>
+              <div
+                className="card-value"
+                style={{ fontSize: 20, color: 'var(--text-dim)' }}
+                title={t('fan.noSensorHint')}
+              >
+                N/A
+              </div>
+              <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
+                {t('fan.noSensor')}
+              </div>
+            </>
+          )}
         </div>
         <div>
           <div className="stat-label" style={{ marginBottom: 8 }}>
@@ -105,6 +163,11 @@ export default function FanControl({ fan, onModeChange }: Props) {
           <div className="card-value" style={{ fontSize: 22 }}>
             {fan.gpu_temp_celsius != null ? `${fan.gpu_temp_celsius}°` : '—'}
           </div>
+          {fan.ambient_temp_celsius != null && (
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {t('fan.ambient')}: {fan.ambient_temp_celsius.toFixed(1)}°
+            </div>
+          )}
         </div>
       </div>
 

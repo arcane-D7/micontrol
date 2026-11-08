@@ -247,18 +247,32 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     case 'get_fan_info':
       return {
         mode: _fanMode,
-        speed_rpm:
-          _fanMode === 'off'
-            ? 0
-            : Math.round(drift(_fanMode === 'fixed' ? _fanSpeedPercent * 55 : 2100, 180)),
-        speed_percent: _fanSpeedPercent,
+        // Mock mirrors the real payload: no tachometer in mock mode either, so
+        // the UI's "unavailable" branch is what dev/mock runs exercise.
+        speed_rpm: null,
+        speed_percent: null,
+        requested_speed_percent: _fanSpeedPercent,
         gpu_temp_celsius: Math.round(drift(52, 6) * 10) / 10,
+        cpu_temp_celsius: Math.round(drift(58, 6) * 10) / 10,
+        ambient_temp_celsius: Math.round(drift(27.8, 0.6) * 10) / 10,
+        tdp_watts: Math.round(drift(15, 3) * 10) / 10,
+        temp_source: 'esif',
       } as T;
 
     case 'set_fan_mode':
       _fanMode = (args?.mode as 'auto' | 'fixed' | 'off') ?? _fanMode;
       _fanSpeedPercent = (args?.speed_percent as number) ?? _fanSpeedPercent;
-      return undefined as T;
+      return {
+        applied: true,
+        method: 'registry+ec_profile',
+        rpm_control: false,
+        warning:
+          _fanMode === 'fixed'
+            ? `Mock: Fixed speed requested, but this platform exposes no RPM control; the EC fan profile was applied instead.`
+            : _fanMode === 'off'
+              ? 'Mock: This platform cannot stop the fan; the EC was set to Super Quiet.'
+              : null,
+      } as T;
 
     // ── Touchpad ───────────────────────────────────────────────────────────
     case 'get_touchpad_info':

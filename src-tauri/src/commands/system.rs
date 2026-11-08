@@ -13,7 +13,7 @@ use crate::hw::display::{
     get_display_info as hw_get_display, set_hdr as hw_set_hdr, AiBrightnessConfig, DisplayInfo,
 };
 use crate::hw::errors::{ErrorResponse, HardwareError};
-use crate::hw::fan::{get_fan_info as hw_get_fan, FanInfo, FanMode};
+use crate::hw::fan::{get_fan_info as hw_get_fan, FanInfo, FanMode, FanModeResult};
 use crate::hw::performance::get_performance_mode as hw_get_perf;
 use crate::hw::processes::{get_process_list as hw_get_processes, ProcessInfo};
 use crate::hw::startup::{get_autostart as hw_get_autostart, set_autostart as hw_set_autostart};
@@ -219,15 +219,24 @@ pub async fn get_fan_info() -> Result<FanInfo, ErrorResponse> {
     Ok(local)
 }
 
+/// Apply a fan mode and return what actually happened.
+///
+/// The reply is a [`FanModeResult`], not a bare success: on this platform
+/// "Fixed Speed" cannot pin RPM (IGCL enumerates no fans) and "Off" only
+/// selects the SuperQuiet EC profile, so the UI needs the real effect to avoid
+/// promising fan control it does not have.
 #[tauri::command]
-pub async fn set_fan_mode(mode: FanMode, speed_percent: u8) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
+pub async fn set_fan_mode(
+    mode: FanMode,
+    speed_percent: u8,
+) -> Result<FanModeResult, ErrorResponse> {
+    let data = elev_bridge::run_elevated(
         "set_fan_mode",
         serde_json::json!({ "mode": mode, "speed_percent": speed_percent }),
     )
     .await
-    .map(|_| ())
-    .map_err(ErrorResponse::from)
+    .map_err(ErrorResponse::from)?;
+    Ok(FanModeResult::from_bridge(&data))
 }
 
 #[tauri::command]

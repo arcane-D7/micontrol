@@ -425,7 +425,11 @@
     "applying": "Aplicando...",
     "applied": "Modo de ventilador establecido",
     "error": "Error al establecer modo de ventilador",
-    "warning": "El control manual del ventilador puede afectar el rendimiento térmico"
+    "warning": "El control manual del ventilador puede afectar el rendimiento térmico",
+    "noSensor": "N/A — sin sensor de RPM en esta plataforma",
+    "noSensorHint": "Este portátil no expone las RPM del ventilador al software (Win32_Fan.DesiredSpeed está vacío y el EC RAM está denegado). El ventilador lo gestiona el EC.",
+    "fixedProfileNote": "Este portátil no expone lectura de RPM: el control selecciona una banda de perfil del EC (Quiet / Balanced / Performance), no fija una RPM exacta.",
+    "ambient": "Ambiente"
   },
   "touchpad": {
     "title": "Touchpad",
