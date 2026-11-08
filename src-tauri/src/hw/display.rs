@@ -572,6 +572,15 @@ pub fn is_calibration_in_progress() -> bool {
 pub struct DisplayInfo {
     pub brightness: u8,
     pub hdr_enabled: bool,
+    /// True when at least one connected display reports HDR (advanced color)
+    /// support. The UI disables the toggle when this is false, instead of
+    /// offering a switch that would write to paths that cannot honour it.
+    #[serde(default)]
+    pub hdr_supported: bool,
+    /// Advanced-color state per display, so "HDR enabled" can say *which*
+    /// monitor it means instead of an aggregate true/false.
+    #[serde(default)]
+    pub hdr_displays: Vec<HdrDisplayState>,
     pub refresh_rate_hz: u32,
     /// All Hz values supported by the primary display at its current resolution.
     pub available_refresh_rates: Vec<u32>,
@@ -580,6 +589,11 @@ pub struct DisplayInfo {
     /// Intel PSR2 DRRS (Panel Self Refresh 2 Display Refresh Rate Switching).
     /// Controlled via the Intel Arc driver registry key Psr2DrrsEnable.
     pub adaptive_refresh_rate: bool,
+    /// True when the PSR2 DRRS value was written during the current boot, i.e.
+    /// the registry holds the new intent but the driver has not reloaded it.
+    /// There is no API to observe DRRS, so this is the only honest state.
+    #[serde(default)]
+    pub adaptive_refresh_rate_pending_reboot: bool,
     pub ai_brightness: bool,
     pub ai_brightness_config: AiBrightnessConfig,
     /// Current ambient illuminance from the light sensor (lux). None when unavailable.
@@ -1065,7 +1079,9 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     // P10: make sure `brightness_source` reflects the LIVE backend instead of
     // the value persisted by the previous session.
     probe_brightness_source_once();
-    let hdr_enabled = get_hdr_state();
+    let hdr_displays = hdr_displays();
+    let hdr_enabled = hdr_displays.iter().any(|d| d.enabled);
+    let hdr_supported = hdr_displays.iter().any(|d| d.supported);
     // One enumeration, one display: `refresh_rate_hz` and
     // `available_refresh_rates` must describe the SAME device, otherwise the
     // UI shows a current rate from one monitor and chips from another (the
@@ -1095,10 +1111,13 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     Ok(DisplayInfo {
         brightness,
         hdr_enabled,
+        hdr_supported,
+        hdr_displays,
         refresh_rate_hz,
         available_refresh_rates,
         dynamic_refresh_rate_capable,
         adaptive_refresh_rate,
+        adaptive_refresh_rate_pending_reboot: drrs_pending_reboot_now(),
         ai_brightness,
         ai_brightness_config,
         ambient_lux,
@@ -2438,9 +2457,11 @@ fn disable_windows_adaptive_brightness() {
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
     QueryDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, QDC_ONLY_ACTIVE_PATHS,
+    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
 #[cfg(windows)]
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
@@ -2496,83 +2517,311 @@ unsafe fn query_display_config_retry() -> HardwareResult<(
     ))
 }
 
-/// Read the real HDR (Advanced Color) enabled state for the primary display.
-pub fn get_hdr_state() -> bool {
-    #[cfg(windows)]
-    unsafe {
-        // SAFETY: query_display_config_retry() returns valid paths with adapterId/id populated
-        // from the active display topology. The DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO struct
-        // is correctly initialized and its header points to its own base address.
-        let (np, _nm, paths, _modes) = match query_display_config_retry() {
-            Ok(x) => x,
-            Err(_) => return false,
-        };
-        for path in paths.iter().take(np as usize) {
-            let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
-                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
-                    size: std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
-                    adapterId: path.targetInfo.adapterId,
-                    id: path.targetInfo.id,
-                },
-                ..Default::default()
-            };
-            // Pass pointer to the header (= base of struct, same address since header is field 0)
-            let rc = DisplayConfigGetDeviceInfo(&mut info.header as *mut _);
-            if rc == 0 {
-                // Anonymous union: value field holds the bitfield
-                // bit 0 = advancedColorSupported, bit 1 = advancedColorEnabled
-                if info.Anonymous.value & 0x2 != 0 {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+// ── CCD path enumeration ─────────────────────────────────────────────────────
+//
+// One `QueryDisplayConfig` pass feeds every consumer that needs to know *which*
+// physical displays exist: the per-display HDR state below and the "internal
+// panel" flag used by the refresh-rate control. A single enumeration keeps the
+// two from disagreeing about the topology.
+
+/// One active CCD path, resolved to the GDI device that drives it.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+struct CcdPath {
+    adapter_id: windows::Win32::Foundation::LUID,
+    target_id: u32,
+    /// GDI source name (`\\.\DISPLAY1`) — joins CCD data to the GDI enumeration.
+    gdi_device: String,
+    /// Monitor friendly name when Windows exposes one, else empty.
+    label: String,
+    /// The target is an embedded output (laptop panel).
+    is_embedded: bool,
 }
 
-/// Enable or disable HDR (Advanced Color) on the primary display.
+/// Active display paths with their GDI source name and monitor name.
+///
+/// Errors are propagated instead of swallowed: a caller that writes (HDR) must
+/// be able to tell "the topology could not be read" from "no display supports
+/// this", and only the former is retryable.
+#[cfg(windows)]
+fn ccd_paths() -> HardwareResult<Vec<CcdPath>> {
+    // SAFETY: `paths` comes from a successful QueryDisplayConfig; every request
+    // struct's header points at its own base address and outlives the call
+    // (DisplayConfigGetDeviceInfo does not retain it).
+    let (np, _nm, paths, _modes) = unsafe { query_display_config_retry() }?;
+    let mut out = Vec::with_capacity(np as usize);
+    for path in paths.iter().take(np as usize) {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header as *mut _) } != 0 {
+            continue;
+        }
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        let (label, is_embedded) =
+            if unsafe { DisplayConfigGetDeviceInfo(&mut target.header as *mut _) } == 0 {
+                (
+                    wide_to_string(&target.monitorFriendlyDeviceName),
+                    is_embedded_output_technology(target.outputTechnology),
+                )
+            } else {
+                (String::new(), false)
+            };
+        out.push(CcdPath {
+            adapter_id: path.targetInfo.adapterId,
+            target_id: path.targetInfo.id,
+            gdi_device: wide_to_string(&source.viewGdiDeviceName),
+            label,
+            is_embedded,
+        });
+    }
+    Ok(out)
+}
+
+/// Per-display Windows advanced-color (HDR / wide colour gamut) state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HdrDisplayState {
+    /// GDI device name (`\\.\DISPLAY1`).
+    pub device: String,
+    /// Monitor friendly name when Windows exposes one, else empty.
+    pub label: String,
+    /// `advancedColorSupported` — the display can do HDR / WCG.
+    pub supported: bool,
+    /// `advancedColorEnabled` — HDR is currently on for this display.
+    pub enabled: bool,
+}
+
+/// `(advancedColorSupported, advancedColorEnabled)` for one CCD target.
+///
+/// `None` means the target did not answer — unknown, not "unsupported".
+#[cfg(windows)]
+fn advanced_color_info(
+    adapter_id: windows::Win32::Foundation::LUID,
+    target_id: u32,
+) -> Option<(bool, bool)> {
+    let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+            size: std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+            adapterId: adapter_id,
+            id: target_id,
+        },
+        ..Default::default()
+    };
+    // SAFETY: the struct is correctly initialised and the header is its own
+    // base address; the API only reads it during the call. The union field is
+    // the API's bitfield, read immediately after a successful call.
+    if unsafe { DisplayConfigGetDeviceInfo(&mut info.header as *mut _) } != 0 {
+        return None;
+    }
+    // Anonymous union bitfield: bit 0 = supported, bit 1 = enabled.
+    let value = unsafe { info.Anonymous.value };
+    Some((value & 0x1 != 0, value & 0x2 != 0))
+}
+
+/// Advanced-color state of every active display (HDR supported / on).
+///
+/// Read-only and cheap enough for `get_display_info`: one CCD query, one device
+/// info call per path. A path whose target does not answer is reported as not
+/// supported so the UI can explain why a toggle is off.
+pub fn hdr_displays() -> Vec<HdrDisplayState> {
+    #[cfg(windows)]
+    {
+        let Ok(paths) = ccd_paths() else {
+            log::warn!("[hdr] display topology unavailable — HDR state unknown");
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            // SAFETY: adapter id / target id come from a live CCD path.
+            let state = advanced_color_info(path.adapter_id, path.target_id);
+            if state.is_none() {
+                log::debug!(
+                    "[hdr] {} ({}) did not answer GET_ADVANCED_COLOR_INFO",
+                    path.gdi_device,
+                    path.label
+                );
+            }
+            let (supported, enabled) = state.unwrap_or((false, false));
+            out.push(HdrDisplayState {
+                device: path.gdi_device,
+                label: path.label,
+                supported,
+                enabled,
+            });
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// True when at least one connected display supports HDR (advanced color).
+pub fn hdr_supported() -> bool {
+    hdr_displays().iter().any(|d| d.supported)
+}
+
+/// Read the real HDR (Advanced Color) state — true when *any* display has it on.
+pub fn get_hdr_state() -> bool {
+    hdr_displays().iter().any(|d| d.enabled)
+}
+
+/// One `SET_ADVANCED_COLOR_STATE` outcome for a single display path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HdrWriteResult {
+    device: String,
+    /// `advancedColorSupported` for this path.
+    supported: bool,
+    /// `Some(0)` = applied, `Some(rc)` = Windows refused, `None` = not attempted
+    /// (unsupported path, reported for the log).
+    rc: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct HdrWriteSummary {
+    /// Paths that report advanced-color support.
+    supported: usize,
+    applied: usize,
+    failed: usize,
+    /// Paths left untouched because they do not support advanced color.
+    skipped: usize,
+}
+
+/// Short per-path label for the single log line of a HDR toggle.
+fn hdr_result_label(result: &HdrWriteResult) -> &'static str {
+    match result.rc {
+        None => "unsupported",
+        Some(0) => "ok",
+        Some(_) => "failed",
+    }
+}
+
+/// Decide the outcome of a HDR toggle from its per-path results.
+///
+/// `Ok` when at least one *supporting* display accepted the change — a laptop
+/// whose panel says yes while two external monitors say no is a success, not an
+/// error (the old code returned `Err` for that, so the UI rolled back a change
+/// the hardware had already applied). When no connected display supports
+/// advanced color the toggle is refused with a message the UI can show verbatim,
+/// so the switch cannot pretend to have done something.
+fn summarize_hdr_write(results: &[HdrWriteResult]) -> HardwareResult<HdrWriteSummary> {
+    let mut summary = HdrWriteSummary::default();
+    for result in results {
+        if !result.supported {
+            summary.skipped += 1;
+            continue;
+        }
+        summary.supported += 1;
+        match result.rc {
+            Some(0) => summary.applied += 1,
+            Some(_) => summary.failed += 1,
+            None => {}
+        }
+    }
+    if summary.supported == 0 {
+        return Err(HardwareError::NotSupported(
+            "no connected display supports HDR (advanced color) — nothing to change".to_string(),
+        ));
+    }
+    if summary.applied == 0 {
+        return Err(HardwareError::Display(format!(
+            "HDR could not be changed on any of the {} display(s) that support it",
+            summary.supported
+        )));
+    }
+    Ok(summary)
+}
+
+/// Enable or disable HDR (Advanced Color) on the displays that support it.
 ///
 /// Uses `DisplayConfigSetDeviceInfo` — operates on the current user's
 /// interactive session and does NOT require administrator privileges.
+///
+/// Only paths whose `advancedColorSupported` bit is set are written; the rest
+/// are left alone. One `info` line records what happened per display, because
+/// this path used to be completely silent (audit §5: no way to prove HDR was
+/// ever toggled).
 fn set_hdr_ccd(enabled: bool) -> HardwareResult<()> {
     #[cfg(windows)]
-    unsafe {
-        // SAFETY: Same as get_hdr_state — paths are valid CCD topology data.
-        // DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE is correctly initialized with
-        // the enableAdvancedColor bit set. DisplayConfigSetDeviceInfo only reads the
-        // struct during the call and does not retain the pointer.
-        let (np, _nm, paths, _modes) =
-            query_display_config_retry().context("query display config")?;
-        let mut last_err = 0i32;
-        for path in paths.iter().take(np as usize) {
+    {
+        let paths = ccd_paths()?;
+        let mut results = Vec::with_capacity(paths.len());
+        for path in &paths {
+            // SAFETY: adapter id / target id come from a live CCD path, and the
+            // SET struct's header points at its own base address.
+            let supported = matches!(
+                advanced_color_info(path.adapter_id, path.target_id),
+                Some((true, _))
+            );
+            if !supported {
+                results.push(HdrWriteResult {
+                    device: path.gdi_device.clone(),
+                    supported: false,
+                    rc: None,
+                });
+                continue;
+            }
             let mut state = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE {
                 header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                     r#type: DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
                     size: std::mem::size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32,
-                    adapterId: path.targetInfo.adapterId,
-                    id: path.targetInfo.id,
+                    adapterId: path.adapter_id,
+                    id: path.target_id,
                 },
                 ..Default::default()
             };
             // bit 0 = enableAdvancedColor
             state.Anonymous.value = enabled as u32;
-            let rc = DisplayConfigSetDeviceInfo(&state.header as *const _);
-            if rc != 0 {
-                last_err = rc;
-            }
+            // SAFETY: the struct is initialised above and only read during the call.
+            let rc = unsafe { DisplayConfigSetDeviceInfo(&state.header as *const _) };
+            results.push(HdrWriteResult {
+                device: path.gdi_device.clone(),
+                supported: true,
+                rc: Some(rc),
+            });
         }
-        if last_err != 0 {
-            return Err(HardwareError::Display(format!(
-                "DisplayConfigSetDeviceInfo failed: {last_err:#x}"
-            )));
+        let summary = summarize_hdr_write(&results)?;
+        let per_path: Vec<String> = results
+            .iter()
+            .map(|r| format!("{}={}", r.device, hdr_result_label(r)))
+            .collect();
+        log::info!(
+            "set_hdr({enabled}) → supported={} applied={} failed={} skipped={} [{}]",
+            summary.supported,
+            summary.applied,
+            summary.failed,
+            summary.skipped,
+            per_path.join(", ")
+        );
+        if summary.failed > 0 {
+            log::warn!(
+                "set_hdr({enabled}): {} display(s) refused the change",
+                summary.failed
+            );
         }
+        Ok(())
     }
     #[cfg(not(windows))]
     {
         log::info!("set_hdr({enabled}) — stub on non-Windows");
+        Ok(())
     }
-    Ok(())
 }
 
 // ── Intel PSR2 DRRS (Display Refresh Rate Switching) ─────────────────────────
@@ -2638,6 +2887,107 @@ pub fn get_intel_drrs() -> bool {
     true // default: assume enabled when registry is unreadable
 }
 
+// ── PSR2 DRRS: "applied — effective after reboot" ────────────────────────────
+//
+// The registry value is read by the Intel driver when it initialises the panel,
+// so a write has NO observable effect until the next boot: Windows keeps
+// reporting the configured Hz, and there is no API that exposes the driver's
+// actual switching state. Reading Psr2DrrsEnable back therefore proves only that
+// the *intent* was stored — the audit found exactly that: reg=1, zero
+// observable effect, reboot required.
+//
+// To stop the UI from claiming "active", the timestamp of the write is persisted
+// and compared with the current boot time: while the write belongs to this boot
+// session the toggle reads "applied — takes effect after reboot". After a reboot
+// the same file answers "not pending" and the value in the registry is what the
+// driver loaded at start-up.
+
+const DRRS_STATE_FILE: &str = "psr2_drrs.json";
+
+/// Clock skew allowed between the write and the boot-time estimate (both derive
+/// from the wall clock, so a NTP correction must not flip the flag).
+const DRRS_CLOCK_SLACK_MS: u64 = 60_000;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DrrsState {
+    /// Unix ms at which the registry value was written.
+    applied_at_ms: u64,
+}
+
+/// `%LOCALAPPDATA%\MiControl\psr2_drrs.json`.
+///
+/// Tests override this via `MICONTROL_DRRS_STATE_PATH` so they never touch the
+/// user's real state.
+fn drrs_state_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("MICONTROL_DRRS_STATE_PATH") {
+        return std::path::PathBuf::from(path);
+    }
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base)
+        .join("MiControl")
+        .join(DRRS_STATE_FILE)
+}
+
+#[cfg(windows)]
+fn boot_time_ms() -> Option<u64> {
+    // SAFETY: GetTickCount64 is a pure read of the system tick counter.
+    let uptime_ms = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    Some(now_ms().saturating_sub(uptime_ms))
+}
+
+#[cfg(not(windows))]
+fn boot_time_ms() -> Option<u64> {
+    None
+}
+
+/// True when a DRRS write happened during the current boot session.
+///
+/// Pure so the boundary is unit-testable without touching the clock: a write
+/// at or after the boot instant is still waiting for the driver to reload.
+fn drrs_pending_reboot(applied_at_ms: Option<u64>, boot_time_ms: Option<u64>) -> bool {
+    match (applied_at_ms, boot_time_ms) {
+        (Some(applied), Some(boot)) => applied >= boot.saturating_sub(DRRS_CLOCK_SLACK_MS),
+        // Unknown timestamps: do not invent a state.
+        _ => false,
+    }
+}
+
+fn read_drrs_state() -> Option<DrrsState> {
+    let raw = std::fs::read_to_string(drrs_state_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Record that the PSR2 DRRS registry value was just written.
+///
+/// Called from the (unelevated) app process after the elevated bridge succeeds,
+/// because the SYSTEM helper's `LOCALAPPDATA` is not the user's.
+pub fn mark_drrs_applied() {
+    let path = drrs_state_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let state = DrrsState {
+        applied_at_ms: now_ms(),
+    };
+    match serde_json::to_string(&state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::warn!(
+                    "[drrs] could not persist applied state to {}: {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => log::warn!("[drrs] could not serialise applied state: {e}"),
+    }
+}
+
+/// True while the DRRS value written this session has not been loaded by the
+/// driver yet (i.e. a reboot is still required for it to take effect).
+pub fn drrs_pending_reboot_now() -> bool {
+    drrs_pending_reboot(read_drrs_state().map(|s| s.applied_at_ms), boot_time_ms())
+}
+
 /// Write Intel PSR2 DRRS state to the Arc driver registry key.
 /// Requires an elevated (admin) process — called from elevated.rs.
 /// Changes take effect after the display driver restarts or system reboots.
@@ -2655,6 +3005,13 @@ pub fn set_intel_drrs(enabled: bool) -> HardwareResult<()> {
         })?;
         key.write_u32(DRRS_REG_VALUE, enabled as u32)
             .map_err(|e| HardwareError::Registry(format!("set Psr2DrrsEnable: {e}")))?;
+        // The registry is the only observable surface: say so once, with the
+        // caveat, so a log reader does not mistake this for a live effect.
+        log::info!(
+            "[drrs] Psr2DrrsEnable={} written to {path} — applied in the registry, \
+             effective only after a reboot/driver restart (not observable by the OS)",
+            enabled as u32
+        );
     }
     Ok(())
 }
@@ -2794,78 +3151,56 @@ fn is_embedded_output_technology(
     )
 }
 
-/// GDI device names (`\\.\DISPLAYn`) whose CCD target is an embedded panel.
+/// CCD paths keyed by GDI device name.
 ///
-/// Best effort: if the CCD query fails (or the machine has no embedded output)
-/// the set is empty and [`select_refresh_target`] falls back to the GDI primary.
+/// Joins CCD metadata (monitor friendly name, embedded-panel flag) onto the GDI
+/// enumeration. Best effort: if the CCD query fails the map is empty and
+/// [`select_refresh_target`] falls back to the GDI primary.
 #[cfg(windows)]
-unsafe fn internal_gdi_devices() -> std::collections::HashSet<String> {
-    use windows::Win32::Devices::Display::{
-        DisplayConfigGetDeviceInfo, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-        DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    };
-
-    let mut internal = std::collections::HashSet::new();
-    // SAFETY: paths come from a successful QueryDisplayConfig; the header of
-    // each request struct points at its own base address and the struct
-    // outlives the call (DisplayConfigGetDeviceInfo does not retain it).
-    let Ok((np, _nm, paths, _modes)) = query_display_config_retry() else {
-        return internal;
-    };
-    for path in paths.iter().take(np as usize) {
-        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
-            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
-                adapterId: path.sourceInfo.adapterId,
-                id: path.sourceInfo.id,
-            },
-            ..Default::default()
-        };
-        if DisplayConfigGetDeviceInfo(&mut source.header as *mut _) != 0 {
-            continue;
-        }
-        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
-            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-                size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
-                adapterId: path.targetInfo.adapterId,
-                id: path.targetInfo.id,
-            },
-            ..Default::default()
-        };
-        if DisplayConfigGetDeviceInfo(&mut target.header as *mut _) != 0 {
-            continue;
-        }
-        if is_embedded_output_technology(target.outputTechnology) {
-            internal.insert(wide_to_string(&source.viewGdiDeviceName));
-        }
-    }
-    internal
+fn ccd_devices_by_gdi_name() -> std::collections::HashMap<String, CcdPath> {
+    ccd_paths()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| (path.gdi_device.clone(), path))
+        .collect()
 }
 
-/// Enumerate the attached display devices with their current and supported
-/// refresh rates at the current resolution.
+/// One display device attached to the desktop, as GDI sees it.
+///
+/// This is the single per-device enumeration behind the colour tab, the
+/// refresh-rate control and the calibration-wizard target — replacing the old
+/// `for i in 0..=7` that invented eight displays (audit 2.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachedDisplayDevice {
+    /// GDI device name (`DISPLAY1` style, with the `\\.\` prefix).
+    pub device: String,
+    /// Adapter / monitor description, for display only.
+    pub label: String,
+    /// CCD reports an embedded output (laptop panel).
+    pub is_internal: bool,
+    /// GDI primary — what `EnumDisplaySettingsW(NULL)` and `dccw.exe` mean.
+    pub is_primary: bool,
+}
+
+/// Every display device attached to the desktop, in GDI order.
+///
+/// Only devices Windows says are attached are returned, so a machine with three
+/// monitors yields three rows. The mirroring pseudo-driver is skipped (it has no
+/// modes and no panel of its own).
 #[cfg(windows)]
-fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
-    use std::collections::HashSet;
+fn enumerate_gdi_devices() -> Vec<AttachedDisplayDevice> {
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
-        EnumDisplayDevicesW, EnumDisplaySettingsExW, DEVMODEW, DISPLAY_DEVICEW,
-        DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_MIRRORING_DRIVER,
-        DISPLAY_DEVICE_PRIMARY_DEVICE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
-        ENUM_DISPLAY_SETTINGS_MODE,
+        EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
+        DISPLAY_DEVICE_MIRRORING_DRIVER, DISPLAY_DEVICE_PRIMARY_DEVICE,
     };
 
-    // SAFETY: every struct is a POD with `cb`/`dmSize` set; the API calls write
-    // into them and do not retain the pointers. `dev_name` is copied out of
-    // `DISPLAY_DEVICEW` and stays alive (NUL-terminated) for the calls that use
-    // it as a PCWSTR.
-    let internal = unsafe { internal_gdi_devices() };
-    let mut out: Vec<DisplayRefreshModes> = Vec::new();
+    let ccd = ccd_devices_by_gdi_name();
+    let mut out = Vec::new();
     let mut idx = 0u32;
     loop {
+        // SAFETY: POD struct with `cb` set; EnumDisplayDevicesW writes into it
+        // and does not retain the pointer.
         let mut dd = DISPLAY_DEVICEW {
             cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
             ..Default::default()
@@ -2877,13 +3212,64 @@ fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
         if dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == 0 {
             continue;
         }
-        // The mirroring driver is a pseudo-device: it has no modes of its own.
         if dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER != 0 {
             continue;
         }
-        let dev_name = dd.DeviceName;
-        let name = PCWSTR::from_raw(dev_name.as_ptr());
+        let device = wide_to_string(&dd.DeviceName);
+        let path = ccd.get(&device);
+        // Prefer the monitor name from CCD: `DISPLAY_DEVICEW.DeviceString` is the
+        // *adapter* ("Intel(R) Arc(TM) B390 GPU") on this machine, which would
+        // label every card identically.
+        let ccd_label = path.map(|p| p.label.clone()).unwrap_or_default();
+        out.push(AttachedDisplayDevice {
+            is_internal: path.is_some_and(|p| p.is_embedded),
+            is_primary: dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0,
+            label: if ccd_label.is_empty() {
+                wide_to_string(&dd.DeviceString)
+            } else {
+                ccd_label
+            },
+            device,
+        });
+    }
+    out
+}
 
+/// Every display device attached to the desktop (empty on non-Windows).
+pub(crate) fn attached_display_devices() -> Vec<AttachedDisplayDevice> {
+    #[cfg(windows)]
+    {
+        enumerate_gdi_devices()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Enumerate the attached display devices with their current and supported
+/// refresh rates at the current resolution.
+#[cfg(windows)]
+fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
+    use std::collections::HashSet;
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplaySettingsExW, DEVMODEW, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
+        ENUM_DISPLAY_SETTINGS_MODE,
+    };
+
+    let mut out: Vec<DisplayRefreshModes> = Vec::new();
+    for dev in enumerate_gdi_devices() {
+        // NUL-terminated copy: the PCWSTR must outlive every call below.
+        let device: Vec<u16> = dev
+            .device
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let name = PCWSTR::from_raw(device.as_ptr());
+
+        // SAFETY: DEVMODEW is a POD with `dmSize` set; the API writes into it
+        // and does not retain the pointer. `name` outlives both calls.
         let mut cur = DEVMODEW {
             dmSize: std::mem::size_of::<DEVMODEW>() as u16,
             ..Default::default()
@@ -2938,12 +3324,11 @@ fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
             rates.push(current_hz);
         }
 
-        let device = wide_to_string(&dev_name);
         out.push(DisplayRefreshModes {
-            is_internal: internal.contains(&device),
-            is_primary: dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0,
-            label: wide_to_string(&dd.DeviceString),
-            device,
+            is_internal: dev.is_internal,
+            is_primary: dev.is_primary,
+            label: dev.label,
+            device: dev.device,
             current_hz,
             rates,
         });
@@ -3914,5 +4299,136 @@ mod tests {
                 target.device
             );
         }
+    }
+
+    // ── HDR: check advanced-color support before writing (audit 2.5) ─────────
+
+    fn hdr_path(device: &str, supported: bool, rc: Option<i32>) -> HdrWriteResult {
+        HdrWriteResult {
+            device: device.to_string(),
+            supported,
+            rc,
+        }
+    }
+
+    #[test]
+    fn hdr_write_is_refused_when_no_display_supports_it() {
+        let results = [
+            hdr_path("DISPLAY1", false, None),
+            hdr_path("DISPLAY2", false, None),
+        ];
+        let err = summarize_hdr_write(&results).unwrap_err();
+        assert!(
+            matches!(&err, HardwareError::NotSupported(_)),
+            "expected NotSupported, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("no connected display supports HDR"),
+            "message must name the reason: {err}"
+        );
+    }
+
+    #[test]
+    fn hdr_write_succeeds_when_one_display_of_three_accepts_it() {
+        // The audit's machine: internal panel + two monitors, only one path
+        // supports advanced color. The old code returned Err because the other
+        // two failed, so the UI rolled back a change the panel had applied.
+        let results = [
+            hdr_path("DISPLAY1", true, Some(0)),
+            hdr_path("DISPLAY2", false, None),
+            hdr_path("DISPLAY3", false, None),
+        ];
+        let summary = summarize_hdr_write(&results).expect("one supporting display is enough");
+        assert_eq!(summary.supported, 1);
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.skipped, 2);
+        assert_eq!(summary.failed, 0);
+    }
+
+    #[test]
+    fn hdr_write_reports_failure_only_when_every_supported_display_refused() {
+        let denied = 0x8007_0005u32 as i32; // E_ACCESSDENIED
+        let mixed = [
+            hdr_path("DISPLAY1", true, Some(0)),
+            hdr_path("DISPLAY2", true, Some(denied)),
+        ];
+        let summary = summarize_hdr_write(&mixed).expect("one display was changed");
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.failed, 1);
+
+        let all_failed = [hdr_path("DISPLAY1", true, Some(denied))];
+        let err = summarize_hdr_write(&all_failed).unwrap_err();
+        assert!(matches!(&err, HardwareError::Display(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn hdr_log_labels_distinguish_skipped_from_failed() {
+        assert_eq!(hdr_result_label(&hdr_path("D", false, None)), "unsupported");
+        assert_eq!(hdr_result_label(&hdr_path("D", true, Some(0))), "ok");
+        assert_eq!(
+            hdr_result_label(&hdr_path("D", true, Some(0x8007_0005u32 as i32))),
+            "failed"
+        );
+    }
+
+    /// Read-only: one HDR entry per active CCD path, each joined to a GDI
+    /// device name. Never writes a state. Skips silently on a headless host.
+    #[test]
+    fn live_hdr_enumeration_is_per_display() {
+        let devices = attached_display_devices();
+        let hdr = hdr_displays();
+        println!(
+            "attached={} ccd_paths={} hdr_supported_any={}",
+            devices.len(),
+            hdr.len(),
+            hdr.iter().any(|d| d.supported)
+        );
+        for d in &hdr {
+            println!(
+                "  {} '{}' supported={} enabled={}",
+                d.device, d.label, d.supported, d.enabled
+            );
+        }
+        if devices.is_empty() {
+            return; // headless CI runner
+        }
+        assert!(
+            !hdr.is_empty(),
+            "CCD returned no path for {} attached display(s)",
+            devices.len()
+        );
+        for d in &hdr {
+            assert!(
+                d.device.contains("DISPLAY"),
+                "CCD path is not joined to a GDI device: {d:?}"
+            );
+        }
+        // No duplicate devices: the aggregate flag must not be inflated.
+        let mut names: Vec<&str> = devices.iter().map(|d| d.device.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), devices.len(), "duplicate GDI devices");
+    }
+
+    // ── PSR2 DRRS: "applied, effective after reboot" (audit 2.8) ────────────
+
+    #[test]
+    fn drrs_write_is_pending_until_the_next_boot() {
+        let boot = 10_000_000u64;
+        // Written ten minutes into this boot: the driver has not reloaded it.
+        assert!(drrs_pending_reboot(Some(boot + 600_000), Some(boot)));
+        // Written just before the boot-time estimate (wall-clock noise).
+        assert!(drrs_pending_reboot(Some(boot - 200), Some(boot)));
+    }
+
+    #[test]
+    fn drrs_write_stops_pending_after_a_reboot() {
+        let boot = 10_000_000u64;
+        // Written two hours before this boot: the driver loaded it at start-up.
+        assert!(!drrs_pending_reboot(Some(boot - 7_200_000), Some(boot)));
+        // Unknown timestamps never invent a state.
+        assert!(!drrs_pending_reboot(None, Some(boot)));
+        assert!(!drrs_pending_reboot(Some(boot + 1), None));
     }
 }

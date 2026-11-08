@@ -96,9 +96,25 @@ export interface AiBrightnessConfig {
   mode: 'curve' | 'smart';
 }
 
+/** Advanced-color (HDR) state of one connected display. */
+export interface HdrDisplayState {
+  /** GDI device name, e.g. `\\.\DISPLAY1`. */
+  device: string;
+  /** Monitor friendly name when Windows exposes one. */
+  label: string;
+  /** `advancedColorSupported` — the display can do HDR / wide colour gamut. */
+  supported: boolean;
+  /** `advancedColorEnabled` — HDR is currently on for this display. */
+  enabled: boolean;
+}
+
 export interface DisplayInfo {
   brightness: number;
   hdr_enabled: boolean;
+  /** At least one connected display reports HDR support; the toggle is disabled otherwise. */
+  hdr_supported?: boolean;
+  /** Per-display HDR state, so "HDR enabled" can say which monitor it means. */
+  hdr_displays?: HdrDisplayState[];
   refresh_rate_hz: number;
   /** All Hz values supported at the current resolution. */
   available_refresh_rates: number[];
@@ -106,6 +122,12 @@ export interface DisplayInfo {
   dynamic_refresh_rate_capable: boolean;
   /** Intel PSR2 DRRS — driver-level automatic 60↔120 Hz switching. */
   adaptive_refresh_rate: boolean;
+  /**
+   * The DRRS value was written during this boot: the registry holds the new
+   * intent but the driver only loads it on restart. There is no API to observe
+   * the switching, so this is the only honest state.
+   */
+  adaptive_refresh_rate_pending_reboot?: boolean;
   ai_brightness: boolean;
   ai_brightness_config: AiBrightnessConfig;
   /** Current ambient illuminance from the light sensor (lux). Null when unavailable. */

@@ -9,6 +9,9 @@
 //! Uses raw FFI to `mscms.dll` since the `windows` crate 0.58 does not
 //! expose `Win32_Graphics_ICM`.
 
+use crate::hw::display::AttachedDisplayDevice;
+#[cfg(windows)]
+use crate::hw::display::{attached_display_devices, HdrDisplayState};
 use crate::hw::errors::{HardwareError, HardwareResult};
 use serde::{Deserialize, Serialize};
 
@@ -18,12 +21,54 @@ use serde::{Deserialize, Serialize};
 pub struct ColorProfileInfo {
     /// Display device name (e.g. "\\\\.\\DISPLAY1")
     pub device_name: String,
+    /// Monitor / adapter description, so the card is not just "Displays N".
+    #[serde(default)]
+    pub label: String,
     /// Currently active ICC profile path (if any)
     pub current_profile: Option<String>,
     /// All installed ICC profiles for this display
     pub installed_profiles: Vec<String>,
-    /// Whether hardware calibration is available
-    pub hardware_calibration: bool,
+    /// The display exposes an advanced-color (HDR / wide colour gamut) pipeline.
+    ///
+    /// This replaces the old hardcoded `hardware_calibration: true`: Windows has
+    /// no API for "monitor has an internal LUT", and while HDR is on the
+    /// compositor bypasses ICC/gamma, so claiming hardware calibration for every
+    /// screen was simply false. What is knowable per display is the advanced
+    /// color capability, which is what decides whether a calibration is visible.
+    #[serde(default)]
+    pub advanced_color_supported: bool,
+    /// HDR is currently on for this display (calibration gammas are ignored).
+    #[serde(default)]
+    pub hdr_enabled: bool,
+}
+
+/// Why the calibration wizard cannot be used right now.
+///
+/// Serialised as a stable code (`no-display`, `hdr-enabled`, `already-open`) so
+/// the webview can translate it instead of echoing an English backend string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WizardBlock {
+    /// Nothing is attached to the desktop — there is nothing to calibrate.
+    NoDisplay,
+    /// HDR is on: Windows ignores the calibration gamma ramp.
+    HdrEnabled,
+    /// A wizard instance is already running (our LUT is released meanwhile).
+    AlreadyOpen,
+}
+
+impl WizardBlock {
+    /// English sentence for error paths and logs (the UI maps the code itself).
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NoDisplay => "no display is attached to the desktop — nothing to calibrate",
+            Self::HdrEnabled => {
+                "HDR (advanced color) is on — Windows ignores the calibration gamma ramp while \
+                 HDR is enabled; turn HDR off first"
+            }
+            Self::AlreadyOpen => "the color calibration wizard is already open",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +79,12 @@ pub struct ColorCalibrationStatus {
     pub eye_protection_active: bool,
     /// Current gamma ramp intensity (0-100, 0 = off)
     pub gamma_intensity: u32,
+    /// Display `dccw.exe` will calibrate (the GDI primary), when there is one.
+    #[serde(default)]
+    pub wizard_target: Option<String>,
+    /// Set when the wizard must stay disabled, with a translatable reason code.
+    #[serde(default)]
+    pub wizard_block: Option<WizardBlock>,
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -42,14 +93,26 @@ pub struct ColorCalibrationStatus {
 pub fn get_color_status() -> HardwareResult<ColorCalibrationStatus> {
     #[cfg(windows)]
     {
-        let displays = enumerate_display_profiles();
+        // One read-only enumeration of *real* displays (the colour tab used to
+        // list DISPLAY1..DISPLAY8 unconditionally) plus one CCD HDR probe, since
+        // Windows ignores the calibration gamma ramp while HDR is on.
+        let devices = attached_display_devices();
+        let hdr = crate::hw::display::hdr_displays();
+        let displays = profiles_for_devices(&devices, &hdr);
         let eye_protection_active = check_eye_protection();
         let gamma_intensity = read_gamma_intensity();
+        let hdr_on = hdr.iter().any(|d| d.enabled);
 
         Ok(ColorCalibrationStatus {
             displays,
             eye_protection_active,
             gamma_intensity,
+            wizard_target: wizard_target(&devices).map(|d| d.device.clone()),
+            wizard_block: wizard_block(
+                &devices,
+                hdr_on,
+                crate::hw::display::is_calibration_in_progress(),
+            ),
         })
     }
     #[cfg(not(windows))]
@@ -218,10 +281,27 @@ pub fn launch_color_calibration_wizard() -> HardwareResult<()> {
     {
         use std::os::windows::process::CommandExt;
 
+        // Refuse instead of opening a wizard whose calibration Windows would
+        // throw away (HDR on) or that has nothing to calibrate. The UI disables
+        // the button with the same reason; this guard covers races and any
+        // other caller.
+        let devices = attached_display_devices();
+        let hdr_on = crate::hw::display::hdr_displays().iter().any(|d| d.enabled);
+        if let Some(block) = wizard_block(
+            &devices,
+            hdr_on,
+            crate::hw::display::is_calibration_in_progress(),
+        ) {
+            log::info!("[color] calibration wizard refused: {block:?}");
+            return Err(HardwareError::NotSupported(block.message().to_string()));
+        }
+
         let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
         let dccw = format!("{}\\System32\\dccw.exe", system_root);
 
-        // Remember whether eye protection was on so we can restore it.
+        // Remember whether eye protection was on so we can restore it — with
+        // its intensity: the old code dropped it (`let _ = eye_intensity`) and
+        // the user's setting fell back to the default 50 after every wizard.
         let eye_was_on = crate::hw::eye_protection::get_eye_protection()
             .map(|s| s.enabled)
             .unwrap_or(false);
@@ -241,21 +321,27 @@ pub fn launch_color_calibration_wizard() -> HardwareResult<()> {
             .creation_flags(0x0800_0000)
             .spawn();
 
+        let target = wizard_target(&devices)
+            .map(|d| format!("{} ({})", d.device, d.label))
+            .unwrap_or_else(|| "unknown".to_string());
+        log::info!(
+            "[color] calibration wizard launched — dccw calibrates the primary display {target}"
+        );
+
         // Spawn a watcher thread that waits for the wizard to exit, then
         // restores our display state. Runs detached from the caller.
-        let _ = eye_intensity;
         std::thread::spawn(move || {
             let mut child = match spawned {
                 Ok(c) => c,
                 Err(e) => {
-                    log::warn!("Failed to launch color calibration wizard: {e}");
-                    restore_after_calibration(eye_was_on, None);
+                    log::warn!("[color] failed to launch the calibration wizard: {e}");
+                    restore_after_calibration(eye_was_on, eye_intensity);
                     return;
                 }
             };
-            // Block this thread until the wizard process exits (up to 10 min).
+            // Block this thread until the wizard process exits.
             let _ = child.wait();
-            restore_after_calibration(eye_was_on, None);
+            restore_after_calibration(eye_was_on, eye_intensity);
         });
 
         Ok(())
@@ -266,12 +352,44 @@ pub fn launch_color_calibration_wizard() -> HardwareResult<()> {
     ))
 }
 
-/// Clear the calibration-in-progress flag and restore eye protection.
+/// Why the wizard must stay disabled, if it must.
+///
+/// Pure — the three inputs are the only things that decide it, so the gating is
+/// testable without a display. A disabled button with a reason replaces the old
+/// behaviour where the button was always enabled and the action silently did
+/// nothing useful (audit 2.9: 0 executions in 73 h).
+fn wizard_block(
+    devices: &[AttachedDisplayDevice],
+    hdr_enabled: bool,
+    already_open: bool,
+) -> Option<WizardBlock> {
+    if devices.is_empty() {
+        return Some(WizardBlock::NoDisplay);
+    }
+    if already_open {
+        return Some(WizardBlock::AlreadyOpen);
+    }
+    if hdr_enabled {
+        return Some(WizardBlock::HdrEnabled);
+    }
+    None
+}
+
+/// Display `dccw.exe` calibrates: the GDI primary, else the first attached one.
+fn wizard_target(devices: &[AttachedDisplayDevice]) -> Option<&AttachedDisplayDevice> {
+    devices
+        .iter()
+        .find(|d| d.is_primary)
+        .or_else(|| devices.first())
+}
+
+/// Clear the calibration-in-progress flag and restore eye protection with the
+/// intensity it had before the wizard ran.
 #[cfg(windows)]
-fn restore_after_calibration(eye_was_on: bool, _intensity: Option<u8>) {
+fn restore_after_calibration(eye_was_on: bool, intensity: Option<u8>) {
     crate::hw::display::CALIBRATION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
     if eye_was_on {
-        let _ = crate::hw::eye_protection::set_eye_protection(true, None);
+        let _ = crate::hw::eye_protection::set_eye_protection(true, intensity);
     }
     log::info!("Color calibration wizard closed — display control restored");
 }
@@ -320,32 +438,36 @@ fn get_srgb_profile_path() -> HardwareResult<String> {
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
-fn enumerate_display_profiles() -> Vec<ColorProfileInfo> {
-    let mut displays = Vec::new();
-
-    for i in 0..=7 {
-        let device_name = format!(r"\\.\DISPLAY{}", i + 1);
-        let current_profile = get_display_icc_profile(&device_name);
-        let installed_profiles = get_installed_profiles_for_display(&device_name);
-
-        displays.push(ColorProfileInfo {
-            device_name: device_name.clone(),
-            current_profile,
-            installed_profiles,
-            hardware_calibration: true,
-        });
+fn profiles_for_devices(
+    devices: &[AttachedDisplayDevice],
+    hdr: &[HdrDisplayState],
+) -> Vec<ColorProfileInfo> {
+    if devices.is_empty() {
+        log::warn!("[color] no display attached to the desktop — colour profile list is empty");
+        return Vec::new();
     }
 
-    if displays.is_empty() {
-        displays.push(ColorProfileInfo {
-            device_name: r"\\.\DISPLAY1".to_string(),
-            current_profile: None,
-            installed_profiles: vec![],
-            hardware_calibration: false,
-        });
-    }
-
-    displays
+    devices
+        .iter()
+        .map(|dev| {
+            let hdr_state = hdr.iter().find(|h| h.device == dev.device);
+            ColorProfileInfo {
+                device_name: dev.device.clone(),
+                // Only the CCD monitor name is a *monitor* name; the GDI
+                // DeviceString is the adapter ("Intel(R) Arc(TM) B390 GPU") and
+                // would label every card identically, so it is dropped here and
+                // the UI falls back to "Displays N".
+                label: hdr_state
+                    .map(|h| h.label.clone())
+                    .filter(|label| !label.is_empty())
+                    .unwrap_or_default(),
+                current_profile: get_display_icc_profile(&dev.device),
+                installed_profiles: get_installed_profiles_for_display(&dev.device),
+                advanced_color_supported: hdr_state.is_some_and(|h| h.supported),
+                hdr_enabled: hdr_state.is_some_and(|h| h.enabled),
+            }
+        })
+        .collect()
 }
 
 #[cfg(windows)]
@@ -556,9 +678,201 @@ fn read_gamma_intensity() -> u32 {
 mod tests {
     use super::*;
 
+    fn device(name: &str, primary: bool, internal: bool) -> AttachedDisplayDevice {
+        AttachedDisplayDevice {
+            device: name.to_string(),
+            label: format!("{name} label"),
+            is_internal: internal,
+            is_primary: primary,
+        }
+    }
+
     #[test]
     fn test_get_color_status_does_not_panic() {
         let _ = get_color_status();
+    }
+
+    // ── calibration wizard gating (audit 2.9: the button always looked usable
+    //    and was never used; with HDR on the calibration is discarded by the
+    //    compositor) ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn wizard_is_blocked_without_an_attached_display() {
+        assert_eq!(
+            wizard_block(&[], false, false),
+            Some(WizardBlock::NoDisplay)
+        );
+        assert_eq!(
+            wizard_block(&[], true, false),
+            Some(WizardBlock::NoDisplay),
+            "no display outranks the HDR reason: there is nothing to calibrate"
+        );
+    }
+
+    #[test]
+    fn wizard_is_blocked_while_hdr_is_on() {
+        let devices = [device("DISPLAY1", true, true)];
+        assert_eq!(
+            wizard_block(&devices, true, false),
+            Some(WizardBlock::HdrEnabled)
+        );
+        // ... and the reason survives into the error the command returns.
+        let msg = wizard_block(&devices, true, false).unwrap().message();
+        assert!(msg.contains("HDR"), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn wizard_is_blocked_while_an_instance_is_running() {
+        let devices = [device("DISPLAY1", true, true)];
+        assert_eq!(
+            wizard_block(&devices, false, true),
+            Some(WizardBlock::AlreadyOpen)
+        );
+    }
+
+    #[test]
+    fn wizard_is_allowed_on_a_plain_sdr_display() {
+        let devices = [
+            device("DISPLAY1", false, true),
+            device("DISPLAY3", true, false),
+        ];
+        assert_eq!(wizard_block(&devices, false, false), None);
+        // dccw calibrates the monitor its window is on, i.e. the GDI primary.
+        assert_eq!(
+            wizard_target(&devices).map(|d| d.device.as_str()),
+            Some("DISPLAY3")
+        );
+    }
+
+    #[test]
+    fn wizard_target_falls_back_to_the_first_display() {
+        let devices = [
+            device("DISPLAY1", false, true),
+            device("DISPLAY2", false, false),
+        ];
+        assert_eq!(
+            wizard_target(&devices).map(|d| d.device.as_str()),
+            Some("DISPLAY1")
+        );
+        assert!(wizard_target(&[]).is_none());
+    }
+
+    #[test]
+    fn wizard_block_serialises_as_a_stable_code() {
+        // The webview switches on these exact strings.
+        let codes: Vec<String> = [
+            WizardBlock::NoDisplay,
+            WizardBlock::HdrEnabled,
+            WizardBlock::AlreadyOpen,
+        ]
+        .iter()
+        .map(|b| serde_json::to_string(b).unwrap())
+        .collect();
+        assert_eq!(
+            codes,
+            vec![
+                "\"no-display\"".to_string(),
+                "\"hdr-enabled\"".to_string(),
+                "\"already-open\"".to_string(),
+            ]
+        );
+    }
+
+    // ── per-device enumeration (audit 2.9: the page listed eight hardcoded
+    //    displays when only three existed) ────────────────────────────────────
+
+    #[cfg(windows)]
+    #[test]
+    fn profiles_are_one_per_attached_device_not_eight() {
+        // Registries / DCs for these pseudo devices do not exist, so the ICC
+        // lookups return None — exactly the "no profile loaded" case the UI
+        // must show for a real display without a profile.
+        let devices = [
+            device("MICONTROL_TEST_DISPLAYA", true, true),
+            device("MICONTROL_TEST_DISPLAYB", false, false),
+        ];
+        let hdr = [
+            HdrDisplayState {
+                device: "MICONTROL_TEST_DISPLAYA".to_string(),
+                label: "A".to_string(),
+                supported: true,
+                enabled: false,
+            },
+            HdrDisplayState {
+                device: "MICONTROL_TEST_DISPLAYB".to_string(),
+                label: "B".to_string(),
+                supported: false,
+                enabled: false,
+            },
+        ];
+        let profiles = profiles_for_devices(&devices, &hdr);
+        assert_eq!(
+            profiles.len(),
+            devices.len(),
+            "one card per attached display, never a fixed 0..=7 list"
+        );
+        assert_eq!(profiles[0].device_name, "MICONTROL_TEST_DISPLAYA");
+        // The monitor name comes from CCD, never from the GDI adapter string.
+        assert_eq!(profiles[0].label, "A");
+        assert!(profiles[0].advanced_color_supported);
+        assert!(!profiles[1].advanced_color_supported);
+        assert!(profiles.iter().all(|p| !p.hdr_enabled));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn profile_label_is_empty_without_a_ccd_monitor_name() {
+        // The adapter string must not leak into the card title: three displays
+        // on one GPU would all read "Intel(R) Arc(TM) B390 GPU".
+        let devices = [device("MICONTROL_TEST_DISPLAYC", true, false)];
+        let profiles = profiles_for_devices(&devices, &[]);
+        assert_eq!(profiles.len(), 1);
+        assert!(
+            profiles[0].label.is_empty(),
+            "unexpected label: {:?}",
+            profiles[0].label
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_attached_display_yields_no_phantom_cards() {
+        assert!(profiles_for_devices(&[], &[]).is_empty());
+    }
+
+    /// Read-only smoke test against the live machine: the colour tab must list
+    /// exactly the displays Windows reports (three here), never DISPLAY1..8.
+    #[cfg(windows)]
+    #[test]
+    fn live_color_status_lists_only_attached_displays() {
+        let attached = attached_display_devices();
+        let status = get_color_status().expect("color status");
+        println!(
+            "attached={} listed={} wizard_target={:?} wizard_block={:?}",
+            attached.len(),
+            status.displays.len(),
+            status.wizard_target,
+            status.wizard_block
+        );
+        for d in &status.displays {
+            println!(
+                "  {} '{}' profile={:?} advanced_color={} hdr={}",
+                d.device_name,
+                d.label,
+                d.current_profile,
+                d.advanced_color_supported,
+                d.hdr_enabled
+            );
+        }
+        assert_eq!(
+            status.displays.len(),
+            attached.len(),
+            "one card per attached display (was a fixed 8)"
+        );
+        assert!(status
+            .displays
+            .iter()
+            .all(|d| d.device_name.contains("DISPLAY")));
     }
 
     #[test]

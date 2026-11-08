@@ -9,15 +9,26 @@ import { useToast } from '../../contexts/ToastContext';
 
 interface ColorProfileInfo {
   device_name: string;
+  label?: string;
   current_profile: string | null;
   installed_profiles: string[];
-  hardware_calibration: boolean;
+  /** The display exposes Windows' advanced-color (HDR / WCG) pipeline. */
+  advanced_color_supported?: boolean;
+  /** HDR is on for this display — calibration gammas are ignored meanwhile. */
+  hdr_enabled?: boolean;
 }
+
+/** Stable reason codes returned by the backend for a disabled wizard. */
+type WizardBlock = 'no-display' | 'hdr-enabled' | 'already-open';
 
 interface ColorCalibrationStatus {
   displays: ColorProfileInfo[];
   eye_protection_active: boolean;
   gamma_intensity: number;
+  /** Display dccw.exe calibrates (the GDI primary). */
+  wizard_target?: string | null;
+  /** Set when the wizard must stay disabled. */
+  wizard_block?: WizardBlock | null;
 }
 
 interface EyeProtectionStatus {
@@ -170,6 +181,18 @@ export default function ColorTab() {
     );
   }
 
+  // The wizard is only offered when it can actually do something: dccw.exe
+  // calibrates the primary display, and Windows discards the calibration gamma
+  // while HDR is on. The backend returns a stable code so the reason is
+  // translated here instead of echoing an English error.
+  const wizardBlock = status?.wizard_block ?? null;
+  const wizardBlockReason = (block: WizardBlock) =>
+    block === 'no-display'
+      ? t('color.wizardBlockedNoDisplay')
+      : block === 'hdr-enabled'
+        ? t('color.wizardBlockedHdr')
+        : t('color.wizardBlockedOpen');
+
   return (
     <>
       <PageHeader title={t('color.title')} subtitle={t('color.subtitle')} />
@@ -185,7 +208,12 @@ export default function ColorTab() {
       <div className="card" style={{ marginBottom: 16 }}>
         <h3>{t('color.actions')}</h3>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={handleLaunchWizard}>
+          <button
+            className="btn btn-primary"
+            onClick={handleLaunchWizard}
+            disabled={wizardBlock != null}
+            title={wizardBlock ? wizardBlockReason(wizardBlock) : undefined}
+          >
             🎨 {t('color.launchWizard')}
           </button>
           <button className="btn btn-secondary" onClick={handleOpenSettings}>
@@ -193,7 +221,13 @@ export default function ColorTab() {
           </button>
         </div>
         <p className="text-muted" style={{ marginTop: 8, fontSize: 12 }}>
-          {t('color.launchWizardDesc')}
+          {wizardBlock
+            ? wizardBlockReason(wizardBlock)
+            : status?.wizard_target
+              ? `${t('color.launchWizardDesc')} — ${t('color.wizardTargets', {
+                  device: status.wizard_target,
+                })}`
+              : t('color.launchWizardDesc')}
         </p>
       </div>
 
@@ -240,7 +274,7 @@ export default function ColorTab() {
       {status?.displays.map((display, idx) => (
         <div className="card" key={display.device_name} style={{ marginBottom: 16 }}>
           <h3>
-            {t('color.displays')} {idx + 1}
+            {display.label || `${t('color.displays')} ${idx + 1}`}
             <span className="text-muted" style={{ fontSize: 12, marginLeft: 8 }}>
               {display.device_name}
             </span>
@@ -258,11 +292,15 @@ export default function ColorTab() {
               </span>
             </div>
             <div className="info-row">
-              <span className="info-label">{t('color.hardwareCalibration')}</span>
+              <span className="info-label">{t('color.advancedColor')}</span>
               <span
-                className={`info-value ${display.hardware_calibration ? 'status-ok' : 'text-muted'}`}
+                className={`info-value ${display.advanced_color_supported ? 'status-ok' : 'text-muted'}`}
               >
-                {display.hardware_calibration ? t('color.supported') : t('color.notSupported')}
+                {display.advanced_color_supported
+                  ? display.hdr_enabled
+                    ? t('color.hdrOn')
+                    : t('color.hdrAvailable')
+                  : t('color.notSupported')}
               </span>
             </div>
           </div>
@@ -315,6 +353,16 @@ export default function ColorTab() {
           )}
         </div>
       ))}
+
+      {/* No phantom rows: the backend returns only displays Windows reports as
+          attached, so an empty list means exactly that. */}
+      {status != null && status.displays.length === 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <p className="text-muted" style={{ fontSize: 12 }}>
+            {t('color.noDisplays')}
+          </p>
+        </div>
+      )}
     </>
   );
 }

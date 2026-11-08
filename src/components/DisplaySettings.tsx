@@ -63,6 +63,25 @@ export default function DisplaySettings({
     );
   }
 
+  // HDR is a per-display property in Windows: the toggle is only honest when the
+  // backend positively reports at least one advanced-color display (it refuses
+  // the write otherwise). An empty path list means the topology could not be
+  // read, which is *not* the same as "no display supports HDR".
+  const hdrPaths = display.hdr_displays ?? [];
+  const hdrSupported = display.hdr_supported === true;
+  const hdrKnown = hdrPaths.length > 0;
+  const hdrDesc = !hdrSupported
+    ? hdrKnown
+      ? t('display.hdrNotSupported')
+      : t('display.hdrUnknown')
+    : display.hdr_enabled
+      ? t('display.hdrEnabled')
+      : t('display.hdrDisabled');
+  const hdrSummary = hdrPaths
+    .filter((d) => d.supported)
+    .map((d) => `${d.label || d.device}${d.enabled ? ' ✓' : ''}`)
+    .join(' · ');
+
   return (
     <div className="card">
       <div className="card-title">{t('display.title')}</div>
@@ -105,16 +124,24 @@ export default function DisplaySettings({
       )}
       <ToggleRow
         label={t('display.hdr')}
-        desc={
-          capabilities != null && !capabilities.has_igcl
-            ? t('display.igclNotAvailable')
-            : display.hdr_enabled
-              ? t('display.hdrEnabled')
-              : t('display.hdrDisabled')
-        }
+        desc={hdrDesc}
         checked={display.hdr_enabled}
+        disabled={!hdrSupported}
         onChange={(v) => void handleAsync('HDR', () => onHdrChange(v))}
       />
+      {hdrSupported && hdrPaths.length > 1 && (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--color-text-dim)',
+            marginTop: -8,
+            marginBottom: 12,
+            lineHeight: 1.4,
+          }}
+        >
+          {t('display.hdrPerDisplay', { list: hdrSummary })}
+        </div>
+      )}
       <ToggleRow
         label={t('display.aiAdaptiveBrightness')}
         desc={
@@ -434,11 +461,11 @@ export default function DisplaySettings({
         <ToggleRow
           label="Intel Adaptive Refresh Rate (PSR2 DRRS)"
           desc={
-            display.adaptive_refresh_rate
-              ? `Active — the Intel driver is switching the panel between ~48 Hz at idle and ${Math.max(...(display.available_refresh_rates ?? [120]))} Hz when content is moving. ` +
-                'Windows always reports the configured Hz (e.g. 120 Hz) — this is expected: PSR2 operates below the OS level.'
-              : `Disabled — panel locked at ${display.refresh_rate_hz} Hz. ` +
-                'Note: This is separate from Windows Dynamic Refresh Rate (DRR). PSR2 DRRS switches at the panel hardware level, invisible to Windows.'
+            display.adaptive_refresh_rate_pending_reboot
+              ? `Applied — takes effect after the next reboot. The Intel driver reads Psr2DrrsEnable at start-up; Windows still reports ${display.refresh_rate_hz} Hz and the switching is not observable by software.`
+              : display.adaptive_refresh_rate
+                ? `Enabled in the Intel driver registry. Windows always reports ${display.refresh_rate_hz} Hz — PSR2 switches below the OS, so software cannot verify it.`
+                : `Disabled — the driver registry value is 0. Windows always reports ${display.refresh_rate_hz} Hz; PSR2 is separate from Windows Dynamic Refresh Rate and is not observable by software.`
           }
           checked={display.adaptive_refresh_rate}
           onChange={(v) => {
@@ -447,8 +474,8 @@ export default function DisplaySettings({
                 await onAdaptiveRefreshRateChange(v);
                 addToast({
                   message: v
-                    ? 'PSR2 DRRS enabled. Reboot required. Note: Windows will still report the configured Hz — PSR2 operates below the OS.'
-                    : 'PSR2 DRRS disabled. Reboot required.',
+                    ? 'PSR2 DRRS applied in the driver registry — effective after reboot. Windows will still report the configured Hz.'
+                    : 'PSR2 DRRS disabled in the driver registry — effective after reboot.',
                   type: 'info',
                 });
               } catch (e) {

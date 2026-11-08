@@ -375,14 +375,19 @@ pub async fn set_refresh_rate(hz: u32) -> Result<(), ErrorResponse> {
 #[tauri::command]
 pub async fn set_adaptive_refresh_rate(enabled: bool) -> Result<(), ErrorResponse> {
     // Writes HKLM registry key — requires elevation.
-    // The UI should inform the user that a driver restart / reboot is needed.
+    // The value only reaches the panel on the next boot (the Intel driver reads
+    // it at start-up), and there is no API to observe the switching, so record
+    // the write here (user hive, so the UI can say "applied — takes effect after
+    // reboot" until the machine restarts) instead of pretending it is live.
     elev_bridge::run_elevated(
         "set_adaptive_refresh_rate",
         serde_json::json!({ "enabled": enabled }),
     )
     .await
     .map(|_| ())
-    .map_err(ErrorResponse::from)
+    .map_err(ErrorResponse::from)?;
+    crate::hw::display::mark_drrs_applied();
+    Ok(())
 }
 
 #[tauri::command]

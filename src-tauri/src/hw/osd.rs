@@ -12,6 +12,7 @@
 
 #![allow(non_snake_case)]
 
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::core::w;
@@ -149,7 +150,17 @@ pub fn init() {
     }
 }
 
+/// Last level logged at `info` — the gesture path fires once per slide step, so
+/// only a change is worth a production log line.
+static LAST_LOGGED_BRIGHTNESS: AtomicU8 = AtomicU8::new(u8::MAX);
+/// One-shot guard for the "OSD window was never created" warning.
+static OSD_MISSING_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// Show (or refresh) the brightness OSD.  Safe to call from any thread.
+///
+/// Logs on every *change* of level (`info`) and on every call (`debug`): this
+/// entry point had no instrumentation at all, so the audit could not prove the
+/// OSD ever appeared (audit §2.10 / §5).
 pub fn show_brightness_osd(level: u8) {
     *state().mode.lock().unwrap() = 0;
     *state().level.lock().unwrap() = level;
@@ -159,7 +170,18 @@ pub fn show_brightness_osd(level: u8) {
     }
     let raw = *state().hwnd.lock().unwrap();
     if raw == 0 {
+        if !OSD_MISSING_WARNED.swap(true, Ordering::Relaxed) {
+            log::warn!("[osd] brightness OSD dropped — OSD window was never created");
+        }
         return;
+    }
+    // Logged only once the window exists, so "level=…" really means the overlay
+    // was posted (the audit had 0 `[osd]` lines and no way to tell).
+    let previous = LAST_LOGGED_BRIGHTNESS.swap(level, Ordering::Relaxed);
+    if previous == level {
+        log::debug!("[osd] brightness OSD: level={level} (refresh)");
+    } else {
+        log::info!("[osd] brightness OSD: level={level}");
     }
     let hwnd = HWND(raw as *mut core::ffi::c_void);
     // SAFETY: hwnd was created by CreateWindowExW in run_message_loop and
