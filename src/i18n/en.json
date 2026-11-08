@@ -242,7 +242,9 @@
       "onBattery": "On battery",
       "manual": "Manual (no auto-switch)",
       "currentlyPluggedIn": "Currently plugged in — AC profile active",
-      "currentlyOnBattery": "Currently on battery — DC profile active"
+      "currentlyOnBattery": "Currently on battery — DC profile active",
+      "syncFailed": "Settings not synced to the background service — auto-switch will not run",
+      "lastApplied": "Last automatic switch: {event} → {mode}"
     },
     "osTurboTitle": "OS Turbo",
     "osTurboDesc": "Switch to Best Performance power plan and throttle background processes",

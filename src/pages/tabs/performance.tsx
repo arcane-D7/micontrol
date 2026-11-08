@@ -12,41 +12,27 @@ import {
   type OsTurboMeasuredData,
 } from '../../components/OsTurboMeasured';
 import type { Hardware, AiSettings, PerfDebugInfo } from './shared';
+import type { PowerProfilesController } from '../../hooks/usePowerProfiles';
 
 interface Props {
   hw: Hardware;
   ai: AiSettings;
+  /**
+   * Power-profiles controller owned by the app shell (`MainWindow`).
+   *
+   * The AC/DC transition loop used to live in this component and died with the
+   * tab (`key={activeTab}` remounts). The tab is now a pure subscriber: it
+   * renders the persisted toggle and the backend's last application, and never
+   * owns a poll or an auto-switch effect.
+   */
+  pp: PowerProfilesController;
   onOpenSettings: () => void;
 }
 
-function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
+function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
   const { addToast } = useToast();
   const aiApiKeySet = !!ai.settings.openai_api_key;
   const isAiMode = hw.performanceMode === 'smart' || hw.performanceMode === 'smart_acceleration';
-
-  // ── Auto-switch performance mode on AC ↔ DC transition ───────────────────
-  const autoSwitchRef = useRef(ai.settings.auto_switch_perf);
-  const acModeRef = useRef(ai.settings.perf_mode_ac);
-  const dcModeRef = useRef(ai.settings.perf_mode_dc);
-  autoSwitchRef.current = ai.settings.auto_switch_perf;
-  acModeRef.current = ai.settings.perf_mode_ac;
-  dcModeRef.current = ai.settings.perf_mode_dc;
-
-  const prevPluggedRef = useRef<boolean | null>(null);
-  useEffect(() => {
-    const plugged = hw.battery?.is_plugged ?? null;
-    if (plugged === null) return;
-    if (prevPluggedRef.current === null) {
-      prevPluggedRef.current = plugged;
-      return;
-    }
-    if (prevPluggedRef.current === plugged) return;
-    prevPluggedRef.current = plugged;
-    if (!autoSwitchRef.current) return;
-    const targetMode = plugged ? acModeRef.current : dcModeRef.current;
-    if (targetMode) void hw.setPerformanceMode(targetMode);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hw.battery?.is_plugged]);
 
   // ── Background logger ────────────────────────────────────────────────────
   const fanRef = useRef(hw.fan);
@@ -122,6 +108,27 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
     if (showLogs) void loadLogs();
   }, [showLogs, loadLogs]);
 
+  // The backend reports the mode as its serialized id (`long_battery`, …);
+  // the status line must show the same label as the selects above it.
+  const modeLabel = (mode: string | null | undefined): string => {
+    if (!mode) return '—';
+    const keys: Record<string, string> = {
+      silence: 'performance.modes.silence',
+      long_battery: 'performance.modes.longBattery',
+      balance: 'performance.modes.balance',
+      turbo: 'performance.modes.turbo',
+      decepticon: 'performance.modes.decepticon',
+      overdrive: 'performance.modes.overdrive',
+      overdrive_high: 'performance.modes.overdriveHigh',
+      overdrive_max: 'performance.modes.overdriveMax',
+      smart_adaptive: 'performance.modes.smartAdaptive',
+      smart: 'performance.modes.smart',
+      smart_acceleration: 'performance.modes.smartAcceleration',
+    };
+    const key = keys[mode];
+    return key ? t(key as Parameters<typeof t>[0]) : mode;
+  };
+
   return (
     <>
       <PageHeader title={t('performance.title')} subtitle={t('performance.subtitle')} />
@@ -145,7 +152,7 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
       {/* OS Turbo Card */}
       <OsTurboCard />
 
-      {/* Power Profiles */}
+      {/* Power Profiles — config + backend status, no local poll loop */}
       <div className="card">
         <div
           style={{
@@ -166,14 +173,14 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
           <label className="toggle-switch">
             <input
               type="checkbox"
-              checked={ai.settings.auto_switch_perf}
-              onChange={(e) => ai.updateKey('auto_switch_perf', e.target.checked)}
+              checked={pp.enabled}
+              onChange={(e) => pp.setEnabled(e.target.checked)}
             />
             <span className="toggle-track" />
             <span className="toggle-knob" />
           </label>
         </div>
-        {ai.settings.auto_switch_perf && (
+        {pp.enabled && (
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div
               style={{
@@ -189,10 +196,9 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
               <select
                 className="select-input"
                 style={{ minWidth: 160 }}
-                value={ai.settings.perf_mode_ac ?? ''}
+                value={pp.acMode ?? ''}
                 onChange={(e) =>
-                  ai.updateKey(
-                    'perf_mode_ac',
+                  pp.setAcMode(
                     (e.target.value || null) as
                       import('../../hooks/useHardware').PerformanceMode | null,
                   )
@@ -228,10 +234,9 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
               <select
                 className="select-input"
                 style={{ minWidth: 160 }}
-                value={ai.settings.perf_mode_dc ?? ''}
+                value={pp.dcMode ?? ''}
                 onChange={(e) =>
-                  ai.updateKey(
-                    'perf_mode_dc',
+                  pp.setDcMode(
                     (e.target.value || null) as
                       import('../../hooks/useHardware').PerformanceMode | null,
                   )
@@ -254,10 +259,20 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
               </select>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingTop: 4 }}>
-              {hw.battery?.is_plugged
-                ? `⚡ ${t('performance.powerProfiles.currentlyPluggedIn')}`
-                : `🔋 ${t('performance.powerProfiles.currentlyOnBattery')}`}
+              {pp.status?.last_event
+                ? `⚙ ${t('performance.powerProfiles.lastApplied', {
+                    event: pp.status.last_event,
+                    mode: modeLabel(pp.status.last_mode),
+                  })}${pp.status.last_ok === false ? ` (${pp.status.last_detail ?? 'failed'})` : ''}`
+                : hw.battery?.is_plugged
+                  ? `⚡ ${t('performance.powerProfiles.currentlyPluggedIn')}`
+                  : `🔋 ${t('performance.powerProfiles.currentlyOnBattery')}`}
             </div>
+            {pp.syncError && (
+              <div style={{ fontSize: 11, color: 'var(--error, #f44336)' }}>
+                ⚠ {t('performance.powerProfiles.syncFailed')}
+              </div>
+            )}
           </div>
         )}
       </div>

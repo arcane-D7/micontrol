@@ -38,16 +38,17 @@ use commands::hardware::{
     get_iot_bind_status, get_iot_device_id, get_iot_device_info, get_iot_device_status,
     get_iot_fw_version, get_iot_model, get_iot_region_hex, get_iot_wifi_by_index,
     get_iot_wifi_count, get_iot_wifi_list, get_iot_wifi_status, get_perf_debug,
-    get_performance_mode, get_primary_thermal_zone, get_thermal_zones, hq_change_boot_option,
-    hq_enable_pxe_boot, hq_load_default, hq_s5_rtc_wake_enable, hq_set_performance_mode,
-    hq_set_shipping_country_code, hq_set_wifi_country_code, iot_connect_wifi, iot_delete_wifi_item,
-    iot_empty_wifi_items, iot_notify_ec_event, iot_notify_event, iot_notify_power_event,
-    iot_pipe_available, iot_report_shutting_down, iot_report_suspending, iot_report_windows_ready,
-    iot_reset_device, iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw,
-    relaunch_as_admin, send_iot_laptop_status, set_audio_default_endpoint, set_audio_mute,
-    set_audio_volume, set_battery_care, set_charging_threshold, set_function_key,
-    set_performance_mode, start_casting, stop_casting, wifi_connect, wifi_disconnect, wifi_scan,
-    wifi_status, wmi_ec_get_performance_mode, wmi_ec_read, wmi_ec_read_adapter_power,
+    get_performance_mode, get_primary_thermal_zone, get_scenario_rules, get_thermal_zones,
+    hq_change_boot_option, hq_enable_pxe_boot, hq_load_default, hq_s5_rtc_wake_enable,
+    hq_set_performance_mode, hq_set_shipping_country_code, hq_set_wifi_country_code,
+    iot_connect_wifi, iot_delete_wifi_item, iot_empty_wifi_items, iot_notify_ec_event,
+    iot_notify_event, iot_notify_power_event, iot_pipe_available, iot_report_shutting_down,
+    iot_report_suspending, iot_report_windows_ready, iot_reset_device, iot_set_device_status,
+    iot_write_wifi_item, is_elevated, read_ecram_raw, relaunch_as_admin, send_iot_laptop_status,
+    set_audio_default_endpoint, set_audio_mute, set_audio_volume, set_battery_care,
+    set_charging_threshold, set_function_key, set_performance_mode, set_scenario_rules,
+    start_casting, stop_casting, wifi_connect, wifi_disconnect, wifi_scan, wifi_status,
+    wmi_ec_get_performance_mode, wmi_ec_read, wmi_ec_read_adapter_power,
     wmi_ec_read_battery_health, wmi_ec_read_sensor_data, wmi_ec_set_auto_illumination,
     wmi_ec_set_brightness_data, wmi_ec_set_epof_flag, wmi_ec_set_label_mode,
     wmi_ec_set_lid_open_type, wmi_ec_set_mi_usage_type, wmi_ec_set_performance_mode,
@@ -492,6 +493,9 @@ pub fn run() {
             get_battery_care,
             set_battery_care,
             get_perf_debug,
+            // P2-6: scenario rules (auto perf-mode on AC/DC) — HKCU config + status
+            get_scenario_rules,
+            set_scenario_rules,
             get_ecram_map,
             get_iot_region_hex,
             write_iot_hex,
@@ -974,10 +978,16 @@ pub fn run() {
             // battery events into native OSD notifications. Reads config from
             // HKCU\SOFTWARE\MiControl\IotEvents; fully isolated from other HW.
             // MIOT-02: the hook now applies user scenario rules (auto perf-mode
-            // on AC/battery) — performance changes run on the blocking pool.
+            // on AC/battery). P2-6 (audit 2026-11-07): the rules ride the
+            // elevated dispatcher — the previous in-process call died on the
+            // HKLM ACL — and the HKCU config key is created up front so the
+            // feature has a durable configuration instead of "no rules".
             #[cfg(windows)]
             {
                 crate::hw::iot_events::set_event_hook(crate::hw::scenario_rules::apply_event);
+                if let Err(e) = crate::hw::iot_events::IotEventsConfig::ensure_key() {
+                    log::warn!("[iot_events] could not create config key: {e}");
+                }
                 crate::hw::iot_events::start_iot_event_listener();
             }
 

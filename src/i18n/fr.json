@@ -242,7 +242,9 @@
       "onBattery": "Sur batterie",
       "manual": "Manuel (sans changement automatique)",
       "currentlyPluggedIn": "Branché sur secteur — profil CA actif",
-      "currentlyOnBattery": "Sur batterie — profil CC actif"
+      "currentlyOnBattery": "Sur batterie — profil CC actif",
+      "syncFailed": "Réglages non synchronisés avec le service en arrière-plan — le changement automatique ne s'appliquera pas",
+      "lastApplied": "Dernier changement automatique : {event} → {mode}"
     },
     "osTurboTitle": "OS Turbo",
     "osTurboDesc": "Passe au plan d'énergie Haute Performance et limite les processus d'arrière-plan",
