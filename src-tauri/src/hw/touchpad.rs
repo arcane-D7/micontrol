@@ -2265,6 +2265,32 @@ mod tests {
     }
 
     #[test]
+    fn edge_slide_releases_the_pin_on_the_first_frame_without_contact() {
+        // A PTP pad may send no further report after a lift, so waiting for the
+        // 5-frame grace (or worse, the 4 s watchdog) would leave the pointer
+        // frozen. The pin must be handed back immediately.
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_500, true); // capture
+        state.edge_want_pin = false; // caller pinned
+
+        let _ = handle_edge_slide(&mut state, 0, 0, 0, false); // finger lifted
+        assert!(
+            state.edge_want_release,
+            "a lift must release the pointer on the same frame"
+        );
+        assert!(
+            state.edge.is_some(),
+            "the state machine keeps its grace period for palm-rejection gaps"
+        );
+
+        // Contact comes back inside the grace window: re-pin, keep the gesture.
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_480, true);
+        assert!(state.edge_want_pin, "resuming must re-pin the pointer");
+        assert!(state.edge.as_ref().expect("edge").captured);
+    }
+
+    #[test]
     fn edge_slide_slow_swipe_still_steps() {
         // 10 units/frame at 250 Hz ≈ 7 cm/s: deliberate but unhurried. The old
         // unconditional accumulator decay reached equilibrium at 8×10 = 80 <
@@ -2527,6 +2553,14 @@ fn handle_edge_slide(
         }
         if let Some(edge) = &mut state.edge {
             edge.lost_frames += 1;
+            // Hand the cursor back on the FIRST frame without contact. The grace
+            // period below exists so a one-frame palm-rejection gap does not kill
+            // a running gesture, but the pointer must not stay frozen while we
+            // wait: the pad may not emit another report at all after a lift, and
+            // then nothing but the 4 s watchdog would release it.
+            if edge.captured && edge.lost_frames == 1 {
+                state.edge_want_release = true;
+            }
             if edge.lost_frames > GRACE_FRAMES {
                 log::debug!(
                     "[gesture] edge-slide dropped: contact lost for {} frames",
@@ -2670,11 +2704,16 @@ fn handle_edge_slide(
             }
             edge.out_of_zone_frames = 0;
 
-            // Contact just restored after a brief tracking loss — re-anchor.
+            // Contact just restored after a brief tracking loss — re-anchor and, if the
+            // gesture was already committed, re-pin the pointer (it was released on
+            // the first lost frame so the user never sees a frozen cursor).
             if edge.lost_frames > 0 {
                 edge.last_x = x;
                 edge.last_y = y;
                 edge.lost_frames = 0;
+                if edge.captured {
+                    state.edge_want_pin = true;
+                }
                 return (0, 0);
             }
 
