@@ -4,6 +4,7 @@ import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
 import { debounceCommit, resolveVolumeIntent } from '../lib/audioVolume';
 import type { AudioVolumeResult } from '../types/hardware';
+import { Icon } from './ui/icons';
 
 interface AudioDevice {
   name: string;
@@ -143,7 +144,7 @@ export default function AudioControl({
   };
 
   /**
-   * Switch the default playback endpoint, then re-enumerate so the ✓ moves to
+   * Switch the default playback endpoint, then re-enumerate so the check mark moves to
    * the device that actually became default (Windows may refuse or pick a
    * different device than requested).
    */
@@ -174,11 +175,21 @@ export default function AudioControl({
     }
   };
 
-  const volumeIcon = muted ? '🔇' : volume > 66 ? '🔊' : volume > 33 ? '🔉' : '🔈';
+  const volumeIcon = muted ? (
+    <Icon name="volume-x" size={16} />
+  ) : volume > 66 ? (
+    <Icon name="volume-high" size={16} />
+  ) : volume > 33 ? (
+    <Icon name="volume-low" size={16} />
+  ) : (
+    <Icon name="volume-low" size={16} />
+  );
 
   return (
     <div className="card">
-      <h2 className="card-title">{t('audio.title')}</h2>
+      <h2 className="card-title">
+        <Icon name="music" size={16} /> {t('audio.title')}
+      </h2>
       <p className="page-subtitle">{t('audio.subtitle')}</p>
 
       {/* Volume Slider */}

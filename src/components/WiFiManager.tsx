@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
+import { Icon } from './ui/icons';
 
 interface WifiNetwork {
   ssid: string;
@@ -112,7 +113,9 @@ export default function WiFiManager() {
   if (loading) {
     return (
       <div className="card">
-        <h2 className="card-title">📶 {t('wifi.title')}</h2>
+        <h2 className="card-title">
+          <Icon name="wifi" size={16} /> {t('wifi.title')}
+        </h2>
         <p className="page-subtitle">{t('common.loading')}</p>
       </div>
     );
@@ -120,7 +123,9 @@ export default function WiFiManager() {
 
   return (
     <div className="card">
-      <h2 className="card-title">📶 {t('wifi.title')}</h2>
+      <h2 className="card-title">
+        <Icon name="wifi" size={16} /> {t('wifi.title')}
+      </h2>
       <p className="page-subtitle">
         {status?.connected && status.ssid
           ? `${t('wifi.connectedTo')}: ${status.ssid}`
@@ -178,11 +183,10 @@ export default function WiFiManager() {
               >
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 500 }}>
-                    {isHidden ? '🔒 ' : ''}
-                    {n.ssid}
+                    {isHidden && <Icon name="lock" size={12} />} {n.ssid}
                     {n.connected && (
                       <span style={{ color: 'var(--success)', marginLeft: 8 }}>
-                        ● {t('wifi.connected')}
+                        <Icon name="dot" size={8} /> {t('wifi.connected')}
                       </span>
                     )}
                   </div>
@@ -247,7 +251,7 @@ export default function WiFiManager() {
         onClick={handleRefresh}
         style={{ marginTop: 12, width: '100%' }}
       >
-        🔄 {t('wifi.refresh')}
+        <Icon name="refresh" size={16} /> {t('wifi.refresh')}
       </button>
     </div>
   );

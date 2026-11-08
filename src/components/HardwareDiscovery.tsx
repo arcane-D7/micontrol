@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { t } from '../hooks/useI18n';
 import type { HardwareProfile, MissingDriver } from '../types/hardware';
 import { useToast } from '../contexts/ToastContext';
+import { Icon } from './ui/icons';
 
 interface Props {
   profile: HardwareProfile | null;
@@ -43,7 +44,15 @@ function BoolRow({ label, value }: { label: string; value: boolean }) {
       <span
         style={{ color: value ? 'var(--color-success, #4ade80)' : 'var(--color-warning, #facc15)' }}
       >
-        {value ? '✓ ' + t('common.yes') : '✗ ' + t('common.no')}
+        {value ? (
+          <>
+            <Icon name="check" size={16} /> {t('common.yes')}
+          </>
+        ) : (
+          <>
+            <Icon name="x" size={16} /> {t('common.no')}
+          </>
+        )}
       </span>
     </div>
   );
@@ -75,7 +84,7 @@ function DriverInstallCard({
   return (
     <div className="card" style={{ marginBottom: 8 }}>
       <h2 className="card-title" style={{ color: 'var(--warning)' }}>
-        ⚠ {driver.name}
+        <Icon name="alert-triangle" size={16} /> {driver.name}
       </h2>
       <p style={{ fontSize: 13, marginBottom: 8 }}>{driver.description}</p>
       {driver.bundled_inf ? (
@@ -216,7 +225,7 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
                 }}
               >
                 <span style={{ color: 'var(--accent)', fontWeight: 600 }} aria-hidden="true">
-                  ℹ{' '}
+                  <Icon name="info" size={16} />{' '}
                 </span>
                 {t('discovery.vhfNotRequired')}
               </div>
@@ -255,7 +264,7 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
           ) : (
             <div className="card">
               <h2 className="card-title" style={{ color: 'var(--color-success, #4ade80)' }}>
-                ✓ {t('discovery.allDriversInstalled')}
+                <Icon name="check" size={16} /> {t('discovery.allDriversInstalled')}
               </h2>
             </div>
           )}

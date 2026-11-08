@@ -78,7 +78,7 @@ export default function AiFeedback({ analysisId }: Props) {
           aria-pressed={feedback?.rating === 'up'}
           title={t('aiAnalysis.analysis.feedbackUp')}
         >
-          👍
+          <Icon name="thumbs-up" size={16} />
         </button>
         <button
           className={`ai-feedback__btn${feedback?.rating === 'down' ? ' ai-feedback__btn--active' : ''}`}
@@ -87,7 +87,7 @@ export default function AiFeedback({ analysisId }: Props) {
           aria-pressed={feedback?.rating === 'down'}
           title={t('aiAnalysis.analysis.feedbackDown')}
         >
-          👎
+          <Icon name="thumbs-down" size={16} />
         </button>
       </div>
       {showThanks && (
@@ -96,3 +96,5 @@ export default function AiFeedback({ analysisId }: Props) {
     </div>
   );
 }
+
+import { Icon } from './ui/icons';

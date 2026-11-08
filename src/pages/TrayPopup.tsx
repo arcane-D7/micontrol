@@ -6,6 +6,7 @@ import type { PerformanceMode } from '../types/hardware';
 import { useSettings } from '../hooks/useSettings';
 import { BRIGHTNESS_PRESETS, getActivePreset } from '../lib/brightnessPresets';
 import { batteryState, batteryStateBadge } from '../lib/batteryState';
+import { Icon, type IconName } from '../components/ui/icons';
 
 type Hardware = ReturnType<typeof useHardware>;
 
@@ -13,19 +14,19 @@ interface Props {
   hardware: Hardware;
 }
 
-type ModeEntry = { key: PerformanceMode; label: string; i18nKey: string };
+type ModeEntry = { key: PerformanceMode; icon: IconName; i18nKey: string };
 
 const STANDARD_MODES: ModeEntry[] = [
-  { key: 'silence', label: '🔇', i18nKey: 'silence' },
-  { key: 'balance', label: '⚖️', i18nKey: 'balance' },
-  { key: 'turbo', label: '⚡', i18nKey: 'turbo' },
-  { key: 'long_battery', label: '🔋', i18nKey: 'longBattery' },
-  { key: 'decepticon', label: '💥', i18nKey: 'decepticon' },
+  { key: 'silence', icon: 'volume-x', i18nKey: 'silence' },
+  { key: 'balance', icon: 'scale', i18nKey: 'balance' },
+  { key: 'turbo', icon: 'bolt', i18nKey: 'turbo' },
+  { key: 'long_battery', icon: 'leaf', i18nKey: 'longBattery' },
+  { key: 'decepticon', icon: 'thermometer', i18nKey: 'decepticon' },
 ];
 
 const AI_MODES: ModeEntry[] = [
-  { key: 'smart', label: '🧠', i18nKey: 'smart' },
-  { key: 'smart_acceleration', label: '🚀', i18nKey: 'smartAcceleration' },
+  { key: 'smart', icon: 'brain', i18nKey: 'smart' },
+  { key: 'smart_acceleration', icon: 'rocket', i18nKey: 'smartAcceleration' },
 ];
 
 export default function TrayPopup({ hardware }: Props) {
@@ -172,7 +173,7 @@ export default function TrayPopup({ hardware }: Props) {
                 disabled={loading}
                 title={t(`performance.modes.${m.i18nKey}` as Parameters<typeof t>[0])}
               >
-                {m.label}
+                <Icon name={m.icon} size={16} />
               </button>
             ))}
           </div>
@@ -190,7 +191,7 @@ export default function TrayPopup({ hardware }: Props) {
                     : t(`performance.modes.${m.i18nKey}` as Parameters<typeof t>[0])
                 }
               >
-                {m.label}
+                <Icon name={m.icon} size={16} />
               </button>
             ))}
           </div>
@@ -240,7 +241,7 @@ export default function TrayPopup({ hardware }: Props) {
             <div className="tray-quick-card">
               <div className="tray-quick-head">
                 <span className="tray-quick-title" aria-hidden="true">
-                  🔊 Audio
+                  <Icon name="volume-high" size={16} /> Audio
                 </span>
                 <button
                   className="tray-chip-btn"
@@ -271,7 +272,7 @@ export default function TrayPopup({ hardware }: Props) {
             <div className="tray-quick-card">
               <div className="tray-quick-head">
                 <span className="tray-quick-title" aria-hidden="true">
-                  📶 WiFi
+                  <Icon name="wifi" size={16} /> WiFi
                 </span>
               </div>
               <div className="tray-quick-meta">{t('tray.openApp')} → WiFi Manager</div>
@@ -289,8 +290,16 @@ export default function TrayPopup({ hardware }: Props) {
               style={{ width: '100%', justifyContent: 'space-between' }}
               onClick={() => setShowDisplay((v) => !v)}
             >
-              <span aria-hidden="true">🖥️ {t('tray.displaySettings')}</span>
-              <span style={{ fontSize: 10, opacity: 0.6 }}>{showDisplay ? '▲' : '▼'}</span>
+              <span aria-hidden="true">
+                <Icon name="monitor" size={16} /> {t('tray.displaySettings')}
+              </span>
+              <span style={{ fontSize: 10, opacity: 0.6 }}>
+                {showDisplay ? (
+                  <Icon name="chevron-up" size={12} />
+                ) : (
+                  <Icon name="chevron-down" size={12} />
+                )}
+              </span>
             </button>
 
             {showDisplay && (
@@ -376,7 +385,7 @@ export default function TrayPopup({ hardware }: Props) {
                               })
                             }
                           >
-                            {p.icon} {p.label}
+                            <Icon name={p.icon} size={16} /> {p.label}
                           </button>
                         );
                       })}
@@ -392,8 +401,16 @@ export default function TrayPopup({ hardware }: Props) {
               style={{ width: '100%', justifyContent: 'space-between' }}
               onClick={() => setShowFan((v) => !v)}
             >
-              <span aria-hidden="true">💨 {t('tray.fanControl')}</span>
-              <span style={{ fontSize: 10, opacity: 0.6 }}>{showFan ? '▲' : '▼'}</span>
+              <span aria-hidden="true">
+                <Icon name="wind" size={16} /> {t('tray.fanControl')}
+              </span>
+              <span style={{ fontSize: 10, opacity: 0.6 }}>
+                {showFan ? (
+                  <Icon name="chevron-up" size={12} />
+                ) : (
+                  <Icon name="chevron-down" size={12} />
+                )}
+              </span>
             </button>
 
             {showFan && (
@@ -423,7 +440,14 @@ export default function TrayPopup({ hardware }: Props) {
                         disabled={loading}
                         title={t(`fan.modes.${mode}` as Parameters<typeof t>[0])}
                       >
-                        {mode === 'auto' ? '🔄' : mode === 'fixed' ? '🔧' : '🔇'} {shortLabel}
+                        {mode === 'auto' ? (
+                          <Icon name="refresh" size={16} />
+                        ) : mode === 'fixed' ? (
+                          <Icon name="wrench" size={16} />
+                        ) : (
+                          <Icon name="volume-x" size={16} />
+                        )}{' '}
+                        {shortLabel}
                       </button>
                     );
                   })}
@@ -453,7 +477,9 @@ export default function TrayPopup({ hardware }: Props) {
 
         {/* Appearance — opacity slider */}
         <div className="tray-section">
-          <div className="tray-section-label">🎨 {t('tray.appearance')}</div>
+          <div className="tray-section-label">
+            <Icon name="palette" size={16} /> {t('tray.appearance')}
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
               {t('tray.opacity')}: {Math.round(opacity * 100)}%

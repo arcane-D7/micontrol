@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { t } from '../hooks/useI18n';
 import type { FanInfo, FanModeResult } from '../types/hardware';
 import { useToast } from '../contexts/ToastContext';
+import { Icon } from './ui/icons';
 
 interface Props {
   fan: FanInfo | null;
@@ -83,7 +84,13 @@ export default function FanControl({ fan, onModeChange }: Props) {
             style={{ padding: '12px 8px' }}
           >
             <span className="mode-btn-icon">
-              {m === 'auto' ? '🔄' : m === 'fixed' ? '🔧' : '🔇'}
+              {m === 'auto' ? (
+                <Icon name="refresh" size={16} />
+              ) : m === 'fixed' ? (
+                <Icon name="wrench" size={16} />
+              ) : (
+                <Icon name="volume-x" size={16} />
+              )}
             </span>
             <span className="mode-btn-name">{t(`fan.modes.${m}` as Parameters<typeof t>[0])}</span>
           </button>
@@ -125,7 +132,7 @@ export default function FanControl({ fan, onModeChange }: Props) {
             borderRadius: 'var(--r-sm)',
           }}
         >
-          ℹ️ {lastResult.warning}
+          <Icon name="info" size={16} /> {lastResult.warning}
         </p>
       )}
 
@@ -172,7 +179,7 @@ export default function FanControl({ fan, onModeChange }: Props) {
       </div>
 
       <p style={{ fontSize: 11, color: 'var(--color-warning)', marginTop: 12 }}>
-        ⚠️ {t('fan.warning')}
+        <Icon name="alert-triangle" size={16} /> {t('fan.warning')}
       </p>
     </div>
   );

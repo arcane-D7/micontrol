@@ -231,7 +231,11 @@
 /* ═══ Ícones ═══════════════════════════════════════════════════════════════ */
 .mc-icon {
   flex: none;
-  display: block;
+  /* Inline by default: quase todos os glifos vivem dentro de uma linha de
+     texto (título, botão, estado). Dentro de flex/grid o browser blockifica,
+     por isso continua a servir o caso `icon-only`. */
+  display: inline-block;
+  vertical-align: -0.18em;
   transition:
     stroke-width var(--d-fast) var(--ease-out),
     color var(--d-fast) var(--ease-out);

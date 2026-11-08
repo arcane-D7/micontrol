@@ -261,7 +261,7 @@ export default function ChargingProtection({
       {confirmation && !failure && (
         <div className="charge-confirm" role="status" aria-live="polite">
           <span className="charge-confirm-icon" aria-hidden="true">
-            ✓
+            <Icon name="check" size={16} />
           </span>
           <span>{confirmation}</span>
         </div>

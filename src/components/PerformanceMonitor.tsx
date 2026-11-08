@@ -1,5 +1,6 @@
 import { t } from '../hooks/useI18n';
 import type { FanInfo, SystemInfo, PerformanceMode, PerformanceResult } from '../types/hardware';
+import { Icon } from './ui/icons';
 
 interface Props {
   fan: FanInfo | null;
@@ -199,9 +200,15 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
           }}
         >
           <span className={`badge ${lastResult.success ? 'success' : 'error'}`}>
-            {lastResult.success
-              ? `✓ ${t('performance.monitor.modeActive')}`
-              : `✗ ${t('performance.monitor.failed')}`}
+            {lastResult.success ? (
+              <>
+                <Icon name="check" size={16} /> {t('performance.monitor.modeActive')}
+              </>
+            ) : (
+              <>
+                <Icon name="x" size={16} /> {t('performance.monitor.failed')}
+              </>
+            )}
           </span>
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {t('performance.monitor.via')}{' '}

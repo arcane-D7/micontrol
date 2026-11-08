@@ -4,6 +4,7 @@ import type { AppSettings } from '../types/settings';
 import { invoke } from '@tauri-apps/api/core';
 import AiConfigForm from './AiConfigForm';
 import PrivacyConsentSection from './PrivacyConsentSection';
+import { Icon } from './ui/icons';
 
 interface DeleteDataReport {
   logs_deleted: boolean;
@@ -196,10 +197,10 @@ export default function SettingsPage({
         )}
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button className="btn btn-secondary" onClick={() => void handleViewErrorLog()}>
-            📋 {t('settings.errorLogView')}
+            <Icon name="clipboard" size={16} /> {t('settings.errorLogView')}
           </button>
           <button className="btn btn-secondary" onClick={() => void handleClearErrorLog()}>
-            🗑 {t('settings.errorLogClear')}
+            <Icon name="trash" size={16} /> {t('settings.errorLogClear')}
           </button>
         </div>
         {showErrorLog && (

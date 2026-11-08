@@ -3,6 +3,7 @@ import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import type { Hardware } from './shared';
 import type { NetworkInterfaceSample, ProcessTaskInfo } from '../../types/hardware';
+import { Icon } from '../../components/ui/icons';
 
 interface Props {
   hw: Hardware;
@@ -169,7 +170,15 @@ function TaskManagerTab({ hw }: Props) {
         >
           {label}
           <span className="th-sort-glyph" aria-hidden="true">
-            {active ? (sortDesc ? '↓' : '↑') : ''}
+            {active ? (
+              sortDesc ? (
+                <Icon name="arrow-down" size={12} />
+              ) : (
+                <Icon name="arrow-up" size={12} />
+              )
+            ) : (
+              ''
+            )}
           </span>
         </button>
       </th>
@@ -221,7 +230,10 @@ function TaskManagerTab({ hw }: Props) {
           </div>
         ))}
         <div className="card" style={{ padding: '10px 14px' }}>
-          <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>NET ↓↑</div>
+          <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+            NET <Icon name="arrow-down" size={12} />
+            <Icon name="arrow-up" size={12} />
+          </div>
           <div style={{ fontSize: 22, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
             {fmtBps(totalNet)}
           </div>
@@ -269,7 +281,7 @@ function TaskManagerTab({ hw }: Props) {
             cursor: 'pointer',
           }}
         >
-          ↻ {t('taskmgr.refresh')}
+          <Icon name="refresh" size={16} /> {t('taskmgr.refresh')}
         </button>
       </div>
 
@@ -427,7 +439,7 @@ function TaskManagerTab({ hw }: Props) {
                       title={t('taskmgr.endProcess', { name: p.name })}
                       style={{
                         background: 'color-mix(in oklab, var(--error) 12%, transparent)',
-                        /* One step darker than --error so the ✕ clears AA on
+                        /* One step darker than --error so the x mark clears AA on
                            its own 12% tint in light mode (3.7:1 → 5.2:1). */
                         color: 'color-mix(in oklab, var(--error) 93%, black)',
                         border: 'none',
@@ -439,7 +451,9 @@ function TaskManagerTab({ hw }: Props) {
                         cursor: 'pointer',
                       }}
                     >
-                      <span aria-hidden="true">{killing === p.pid ? '…' : '✕'}</span>
+                      <span aria-hidden="true">
+                        {killing === p.pid ? '…' : <Icon name="x" size={16} />}
+                      </span>
                     </button>
                   </td>
                 </tr>

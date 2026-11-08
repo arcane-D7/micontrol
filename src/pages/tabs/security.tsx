@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { Icon } from '../../components/ui/icons';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
 
@@ -225,7 +226,7 @@ export default function SecurityTab() {
       {/* Error message */}
       {errorMsg && (
         <div className="alert alert-error" style={{ marginBottom: 16 }}>
-          ⚠ {errorMsg}
+          <Icon name="alert-triangle" size={16} /> {errorMsg}
         </div>
       )}
 
@@ -234,20 +235,38 @@ export default function SecurityTab() {
         <h3>{t('security.scanActions')}</h3>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
           <button className="btn btn-primary" onClick={handleQuickScan} disabled={scanning}>
-            {scanning ? t('security.scanning') : `🔍 ${t('security.quickScan')}`}
+            {scanning ? (
+              t('security.scanning')
+            ) : (
+              <>
+                <Icon name="search" size={16} /> {t('security.quickScan')}
+              </>
+            )}
           </button>
           <button className="btn btn-secondary" onClick={handleFullScan} disabled={scanning}>
-            {scanning ? t('security.scanning') : `🦠 ${t('security.fullScan')}`}
+            {scanning ? (
+              t('security.scanning')
+            ) : (
+              <>
+                <Icon name="virus" size={16} /> {t('security.fullScan')}
+              </>
+            )}
           </button>
           <button
             className="btn btn-secondary"
             onClick={handleUpdateSignatures}
             disabled={updating}
           >
-            {updating ? t('security.updating') : `⬇️ ${t('security.updateSignatures')}`}
+            {updating ? (
+              t('security.updating')
+            ) : (
+              <>
+                <Icon name="download" size={16} /> {t('security.updateSignatures')}
+              </>
+            )}
           </button>
           <button className="btn btn-secondary" onClick={handleOpenDefender}>
-            🛡️ {t('security.openDefender')}
+            <Icon name="shield" size={16} /> {t('security.openDefender')}
           </button>
         </div>
 
@@ -279,11 +298,24 @@ export default function SecurityTab() {
             className={`alert ${scanResult.status === 'clean' ? 'alert-success' : scanResult.status === 'error' ? 'alert-error' : 'alert-warn'}`}
             style={{ marginTop: 12 }}
           >
-            {scanResult.status === 'clean' && `✓ ${t('security.scanClean')}`}
+            {scanResult.status === 'clean' && (
+              <>
+                <Icon name="check" size={16} /> {t('security.scanClean')}
+              </>
+            )}
             {scanResult.status === 'threats_detected' &&
               t('security.scanThreats', { count: scanResult.exit_code === 2 ? 1 : 0 })}
-            {scanResult.status === 'error' && `⚠ ${scanResult.output || t('errors.unknownError')}`}
-            {scanResult.status === 'updated' && `✓ ${t('security.updateComplete')}`}
+            {scanResult.status === 'error' && (
+              <>
+                <Icon name="alert-triangle" size={16} />{' '}
+                {scanResult.output || t('errors.unknownError')}
+              </>
+            )}
+            {scanResult.status === 'updated' && (
+              <>
+                <Icon name="check" size={16} /> {t('security.updateComplete')}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -293,13 +325,17 @@ export default function SecurityTab() {
         <h3>{t('security.threatHistory')}</h3>
         {threatsError ? (
           // The history could not be read. This must be visibly different from
-          // "no threats": the old UI claimed ✓ Nenhuma ameaça on every failure.
+          // "no threats": the old UI claimed a tick + "Nenhuma ameaça" on every failure.
           <div className="alert alert-error">
-            <div>⚠ {t('security.threatHistoryError')}</div>
+            <div>
+              <Icon name="alert-triangle" size={16} /> {t('security.threatHistoryError')}
+            </div>
             <div style={{ fontSize: 12, marginTop: 4, opacity: 0.85 }}>{threatsError}</div>
           </div>
         ) : threats.length === 0 ? (
-          <p className="text-muted">✓ {t('security.noThreats')}</p>
+          <p className="text-muted">
+            <Icon name="check" size={16} /> {t('security.noThreats')}
+          </p>
         ) : (
           <table className="data-table" style={{ width: '100%' }}>
             <thead>
@@ -323,7 +359,10 @@ export default function SecurityTab() {
                       {threat.severity_name || t('security.severityLow')}
                     </span>
                   </td>
-                  <td>{threat.action_name || (threat.action_success ? '✓' : '—')}</td>
+                  <td>
+                    {threat.action_name ||
+                      (threat.action_success ? <Icon name="check" size={16} /> : '—')}
+                  </td>
                   <td>{threat.initial_detection_time || threat.remediation_time || '—'}</td>
                 </tr>
               ))}

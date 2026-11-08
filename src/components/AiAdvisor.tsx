@@ -3,6 +3,7 @@ import { t } from '../hooks/useI18n';
 import type { useHardware } from '../hooks/useHardware';
 import type { useSettings as UseSettings } from '../hooks/useSettings';
 import AiFeedback from './AiFeedback';
+import { Icon } from './ui/icons';
 
 type Hardware = ReturnType<typeof useHardware>;
 type Settings = ReturnType<typeof UseSettings>;
@@ -102,10 +103,10 @@ export default function AiAdvisor({ hw, ai, onOpenSettings }: Props) {
           className="card-title"
           style={{ marginBottom: 0, display: 'flex', alignItems: 'center', gap: 8 }}
         >
-          🤖 {t('ai.title')}
+          <Icon name="bot" size={16} /> {t('ai.title')}
         </h2>
         <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-          {expanded ? '▲' : '▼'}
+          {expanded ? <Icon name="chevron-up" size={12} /> : <Icon name="chevron-down" size={12} />}
         </span>
       </div>
 
@@ -145,7 +146,15 @@ export default function AiAdvisor({ hw, ai, onOpenSettings }: Props) {
                 disabled={status === 'loading'}
                 onClick={() => void handleAnalyze()}
               >
-                {status === 'loading' ? <>⏳ {t('ai.analyzing')}</> : <>🔍 {t('ai.analyzeBtn')}</>}
+                {status === 'loading' ? (
+                  <>
+                    <Icon name="hourglass" size={16} /> {t('ai.analyzing')}
+                  </>
+                ) : (
+                  <>
+                    <Icon name="search" size={16} /> {t('ai.analyzeBtn')}
+                  </>
+                )}
               </button>
 
               {/* Loading spinner */}
@@ -171,7 +180,7 @@ export default function AiAdvisor({ hw, ai, onOpenSettings }: Props) {
                     border: '1px solid rgba(248,113,113,0.3)',
                   }}
                 >
-                  ✗ {error}
+                  <Icon name="x" size={16} /> {error}
                 </div>
               )}
 
@@ -196,7 +205,9 @@ export default function AiAdvisor({ hw, ai, onOpenSettings }: Props) {
                       justifyContent: 'space-between',
                     }}
                   >
-                    <span aria-hidden="true">🤖 {ai.settings.openai_model}</span>
+                    <span aria-hidden="true">
+                      <Icon name="bot" size={16} /> {ai.settings.openai_model}
+                    </span>
                     <button
                       className="btn-inline"
                       onClick={() => {
@@ -204,7 +215,7 @@ export default function AiAdvisor({ hw, ai, onOpenSettings }: Props) {
                         setResult(null);
                       }}
                     >
-                      ✕ {t('ai.clear')}
+                      <Icon name="x" size={16} /> {t('ai.clear')}
                     </button>
                   </div>
                   <RenderAnalysis text={result} />

@@ -6,6 +6,7 @@ import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '..
 import { PageHeader } from './PageHeader';
 import AudioControl from '../../components/AudioControl';
 import type { Hardware } from './shared';
+import { Icon } from '../../components/ui/icons';
 
 // `t` from useI18n types keys as a literal union; error.ts' TranslateFn takes
 // any string — wrap it (matches the pattern used across the codebase).
@@ -97,14 +98,16 @@ function AudioTab({ hw }: Props) {
 
       {/* Audio effects — saved preferences, honestly labelled */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3>🎙️ {t('audio.effectsTitle')}</h3>
+        <h3>
+          <Icon name="microphone" size={16} /> {t('audio.effectsTitle')}
+        </h3>
         <p className="text-muted" style={{ fontSize: 12, marginBottom: 12 }}>
           {t('audio.effectsDesc')}
         </p>
 
         {errorMsg && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
-            ⚠ {errorMsg}
+            <Icon name="alert-triangle" size={16} /> {errorMsg}
           </div>
         )}
 
@@ -114,7 +117,7 @@ function AudioTab({ hw }: Props) {
           <>
             {!effects.applies_to_audio && (
               <div className="alert alert-warn" style={{ marginBottom: 12 }} role="status">
-                ℹ {t('audio.preferenceOnly')}
+                <Icon name="info" size={16} /> {t('audio.preferenceOnly')}
               </div>
             )}
             <p className="text-muted" style={{ fontSize: 12, marginBottom: 8 }}>

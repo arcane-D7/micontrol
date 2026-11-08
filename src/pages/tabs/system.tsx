@@ -8,6 +8,7 @@ import type { useHardware } from '../../hooks/useHardware';
 import type { IotRegionName } from '../../types/hardware';
 import type { Hardware } from './shared';
 import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../../types/error';
+import { Icon } from '../../components/ui/icons';
 
 const translate: TranslateFn = (key) => t(key as never);
 
@@ -519,7 +520,7 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               fontWeight: 400,
             }}
           >
-            ⚠ danger zone
+            <Icon name="alert-triangle" size={16} /> danger zone
           </span>
         </summary>
         <div className="card" style={{ marginTop: 8, marginBottom: 0 }}>
@@ -537,8 +538,8 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               marginBottom: 10,
             }}
           >
-            ⚠ DANGER: Writing to a raw physical address can permanently brick your device.
-            Double-check the address and data before proceeding.
+            <Icon name="alert-triangle" size={16} /> DANGER: Writing to a raw physical address can
+            permanently brick your device. Double-check the address and data before proceeding.
           </div>
           <div style={{ display: 'grid', gap: 8 }}>
             <input
@@ -576,7 +577,7 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
 
                   if (
                     !window.confirm(
-                      '⚠️ WARNING: Writing to a raw physical address can brick your device. Are you sure?',
+                      'WARNING: Writing to a raw physical address can brick your device. Are you sure?',
                     )
                   ) {
                     return;
@@ -656,7 +657,7 @@ function SmartModelStatusCard({ hw }: { hw: HardwareInstance }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <h2 className="card-title" style={{ marginBottom: 6 }}>
-        🧠 {t('system.smartModelTitle')}
+        <Icon name="brain" size={16} /> {t('system.smartModelTitle')}
       </h2>
       {failed ? (
         <p className="page-subtitle" style={{ margin: 0 }}>
@@ -753,20 +754,36 @@ function SystemTab({ hw }: Props) {
             marginBottom: 12,
           }}
         >
-          <h3>🔧 {t('updates.driverDetails')}</h3>
+          <h3>
+            <Icon name="wrench" size={16} /> {t('updates.driverDetails')}
+          </h3>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-secondary" onClick={handleScan} disabled={scanning}>
-              {scanning ? `🔍 ${t('updates.scanning')}` : `🔍 ${t('updates.scanDrivers')}`}
+              {scanning ? (
+                <>
+                  <Icon name="search" size={16} /> {t('updates.scanning')}
+                </>
+              ) : (
+                <>
+                  <Icon name="search" size={16} /> {t('updates.scanDrivers')}
+                </>
+              )}
             </button>
             <button className="btn btn-secondary" onClick={fetchDrivers} disabled={loadingDrivers}>
-              {loadingDrivers ? t('common.loading') : `🔄 ${t('updates.refreshDrivers')}`}
+              {loadingDrivers ? (
+                t('common.loading')
+              ) : (
+                <>
+                  <Icon name="refresh" size={16} /> {t('updates.refreshDrivers')}
+                </>
+              )}
             </button>
           </div>
         </div>
 
         {errorMsg && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
-            ⚠ {errorMsg}
+            <Icon name="alert-triangle" size={16} /> {errorMsg}
           </div>
         )}
 

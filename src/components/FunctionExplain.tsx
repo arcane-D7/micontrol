@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Icon } from './ui/icons';
 
 interface FunctionExplainProps {
   /** Short inline description shown next to the control. */
@@ -49,7 +50,7 @@ export default function FunctionExplain({ summary, details, bullets, note }: Fun
         }}
       >
         <span aria-hidden="true" style={{ display: 'inline-block', transition: 'transform 150ms' }}>
-          ▸
+          <Icon name="chevron-right" size={12} />
         </span>
         <span>{summary}</span>
         <span aria-hidden="true" style={{ marginLeft: 'auto', opacity: 0.6 }}>

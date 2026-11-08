@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
+import { Icon } from './ui/icons';
 
 interface CastDevice {
   name: string;
@@ -95,7 +96,9 @@ export default function ScreenCast() {
 
   return (
     <div className="card">
-      <h2 className="card-title">📺 {t('cast.title')}</h2>
+      <h2 className="card-title">
+        <Icon name="tv" size={16} /> {t('cast.title')}
+      </h2>
       <p className="page-subtitle">{t('cast.subtitle')}</p>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
@@ -105,11 +108,11 @@ export default function ScreenCast() {
           disabled={loading}
           style={{ flex: 1 }}
         >
-          📤 {t('cast.start')}
+          <Icon name="upload" size={16} /> {t('cast.start')}
         </button>
         {panelOpened && (
           <button className="btn btn-secondary" onClick={handleClosePanel} disabled={loading}>
-            ⏹ {t('cast.stop')}
+            <Icon name="stop" size={16} /> {t('cast.stop')}
           </button>
         )}
       </div>
@@ -120,7 +123,7 @@ export default function ScreenCast() {
         disabled={loading}
         style={{ marginTop: 8, width: '100%' }}
       >
-        🔍 {t('cast.scan')}
+        <Icon name="search" size={16} /> {t('cast.scan')}
       </button>
 
       <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>

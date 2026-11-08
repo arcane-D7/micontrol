@@ -5,6 +5,7 @@ import InfoModal from '../../components/InfoModal';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { Icon } from '../../components/ui/icons';
 
 interface FaceStatus {
   service_installed: boolean;
@@ -261,7 +262,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
   const stepTitle: Record<EnrollStep, string> = {
     user: '1 · Windows account',
     hello: '2 · Verify with PIN / fingerprint',
-    password: pwConfigured ? '3 · Unlock credential saved ✓' : '3 · Unlock credential (optional)',
+    password: pwConfigured ? '3 · Unlock credential saved' : '3 · Unlock credential (optional)',
     camera: '4 · Camera capture',
   };
 
@@ -308,7 +309,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   border: active ? '1px solid var(--accent-soft)' : '1px solid transparent',
                 }}
               >
-                {done ? '✓ ' : `${i + 1}. `}
+                {done ? <Icon name="check" size={14} /> : `${i + 1}. `}{' '}
                 {s === 'password' ? 'credential' : s === 'camera' ? 'capture' : s}
               </span>
             );
@@ -354,7 +355,9 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   ))}
                 </select>
                 {userListErr && (
-                  <span style={{ fontSize: 11.5, color: 'var(--warning)' }}>⚠️ {userListErr}</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--warning)' }}>
+                    <Icon name="alert-triangle" size={16} /> {userListErr}
+                  </span>
                 )}
               </label>
               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
@@ -467,7 +470,15 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                 ← Back
               </button>
               <button className="btn btn-primary" disabled={busy} onClick={() => void doHello()}>
-                {busy ? '⏳ Waiting…' : '🔑 Verify with PIN / fingerprint'}
+                {busy ? (
+                  <>
+                    <Icon name="hourglass" size={16} /> Waiting…
+                  </>
+                ) : (
+                  <>
+                    <Icon name="key" size={16} /> Verify with PIN / fingerprint
+                  </>
+                )}
               </button>
             </div>
           </>
@@ -568,11 +579,17 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                 disabled={busy || (!pwConfigured && !password)}
                 onClick={() => void savePassword(pwConfigured === true)}
               >
-                {busy
-                  ? '⏳ Storing…'
-                  : pwConfigured
-                    ? 'Continue →'
-                    : '🔐 Save credential & continue'}
+                {busy ? (
+                  <>
+                    <Icon name="hourglass" size={16} /> Storing…
+                  </>
+                ) : pwConfigured ? (
+                  'Continue →'
+                ) : (
+                  <>
+                    <Icon name="lock" size={16} /> Save credential &amp; continue
+                  </>
+                )}
               </button>
             </div>
           </>
@@ -624,8 +641,8 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
             </div>
             {camErr && (
               <p style={{ margin: 0, color: 'var(--warning)', fontSize: 12.5 }}>
-                ⚠️ {camErr} — check that the camera is not in use by another app, then close and
-                reopen this dialog.
+                <Icon name="alert-triangle" size={16} /> {camErr} — check that the camera is not in
+                use by another app, then close and reopen this dialog.
               </p>
             )}
             <div
@@ -668,7 +685,16 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                 ← Back
               </button>
               <button className="btn btn-primary" disabled={busy} onClick={() => void doCapture()}>
-                {busy ? '⏳ Capturing…' : `📷 Capture ${frames} frame${frames !== 1 ? 's' : ''}`}
+                {busy ? (
+                  <>
+                    <Icon name="hourglass" size={16} /> Capturing…
+                  </>
+                ) : (
+                  <>
+                    <Icon name="camera" size={16} /> Capture {frames} frame
+                    {frames !== 1 ? 's' : ''}
+                  </>
+                )}
               </button>
             </div>
           </>

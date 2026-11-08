@@ -4,6 +4,7 @@ import { t } from '../../hooks/useI18n';
 import AppUpdateBanner from '../../components/AppUpdateBanner';
 import AutoUpdateCard from '../../components/AutoUpdateCard';
 import type { AppUpdateState, AppUpdateInfo } from '../../hooks/useAutoUpdate';
+import { Icon } from '../../components/ui/icons';
 
 const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
 
@@ -111,11 +112,11 @@ export default function AboutTab({
               height: 44,
               borderRadius: 12,
               background: 'color-mix(in oklab, var(--warning) 15%, transparent)',
-              fontSize: 22,
+              color: 'var(--warning)',
               flexShrink: 0,
             }}
           >
-            ☕
+            <Icon name="coffee" size={22} />
           </span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <p
@@ -134,7 +135,7 @@ export default function AboutTab({
                   }).catch((e) => console.error('[support] open failed:', e))
                 }
               >
-                ☕ {t('about.support.bmc')}
+                <Icon name="coffee" size={16} /> {t('about.support.bmc')}
               </button>
               <button
                 type="button"
@@ -145,7 +146,7 @@ export default function AboutTab({
                   }).catch((e) => console.error('[support] open failed:', e))
                 }
               >
-                ⭐ {t('about.support.star')}
+                <Icon name="star" size={16} /> {t('about.support.star')}
               </button>
             </div>
             <p

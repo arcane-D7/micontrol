@@ -13,6 +13,7 @@ import {
 } from '../../components/OsTurboMeasured';
 import type { Hardware, AiSettings, PerfDebugInfo } from './shared';
 import type { PowerProfilesController } from '../../hooks/usePowerProfiles';
+import { Icon } from '../../components/ui/icons';
 
 interface Props {
   hw: Hardware;
@@ -191,7 +192,7 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
               }}
             >
               <span style={{ fontSize: 13 }} aria-hidden="true">
-                🔌 {t('performance.powerProfiles.pluggedIn')}
+                <Icon name="plug" size={16} /> {t('performance.powerProfiles.pluggedIn')}
               </span>
               <select
                 className="select-input"
@@ -229,7 +230,7 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
               }}
             >
               <span style={{ fontSize: 13 }} aria-hidden="true">
-                🔋 {t('performance.powerProfiles.onBattery')}
+                <Icon name="battery" size={16} /> {t('performance.powerProfiles.onBattery')}
               </span>
               <select
                 className="select-input"
@@ -259,18 +260,29 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
               </select>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingTop: 4 }}>
-              {pp.status?.last_event
-                ? `⚙ ${t('performance.powerProfiles.lastApplied', {
+              {pp.status?.last_event ? (
+                <>
+                  <Icon name="gear" size={16} />{' '}
+                  {t('performance.powerProfiles.lastApplied', {
                     event: pp.status.last_event,
                     mode: modeLabel(pp.status.last_mode),
-                  })}${pp.status.last_ok === false ? ` (${pp.status.last_detail ?? 'failed'})` : ''}`
-                : hw.battery?.is_plugged
-                  ? `⚡ ${t('performance.powerProfiles.currentlyPluggedIn')}`
-                  : `🔋 ${t('performance.powerProfiles.currentlyOnBattery')}`}
+                  })}
+                  {pp.status.last_ok === false ? ` (${pp.status.last_detail ?? 'failed'})` : ''}
+                </>
+              ) : hw.battery?.is_plugged ? (
+                <>
+                  <Icon name="bolt" size={16} /> {t('performance.powerProfiles.currentlyPluggedIn')}
+                </>
+              ) : (
+                <>
+                  <Icon name="battery" size={16} />{' '}
+                  {t('performance.powerProfiles.currentlyOnBattery')}
+                </>
+              )}
             </div>
             {pp.syncError && (
               <div style={{ fontSize: 11, color: 'var(--error, #f44336)' }}>
-                ⚠ {t('performance.powerProfiles.syncFailed')}
+                <Icon name="alert-triangle" size={16} /> {t('performance.powerProfiles.syncFailed')}
               </div>
             )}
           </div>
@@ -312,7 +324,7 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
               onClick={() => void hw.openAiLogsDir()}
               title={t('ai.openLogFolder')}
             >
-              📂
+              <Icon name="folder-open" size={16} />
             </button>
           </div>
         </div>
@@ -455,7 +467,7 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
                     style={{ fontSize: 11 }}
                     onClick={() => void loadLogs()}
                   >
-                    ↻ {t('ai.refreshLogs')}
+                    <Icon name="refresh" size={16} /> {t('ai.refreshLogs')}
                   </button>
                 </div>
               </div>
@@ -512,9 +524,15 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
                     fontWeight: 600,
                   }}
                 >
-                  {debugInfo.hq_wmi_works
-                    ? `✓ ${t('performance.channels.functional')}`
-                    : `✗ ${t('performance.channels.unavailable')}`}
+                  {debugInfo.hq_wmi_works ? (
+                    <>
+                      <Icon name="check" size={16} /> {t('performance.channels.functional')}
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="x" size={16} /> {t('performance.channels.unavailable')}
+                    </>
+                  )}
                 </span>
               </div>
               {debugInfo.hq_wmi_instance && (
@@ -562,9 +580,13 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
                     fontWeight: 600,
                   }}
                 >
-                  {debugInfo.vhf_device_path
-                    ? `✓ ${t('performance.channels.found')}`
-                    : `— ${t('performance.channels.notFound')}`}
+                  {debugInfo.vhf_device_path ? (
+                    <>
+                      <Icon name="check" size={16} /> {t('performance.channels.found')}
+                    </>
+                  ) : (
+                    `— ${t('performance.channels.notFound')}`
+                  )}
                 </span>
               </div>
               {debugInfo.vhf_device_path && (
@@ -687,7 +709,7 @@ function OsTurboCard() {
       >
         <div>
           <h2 className="card-title" style={{ marginBottom: 2 }}>
-            ⚡ {t('performance.osTurboTitle')}
+            <Icon name="bolt" size={16} /> {t('performance.osTurboTitle')}
           </h2>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {t('performance.osTurboDesc')}
@@ -706,28 +728,28 @@ function OsTurboCard() {
       </div>
       {errorMsg && (
         <div className="alert alert-error" style={{ marginTop: 8 }}>
-          ⚠ {errorMsg}
+          <Icon name="alert-triangle" size={16} /> {errorMsg}
         </div>
       )}
       {status?.enabled && (
         <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
           <div>
-            📊{' '}
+            <Icon name="chart-bar" size={16} />{' '}
             {inspected > 0
               ? t('performance.osTurboLimitSummary', { applied, inspected })
               : t('performance.osTurboNoCandidates')}
           </div>
           <div>
-            🔌 {t('performance.osTurboPowerPlan')}: {status.power_plan}
+            <Icon name="plug" size={16} /> {t('performance.osTurboPowerPlan')}: {status.power_plan}
           </div>
           {status.snapshot_stale && (
             <div className="alert alert-warn" style={{ marginTop: 8 }}>
-              ⚠ {t('performance.osTurboStaleSnapshot')}
+              <Icon name="alert-triangle" size={16} /> {t('performance.osTurboStaleSnapshot')}
             </div>
           )}
           {(status.measured?.failures ?? 0) > 0 && (
             <div className="alert alert-warn" style={{ marginTop: 8 }}>
-              ⚠{' '}
+              <Icon name="alert-triangle" size={16} />{' '}
               {t('performance.osTurboFailuresHint', {
                 failures: status.measured?.failures ?? 0,
               })}
