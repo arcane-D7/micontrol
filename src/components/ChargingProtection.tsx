@@ -143,7 +143,7 @@ export default function ChargingProtection({
       }
     >
       <Switch
-        label={t('battery.limitLabel')}
+        label={t('battery.careSwitch')}
         desc={t('battery.careDesc', { limit: display < 100 ? display : RECOMMENDED })}
         checked={careEnabled}
         pending={carePending}

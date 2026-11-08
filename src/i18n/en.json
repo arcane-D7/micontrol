@@ -380,7 +380,8 @@
       "careAndLimit": "Protection on — limit of {limit}%",
       "careOff": "Protection off — charges to 100%"
     },
-    "reading": "Reading the battery"
+    "reading": "Reading the battery",
+    "careSwitch": "Limit charging"
   },
   "charging": {
     "title": "Charging Control",
