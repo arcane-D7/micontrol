@@ -1,0 +1,2121 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   MiControl · Hairline — primitivos
+   11 primitivos na gramática da Rota C (theme-migration.md §2.4):
+     1 px hairline · ZERO sombra · UM accent só para interacção · radius 12/8
+   Carregado DEPOIS de globals.css (main.tsx) — a ponte no fim do ficheiro
+   ressaca as classes antigas por ordem de cascata, sem tocar nas regras velhas.
+   Sem Tailwind, sem Radix, sem dependências. Só tokens.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+/* ═══ 0. Base ═══════════════════════════════════════════════════════════════ */
+
+.mc-icon {
+  display: block;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* O hover engrossa o traço — é o "draw state" do POC. */
+.mc-btn:hover .mc-icon,
+.mc-icon-btn:hover .mc-icon,
+.mc-nav-item:hover .mc-icon,
+.mc-switch:hover .mc-icon,
+.mc-card--selectable:hover .mc-icon {
+  stroke-width: 1.9;
+}
+
+.mc-num,
+.mc-stat-row__value,
+.mc-slider__value,
+.mc-card__value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══ 1. Card ═══════════════════════════════════════════════════════════════
+   A moldura adoptada a 100% do hairline: 1 px, raio 12, zero sombra.
+   Morre o backdrop-filter, o --shadow-glass e o inset 0 1px 0. */
+
+.mc-card {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-card);
+  padding: 20px;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  color: var(--ink);
+  transition:
+    background-color var(--d-base) var(--ease-out),
+    border-color var(--d-base) var(--ease-out);
+}
+
+.mc-card + .mc-card {
+  margin-top: var(--s-4);
+}
+
+.mc-card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 24px;
+  margin-bottom: var(--s-3);
+}
+
+.mc-card__head > .mc-icon {
+  color: var(--ink-dim);
+}
+
+.mc-card__title {
+  font-size: var(--t-body);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  letter-spacing: -0.005em;
+  line-height: 1.35;
+  /* Sentence case. O uppercase + tracking era o principal tell visual. */
+  text-transform: none;
+}
+
+.mc-card__meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex: none;
+}
+
+.mc-card__body {
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+}
+
+.mc-card__value {
+  font-size: var(--t-title);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.mc-card__sub {
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+  margin-top: var(--s-1);
+}
+
+.mc-card__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+  padding-top: var(--s-3);
+  border-top: var(--hair) solid var(--hairline);
+}
+
+.mc-card--flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.mc-card--selectable {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  appearance: none;
+}
+
+.mc-card--selectable:hover {
+  border-color: var(--hairline-2);
+  background: var(--surface-hover);
+}
+
+.mc-card--selectable:active {
+  scale: 0.995;
+}
+
+.mc-card--selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mc-card--loading {
+  pointer-events: none;
+}
+
+.mc-card--stale {
+  border-top-color: var(--warning);
+}
+
+/* ═══ 2. Hairline ═══════════════════════════════════════════════════════════ */
+
+.mc-hairline {
+  display: block;
+  height: 0;
+  margin: var(--s-3) 0;
+  border: 0;
+  border-top: var(--hair) solid var(--hairline);
+}
+
+.mc-hairline--strong {
+  border-top-color: var(--hairline-2);
+}
+
+.mc-hairline--tight {
+  margin: var(--s-2) 0;
+}
+
+/* ═══ 3. StatRow ════════════════════════════════════════════════════════════
+   A linha label/valor que hoje está copiada 87×. Anatomia do hairline:
+   label 13 ink-muted / valor 13 tabular 600 alinhado à direita / unidade
+   ink-dim a 0,85em. */
+
+.mc-stat-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-top: var(--hair) solid var(--hairline);
+  font-size: var(--t-body);
+  min-width: 0;
+}
+
+.mc-stat-row:first-child {
+  border-top: 0;
+}
+
+.mc-stat-row__label {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--ink-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mc-stat-row__label > .mc-icon {
+  color: var(--ink-dim);
+}
+
+.mc-stat-row__value {
+  color: var(--ink);
+  font-weight: var(--w-strong);
+  text-align: right;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25em;
+}
+
+.mc-stat-row__value--mono {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+.mc-stat-row__unit {
+  color: var(--ink-dim);
+  font-weight: var(--w-body);
+  font-size: 0.85em;
+}
+
+.mc-stat-row__hint {
+  color: var(--ink-dim);
+  font-size: var(--t-meta);
+  font-weight: var(--w-body);
+  margin-left: var(--s-2);
+}
+
+.mc-stat-row--empty .mc-stat-row__value {
+  color: var(--ink-dim);
+  font-weight: var(--w-body);
+}
+
+.mc-stat-group {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ═══ 4. Badge / chip ═══════════════════════════════════════════════════════
+   Regra §3.6: pastel é superfície, tinta é texto. O pastel nunca é texto. */
+
+.mc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  border: var(--hair) solid transparent;
+  font-family: var(--font);
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.mc-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.mc-badge__count {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--w-strong);
+  opacity: 0.85;
+}
+
+.mc-badge--neutral {
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  border-color: var(--hairline);
+}
+
+.mc-badge--accent {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border-color: color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+.mc-badge--success {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 22%, transparent);
+}
+
+.mc-badge--warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+  border-color: color-mix(in oklab, var(--warning) 24%, transparent);
+}
+
+.mc-badge--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 22%, transparent);
+}
+
+.mc-badge--info {
+  background: var(--info-soft);
+  color: var(--info);
+  border-color: color-mix(in oklab, var(--info) 22%, transparent);
+}
+
+/* ═══ 5. Button ═════════════════════════════════════════════════════════════
+   Regra §2.4/§3.1: o accent só pinta estado. O botão primário é TINTA (--ink),
+   não accent — é isso que acaba com o "tudo azul" do CTA a competir com o
+   título. O accent só aparece em --accent-soft tints (item activo, segmented). */
+
+.mc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 7px 14px;
+  border: var(--hair) solid var(--hairline-2);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: none;
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    scale var(--d-fast) var(--ease-out);
+}
+
+.mc-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--ink-dim);
+}
+
+/* press 3% — o estado do hairline */
+.mc-btn:active:not(:disabled) {
+  scale: 0.97;
+}
+
+.mc-btn:disabled {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink-dim);
+  cursor: not-allowed;
+}
+
+.mc-btn--primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+  font-weight: var(--w-strong);
+}
+
+.mc-btn--primary:hover:not(:disabled) {
+  background: var(--ink-muted);
+  border-color: var(--ink-muted);
+}
+
+.mc-btn--primary:disabled {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink-dim);
+}
+
+.mc-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-muted);
+}
+
+.mc-btn--ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--ink);
+}
+
+.mc-btn--danger {
+  background: var(--danger-soft);
+  border-color: color-mix(in oklab, var(--danger) 30%, transparent);
+  color: var(--danger);
+}
+
+.mc-btn--danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--danger) 18%, var(--surface));
+  border-color: var(--danger);
+}
+
+.mc-btn--sm {
+  min-height: 26px;
+  padding: 4px 10px;
+  font-size: var(--t-meta);
+}
+
+.mc-btn--lg {
+  min-height: 40px;
+  padding: 9px 18px;
+  font-size: var(--t-body-lg);
+}
+
+.mc-btn--full {
+  width: 100%;
+}
+
+.mc-btn[aria-busy='true'] {
+  cursor: progress;
+}
+
+.mc-btn__spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: mc-spin 0.7s linear infinite;
+}
+
+@keyframes mc-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+/* ═══ 6. Switch (ToggleRow / ToggleSwitch) ══════════════════════════════════
+   Track 40×22, thumb 16, thumb estica 4 px no press e volta com EASE_THROW. */
+
+.mc-switch-wrap {
+  min-width: 0;
+}
+
+.mc-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+  padding: var(--s-3) 0;
+  border-top: var(--hair) solid var(--hairline);
+  cursor: pointer;
+}
+
+.mc-switch:first-child,
+.mc-switch--bare {
+  border-top: 0;
+}
+
+.mc-switch--bare {
+  display: inline-flex;
+  padding: 0;
+  gap: 0;
+}
+
+.mc-switch__text {
+  min-width: 0;
+}
+
+.mc-switch__label {
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.mc-switch__desc {
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+  margin-top: 1px;
+  line-height: 1.4;
+}
+
+.mc-switch__control {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 22px;
+}
+
+.mc-switch__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+  z-index: 1;
+}
+
+.mc-switch__track {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: var(--hair) solid var(--hairline-2);
+  pointer-events: none;
+  transition:
+    background-color var(--d-base) var(--ease-out),
+    border-color var(--d-base) var(--ease-out);
+}
+
+.mc-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline-2);
+  pointer-events: none;
+  transition:
+    translate var(--d-base) var(--ease-throw),
+    width var(--d-fast) var(--ease-out),
+    background-color var(--d-base) var(--ease-out),
+    border-color var(--d-base) var(--ease-out);
+}
+
+.mc-switch:hover .mc-switch__track {
+  border-color: var(--ink-dim);
+}
+
+.mc-switch__input:checked ~ .mc-switch__track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.mc-switch__input:checked ~ .mc-switch__knob {
+  translate: 18px 0;
+  border-color: transparent;
+}
+
+.mc-switch__input:active ~ .mc-switch__knob {
+  width: 20px;
+}
+
+.mc-switch__input:checked:active ~ .mc-switch__knob {
+  translate: 14px 0;
+}
+
+.mc-switch__input:focus-visible ~ .mc-switch__track {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.mc-switch__input:disabled ~ .mc-switch__track,
+.mc-switch__input:disabled ~ .mc-switch__knob {
+  opacity: 0.45;
+}
+
+.mc-switch--disabled {
+  cursor: not-allowed;
+}
+
+.mc-switch--pending .mc-switch__track {
+  animation: mc-pulse 1.2s ease-in-out infinite;
+}
+
+.mc-switch__reason {
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+  margin-top: var(--s-1);
+}
+
+@keyframes mc-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* ═══ 7. Slider ═════════════════════════════════════════════════════════════
+   accent-color pinta o fill do track e o thumb nativos — zero estilo inline,
+   zero JS. É a leitura do POC (que faz exactamente isto, 1 linha). */
+
+.mc-slider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+}
+
+.mc-slider__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.mc-slider__label {
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+  min-width: 0;
+}
+
+.mc-slider__value {
+  font-size: var(--t-body);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.mc-slider__input {
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.mc-slider__input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--r-control);
+}
+
+.mc-slider__input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.mc-slider__scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--t-label);
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══ 8. Dialog ═════════════════════════════════════════════════════════════
+   Véu da própria cor do fundo (sem blur), painel sobe de 6 px, zero sombra. */
+
+.mc-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--s-5);
+  background: color-mix(in oklab, var(--bg) 78%, transparent);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  animation: mc-fade var(--d-base) var(--ease-out);
+}
+
+.mc-dialog {
+  width: 100%;
+  max-width: 520px;
+  max-height: 80vh;
+  overflow: auto;
+  padding: var(--s-5);
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-card);
+  box-shadow: none;
+  color: var(--ink);
+  animation: mc-dialog-in var(--d-base) var(--ease-out);
+}
+
+.mc-dialog--sm {
+  max-width: 400px;
+}
+
+.mc-dialog--lg {
+  max-width: 720px;
+}
+
+.mc-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.mc-dialog__title {
+  font-size: var(--t-body-lg);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.mc-dialog__body {
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+  line-height: 1.6;
+}
+
+.mc-dialog__foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s-2);
+  margin-top: var(--s-5);
+  padding-top: var(--s-4);
+  border-top: var(--hair) solid var(--hairline);
+}
+
+@keyframes mc-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes mc-dialog-in {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+/* ═══ 9. NavItem / Tabs (sidebar) ═══════════════════════════════════════════
+   Activo = surface-2 + hairline + ink + 600; o ícone é o único accent. */
+
+.mc-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: var(--hair) solid transparent;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: var(--font);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out);
+}
+
+.mc-nav-item > .mc-icon {
+  color: var(--ink-dim);
+  transition:
+    color var(--d-fast) var(--ease-out),
+    translate var(--d-base) var(--ease-settle);
+}
+
+.mc-nav-item:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.mc-nav-item:hover > .mc-icon {
+  color: var(--ink-muted);
+  translate: 2px 0;
+}
+
+.mc-nav-item[aria-current='page'] {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink);
+  font-weight: var(--w-strong);
+}
+
+.mc-nav-item[aria-current='page'] > .mc-icon {
+  color: var(--accent);
+}
+
+.mc-nav-item:active {
+  scale: 0.99;
+}
+
+.mc-nav-item__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-nav-item__trail {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.mc-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mc-nav-group + .mc-nav-group {
+  margin-top: var(--s-3);
+}
+
+.mc-nav-group__label {
+  padding: var(--s-1) 10px var(--s-1);
+  font-size: var(--t-label);
+  font-weight: var(--w-strong);
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+/* ═══ 10. Skeleton ══════════════════════════════════════════════════════════
+   Banda de luz a 1,4 s, sem salto: a forma é a do conteúdo. */
+
+.mc-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    var(--surface-hover) 50%,
+    var(--surface-2) 75%
+  );
+  background-size: 200% 100%;
+  border-radius: var(--r-control);
+  animation: mc-shimmer 1.4s linear infinite;
+}
+
+.mc-skeleton--line {
+  height: 12px;
+  border-radius: 6px;
+}
+
+.mc-skeleton--text {
+  height: 1em;
+  border-radius: 4px;
+}
+
+.mc-skeleton--block {
+  height: 64px;
+}
+
+.mc-skeleton--circle,
+.mc-skeleton--ring {
+  border-radius: 50%;
+}
+
+@keyframes mc-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.mc-skeleton-swap {
+  transition: opacity var(--d-base) var(--ease-out);
+}
+
+.mc-skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+/* ═══ 11. Tooltip ═══════════════════════════════════════════════════════════
+   O hairline não tem sombra, por isso o plano separa-se por cor invertida
+   (--ink sobre --surface) + hairline-2. Substitui o title="" nativo. */
+
+.mc-tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.mc-tooltip__bubble {
+  position: absolute;
+  z-index: 60;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  translate: -50% 0;
+  max-width: 260px;
+  width: max-content;
+  padding: 6px 10px;
+  border: var(--hair) solid var(--hairline-2);
+  border-radius: var(--r-control);
+  background: var(--ink);
+  color: var(--surface);
+  font-family: var(--font);
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
+  line-height: 1.4;
+  white-space: normal;
+  text-align: left;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity var(--d-fast) var(--ease-out),
+    translate var(--d-fast) var(--ease-out),
+    visibility var(--d-fast);
+}
+
+.mc-tooltip__bubble[data-open='true'] {
+  opacity: 1;
+  visibility: visible;
+  translate: -50% -2px;
+}
+
+.mc-tooltip__bubble[data-side='bottom'] {
+  bottom: auto;
+  top: calc(100% + 8px);
+}
+
+/* ═══ 12. Segmented (limite de carga) ═══════════════════════════════════════
+   Seleccionado = accent-soft + accent-ink + hairline accent (5,81:1).
+   Nunca --accent como fundo com texto branco (dava 3,59:1). */
+
+.mc-segmented-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.mc-segmented {
+  display: inline-flex;
+  border: var(--hair) solid var(--hairline-2);
+  border-radius: var(--r-control);
+  overflow: hidden;
+  background: var(--surface);
+  max-width: 100%;
+}
+
+.mc-segmented__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border: 0;
+  border-left: var(--hair) solid var(--hairline);
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: var(--font);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out);
+}
+
+.mc-segmented__item:first-child {
+  border-left: 0;
+}
+
+.mc-segmented__item:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.mc-segmented__item[aria-pressed='true'] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: var(--w-strong);
+}
+
+.mc-segmented__item:disabled {
+  color: var(--ink-dim);
+  cursor: not-allowed;
+}
+
+.mc-segmented__badge {
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--success-soft);
+  color: var(--success);
+  font-size: var(--t-label);
+  font-weight: var(--w-strong);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.mc-segmented__note {
+  margin-top: var(--s-2);
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+}
+
+/* ═══ 13. IconButton (apoio do Card e do POC) ═══════════════════════════════
+   Hit area 32×32; hover = círculo 28 de accent-soft atrás do glifo. */
+
+.mc-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    scale var(--d-fast) var(--ease-out);
+}
+
+.mc-icon-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.mc-icon-btn:active:not(:disabled) {
+  scale: 0.94;
+}
+
+.mc-icon-btn:disabled {
+  color: var(--ink-dim);
+  cursor: not-allowed;
+}
+
+/* ═══ 14. Progress / Toast / Alert / Field (apoio) ══════════════════════════ */
+
+.mc-progress {
+  position: relative;
+  height: 8px;
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.mc-progress__fill {
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  transition: width var(--d-slow) var(--ease-out);
+}
+
+.mc-progress__fill--success {
+  background: var(--success);
+}
+
+.mc-progress__fill--warning {
+  background: var(--warning);
+}
+
+.mc-progress__fill--danger {
+  background: var(--danger);
+}
+
+.mc-progress__mark {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--ink);
+  border-radius: 1px;
+}
+
+.mc-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 360px;
+  padding: 12px 14px;
+  border: var(--hair) solid var(--hairline);
+  border-left-width: 2px;
+  border-left-color: var(--hairline-2);
+  border-radius: var(--r-card);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--t-body);
+  line-height: 1.45;
+  box-shadow: none;
+}
+
+.mc-toast--success {
+  border-left-color: var(--success);
+}
+
+.mc-toast--warning {
+  border-left-color: var(--warning);
+}
+
+.mc-toast--error {
+  border-left-color: var(--danger);
+}
+
+.mc-toast--info {
+  border-left-color: var(--info);
+}
+
+.mc-toast__icon {
+  flex: none;
+  color: var(--ink-dim);
+}
+
+.mc-toast--success .mc-toast__icon {
+  color: var(--success);
+}
+
+.mc-toast--warning .mc-toast__icon {
+  color: var(--warning);
+}
+
+.mc-toast--error .mc-toast__icon {
+  color: var(--danger);
+}
+
+.mc-toast--info .mc-toast__icon {
+  color: var(--info);
+}
+
+.mc-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: var(--t-body);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.mc-alert--warn {
+  background: var(--warning-soft);
+  border-color: color-mix(in oklab, var(--warning) 30%, transparent);
+}
+
+.mc-alert--error {
+  background: var(--danger-soft);
+  border-color: color-mix(in oklab, var(--danger) 30%, transparent);
+  color: var(--danger);
+}
+
+.mc-alert--success {
+  background: var(--success-soft);
+  border-color: color-mix(in oklab, var(--success) 30%, transparent);
+}
+
+.mc-alert--info {
+  background: var(--info-soft);
+  border-color: color-mix(in oklab, var(--info) 30%, transparent);
+}
+
+.mc-alert > .mc-icon {
+  margin-top: 1px;
+}
+
+.mc-field {
+  width: 100%;
+  padding: 8px 10px;
+  border: var(--hair) solid var(--hairline-2);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: var(--t-body);
+  outline: none;
+  transition: border-color var(--d-fast) var(--ease-out);
+}
+
+.mc-field:focus {
+  border-color: var(--accent);
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.mc-field::placeholder {
+  color: var(--ink-dim);
+}
+
+.mc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-6) var(--s-4);
+  text-align: center;
+  color: var(--ink-muted);
+  font-size: var(--t-body);
+}
+
+.mc-empty > .mc-icon {
+  color: var(--ink-dim);
+}
+
+.mc-empty__title {
+  font-weight: var(--w-strong);
+  color: var(--ink);
+}
+
+/* ── Glossário (InfoRow / InfoSection) ─────────────────────────────────────── */
+
+.mc-info-row {
+  margin-bottom: var(--s-4);
+}
+
+.mc-info-row__label {
+  font-size: var(--t-meta);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.mc-info-row__body {
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+  line-height: 1.6;
+}
+
+.mc-info-section {
+  margin: var(--s-1) 0;
+  padding-top: var(--s-3);
+  border-top: var(--hair) solid var(--hairline);
+}
+
+.mc-info-section__title {
+  margin-bottom: var(--s-2);
+  font-size: var(--t-label);
+  font-weight: var(--w-strong);
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+}
+
+/* ═══ 15. Foco, movimento, acessibilidade ═══════════════════════════════════ */
+
+*:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--r-control);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-btn,
+  .mc-btn:active,
+  .mc-card--selectable:active,
+  .mc-icon-btn:active,
+  .mc-nav-item:active,
+  .mc-switch__knob,
+  .mc-skeleton,
+  .mc-skeleton-swap,
+  .mc-dialog,
+  .mc-dialog-backdrop,
+  .mc-tooltip__bubble,
+  .mc-progress__fill {
+    animation: none !important;
+    transition: none !important;
+    scale: none !important;
+    translate: none !important;
+  }
+
+  .mc-skeleton {
+    background: var(--surface-2);
+  }
+}
+
+@media (forced-colors: active) {
+  .mc-card,
+  .mc-btn,
+  .mc-badge,
+  .mc-field,
+  .mc-segmented,
+  .mc-dialog,
+  .mc-toast,
+  .mc-alert,
+  .mc-switch__track,
+  .mc-switch__knob {
+    border: 1px solid CanvasText;
+  }
+
+  .mc-btn--primary {
+    background: Highlight;
+    color: HighlightText;
+  }
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   PONTE LEGADA — as classes antigas passam a ler a gramática hairline.
+   Vem depois de globals.css na cascata (main.tsx importa primitives.css no
+   fim), por isso ganha por ordem. Não apaga nada: a vaga 1 remove os blocos
+   antigos e esta secção inteira.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── superfícies ───────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-card);
+  padding: 20px;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.card-title {
+  font-size: var(--t-body);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: -0.005em;
+  margin-bottom: var(--s-3);
+}
+
+.card-value {
+  font-size: var(--t-title);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  font-family: var(--font);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.card-subtitle {
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+}
+
+.page-title {
+  font-size: var(--t-title);
+  font-weight: var(--w-strong);
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.page-subtitle {
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+}
+
+/* O card-rise deixa `transform: translateY(0)` com fill both, o que faz de
+   `.card` um containing block de `position: fixed` — todos os modais
+   ancoravam à área de conteúdo em vez da viewport. Sai a decoração, fica a
+   correcção. */
+.tab-content .card:nth-child(n) {
+  animation: none;
+}
+
+/* ── sidebar / navegação ───────────────────────────────────────────────────── */
+.sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  background: var(--surface);
+  border-right: var(--hair) solid var(--hairline);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  scrollbar-color: var(--hairline-2) transparent;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background: var(--hairline-2);
+}
+
+.sidebar::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-dim);
+}
+
+.sidebar-item {
+  gap: 10px;
+  padding: 7px 10px;
+  border: var(--hair) solid transparent;
+  border-radius: var(--r-control);
+  color: var(--ink-muted);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out);
+}
+
+.sidebar-item:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.sidebar-item.active {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink);
+  font-weight: var(--w-strong);
+  box-shadow: none;
+}
+
+.sidebar-item.active .sidebar-icon {
+  color: var(--accent);
+}
+
+.sidebar-logo {
+  font-size: var(--t-body-lg);
+  font-weight: var(--w-strong);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.sidebar-logo-dot {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.theme-toggle {
+  border: var(--hair) solid var(--hairline);
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  font-size: var(--t-meta);
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out);
+}
+
+.theme-toggle:hover {
+  background: var(--surface-2);
+  border-color: var(--hairline-2);
+  color: var(--ink);
+}
+
+/* ── botões ────────────────────────────────────────────────────────────────── */
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-ghost,
+.btn-danger {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline-2);
+  border-radius: var(--r-control);
+  color: var(--ink);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  box-shadow: none;
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out),
+    scale var(--d-fast) var(--ease-out);
+}
+
+.btn:hover:not(:disabled),
+.btn-secondary:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--ink-dim);
+  box-shadow: none;
+}
+
+.btn:active:not(:disabled),
+.btn-primary:active:not(:disabled),
+.btn-secondary:active:not(:disabled),
+.btn-ghost:active:not(:disabled),
+.btn-danger:active:not(:disabled) {
+  scale: 0.97;
+}
+
+/* Primário é tinta, não accent. */
+.btn-primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+  font-weight: var(--w-strong);
+  box-shadow: none;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--ink-muted);
+  border-color: var(--ink-muted);
+  box-shadow: none;
+  transform: none;
+}
+
+.btn-secondary {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline-2);
+  color: var(--ink);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-muted);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--ink);
+}
+
+.btn-danger {
+  background: var(--danger-soft);
+  border-color: color-mix(in oklab, var(--danger) 30%, transparent);
+  color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--danger) 18%, var(--surface));
+  border-color: var(--danger);
+}
+
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink-dim);
+  opacity: 1;
+  box-shadow: none;
+}
+
+.btn-sm {
+  font-size: var(--t-meta);
+  padding: 4px 10px;
+}
+
+.chip-btn {
+  border: var(--hair) solid var(--hairline-2);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--t-meta);
+  border-radius: var(--r-pill);
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out);
+}
+
+.chip-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+
+.chip-btn.active {
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+  color: var(--accent-ink);
+}
+
+.link-btn {
+  color: var(--accent-ink);
+  text-decoration-color: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+.link-btn:hover {
+  color: var(--accent-ink);
+  text-decoration-color: var(--accent);
+}
+
+.btn-inline {
+  border-radius: var(--r-control);
+  color: var(--ink-muted);
+}
+
+.btn-inline:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* ── switches ──────────────────────────────────────────────────────────────── */
+.toggle {
+  border-bottom: var(--hair) solid var(--hairline);
+}
+
+.toggle-name {
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  color: var(--ink);
+}
+
+.toggle-desc {
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+}
+
+.toggle-track {
+  background: var(--surface-2);
+  border: var(--hair) solid var(--hairline-2);
+  transition:
+    background-color var(--d-base) var(--ease-out),
+    border-color var(--d-base) var(--ease-out);
+}
+
+.toggle-switch input:checked + .toggle-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle-knob {
+  top: 2px;
+  left: 2px;
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline-2);
+  box-shadow: none;
+  transition:
+    translate var(--d-base) var(--ease-throw),
+    width var(--d-fast) var(--ease-out),
+    border-color var(--d-base) var(--ease-out);
+}
+
+.toggle-switch input:checked ~ .toggle-knob {
+  translate: 18px 0;
+  border-color: transparent;
+}
+
+.toggle-switch input:active ~ .toggle-knob {
+  width: 20px;
+}
+
+.toggle-switch:hover .toggle-track {
+  box-shadow: none;
+  border-color: var(--ink-dim);
+}
+
+.toggle-switch:hover {
+  opacity: 1;
+}
+
+/* ── sliders ───────────────────────────────────────────────────────────────── */
+.slider-label {
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+}
+
+.slider-value {
+  font-size: var(--t-body);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  background: transparent;
+  accent-color: var(--accent);
+  -webkit-appearance: auto;
+  appearance: auto;
+  outline: none;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  box-shadow: none;
+  transition: none;
+}
+
+input[type='range']::-webkit-slider-thumb:hover,
+input[type='range']:active::-webkit-slider-thumb {
+  transform: none;
+  box-shadow: none;
+}
+
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: none;
+}
+
+input[type='range']:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--r-control);
+}
+
+/* ── segmented / threshold ─────────────────────────────────────────────────── */
+.threshold-btn {
+  border: var(--hair) solid var(--hairline-2);
+  border-radius: var(--r-control);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--t-body);
+  font-weight: var(--w-medium);
+  box-shadow: none;
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out);
+}
+
+.threshold-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+
+.threshold-btn.active {
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+  color: var(--accent-ink);
+  font-weight: var(--w-strong);
+  box-shadow: none;
+}
+
+.threshold-btn:disabled {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink-dim);
+  cursor: not-allowed;
+}
+
+.threshold-badge {
+  top: -7px;
+  right: -4px;
+  background: var(--success-soft);
+  border: var(--hair) solid color-mix(in oklab, var(--success) 30%, transparent);
+  color: var(--success);
+  font-size: var(--t-label);
+  font-weight: var(--w-strong);
+}
+
+/* ── badge / stat rows ─────────────────────────────────────────────────────── */
+.badge {
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
+  border: var(--hair) solid transparent;
+}
+
+.badge.success {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 22%, transparent);
+}
+
+.badge.warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+  border-color: color-mix(in oklab, var(--warning) 24%, transparent);
+}
+
+.badge.error {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 22%, transparent);
+}
+
+.badge.info {
+  background: var(--info-soft);
+  color: var(--info);
+  border-color: color-mix(in oklab, var(--info) 22%, transparent);
+}
+
+.badge.accent {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border-color: color-mix(in oklab, var(--accent) 22%, transparent);
+}
+
+.stat-row,
+.stat-item {
+  align-items: baseline;
+  padding: var(--s-2) 0;
+  border-bottom: var(--hair) solid var(--hairline);
+  font-size: var(--t-body);
+}
+
+.stat-label {
+  color: var(--ink-muted);
+}
+
+.stat-value {
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.info-row {
+  border-bottom: var(--hair) solid var(--hairline);
+}
+
+.info-label {
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+}
+
+.info-value {
+  font-size: var(--t-body);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── progresso ─────────────────────────────────────────────────────────────── */
+.progress-bar {
+  height: 8px;
+  background: var(--surface-2);
+  border: var(--hair) solid var(--hairline);
+}
+
+.progress-fill.ram {
+  background: var(--accent);
+}
+
+.progress-fill.temp,
+.progress-fill.battery.critical {
+  background: var(--danger);
+}
+
+/* ── skeleton ──────────────────────────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 25%,
+    var(--surface-hover) 50%,
+    var(--surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: mc-shimmer 1.4s linear infinite;
+  border-radius: var(--r-control);
+}
+
+/* ── formulários ───────────────────────────────────────────────────────────── */
+.select-input,
+.text-input,
+input[type='text'],
+input[type='password'],
+input[type='url'],
+input[type='email'] {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline-2);
+  border-radius: var(--r-control);
+  color: var(--ink);
+  font-size: var(--t-body);
+  box-shadow: none;
+}
+
+.select-input:focus,
+.text-input:focus,
+input[type='text']:focus,
+input[type='password']:focus,
+input[type='url']:focus,
+input[type='email']:focus {
+  border-color: var(--accent);
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+
+.select-input::placeholder,
+.text-input::placeholder,
+input::placeholder {
+  color: var(--ink-dim);
+}
+
+/* ── toasts / alerts ───────────────────────────────────────────────────────── */
+.toast {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline);
+  border-left-width: 2px;
+  border-radius: var(--r-card);
+  box-shadow: none;
+  backdrop-filter: none;
+  color: var(--ink);
+  font-size: var(--t-body);
+}
+
+.toast--error {
+  background: var(--surface);
+  border-color: var(--hairline);
+  border-left-color: var(--danger);
+}
+
+.toast--success {
+  background: var(--surface);
+  border-color: var(--hairline);
+  border-left-color: var(--success);
+}
+
+.toast--info {
+  background: var(--surface);
+  border-color: var(--hairline);
+  border-left-color: var(--info);
+}
+
+.alert {
+  border-radius: var(--r-control);
+  font-size: var(--t-body);
+}
+
+.alert-warn {
+  background: var(--warning-soft);
+  border: var(--hair) solid color-mix(in oklab, var(--warning) 30%, transparent);
+  color: var(--ink);
+}
+
+.alert-error {
+  background: var(--danger-soft);
+  border: var(--hair) solid color-mix(in oklab, var(--danger) 30%, transparent);
+  color: var(--danger);
+}
+
+.alert-success {
+  background: var(--success-soft);
+  border: var(--hair) solid color-mix(in oklab, var(--success) 30%, transparent);
+  color: var(--ink);
+}
+
+/* ── modais legados ────────────────────────────────────────────────────────── */
+.overpower-modal-backdrop {
+  background: color-mix(in oklab, var(--bg) 78%, transparent);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.overpower-modal {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-card);
+  box-shadow: none;
+}
+
+.overpower-modal-cancel,
+.overpower-modal-confirm {
+  border-radius: var(--r-control);
+  border: var(--hair) solid var(--hairline-2);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.overpower-modal-confirm {
+  background: var(--warning-soft);
+  border-color: color-mix(in oklab, var(--warning) 35%, transparent);
+  color: var(--warning);
+}
+
+.overpower-modal-confirm:hover {
+  background: color-mix(in oklab, var(--warning) 22%, var(--surface));
+  border-color: var(--warning);
+}
+
+/* ── mode cards ────────────────────────────────────────────────────────────── */
+.mode-btn {
+  background: var(--surface);
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-control);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+.mode-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--hairline-2);
+  box-shadow: none;
+  transform: none;
+}
+
+.mode-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.mode-btn.active .mode-btn-name {
+  color: var(--accent-ink);
+}
+
+.mode-btn.overpower {
+  border-color: color-mix(in oklab, var(--warning) 40%, transparent);
+}
+
+.mode-btn.overpower:hover:not(:disabled) {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.mode-btn.overpower.active {
+  border-color: var(--warning);
+  box-shadow: none;
+}
+
+.mode-btn:disabled {
+  opacity: 1;
+  background: var(--surface-2);
+  border-color: var(--hairline);
+}
+
+.mode-group-header {
+  text-transform: none;
+  font-size: var(--t-label);
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+}
+
+.mode-group-divider {
+  background: var(--hairline);
+}
+
+/* ── tray ──────────────────────────────────────────────────────────────────── */
+.tray-popup {
+  background: var(--surface) !important;
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-card);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.tray-header {
+  background: var(--surface);
+  border-bottom: var(--hair) solid var(--hairline);
+}
+
+.tray-section-label {
+  text-transform: none;
+  font-size: var(--t-label);
+  color: var(--ink-dim);
+  letter-spacing: 0.02em;
+}
+
+.tray-mode-btn {
+  border: var(--hair) solid var(--hairline-2);
+  background: var(--surface);
+  border-radius: var(--r-control);
+  color: var(--ink-muted);
+}
+
+.tray-mode-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+
+.tray-mode-btn.active {
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+  color: var(--accent-ink);
+}
+
+.tray-quick-card {
+  border: var(--hair) solid var(--hairline);
+  background: var(--surface);
+  border-radius: var(--r-control);
+}
+
+.tray-chip-btn,
+.tray-link-btn,
+.tray-icon-btn {
+  border: var(--hair) solid var(--hairline-2);
+  background: var(--surface);
+  color: var(--ink-muted);
+}
+
+.tray-chip-btn:hover:not(:disabled),
+.tray-link-btn:hover:not(:disabled),
+.tray-icon-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--ink-dim);
+  color: var(--ink);
+}
+
+/* ── diversos ──────────────────────────────────────────────────────────────── */
+.spinner {
+  border: 2px solid var(--hairline-2);
+  border-top-color: var(--accent);
+}
+
+.loading-container,
+.loading-spinner {
+  color: var(--ink-muted);
+}
+
+.fan-seg {
+  background: var(--hairline-2);
+}
+
+.fan-seg.active {
+  background: var(--accent);
+}
+
+.delete-log-button {
+  color: var(--ink-dim);
+}
+
+.delete-log-button:hover {
+  color: var(--danger);
+}
+
+.status-ok {
+  color: var(--success);
+}
+
+.status-warn {
+  color: var(--warning);
+}
+
+.text-muted {
+  color: var(--ink-muted);
+}
+
+.text-muted code {
+  background: var(--surface-2);
+  border: var(--hair) solid var(--hairline);
+}
+
+.feature-card {
+  border-radius: var(--r-card);
+}
+
+.mute-btn:hover {
+  background-color: var(--surface-2);
+}

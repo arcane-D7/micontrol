@@ -1,194 +1,211 @@
 /* ─────────────────────────────────────────────────────────────────────────────
-   MiControl — Silken Hardware Design System
-   System UI × Cascadia Code · OKLCH · Pastel Glass · Auto / Light / Dark
+   MiControl · Hairline — fundação de tema
+   1 px hairline · zero sombra · um accent de interacção · números tabulares
+   Fonte: audit-20261107/ui-audit/theme-migration.md §3.3–§3.7
    ──────────────────────────────────────────────────────────────────────────── */
 
-/* ── Light mode tokens (default) ─────────────────────────────────────────── */
+/* ── Tokens — claro (default). 20 tokens de cor, um par por token. ────────── */
 :root {
-  /* Backgrounds */
-  --bg: oklch(96.5% 0.007 75);
-  --bg-mesh:
-    radial-gradient(ellipse 70% 55% at 10% 0%, oklch(82% 0.07 300 / 0.16) 0%, transparent 100%),
-    radial-gradient(ellipse 60% 55% at 90% 100%, oklch(79% 0.08 178 / 0.13) 0%, transparent 100%);
+  color-scheme: light;
 
-  /* Glass surfaces */
-  --surface: oklch(100% 0.003 80 / 0.72);
-  --surface-2: oklch(98.5% 0.003 80 / 0.56);
-  --surface-solid: oklch(99% 0.003 80);
-  --surface-hover: oklch(97% 0.004 80 / 0.84);
+  /* planos — surface está sempre +2,6 L acima do bg; surface-2 −2,6 L */
+  --bg: oklch(96.8% 0.003 250);
+  --surface: oklch(99.4% 0.002 250);
+  --surface-2: oklch(94.2% 0.003 250);
+  --hairline: oklch(90% 0.004 250);
+  --hairline-2: oklch(84% 0.004 250);
+  --surface-hover: color-mix(in oklab, var(--surface-2) 60%, var(--surface));
+  --surface-active: color-mix(in oklab, var(--surface-2) 85%, var(--surface));
 
-  /* Borders */
-  --border: oklch(18% 0.012 260 / 0.09);
-  --border-strong: oklch(18% 0.012 260 / 0.17);
+  /* tinta */
+  --ink: oklch(22% 0.006 250);
+  --ink-muted: oklch(38% 0.005 250);
+  --ink-dim: oklch(50% 0.005 250);
 
-  /* Text */
-  --text: oklch(16% 0.016 260);
-  --text-muted: oklch(44% 0.013 260);
-  --text-dim: oklch(63% 0.008 260);
+  /* accent — só pinta estado: track, fill, anel de foco, item activo */
+  --accent: oklch(62% 0.13 268);
+  --accent-ink: oklch(46% 0.15 268);
+  --accent-soft: oklch(92% 0.035 268);
+  --accent-on: oklch(22% 0.006 250);
+  --ring: var(--accent);
 
-  /* Accent: periwinkle */
-  --accent: oklch(55% 0.19 268);
-  --accent-hover: oklch(50% 0.21 268);
-  --accent-soft: oklch(55% 0.19 268 / 0.11);
-  --accent-glow: oklch(55% 0.19 268 / 0.25);
+  /* funcionais — --x é tinta legível, --x-soft é superfície pastel */
+  --success: oklch(44% 0.115 152);
+  --success-soft: oklch(92% 0.05 152);
+  --warning: oklch(46% 0.105 75);
+  --warning-soft: oklch(92% 0.06 75);
+  --danger: oklch(48% 0.17 27);
+  --danger-soft: oklch(92% 0.048 27);
+  --info: oklch(46% 0.13 245);
+  --info-soft: oklch(92% 0.045 245);
 
-  /* Status */
-  --success: oklch(64% 0.17 148);
-  --warning: oklch(69% 0.17 75);
-  --error: oklch(59% 0.23 25);
-  --info: oklch(62% 0.17 248);
+  /* forma */
+  --r-control: 8px;
+  --r-card: 12px;
+  --r-pill: 999px;
+  --hair: 1px;
+  --radius: var(--r-card);
 
-  /* Category pastels */
-  --cat-perf: oklch(71% 0.17 44);
-  --cat-battery: oklch(66% 0.16 148);
-  --cat-display: oklch(65% 0.15 232);
-  --cat-fan: oklch(63% 0.13 192);
-  --cat-touchpad: oklch(66% 0.16 295);
+  /* espaço — 4 / 8 / 12 / 16 / 24 / 32 / 48 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --rail: 24px;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 3px oklch(10% 0.02 260 / 0.07);
-  --shadow-md: 0 4px 20px oklch(10% 0.02 260 / 0.1), 0 1px 4px oklch(10% 0.02 260 / 0.06);
-  --shadow-glass: 0 8px 32px oklch(10% 0.02 260 / 0.08), inset 0 1px 0 oklch(100% 0 0 / 0.75);
+  /* tipo — 7 tamanhos, 3 pesos */
+  --t-label: 11px;
+  --t-meta: 12px;
+  --t-body: 13px;
+  --t-body-lg: 15px;
+  --t-section: 20px;
+  --t-title: 26px;
+  --t-hero: 40px;
+  --w-body: 400;
+  --w-medium: 500;
+  --w-strong: 600;
 
-  /* Blur */
-  --blur: blur(14px) saturate(1.45);
-  --blur-sm: blur(8px) saturate(1.25);
+  /* movimento */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-settle: cubic-bezier(0.22, 1.18, 0.36, 1);
+  --ease-throw: cubic-bezier(0.34, 1.36, 0.64, 1);
+  --d-fast: 120ms;
+  --d-base: 200ms;
+  --d-slow: 320ms;
 
-  /* Shape */
-  --r-xs: 6px;
-  --r-sm: 10px;
-  --r-md: 16px;
-  --r-lg: 22px;
-  --r-xl: 30px;
+  /* sombra: nenhuma. Os nomes ficam definidos para o CSS antigo não rebentar. */
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-glass: none;
+  --blur: none;
+  --blur-sm: none;
+  --bg-mesh: none;
 
-  /* Motion */
-  --ease: cubic-bezier(0.16, 1, 0.3, 1); /* expo-out */
-  --t-fast: 110ms;
-  --t-base: 190ms;
-  --t-slow: 320ms;
+  /* ── Ponte com o vocabulário antigo ──────────────────────────────────────
+     Não é dívida nova: é o mapa de renomeação. A vaga 1 apaga os blocos
+     antigos do globals.css e esta ponte. Nenhum token novo nasce aqui. */
+  --surface-solid: var(--surface);
+  --border: var(--hairline);
+  --border-strong: var(--hairline-2);
+  --text: var(--ink);
+  --text-muted: var(--ink-muted);
+  --text-dim: var(--ink-dim);
+  --text-secondary: var(--ink-muted);
+  --accent-hover: var(--accent-ink);
+  --accent-glow: color-mix(in oklab, var(--accent) 32%, transparent);
+  --accent-contrast: var(--accent-on);
+  /* Decisão do dono: --error fica apelido de --danger (0 churn). */
+  --error: var(--danger);
+  --r-xs: var(--r-control);
+  --r-sm: var(--r-control);
+  --r-md: var(--r-card);
+  --r-lg: var(--r-card);
+  --r-xl: var(--r-card);
+  --radius-sm: var(--r-control);
+  --radius-md: var(--r-control);
+  --radius-lg: var(--r-card);
+  --ease: var(--ease-out);
+  --t-fast: var(--d-fast);
+  --t-base: var(--d-base);
+  --t-slow: var(--d-slow);
+  --transition: var(--d-base) var(--ease-out);
+  --sidebar-w: 232px;
+  --sidebar-width: var(--sidebar-w);
 
-  /* Fonts */
-  --font: 'Outfit', 'Segoe UI Variable', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Code', monospace;
+  /* fontes: system-ui. Sem ficheiros de fonte locais não há Outfit nem JetBrains Mono. */
+  --font: system-ui, 'Segoe UI Variable Text', 'Segoe UI', -apple-system, sans-serif;
+  --font-sans: var(--font);
+  --font-mono: ui-monospace, 'Cascadia Code', 'Consolas', monospace;
 
-  /* ── Legacy compat ── */
+  /* aliases --color-* — morrem na vaga 4 (codemod), hoje só apontam */
   --color-bg: var(--bg);
-  --color-surface: var(--surface-solid);
-  --color-surface-2: oklch(97.5% 0.004 80);
-  --color-surface-3: oklch(95% 0.005 80);
-  --color-border: var(--border-strong);
-  --color-accent: var(--accent);
-  --color-accent-hover: var(--accent-hover);
-  --color-accent-muted: var(--accent-soft);
-  --color-text: var(--text);
-  --color-text-muted: var(--text-muted);
-  --color-text-dim: var(--text-dim);
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-error: var(--error);
-  --color-info: var(--info);
-  /* S48c contrast audit: these were referenced by components but never
-     defined — callers silently fell back to hardcoded hexes that don't
-     adapt to the active theme (e.g. var(--color-danger, #f87171) rendered
-     pink in both themes; --text-secondary fell through to --text-dim which
-     is near-invisible in dark mode). Define them as theme-aware aliases. */
-  --color-danger: var(--error);
-  --text-secondary: var(--text-muted);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-2);
   --color-surface-alt: var(--surface-2);
   --color-surface-raised: var(--surface-2);
-  --color-surface-sunken: var(--surface-hover);
-  /* Readable text color for use ON accent-colored backgrounds (buttons,
-     active chips). Dark theme flips this to dark text because the dark
-     accent is light (oklch 70%) — white-on-accent was ≈2.1:1, failing WCAG. */
-  --accent-contrast: oklch(98% 0 0);
-  --radius-sm: var(--r-xs);
-  --radius-md: var(--r-sm);
-  --radius-lg: var(--r-md);
-  --shadow-sm: 0 1px 3px oklch(10% 0.02 260 / 0.07);
-  --shadow-md: 0 4px 20px oklch(10% 0.02 260 / 0.1);
-  --transition: var(--t-base) var(--ease);
-  --font-sans: var(--font);
+  --color-surface-sunken: var(--surface-2);
+  --color-border: var(--hairline-2);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-ink);
+  --color-accent-muted: var(--accent-soft);
+  --color-text: var(--ink);
+  --color-text-muted: var(--ink-muted);
+  --color-text-dim: var(--ink-dim);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--danger);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
 }
 
-/* ── Dark mode — explicit ────────────────────────────────────────────────── */
+/* ── Tokens — escuro explícito ────────────────────────────────────────────────
+   Espelho de amplitude: surface +2,6 L, surface-2 −2,6 L, ink a 74,8 L do
+   plano. A hairline desvia de propósito (12,8 L em vez de 6,8 L) — a 6,8 L
+   media 1,11:1 e desaparecia. Ver theme-migration.md §3.2.
+   Mantém-se em sincronia com o bloco @media abaixo (themeTokens.test.ts). */
 [data-theme='dark'] {
-  --bg: oklch(10.5% 0.018 260);
-  --bg-mesh:
-    radial-gradient(ellipse 65% 50% at 14% 0%, oklch(30% 0.12 268 / 0.38) 0%, transparent 100%),
-    radial-gradient(ellipse 55% 55% at 86% 100%, oklch(26% 0.1 198 / 0.28) 0%, transparent 100%);
-  --surface: oklch(20% 0.018 260 / 0.68);
-  --surface-2: oklch(28% 0.016 260 / 0.52);
-  --surface-solid: oklch(17% 0.018 260);
-  --surface-hover: oklch(27% 0.016 260 / 0.76);
-  --border: oklch(100% 0 0 / 0.07);
-  --border-strong: oklch(100% 0 0 / 0.14);
-  /* S48c contrast audit: dark --text was 60%/37% for muted/dim ≈2.7:1 and
-     ≈1.5:1 against the 17% surface — both below WCAG AA (4.5:1 body text).
-     Raised to 72%/60% (≈4.6:1 / ≈3.4:1); dim is still visually secondary to
-     muted but no longer unreadable on essential text (card titles, labels). */
-  --text: oklch(93% 0.007 75);
-  --text-muted: oklch(72% 0.01 260);
-  --text-dim: oklch(60% 0.01 260);
-  --accent: oklch(70% 0.17 268);
-  --accent-hover: oklch(74% 0.18 268);
-  --accent-soft: oklch(70% 0.17 268 / 0.15);
-  --accent-glow: oklch(70% 0.17 268 / 0.32);
-  /* Dark text on the light dark-theme accent (see --accent-contrast note). */
-  --accent-contrast: oklch(15% 0.02 268);
-  --success: oklch(72% 0.16 148);
-  --warning: oklch(76% 0.16 75);
-  --error: oklch(70% 0.21 25);
-  --info: oklch(68% 0.17 248);
-  --cat-perf: oklch(78% 0.17 44);
-  --cat-battery: oklch(74% 0.16 148);
-  --cat-display: oklch(74% 0.15 232);
-  --cat-fan: oklch(72% 0.13 192);
-  --cat-touchpad: oklch(74% 0.16 295);
-  --shadow-sm: 0 1px 4px oklch(0% 0 0 / 0.32);
-  --shadow-md: 0 4px 20px oklch(0% 0 0 / 0.44), 0 1px 4px oklch(0% 0 0 / 0.24);
-  --shadow-glass: 0 8px 32px oklch(0% 0 0 / 0.36), inset 0 1px 0 oklch(100% 0 0 / 0.07);
-  --color-surface-2: oklch(22% 0.015 260);
-  --color-surface-3: oklch(28% 0.015 260);
-  --color-border: oklch(100% 0 0 / 0.12);
+  color-scheme: dark;
+
+  --bg: oklch(18% 0.006 250);
+  --surface: oklch(20.6% 0.006 250);
+  --surface-2: oklch(15.4% 0.006 250);
+  --hairline: oklch(30.8% 0.004 250);
+  --hairline-2: oklch(36% 0.004 250);
+  --surface-hover: color-mix(in oklab, var(--surface-2) 60%, var(--surface));
+  --surface-active: color-mix(in oklab, var(--surface-2) 85%, var(--surface));
+
+  --ink: oklch(92.8% 0.005 250);
+  --ink-muted: oklch(76.8% 0.006 250);
+  --ink-dim: oklch(64.8% 0.005 250);
+
+  --accent: oklch(72% 0.11 268);
+  --accent-ink: oklch(80% 0.115 268);
+  --accent-soft: oklch(30% 0.05 268);
+  --accent-on: oklch(10% 0.02 268);
+
+  --success: oklch(78% 0.11 152);
+  --success-soft: oklch(30% 0.048 152);
+  --warning: oklch(82% 0.1 75);
+  --warning-soft: oklch(30% 0.055 75);
+  --danger: oklch(76% 0.125 27);
+  --danger-soft: oklch(30% 0.05 27);
+  --info: oklch(78% 0.105 245);
+  --info-soft: oklch(30% 0.048 245);
 }
 
-/* ── Dark mode — auto (system preference) ───────────────────────────────── */
+/* ── Tokens — escuro automático ──────────────────────────────────────────────
+   App.tsx escreve data-theme="auto"; o script inline de index.html resolve o
+   modo antes da primeira pintura. Este bloco é a rede para o atributo "auto"
+   ou ausente. themeTokens.test.ts falha se divergir do bloco explícito. */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --bg: oklch(10.5% 0.018 260);
-    --bg-mesh:
-      radial-gradient(ellipse 65% 50% at 14% 0%, oklch(30% 0.12 268 / 0.38) 0%, transparent 100%),
-      radial-gradient(ellipse 55% 55% at 86% 100%, oklch(26% 0.1 198 / 0.28) 0%, transparent 100%);
-    --surface: oklch(20% 0.018 260 / 0.68);
-    --surface-2: oklch(28% 0.016 260 / 0.52);
-    --surface-solid: oklch(17% 0.018 260);
-    --surface-hover: oklch(27% 0.016 260 / 0.76);
-    --border: oklch(100% 0 0 / 0.07);
-    --border-strong: oklch(100% 0 0 / 0.14);
-    /* S48c: keep in sync with [data-theme='dark'] (contrast audit). */
-    --text: oklch(93% 0.007 75);
-    --text-muted: oklch(72% 0.01 260);
-    --text-dim: oklch(60% 0.01 260);
-    --accent: oklch(70% 0.17 268);
-    --accent-hover: oklch(74% 0.18 268);
-    --accent-soft: oklch(70% 0.17 268 / 0.15);
-    --accent-glow: oklch(70% 0.17 268 / 0.32);
-    --accent-contrast: oklch(15% 0.02 268);
-    --success: oklch(72% 0.16 148);
-    --warning: oklch(76% 0.16 75);
-    --error: oklch(70% 0.21 25);
-    --info: oklch(68% 0.17 248);
-    --cat-perf: oklch(78% 0.17 44);
-    --cat-battery: oklch(74% 0.16 148);
-    --cat-display: oklch(74% 0.15 232);
-    --cat-fan: oklch(72% 0.13 192);
-    --cat-touchpad: oklch(74% 0.16 295);
-    --shadow-sm: 0 1px 4px oklch(0% 0 0 / 0.32);
-    --shadow-md: 0 4px 20px oklch(0% 0 0 / 0.44), 0 1px 4px oklch(0% 0 0 / 0.24);
-    --shadow-glass: 0 8px 32px oklch(0% 0 0 / 0.36), inset 0 1px 0 oklch(100% 0 0 / 0.07);
-    --color-surface-2: oklch(22% 0.015 260);
-    --color-surface-3: oklch(28% 0.015 260);
-    --color-border: oklch(100% 0 0 / 0.12);
+  :root[data-theme='auto'],
+  :root:not([data-theme]) {
+    --bg: oklch(18% 0.006 250);
+    --surface: oklch(20.6% 0.006 250);
+    --surface-2: oklch(15.4% 0.006 250);
+    --hairline: oklch(30.8% 0.004 250);
+    --hairline-2: oklch(36% 0.004 250);
+    --surface-hover: color-mix(in oklab, var(--surface-2) 60%, var(--surface));
+    --surface-active: color-mix(in oklab, var(--surface-2) 85%, var(--surface));
+    --ink: oklch(92.8% 0.005 250);
+    --ink-muted: oklch(76.8% 0.006 250);
+    --ink-dim: oklch(64.8% 0.005 250);
+    --accent: oklch(72% 0.11 268);
+    --accent-ink: oklch(80% 0.115 268);
+    --accent-soft: oklch(30% 0.05 268);
+    --accent-on: oklch(10% 0.02 268);
+    --success: oklch(78% 0.11 152);
+    --success-soft: oklch(30% 0.048 152);
+    --warning: oklch(82% 0.1 75);
+    --warning-soft: oklch(30% 0.055 75);
+    --danger: oklch(76% 0.125 27);
+    --danger-soft: oklch(30% 0.05 27);
+    --info: oklch(78% 0.105 245);
+    --info-soft: oklch(30% 0.048 245);
   }
 }
 
@@ -713,16 +730,16 @@ div > .mode-grid:first-child {
 }
 /* Overpower modes: warm warning tint so the risk is visible at a glance */
 .mode-btn.overpower {
-  border-color: oklch(from var(--warning) l c h / 0.4);
+  border-color: color-mix(in oklab, var(--warning) 40%, transparent);
 }
 .mode-btn.overpower:hover:not(:disabled) {
   border-color: var(--warning);
-  background: oklch(from var(--warning) l c h / 0.08);
+  background: color-mix(in oklab, var(--warning) 8%, transparent);
 }
 .mode-btn.overpower.active {
   border-color: var(--warning);
   box-shadow:
-    0 0 0 3px oklch(from var(--warning) l c h / 0.25),
+    0 0 0 3px color-mix(in oklab, var(--warning) 25%, transparent),
     var(--shadow-sm);
 }
 
@@ -734,7 +751,7 @@ div > .mode-grid:first-child {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: oklch(from var(--bg) l c h / 0.72);
+  background: color-mix(in oklab, var(--bg) 72%, transparent);
   backdrop-filter: var(--blur);
   -webkit-backdrop-filter: var(--blur);
   animation: mode-applying-fade-in 160ms var(--ease);
@@ -811,8 +828,8 @@ div > .mode-grid:first-child {
   color: oklch(0% 0 0 / 0.9);
 }
 .overpower-modal-confirm:hover {
-  background: oklch(from var(--warning) calc(l - 6%) c h);
-  border-color: oklch(from var(--warning) calc(l - 6%) c h);
+  background: color-mix(in oklab, var(--warning) 90%, var(--ink));
+  border-color: color-mix(in oklab, var(--warning) 90%, var(--ink));
 }
 
 /* ── Sliders ─────────────────────────────────────────────────────────────── */
@@ -1112,19 +1129,19 @@ input[type='range']:focus-visible::-webkit-slider-thumb {
   letter-spacing: 0.01em;
 }
 .badge.success {
-  background: oklch(from var(--success) l c h / 0.12);
+  background: color-mix(in oklab, var(--success) 12%, transparent);
   color: var(--success);
 }
 .badge.warning {
-  background: oklch(from var(--warning) l c h / 0.14);
+  background: color-mix(in oklab, var(--warning) 14%, transparent);
   color: var(--warning);
 }
 .badge.error {
-  background: oklch(from var(--error) l c h / 0.16);
+  background: color-mix(in oklab, var(--error) 16%, transparent);
   color: var(--error);
 }
 .badge.info {
-  background: oklch(from var(--info) l c h / 0.14);
+  background: color-mix(in oklab, var(--info) 14%, transparent);
   color: var(--info);
 }
 .badge.accent {
@@ -1447,12 +1464,12 @@ input[type='range']:focus-visible::-webkit-slider-thumb {
   border-color: var(--border-strong);
 }
 .btn-danger {
-  background: oklch(from var(--error) l c h / 0.12);
+  background: color-mix(in oklab, var(--error) 12%, transparent);
   color: var(--error);
-  border: 1px solid oklch(from var(--error) l c h / 0.25);
+  border: 1px solid color-mix(in oklab, var(--error) 25%, transparent);
 }
 .btn-danger:hover:not(:disabled) {
-  background: oklch(from var(--error) l c h / 0.2);
+  background: color-mix(in oklab, var(--error) 20%, transparent);
 }
 .btn-sm {
   padding: 6px 12px;
@@ -1645,18 +1662,18 @@ input::placeholder {
 }
 
 .toast--error {
-  background: oklch(from var(--error) l c h / 0.15);
-  border: 1px solid oklch(from var(--error) l c h / 0.4);
+  background: color-mix(in oklab, var(--error) 15%, transparent);
+  border: 1px solid color-mix(in oklab, var(--error) 40%, transparent);
   color: var(--text);
 }
 .toast--success {
-  background: oklch(from var(--success) l c h / 0.15);
-  border: 1px solid oklch(from var(--success) l c h / 0.4);
+  background: color-mix(in oklab, var(--success) 15%, transparent);
+  border: 1px solid color-mix(in oklab, var(--success) 40%, transparent);
   color: var(--text);
 }
 .toast--info {
-  background: oklch(from var(--info) l c h / 0.15);
-  border: 1px solid oklch(from var(--info) l c h / 0.4);
+  background: color-mix(in oklab, var(--info) 15%, transparent);
+  border: 1px solid color-mix(in oklab, var(--info) 40%, transparent);
   color: var(--text);
 }
 
@@ -1923,14 +1940,14 @@ input::placeholder {
 }
 
 .alert-warn {
-  background: oklch(from var(--warning) l c h / 0.12);
-  border: 1px solid oklch(from var(--warning) l c h / 0.3);
+  background: color-mix(in oklab, var(--warning) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--warning) 30%, transparent);
   color: var(--text);
 }
 
 .alert-error {
-  background: oklch(from var(--error) l c h / 0.12);
-  border: 1px solid oklch(from var(--error) l c h / 0.3);
+  background: color-mix(in oklab, var(--error) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--error) 30%, transparent);
   color: var(--error);
 }
 

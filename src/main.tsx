@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './styles/globals.css';
+import './styles/primitives.css';
 
 // P3GLEG tauri-plugin-mcp guest bindings — wires the webview side of the
 // MCP server (needed by execute_js / query_page / click / read_text /
