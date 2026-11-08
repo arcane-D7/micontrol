@@ -34,7 +34,7 @@ export default function TouchpadSettings({
   if (!touchpad) {
     return (
       <div className="card">
-        <div className="card-title">{t('touchpad.title')}</div>
+        <h2 className="card-title">{t('touchpad.title')}</h2>
         <div className="skeleton" style={{ height: 100 }} />
       </div>
     );
@@ -44,7 +44,7 @@ export default function TouchpadSettings({
 
   return (
     <div className="card">
-      <div className="card-title">{t('touchpad.title')}</div>
+      <h2 className="card-title">{t('touchpad.title')}</h2>
 
       {/* ── Sensitivity ── */}
       <div style={{ marginBottom: 20 }}>

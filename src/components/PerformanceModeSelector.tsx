@@ -342,7 +342,7 @@ export default function PerformanceModeSelector({
                   <span className="mode-btn-desc">
                     {aiLocked
                       ? t('performance.techDetails.requiresApiKey')
-                      : t(`performance.descriptions.${m.descKey}` as Parameters<typeof t>[0])}
+                      : t(`performance.userHint.${m.descKey}` as Parameters<typeof t>[0])}
                   </span>
                 </button>
               );
@@ -351,117 +351,125 @@ export default function PerformanceModeSelector({
         </div>
       ))}
 
-      {/* Technical details for the active mode */}
+      {/* Technical details for the active mode.
+          Glossary §4.4: PL1 / PL2 / WMI are the system's internal model, not
+          the user's question. They now live behind a disclosure instead of
+          occupying the main path. */}
       {spec && (
-        <div
-          style={{
-            marginTop: 16,
-            padding: '16px 18px',
-            background: 'var(--surface-2)',
-            borderRadius: 'var(--r-sm)',
-            borderLeft: `3px solid ${spec.accentColor}`,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              color: 'var(--text-dim)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.08em',
-              marginBottom: 12,
-            }}
-          >
-            {t('performance.techDetails.title')}
-          </div>
-
-          {/* Spec row: TDP / Fan / Windows overlay */}
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr 1fr',
-              gap: '10px 16px',
-              marginBottom: 12,
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
-                {t('performance.techDetails.tdp')}
-              </div>
-              <div
-                style={{
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: 'var(--text)',
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {spec.tdp}
-              </div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
-                {t('performance.techDetails.fanBehavior')}
-              </div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{spec.fan}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
-                {t('performance.techDetails.windowsOverlay')}
-              </div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: spec.accentColor }}>
-                {spec.windowsOverlay}
-              </div>
-            </div>
-          </div>
-
-          {/* Detailed description — now pulled from i18n */}
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            {t(
-              `performance.techDetails.modes.${MODES.find((m) => m.key === current)?.detailKey ?? 'balance'}` as Parameters<
-                typeof t
-              >[0],
-            )}
-          </div>
-
-          {/* Windows overlay note */}
+        <details className="perf-tech">
+          <summary>{t('performance.techDetails.show')}</summary>
           <div
             style={{
               marginTop: 10,
-              fontSize: 11,
-              color: 'var(--text-dim)',
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: 6,
+              padding: '16px 18px',
+              background: 'var(--surface-2)',
+              borderRadius: 'var(--r-sm)',
+              borderLeft: `3px solid ${spec.accentColor}`,
             }}
           >
-            <span style={{ flexShrink: 0 }} aria-hidden="true">
-              ℹ️
-            </span>
-            <span>{t('performance.techDetails.overlayNote')}</span>
-          </div>
-
-          {/* Smart vs Smart Acceleration comparison */}
-          {showSmartDiff && (
             <div
               style={{
-                marginTop: 12,
-                padding: '10px 14px',
-                background: 'var(--surface-3, var(--surface))',
-                borderRadius: 'var(--r-sm)',
-                borderLeft: '3px solid var(--accent)',
-                fontSize: 12,
-                color: 'var(--text-muted)',
-                lineHeight: 1.55,
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--text-dim)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                marginBottom: 12,
               }}
             >
-              <span style={{ fontWeight: 600, color: 'var(--accent)' }}>
-                Smart vs Smart Acceleration —{' '}
-              </span>
-              {t('performance.techDetails.smartDiff')}
+              {t('performance.techDetails.title')}
             </div>
-          )}
-        </div>
+
+            {/* Spec row: TDP / Fan / Windows overlay */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr 1fr',
+                gap: '10px 16px',
+                marginBottom: 12,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
+                  {t('performance.techDetails.tdp')}
+                </div>
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: 'var(--text)',
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {spec.tdp}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
+                  {t('performance.techDetails.fanBehavior')}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
+                  {spec.fan}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
+                  {t('performance.techDetails.windowsOverlay')}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: spec.accentColor }}>
+                  {spec.windowsOverlay}
+                </div>
+              </div>
+            </div>
+
+            {/* Detailed description — now pulled from i18n */}
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+              {t(
+                `performance.techDetails.modes.${MODES.find((m) => m.key === current)?.detailKey ?? 'balance'}` as Parameters<
+                  typeof t
+                >[0],
+              )}
+            </div>
+
+            {/* Windows overlay note */}
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 11,
+                color: 'var(--text-dim)',
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 6,
+              }}
+            >
+              <span style={{ flexShrink: 0 }} aria-hidden="true">
+                ℹ️
+              </span>
+              <span>{t('performance.techDetails.overlayNote')}</span>
+            </div>
+
+            {/* Smart vs Smart Acceleration comparison */}
+            {showSmartDiff && (
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: '10px 14px',
+                  background: 'var(--surface-3, var(--surface))',
+                  borderRadius: 'var(--r-sm)',
+                  borderLeft: '3px solid var(--accent)',
+                  fontSize: 12,
+                  color: 'var(--text-muted)',
+                  lineHeight: 1.55,
+                }}
+              >
+                <span style={{ fontWeight: 600, color: 'var(--accent)' }}>
+                  Smart vs Smart Acceleration —{' '}
+                </span>
+                {t('performance.techDetails.smartDiff')}
+              </div>
+            )}
+          </div>
+        </details>
       )}
 
       {/* S60: overpower confirmation modal — experimental modes that push the

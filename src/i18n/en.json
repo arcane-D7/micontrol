@@ -41,12 +41,12 @@
     "performance": "Performance",
     "battery": "Battery",
     "display": "Display",
-    "fan": "Fan Control",
+    "fan": "Fan",
     "audio": "Audio",
     "cast": "Cast",
     "touchpad": "Touchpad",
     "faceUnlock": "Face Unlock",
-    "iot": "IoT Device",
+    "iot": "Connected devices",
     "wifi": "Wi-Fi",
     "startup": "Startup",
     "system": "System",
@@ -58,7 +58,17 @@
     "cleanup": "System Cleanup",
     "settings": "Settings",
     "aiAnalysis": "AI Analysis",
-    "about": "About"
+    "about": "About",
+    "groups": {
+      "system": "System",
+      "energy": "Energy",
+      "screen": "Display & sound",
+      "devices": "Devices",
+      "settings": "Settings"
+    },
+    "label": "Main navigation",
+    "search": "Search destinations…",
+    "noResults": "No destination matches “{query}”"
   },
   "keyboard": {
     "title": "Keyboard Remapper",
@@ -138,7 +148,22 @@
     "filterPlaceholder": "Filter by name or PID…",
     "refresh": "Refresh",
     "noProcesses": "No processes found",
-    "noMatches": "No processes match the filter"
+    "noMatches": "No processes match the filter",
+    "endProcess": "End {name}",
+    "endProcessConfirm": "End process “{name}” (PID {pid})?",
+    "sortBy": "Sort by {column}",
+    "filterLabel": "Filter processes by name or PID",
+    "colProcess": "Process",
+    "colPid": "PID",
+    "colCpu": "CPU %",
+    "colGpu": "GPU %",
+    "colNpu": "NPU %",
+    "colRam": "RAM",
+    "colThreads": "Threads",
+    "colActions": "Actions",
+    "noTraffic": "no traffic",
+    "footer": "{count} processes · refreshes every 2.5 s · NPU = Intel Arc neural engines",
+    "killFailed": "Could not end the process"
   },
   "performance": {
     "title": "Performance Mode",
@@ -208,8 +233,8 @@
     "techDetails": {
       "title": "Technical Details",
       "tdp": "TDP",
-      "peak": "Peak",
-      "sustained": "Sustained",
+      "peak": "Fast",
+      "sustained": "Stays fast",
       "temp": "Peak temp",
       "fanBehavior": "Fan",
       "windowsOverlay": "Windows Power",
@@ -229,7 +254,8 @@
         "overdriveHigh": "Hidden firmware profile ODV1=5. Measured: ~62-67 W SUSTAINED throughout (no PL1 throttle detected in 25 s window). PL1 ≈ PL2 ≈ 62 W — effectively uncapped burst. Peak 99°C. The most consistent high-performance profile. WMI command: 5.",
         "overdriveMax": "Hidden firmware profile ODV1=6 — highest DPTF index. Measured: ~60-77 W sustained throughout (uncapped PL1, 100°C). Nearly identical to Overdrive+ with slightly higher peak variance. WMI command: 6.",
         "smartAdaptive": "EC-driven adaptive mode. QFAN=9 instructs the embedded controller to read the SMMT sub-register and auto-scale across the full ODV1 range. Measured: ~65-73 W burst (~13 s) / ~35 W sustained. Unlike Smart (fixed at ODV1=2), this auto-selects the power table. WMI command: 9."
-      }
+      },
+      "show": "Technical details (PL1 / PL2, WMI)"
     },
     "applying": "Applying mode...",
     "applied": "Mode applied",
@@ -279,17 +305,30 @@
       "registry": "Mi Registry",
       "overlay": "Power Overlay",
       "note": "MI Registry stores the exact performance mode. The Windows Power Overlay has only 3 levels (Efficiency, Balanced, Performance), so multiple MI modes share the same overlay GUID. This is expected behavior."
+    },
+    "userHint": {
+      "silence": "Quietest, but the slowest. For reading, writing and browsing.",
+      "longBattery": "Saves battery with little speed loss. For long work away from the plug.",
+      "balance": "The default balance. For everyday use.",
+      "turbo": "Bursts fast then slows down. For short spurts of work.",
+      "decepticon": "Steady power and cooler. For long, constant loads.",
+      "smart": "Adapts to what you are doing. For mixed use.",
+      "smartAcceleration": "Like Smart, but reacts to sudden spikes. For editing and compiling.",
+      "smartAdaptive": "Automatic, controller-driven adjustment. For unpredictable use.",
+      "overdrive": "Sustained speed with more heat and noise. For gaming.",
+      "overdriveHigh": "The fastest sustained profile. For rendering.",
+      "overdriveMax": "At the hardware limit. Only for very short loads."
     }
   },
   "battery": {
     "title": "Battery",
     "status": "Status",
     "level": "Level",
-    "health": "Health",
+    "health": "Battery health",
     "healthHint": "Full-charge capacity vs. factory design capacity. The gauge re-learns the full capacity after a complete discharge/charge cycle, so this value may rise after deep discharges — it is not wear.",
     "capacity": "Capacity",
-    "designedCapacity": "Designed Capacity",
-    "fullCapacity": "Full Charge Capacity",
+    "designedCapacity": "Factory capacity",
+    "fullCapacity": "Current maximum capacity",
     "manufacturer": "Manufacturer",
     "temperature": "Temperature",
     "voltage": "Voltage",
@@ -297,14 +336,14 @@
     "discharging": "Discharging",
     "full": "Fully Charged",
     "powerSource": "Power source",
-    "acConnected": "AC connected",
-    "acOnBattery": "On battery",
+    "acConnected": "Charger connected",
+    "acOnBattery": "Running on battery",
     "unknown": "Unknown",
     "timeRemaining": "Time remaining",
     "timeToFull": "Time to full",
-    "chargeRate": "Charging rate",
-    "dischargeRate": "Discharge rate",
-    "acInputPower": "AC adapter power",
+    "chargeRate": "Charging at",
+    "dischargeRate": "Using",
+    "acInputPower": "Charger delivering",
     "hours": "h",
     "minutes": "m",
     "mah": "mAh",
@@ -314,10 +353,10 @@
     "voltageUnit": "V",
     "slowCharger": "Slow charger detected",
     "slowChargerHint": "The connected adapter delivers less than 45 W. Charging will take significantly longer. Use the original 100 W adapter for full speed.",
-    "batteryCare": "Battery Care Mode",
-    "batteryCareDesc": "Enables EC-based battery care (register 0xA4) to optimize charging patterns and extend battery lifespan",
-    "batteryCareOn": "Battery Care is enabled",
-    "batteryCareOff": "Battery Care is disabled",
+    "batteryCare": "Battery protection",
+    "batteryCareDesc": "Stops charging at the limit you pick so the battery lasts longer.",
+    "batteryCareOn": "Battery protection is on",
+    "batteryCareOff": "Battery protection is off",
     "infoModal": {
       "title": "Battery Information",
       "levelLabel": "Battery Level (%)",
@@ -332,7 +371,11 @@
       "chargeRateDesc": "Power flowing to or from the battery, measured by the battery driver in mW. This is the battery’s own charge or discharge rate — not the total AC adapter output. Adapter wattage = battery charge rate + system power draw, but system consumption is not available through standard Windows APIs.",
       "timeLabel": "Time Remaining / Time to Full",
       "timeDesc": "Instantaneous estimate based on current energy and power rate. When discharging on battery: remaining energy ÷ discharge rate. When charging: energy needed to fill ÷ charge rate. Fluctuates with varying workload."
-    }
+    },
+    "timeToFullAt": "Time left to {limit}%",
+    "healthGood": "good",
+    "healthFair": "fair",
+    "healthPoor": "poor"
   },
   "charging": {
     "title": "Charging Control",
@@ -340,7 +383,7 @@
     "enableToggle": "Charge Limit",
     "limitEnabled": "Charge limit enabled",
     "limitDisabled": "Charge limit disabled",
-    "noLimit": "No limit — charging to 100%",
+    "noLimit": "Charges to 100%",
     "threshold": "Charge Limit",
     "protectMode": "Battery Protection Mode",
     "protectModeDesc": "Limits charging to 80% to extend battery lifespan",
@@ -365,7 +408,21 @@
       "behaviorDesc": "This is a charge ceiling — it does not discharge the battery. If you are already above the configured limit, the limit applies on the next charge cycle (discharge below the limit, then plug in).",
       "warningLabel": "⚠️ Note:",
       "warningDesc": "This feature was reverse-engineered from the Xiaomi IoTService binary (message type 0x1003). Values 40–80 are interpreted as charge limit percentages, but on some firmware variants the same command may control the charging current rate instead. If you observe the battery consistently charging past your configured limit, the IoTDriver may not be active on your device."
-    }
+    },
+    "state": {
+      "heading": "Charging state",
+      "chargingTo": "Charging up to {limit}%",
+      "paused": "Paused at {level}% — resumes below {limit}%",
+      "aboveLimit": "Already above {limit}% — the limit applies on the next cycle",
+      "unplugged": "Running on battery",
+      "why": "The battery is at {level}%, above the {limit}% limit, so charging stays paused. It resumes when the level drops below {limit}%."
+    },
+    "appliedLimit": "Limit of {level}% applied at {time} — charging stops at {level}%",
+    "appliedCareOn": "Battery protection on at {time} — charging stops at {limit}%",
+    "appliedCareOff": "Battery protection off at {time} — now charges to 100%",
+    "enableHint": "Battery protection is off. Pick a level to switch it on and apply it in one step.",
+    "pending": "Applying…",
+    "technicalTerm": "The limit is written to the embedded controller (EC), register 0xA7. The protection itself uses register 0xA4."
   },
   "display": {
     "title": "Display",
@@ -418,7 +475,7 @@
     "error": "Failed to apply display setting"
   },
   "fan": {
-    "title": "Fan Control",
+    "title": "Fan",
     "mode": "Fan Mode",
     "modes": {
       "auto": "Auto (System Managed)",
@@ -577,10 +634,12 @@
     "seconds_other": "{count} seconds",
     "minutes": "{count} minutes",
     "minutes_one": "{count} minute",
-    "minutes_other": "{count} minutes"
+    "minutes_other": "{count} minutes",
+    "technicalTerm": "Technical term",
+    "why": "Why?"
   },
   "wifi": {
-    "title": "WiFi Manager",
+    "title": "Wi-Fi",
     "connectedTo": "Connected to",
     "notConnected": "Not connected",
     "signal": "Signal",
@@ -597,7 +656,7 @@
     "enterpriseUnsupported": "This network needs 802.1X/Enterprise credentials — connect it once through Windows Settings (MiControl cannot supply EAP logins)."
   },
   "cast": {
-    "title": "Screen Cast",
+    "title": "Cast to another screen",
     "subtitle": "Project to a wireless display through the Windows panel",
     "noDevices": "No displays are paired with this PC yet. Open the projection panel to discover one.",
     "scanError": "Scan error",
@@ -822,7 +881,7 @@
       "description": "miPC is ready to use. You can replay this wizard anytime from Settings.",
       "finish": "Finish"
     },
-    "step": "Step {{current}} of {{total}}",
+    "step": "Step {current} of {total}",
     "next": "Next",
     "back": "Back",
     "skip": "Skip"

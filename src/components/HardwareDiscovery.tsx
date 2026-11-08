@@ -74,9 +74,9 @@ function DriverInstallCard({
 
   return (
     <div className="card" style={{ marginBottom: 8 }}>
-      <div className="card-title" style={{ color: 'var(--warning)' }}>
+      <h2 className="card-title" style={{ color: 'var(--warning)' }}>
         ⚠ {driver.name}
-      </div>
+      </h2>
       <p style={{ fontSize: 13, marginBottom: 8 }}>{driver.description}</p>
       {driver.bundled_inf ? (
         <button
@@ -174,7 +174,7 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
         <>
           {/* Device */}
           <div className="card">
-            <div className="card-title">{t('discovery.device')}</div>
+            <h2 className="card-title">{t('discovery.device')}</h2>
             <div className="stat-row">
               <span className="stat-label">{t('discovery.model')}</span>
               <span className="stat-value">{profile.device_model ?? t('common.unknown')}</span>
@@ -184,7 +184,7 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
 
           {/* Hardware paths */}
           <div className="card">
-            <div className="card-title">{t('discovery.paths')}</div>
+            <h2 className="card-title">{t('discovery.paths')}</h2>
             <PathRow label={t('discovery.vhfPath')} value={profile.vhf_device_path} />
             <PathRow label={t('discovery.touchpadPath')} value={profile.touchpad_hid_path} />
             <PathRow label={t('discovery.touchscreenPath')} value={profile.touchscreen_hid_path} />
@@ -196,7 +196,7 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
 
           {/* Capability flags */}
           <div className="card">
-            <div className="card-title">{t('discovery.capabilities')}</div>
+            <h2 className="card-title">{t('discovery.capabilities')}</h2>
             <BoolRow
               label={t('discovery.cap.vhfPerformance')}
               value={profile.capabilities.has_vhf_performance}
@@ -244,9 +244,9 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
           {/* Missing drivers */}
           {profile.missing_drivers.length > 0 ? (
             <div className="card">
-              <div className="card-title" style={{ color: 'var(--color-warning, #facc15)' }}>
+              <h2 className="card-title" style={{ color: 'var(--color-warning, #facc15)' }}>
                 {t('discovery.missingDrivers')} ({profile.missing_drivers.length})
-              </div>
+              </h2>
               <p style={{ fontSize: 13, marginBottom: 12 }}>{t('discovery.missingNote')}</p>
               {profile.missing_drivers.map((d) => (
                 <DriverInstallCard key={d.name} driver={d} onInstall={onInstallDriver} />
@@ -254,9 +254,9 @@ export default function HardwareDiscovery({ profile, loading, onRescan, onInstal
             </div>
           ) : (
             <div className="card">
-              <div className="card-title" style={{ color: 'var(--color-success, #4ade80)' }}>
+              <h2 className="card-title" style={{ color: 'var(--color-success, #4ade80)' }}>
                 ✓ {t('discovery.allDriversInstalled')}
-              </div>
+              </h2>
             </div>
           )}
         </>

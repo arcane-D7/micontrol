@@ -14,10 +14,14 @@ function BatteryTab({ hw }: Props) {
     <>
       <PageHeader title={t('battery.title')} />
 
-      <BatteryInfoCard battery={hw.battery} />
+      <BatteryInfoCard
+        battery={hw.battery}
+        limit={hw.chargingThreshold !== 100 ? hw.chargingThreshold : undefined}
+      />
       <ChargingProtection
         threshold={hw.chargingThreshold}
         onThresholdChange={hw.setChargingThreshold}
+        battery={hw.battery}
       />
     </>
   );

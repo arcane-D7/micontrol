@@ -117,7 +117,7 @@ function SystemOptimizationTab() {
 
       {/* OS Turbo card */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <div className="card-title">⚡ {t('sysOpt.osTurboTitle')}</div>
+        <h2 className="card-title">⚡ {t('sysOpt.osTurboTitle')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 14 }}>
           {t('sysOpt.osTurboDesc')}
         </p>
@@ -176,7 +176,7 @@ function SystemOptimizationTab() {
 
       {/* ── S55: Windows Debloater card ── */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <div className="card-title">🧹 {t('sysOpt.debloaterTitle')}</div>
+        <h2 className="card-title">🧹 {t('sysOpt.debloaterTitle')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
           {t('sysOpt.debloaterDesc')}
         </p>

@@ -102,7 +102,7 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
 
   return (
     <div className="card">
-      <div className="card-title">{t('performance.monitor.title')}</div>
+      <h2 className="card-title">{t('performance.monitor.title')}</h2>
 
       <div
         style={{

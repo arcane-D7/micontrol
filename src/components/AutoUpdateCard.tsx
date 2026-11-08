@@ -100,9 +100,9 @@ export default function AutoUpdateCard() {
         }}
       >
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="card-title" style={{ margin: 0, marginBottom: 6 }}>
+          <h2 className="card-title" style={{ margin: 0, marginBottom: 6 }}>
             🔄 {t('about.autoUpdateTitle')}
-          </div>
+          </h2>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', margin: 0 }}>
             {t('about.autoUpdateDesc')}
           </p>

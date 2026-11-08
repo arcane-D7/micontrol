@@ -79,7 +79,7 @@ export default function AboutTab({
         </p>
       </div>
       <div className="card">
-        <div className="card-title">{t('about.drivers')}</div>
+        <h2 className="card-title">{t('about.drivers')}</h2>
         <div className="grid-2">
           <div className="stat-row">
             <span className="stat-label">{t('about.driversList.virtualControlHID')}</span>
@@ -99,7 +99,7 @@ export default function AboutTab({
 
       {/* S49: Buy me a coffee — optional thank-you donation */}
       <div className="card">
-        <div className="card-title">{t('about.support.title')}</div>
+        <h2 className="card-title">{t('about.support.title')}</h2>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
           <span
             aria-hidden="true"

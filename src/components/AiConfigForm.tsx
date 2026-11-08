@@ -107,7 +107,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
 
   return (
     <div className="card">
-      <div className="card-title">{t('settings.aiTitle')}</div>
+      <h2 className="card-title">{t('settings.aiTitle')}</h2>
       <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 20 }}>
         {t('settings.aiSubtitle')}
       </p>

@@ -95,7 +95,7 @@ export default function ScreenCast() {
 
   return (
     <div className="card">
-      <div className="card-title">📺 {t('cast.title')}</div>
+      <h2 className="card-title">📺 {t('cast.title')}</h2>
       <p className="page-subtitle">{t('cast.subtitle')}</p>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>

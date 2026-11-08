@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, lazy, Suspense, memo } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, memo } from 'react';
 import type { ThemeMode } from '../App';
 import { t } from '../hooks/useI18n';
 import type { useHardware } from '../hooks/useHardware';
@@ -49,32 +49,102 @@ interface Props {
   toggleTheme: () => void;
 }
 
-const NAV_ITEMS = [
-  { id: 'overview', icon: '📊', label: 'nav.overview' },
-  { id: 'taskmgr', icon: '📈', label: 'nav.taskmgr' },
-  { id: 'performance', icon: '⚡', label: 'nav.performance' },
-  { id: 'sysopt', icon: '🚀', label: 'nav.sysOpt' },
-  { id: 'battery', icon: '🔋', label: 'nav.battery' },
-  { id: 'display', icon: '🖥️', label: 'nav.display' },
-  { id: 'fan', icon: '💨', label: 'nav.fan' },
-  { id: 'audio', icon: '🎵', label: 'nav.audio' },
-  { id: 'cast', icon: '📺', label: 'nav.cast' },
-  { id: 'touchpad', icon: '🖱️', label: 'nav.touchpad' },
-  { id: 'iot', icon: '🔌', label: 'nav.iot' },
-  { id: 'faceUnlock', icon: '😀', label: 'nav.faceUnlock' },
-  { id: 'wifi', icon: '📶', label: 'nav.wifi' },
-  { id: 'startup', icon: '🚀', label: 'nav.startup' },
-  { id: 'system', icon: '🔧', label: 'nav.system' },
-  { id: 'keyboard', icon: '⌨️', label: 'nav.keyboard' },
-  { id: 'security', icon: '🛡️', label: 'nav.security' },
-  { id: 'crossDevice', icon: '📱', label: 'nav.crossDevice' },
-  { id: 'color', icon: '🎨', label: 'nav.color' },
-  { id: 'cleanup', icon: '🧹', label: 'nav.cleanup' },
-  ...(import.meta.env.DEV ? [{ id: 'ecrdebug', icon: '🔧', label: 'nav.ecrdebug' }] : []),
-  { id: 'ai_analysis', icon: '🤖', label: 'nav.aiAnalysis' },
-  { id: 'settings', icon: '⚙️', label: 'nav.settings' },
-  { id: 'about', icon: 'ℹ️', label: 'nav.about' },
-] as const;
+type NavKey = Parameters<typeof t>[0];
+
+interface NavItem {
+  id: string;
+  icon: string;
+  label: NavKey;
+}
+
+interface NavGroup {
+  id: string;
+  label: NavKey;
+  items: NavItem[];
+}
+
+/**
+ * Navigation grouped by task domain (audit 2026-11-07, finding #3: 23 flat
+ * destinations cost 23 binary decisions and pushed `Definições` below the
+ * fold). Five groups, each labelled; the last one is pinned outside the
+ * scroll area so Settings is always reachable at 950×660 and at the 600×560
+ * minimum.
+ */
+const NAV_GROUPS: NavGroup[] = [
+  {
+    id: 'system',
+    label: 'nav.groups.system',
+    items: [
+      { id: 'overview', icon: '📊', label: 'nav.overview' },
+      { id: 'taskmgr', icon: '📈', label: 'nav.taskmgr' },
+      { id: 'system', icon: '🔧', label: 'nav.system' },
+      { id: 'startup', icon: '🚀', label: 'nav.startup' },
+      { id: 'security', icon: '🛡️', label: 'nav.security' },
+      { id: 'cleanup', icon: '🧹', label: 'nav.cleanup' },
+      { id: 'ai_analysis', icon: '🤖', label: 'nav.aiAnalysis' },
+    ],
+  },
+  {
+    id: 'energy',
+    label: 'nav.groups.energy',
+    items: [
+      { id: 'battery', icon: '🔋', label: 'nav.battery' },
+      { id: 'performance', icon: '⚡', label: 'nav.performance' },
+      { id: 'fan', icon: '💨', label: 'nav.fan' },
+      { id: 'sysopt', icon: '🚀', label: 'nav.sysOpt' },
+    ],
+  },
+  {
+    id: 'screen',
+    label: 'nav.groups.screen',
+    items: [
+      { id: 'display', icon: '🖥️', label: 'nav.display' },
+      { id: 'color', icon: '🎨', label: 'nav.color' },
+      { id: 'audio', icon: '🎵', label: 'nav.audio' },
+      { id: 'cast', icon: '📺', label: 'nav.cast' },
+    ],
+  },
+  {
+    id: 'devices',
+    label: 'nav.groups.devices',
+    items: [
+      { id: 'crossDevice', icon: '📱', label: 'nav.crossDevice' },
+      { id: 'iot', icon: '🔌', label: 'nav.iot' },
+      { id: 'wifi', icon: '📶', label: 'nav.wifi' },
+      { id: 'keyboard', icon: '⌨️', label: 'nav.keyboard' },
+      { id: 'touchpad', icon: '🖱️', label: 'nav.touchpad' },
+      { id: 'faceUnlock', icon: '😀', label: 'nav.faceUnlock' },
+    ],
+  },
+];
+
+const PINNED_GROUP: NavGroup = {
+  id: 'settings',
+  label: 'nav.groups.settings',
+  items: [
+    { id: 'settings', icon: '⚙️', label: 'nav.settings' },
+    { id: 'about', icon: 'ℹ️', label: 'nav.about' },
+    ...(import.meta.env.DEV
+      ? [{ id: 'ecrdebug', icon: '🔧', label: 'nav.ecrdebug' as NavKey }]
+      : []),
+  ],
+};
+
+const NAV_ITEMS: NavItem[] = [...NAV_GROUPS.flatMap((g) => g.items), ...PINNED_GROUP.items];
+
+/** Alt+1..9 keeps the pre-grouping order — muscle memory must survive the
+ *  reorganisation (audit §4.5: memorability is the weakest axis). */
+const SHORTCUT_TABS = [
+  'overview',
+  'taskmgr',
+  'performance',
+  'sysopt',
+  'battery',
+  'display',
+  'fan',
+  'audio',
+  'cast',
+];
 
 function ThemeIcon({ mode }: { mode: ThemeMode }) {
   if (mode === 'light')
@@ -142,25 +212,108 @@ const Sidebar = memo(function Sidebar({
   hardware,
   setShowTrayPreview,
 }: SidebarProps) {
+  const [query, setQuery] = useState('');
+  const activeRef = useRef<HTMLButtonElement | null>(null);
+  const q = query.trim().toLowerCase();
+
+  // Keep the active destination in view: the list scrolls internally, so a
+  // tab change from a shortcut or the tray must not leave the marker offscreen
+  // (audit §4.3 #7 — the active item used to stay below the fold).
+  useEffect(() => {
+    if (!q) activeRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [activeTab, q]);
+
+  const renderItem = (item: NavItem) => {
+    const active = activeTab === item.id;
+    return (
+      <button
+        key={item.id}
+        ref={active ? activeRef : undefined}
+        className={`sidebar-item ${active ? 'active' : ''}`}
+        onClick={() => onTabChange(item.id)}
+        aria-current={active ? 'page' : undefined}
+        title={t(item.label)}
+      >
+        <span className="sidebar-icon" aria-hidden="true">
+          {item.icon}
+        </span>
+        <span className="sidebar-item-label">{t(item.label)}</span>
+      </button>
+    );
+  };
+
+  const matches = (item: NavItem) => !q || t(item.label).toLowerCase().includes(q);
+  const results = q ? NAV_ITEMS.filter(matches) : null;
+  // While filtering, every match (pinned ones included) is rendered in the
+  // single result list — keeping the pinned group would duplicate Settings.
+  const pinnedItems = q ? [] : PINNED_GROUP.items;
+
   return (
-    <nav aria-label="Main navigation" className="sidebar">
+    <nav aria-label={t('nav.label')} className="sidebar">
       <div className="sidebar-logo">
         <MiControlIcon size={22} />
         MiControl
       </div>
-      {NAV_ITEMS.map((item) => (
-        <button
-          key={item.id}
-          className={`sidebar-item ${activeTab === item.id ? 'active' : ''}`}
-          onClick={() => onTabChange(item.id)}
-          aria-label={t(item.label as Parameters<typeof t>[0])}
+
+      <div className="sidebar-search">
+        <svg
+          className="sidebar-search-icon"
+          width="12"
+          height="12"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          aria-hidden="true"
         >
-          <span className="sidebar-icon" aria-hidden="true">
-            {item.icon}
-          </span>
-          {t(item.label as Parameters<typeof t>[0])}
-        </button>
-      ))}
+          <circle cx="7" cy="7" r="4.5" />
+          <line x1="10.5" y1="10.5" x2="14" y2="14" />
+        </svg>
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setQuery('');
+          }}
+          placeholder={t('nav.search')}
+          aria-label={t('nav.search')}
+          spellCheck={false}
+        />
+      </div>
+
+      <div className="sidebar-scroll">
+        {results ? (
+          results.length > 0 ? (
+            results.map(renderItem)
+          ) : (
+            <div className="sidebar-empty" role="status">
+              {t('nav.noResults', { query: query.trim() })}
+            </div>
+          )
+        ) : (
+          NAV_GROUPS.map((group) => (
+            <div key={group.id} className="sidebar-group" role="group" aria-label={t(group.label)}>
+              <div className="sidebar-group-label" aria-hidden="true">
+                {t(group.label)}
+              </div>
+              {group.items.map(renderItem)}
+            </div>
+          ))
+        )}
+      </div>
+
+      {pinnedItems.length > 0 && (
+        <div className="sidebar-pinned">
+          <div className="sidebar-group" role="group" aria-label={t(PINNED_GROUP.label)}>
+            <div className="sidebar-group-label" aria-hidden="true">
+              {t(PINNED_GROUP.label)}
+            </div>
+            {pinnedItems.map(renderItem)}
+          </div>
+        </div>
+      )}
 
       <div className="sidebar-footer">
         {hardware.error && (
@@ -176,7 +329,7 @@ const Sidebar = memo(function Sidebar({
           </div>
         )}
         {hardware.loading && (
-          <div style={{ padding: '4px 8px', fontSize: 11, color: 'var(--text-dim)' }}>
+          <div style={{ padding: '4px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
             {t('common.loading')}
           </div>
         )}
@@ -278,14 +431,12 @@ export default function MainWindow({
 
   // ── Keyboard shortcuts: Alt+1..9 to switch tabs ──────────────────────
   useEffect(() => {
-    const tabIds = NAV_ITEMS.slice(0, 9).map((item) => item.id);
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.altKey && e.key >= '1' && e.key <= '9') {
         e.preventDefault();
         const tabIndex = parseInt(e.key, 10) - 1;
-        if (tabIndex < tabIds.length) {
-          onTabChange(tabIds[tabIndex]);
-        }
+        const tabId = SHORTCUT_TABS[tabIndex];
+        if (tabId) onTabChange(tabId);
       }
     };
     window.addEventListener('keydown', handleKeyDown);

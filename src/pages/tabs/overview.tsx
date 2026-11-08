@@ -22,7 +22,7 @@ function OverviewTab({ hw, ai, onOpenSettings }: Props) {
         <BatteryInfoCard battery={hw.battery} />
       </div>
       <div className="card">
-        <div className="card-title">{t('nav.performance')}</div>
+        <h2 className="card-title">{t('nav.performance')}</h2>
         <PerformanceModeSelector
           current={hw.performanceMode}
           onChange={hw.setPerformanceMode}
