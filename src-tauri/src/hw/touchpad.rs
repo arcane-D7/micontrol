@@ -1104,6 +1104,10 @@ struct EdgeSlideState {
     /// Consecutive WM_INPUT frames where contact_count != 1.
     /// Edge state is preserved across brief gaps (palm rejection artefacts).
     lost_frames: u8,
+    /// Consecutive frames with X outside the continuation zone. A single
+    /// out-of-zone sample is usually a slot shuffle in the HID report, not the
+    /// finger leaving the edge, so the gesture only dies after a short run.
+    out_of_zone_frames: u8,
 }
 
 #[cfg(windows)]
@@ -1242,6 +1246,134 @@ unsafe fn query_raw_input_device_name(
     Some(String::from_utf16_lossy(&name_buf[..len]))
 }
 
+/// One contact slot selected from a HID report.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+struct ContactPick {
+    /// Value of the Contact Count usage (0x000D/0x0054).
+    count: u32,
+    x: i32,
+    y: i32,
+    /// TipSwitch (0x0042) of the *selected* slot.
+    tip: bool,
+    lc: u16,
+    /// How many slots carried a plausible (in-range) coordinate.
+    candidates: u8,
+}
+
+/// Pick the contact that should drive the gesture state machine.
+///
+/// The BLTP7853 keeps up to five contact slots in one report and leaves stale
+/// coordinates in the unused ones. The old code took the first slot with
+/// `x>0 && y>0`, which produced the audit's impossible frames: a left-edge
+/// gesture whose next sample read `x=3240` (right edge) and ended, then
+/// re-armed in the middle of the pad, 3 167 times.
+///
+/// Selection order:
+///   1. only slots whose coordinates are inside the logical range;
+///   2. prefer slots whose TipSwitch is set (finger actually down);
+///   3. among those, the slot closest to `prev` (temporal continuity).
+///
+/// `prev` is `None` when no gesture is in flight, in which case the first
+/// touching slot wins.
+#[cfg(windows)]
+fn select_contact(
+    preparsed: windows::Win32::Devices::HumanInterfaceDevice::PHIDP_PREPARSED_DATA,
+    report: &[u8],
+    x_max: i32,
+    y_max: i32,
+    prev: Option<(i32, i32)>,
+) -> ContactPick {
+    use windows::Win32::Devices::HumanInterfaceDevice::{
+        HidP_GetUsageValue, HidP_GetUsages, HidP_Input,
+    };
+
+    let mut count: u32 = 0;
+    let _ =
+        unsafe { HidP_GetUsageValue(HidP_Input, 0x000D, 0, 0x0054, &mut count, preparsed, report) };
+
+    let mut best: Option<ContactPick> = None;
+    let mut best_score = i64::MAX;
+    let mut candidates: u8 = 0;
+
+    for lc in 1u16..=5 {
+        let mut x_val: u32 = 0;
+        let mut y_val: u32 = 0;
+        // X/Y live in the Generic Desktop page (0x0001), not Digitizer.
+        let rx = unsafe {
+            HidP_GetUsageValue(
+                HidP_Input, 0x0001, lc, 0x0030, &mut x_val, preparsed, report,
+            )
+        };
+        let ry = unsafe {
+            HidP_GetUsageValue(
+                HidP_Input, 0x0001, lc, 0x0031, &mut y_val, preparsed, report,
+            )
+        };
+        if rx.is_err() || ry.is_err() {
+            continue;
+        }
+        let (x, y) = (x_val as i32, y_val as i32);
+        // 0/0 is an empty slot; anything outside the logical range is an
+        // EMI-corrupted or foreign-usage value and must not be a position.
+        if x <= 0 || y <= 0 || x > x_max || y > y_max {
+            continue;
+        }
+        candidates = candidates.saturating_add(1);
+
+        let mut usage_buf = [0u16; 8];
+        let mut usage_len: u32 = usage_buf.len() as u32;
+        let mut report_mut = report.to_vec();
+        let tip = unsafe {
+            HidP_GetUsages(
+                HidP_Input,
+                0x000D, // Digitizer page — TipSwitch and Confidence live here
+                lc,
+                usage_buf.as_mut_ptr(),
+                &mut usage_len,
+                preparsed,
+                &mut report_mut,
+            )
+        }
+        .is_ok()
+            && usage_buf[..(usage_len.min(8) as usize)].contains(&0x0042);
+
+        let continuity = match prev {
+            Some((px, py)) => i64::from((x - px).abs()) + i64::from((y - py).abs()),
+            None => 0,
+        };
+        // A lifted slot loses to any touching slot, however far away.
+        let score = continuity + if tip { 0 } else { 1_000_000 };
+
+        if score < best_score {
+            best_score = score;
+            best = Some(ContactPick {
+                count,
+                x,
+                y,
+                tip,
+                lc,
+                candidates,
+            });
+        }
+    }
+
+    match best {
+        Some(mut pick) => {
+            pick.candidates = candidates;
+            pick
+        }
+        None => ContactPick {
+            count,
+            x: 0,
+            y: 0,
+            tip: false,
+            lc: 0,
+            candidates: 0,
+        },
+    }
+}
+
 /// Process a single WM_INPUT message from the Precision Touchpad.
 ///
 /// # Safety
@@ -1252,8 +1384,7 @@ unsafe fn query_raw_input_device_name(
 #[cfg(windows)]
 unsafe fn process_raw_input(lparam: isize) {
     use windows::Win32::Devices::HumanInterfaceDevice::{
-        HidP_GetSpecificValueCaps, HidP_GetUsageValue, HidP_GetUsages, HidP_Input, HIDP_VALUE_CAPS,
-        PHIDP_PREPARSED_DATA,
+        HidP_GetSpecificValueCaps, HidP_Input, HIDP_VALUE_CAPS, PHIDP_PREPARSED_DATA,
     };
     use windows::Win32::UI::Input::{
         GetRawInputData, GetRawInputDeviceInfoW, HRAWINPUT, RAWINPUT, RAWINPUTHEADER,
@@ -1466,69 +1597,33 @@ unsafe fn process_raw_input(lparam: isize) {
         }
     });
 
-    // ── Read contact count (Usage Page 0x000D, Usage 0x0054, LC=0) ───────────
-    let mut contact_count: u32 = 0;
-    let _ = HidP_GetUsageValue(
-        HidP_Input,
-        0x000D,
-        0,
-        0x0054,
-        &mut contact_count,
-        preparsed,
-        report,
+    // ── Read the active contact (count + the right slot) ──────────────────────
+    // The BLTP7853 reports up to five contact slots per report and keeps
+    // stale coordinates in the unused ones. Reading "the first slot with
+    // x>0 && y>0" (the old behaviour) meant a finger at the left edge could be
+    // reported at the right edge on the next frame, because slot 1 and slot 2
+    // had swapped — the audit's `ended` lines show x=3240 on a *left* gesture.
+    // The picker below prefers a slot whose TipSwitch is set and, among those,
+    // the one closest to the last processed position (continuity).
+    let prev_point = GESTURE_STATE.with(|state| {
+        state
+            .borrow()
+            .edge
+            .as_ref()
+            .map(|edge| (edge.last_x, edge.last_y))
+    });
+    let (x_max, y_max) = GESTURE_STATE.with(|state| {
+        let s = state.borrow();
+        (s.x_max, s.y_max)
+    });
+    let pick = select_contact(preparsed, report, x_max, y_max, prev_point);
+    let contact_count = pick.count;
+    let contact_active = pick.tip;
+    log::trace!(
+        target: "hw::touchpad",
+        "contact pick: lc={} x={} y={} tip={} count={} candidates={}",
+        pick.lc, pick.x, pick.y, pick.tip, pick.count, pick.candidates
     );
-
-    // ── Read first contact X and Y (per-contact link collections 1..=5) ──────
-    // X/Y are in Generic Desktop usage page (0x0001), not Digitizer (0x000D).
-    // Both coordinates must come from the *same* link collection to avoid
-    // mismatched X from LC-1 and Y from LC-2 when contacts shuffle.
-    let mut first_lc: u16 = 0;
-    let mut first_x: u32 = 0;
-    let mut first_y: u32 = 0;
-    for lc in 1u16..=5 {
-        let mut x_val: u32 = 0;
-        let mut y_val: u32 = 0;
-        let rx = HidP_GetUsageValue(
-            HidP_Input, 0x0001, lc, 0x0030, &mut x_val, preparsed, report,
-        );
-        let ry = HidP_GetUsageValue(
-            HidP_Input, 0x0001, lc, 0x0031, &mut y_val, preparsed, report,
-        );
-        if rx.is_ok() && ry.is_ok() && x_val > 0 && y_val > 0 {
-            first_lc = lc;
-            first_x = x_val;
-            first_y = y_val;
-            break;
-        }
-    }
-
-    // ── Read TipSwitch (0x42) for the active contact's link collection ────────
-    // HidP_GetUsages returns the list of active button usages on the Digitizer
-    // page for the given LC. TipSwitch (0x42) being in the list means the
-    // finger is physically touching the pad; its absence means the finger has
-    // lifted (even when contact_count still shows 1 due to BLTP7853 quirks).
-    let mut tip_switch = false;
-    let mut tip_switch_known = false;
-    if first_lc > 0 {
-        let mut usage_buf = [0u16; 8]; // 8 slots >> max PTP buttons per contact
-        let mut usage_len: u32 = usage_buf.len() as u32;
-        // HidP_GetUsages needs &mut [u8]; clone report bytes (small, ~10-40 B)
-        let mut report_mut = report.to_vec();
-        let r = HidP_GetUsages(
-            HidP_Input,
-            0x000D, // Digitizer page — where TipSwitch and Confidence live
-            first_lc,
-            usage_buf.as_mut_ptr(),
-            &mut usage_len,
-            preparsed,
-            &mut report_mut,
-        );
-        if r.is_ok() {
-            tip_switch_known = true;
-            let n = usage_len.min(8) as usize;
-            tip_switch = usage_buf[..n].contains(&0x0042); // TipSwitch
-        }
-    }
 
     // ── Feed gesture state machine ────────────────────────────────────────────
     // Each handler returns a value describing the action to perform so that
@@ -1543,16 +1638,11 @@ unsafe fn process_raw_input(lparam: isize) {
     // (brightness_steps, volume_steps) — positive = up, negative = down
     let (brightness_steps, volume_steps) = if EDGE_SLIDE_ENABLED.load(Ordering::Relaxed) {
         GESTURE_STATE.with(|state| {
-            // Harden TipSwitch fallback: when the tip switch state is unknown
-            // (HidP_GetUsages failed), do NOT assume contact — reject the frame
-            // instead of treating unknown as "touching". This prevents corrupted
-            // HID reports from triggering edge-slide gestures.
-            let contact_active = tip_switch_known && tip_switch;
             handle_edge_slide(
                 &mut state.borrow_mut(),
                 contact_count,
-                first_x as i32,
-                first_y as i32,
+                pick.x,
+                pick.y,
                 contact_active,
             )
         })
@@ -1814,6 +1904,129 @@ mod tests {
         assert!(b > 0, "expected brightness step with high y_max");
         assert_eq!(v, 0);
     }
+
+    // ── Field-geometry regressions (BLTP7853 on this laptop) ─────────────────
+    //
+    // x_max=3282 / y_max=2124 are the values the deployed build logged at
+    // 13:26:38 (`Touchpad logical range: x_max=3282, y_max=2124`). The old
+    // deadband was min(2% of height, y_step/2) = 42 units, while a normal
+    // swipe at 250 Hz moves ~18 units per report: every real sample was
+    // dropped as "noise", the accumulator never reached y_step=88, and the log
+    // therefore contains 54 `captured` lines and ZERO `edge-left steps=` lines.
+
+    fn real_pad() -> super::GestureState {
+        super::GestureState {
+            x_max: 3_282,
+            y_max: 2_124,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn edge_slide_real_geometry_emits_steps_at_250hz() {
+        let mut state = real_pad();
+        // Contact starts in the left edge zone (x < 3282/8 = 410).
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        assert!(state.edge.is_some(), "must arm from the edge");
+
+        // 18 logical units per frame ≈ a 4 cm/s swipe at 250 Hz.
+        let mut brightness_total = 0;
+        let mut y = 1_800;
+        for i in 0..40 {
+            y -= 18;
+            let (b, _v) = handle_edge_slide(&mut state, 1, 200 + (i % 3), y, true);
+            brightness_total += b;
+        }
+        assert!(
+            brightness_total > 0,
+            "a normal swipe must produce brightness steps (got {brightness_total})"
+        );
+    }
+
+    #[test]
+    fn edge_slide_survives_a_contact_slot_shuffle() {
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        // Capture with vertical intent.
+        let _ = handle_edge_slide(&mut state, 1, 205, 1_760, true);
+        assert!(state.edge.as_ref().expect("edge").captured);
+
+        // One frame reads the *other* contact slot: x jumps to the right edge,
+        // exactly what the deployed log recorded (`ended: x=3240/3282` on a
+        // left-side gesture). This must re-anchor, not kill the gesture.
+        let _ = handle_edge_slide(&mut state, 1, 3_240, 1_742, true);
+        assert!(
+            state.edge.is_some(),
+            "a slot shuffle must not end the gesture"
+        );
+
+        let mut brightness_total = 0;
+        let mut y = 1_742;
+        for _ in 0..30 {
+            y -= 18;
+            let (b, _v) = handle_edge_slide(&mut state, 1, 205, y, true);
+            brightness_total += b;
+        }
+        assert!(
+            brightness_total > 0,
+            "gesture must keep producing steps after a slot shuffle"
+        );
+    }
+
+    #[test]
+    fn edge_slide_does_not_rearm_after_leaving_the_zone() {
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        assert!(state.edge.is_some());
+        // Finger travels to the middle of the pad (beyond 3282/3 = 1094).
+        for x in [500, 800, 1_200, 1_500, 1_800, 2_100, 2_400] {
+            let _ = handle_edge_slide(&mut state, 1, x, 1_790, true);
+        }
+        assert!(state.edge.is_none(), "gesture must end away from the edge");
+        // The log storm the audit found: every further frame re-armed from the
+        // stale session side and ended again (3 167 `ended` lines). It must not.
+        for x in [2_000, 2_100, 2_200, 2_300, 2_400, 2_500] {
+            let _ = handle_edge_slide(&mut state, 1, x, 1_790, true);
+            assert!(
+                state.edge.is_none(),
+                "must not re-arm from a stale edge session at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_slide_ignores_out_of_range_coordinates() {
+        let mut state = real_pad();
+        // x beyond the logical max is an EMI-corrupted report, not a position.
+        let _ = handle_edge_slide(&mut state, 1, 4_000, 1_800, true);
+        assert!(
+            state.edge.is_none(),
+            "out-of-range X must not arm a gesture"
+        );
+        // Arm legitimately, then feed a corrupt frame: it must not capture.
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        assert!(state.edge.is_some());
+        let _ = handle_edge_slide(&mut state, 1, 200, 9_000, true);
+        assert!(
+            !state.edge.as_ref().expect("edge").captured,
+            "an out-of-range Y must not count as vertical intent"
+        );
+    }
+
+    #[test]
+    fn edge_slide_right_edge_drives_volume() {
+        let mut state = real_pad();
+        // Right initiation zone: x > 3282 - 410 = 2872.
+        let _ = handle_edge_slide(&mut state, 1, 3_100, 1_800, true);
+        let mut volume_total = 0;
+        let mut y = 1_800;
+        for _ in 0..40 {
+            y -= 18;
+            let (_b, v) = handle_edge_slide(&mut state, 1, 3_100, y, true);
+            volume_total += v;
+        }
+        assert!(volume_total > 0, "right edge must drive volume");
+    }
 }
 
 // ─── Gesture handlers ─────────────────────────────────────────────────────────
@@ -1863,17 +2076,27 @@ fn handle_edge_slide(
     y: i32,
     tip_switch: bool,
 ) -> (i32, i32) {
+    // Reject frames whose coordinates are outside the pad's logical range.
+    // The BLTP7853 emits out-of-range X/Y on EMI-corrupted reports (the audit
+    // saw x=3240 on a pad whose logical max is 3282, and start_x values that
+    // produced total_dx=-3200). Those frames used to arm, capture and reset
+    // gestures; they carry no usable position, so they must not move the state
+    // machine at all. `contact_count`/`tip_switch` are still honoured below so
+    // a lifted finger is not ignored just because the coordinates are junk.
+    let coords_valid = x >= 0 && y >= 0 && x <= state.x_max && y <= state.y_max;
+
     // Exponential decay: drift the accumulator toward zero during idle/noise
     // frames so stale Y-deltas don't accumulate into phantom gestures.
     // This is defense-in-depth against EMI-corrupted Y values that could
-    // otherwise build up in the accumulator.
+    // otherwise build up in the accumulator. 1/8 per frame: gentle enough that
+    // a normal 250 Hz report stream still accumulates a step, strong enough
+    // that a stopped finger does not leave a charged accumulator behind.
     if let Some(edge) = &mut state.edge {
         if edge.accum != 0 {
-            // Decay by ~25% per frame (shift right by 2), rounding toward zero.
-            let decay = edge.accum.abs() / 4;
+            let decay = edge.accum.abs() / 8;
             if decay > 0 {
                 edge.accum -= if edge.accum > 0 { decay } else { -decay };
-            } else if edge.accum.abs() == 1 {
+            } else {
                 edge.accum = 0; // snap small residual to zero
             }
         }
@@ -1881,11 +2104,12 @@ fn handle_edge_slide(
 
     // Allow up to 5 consecutive frames of lost contact before resetting.
     const GRACE_FRAMES: u8 = 5;
+    /// Out-of-zone frames tolerated before the gesture is considered over.
+    const OUT_OF_ZONE_GRACE: u8 = 3;
 
-    // Treat both a missing contact and a lifted finger (TipSwitch=0) as
-    // "no valid contact".  The BLTP7853 sometimes reports contact_count=1
-    // even after the finger has lifted; TipSwitch catches that case.
-    let no_contact = contact_count != 1 || !tip_switch;
+    // Treat both a missing contact, a lifted finger (TipSwitch=0) and an
+    // out-of-range coordinate as "no valid contact" for the *position* part.
+    let no_contact = contact_count != 1 || !tip_switch || !coords_valid;
 
     if no_contact {
         if state.edge_contact_active {
@@ -1899,6 +2123,10 @@ fn handle_edge_slide(
         if let Some(edge) = &mut state.edge {
             edge.lost_frames += 1;
             if edge.lost_frames > GRACE_FRAMES {
+                log::debug!(
+                    "[gesture] edge-slide dropped: contact lost for {} frames",
+                    edge.lost_frames
+                );
                 state.edge = None;
                 EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
             }
@@ -1920,70 +2148,113 @@ fn handle_edge_slide(
     if !state.edge_contact_active {
         state.edge_contact_active = true;
         state.edge_contact_lost_frames = 0;
-        state.edge_contact_start_side = if x < edge_thresh {
-            Some(EdgeSide::Left)
-        } else if x > state.x_max - edge_thresh {
-            Some(EdgeSide::Right)
-        } else {
-            None
-        };
+        state.edge_contact_start_side = edge_side_of(x, state.x_max, edge_thresh);
     } else if state.edge_contact_lost_frames > 0 {
         state.edge_contact_lost_frames = 0;
     }
 
     match &mut state.edge {
         None => {
-            let side = state.edge_contact_start_side;
-            if let Some(side) = side {
-                log::debug!(
-                    "[gesture] edge-slide armed: side={} x={}/{} y={}",
-                    match side {
-                        EdgeSide::Left => "left",
-                        EdgeSide::Right => "right",
-                    },
-                    x,
-                    state.x_max,
-                    y
-                );
-                state.edge = Some(EdgeSlideState {
-                    side,
-                    start_x: x,
-                    start_y: y,
-                    last_x: x,
-                    last_y: y,
-                    accum: 0,
-                    captured: false,
-                    lost_frames: 0,
-                });
+            // Re-arm only if BOTH hold:
+            //   1. the contact session started at an edge, and
+            //   2. the finger is *still* inside the initiation zone right now.
+            //
+            // (2) is what stops the log storm the audit found: the old code
+            // re-armed from a stale session side at whatever X the finger was
+            // at, so after the first exit every subsequent frame armed in the
+            // middle of the pad and "ended" on the next one — 3 167 `ended`
+            // lines with x=3240 on a left-side gesture.
+            let session_side = state.edge_contact_start_side;
+            let current_side = edge_side_of(x, state.x_max, edge_thresh);
+            if let (Some(side), Some(cur)) = (session_side, current_side) {
+                if side == cur {
+                    log::debug!(
+                        "[gesture] edge-slide armed: side={} x={}/{} y={} y_step={} activation_dy={}",
+                        match side {
+                            EdgeSide::Left => "left",
+                            EdgeSide::Right => "right",
+                        },
+                        x,
+                        state.x_max,
+                        y,
+                        y_step,
+                        activation_dy
+                    );
+                    state.edge = Some(EdgeSlideState {
+                        side,
+                        start_x: x,
+                        start_y: y,
+                        last_x: x,
+                        last_y: y,
+                        accum: 0,
+                        captured: false,
+                        lost_frames: 0,
+                        out_of_zone_frames: 0,
+                    });
+                }
             }
             (0, 0)
         }
         Some(edge) => {
-            // ── X-zone validation (FIRST check) ────────────────────────────────────────
+            // ── X-zone validation ─────────────────────────────────────────────
             // Gesture continuation zone is 33% from the edge — wider than the
             // 12.5% initiation zone so normal finger drift doesn't kill the
             // gesture, but a new finger placed in the center terminates it.
-            // This is the primary fix for the "stuck gesture" bug: when the
-            // BLTP7853 skips the contact_count=0 frame between two touches, a
-            // new contact in the center was silently continuing the edge swipe.
+            //
+            // A large X jump (more than half the pad) is not travel: it is the
+            // HID report switching which contact slot we are reading. Re-anchor
+            // instead of ending, otherwise a slot shuffle kills the gesture.
             let in_zone = match edge.side {
                 EdgeSide::Left => x < state.x_max / 3,
                 EdgeSide::Right => x > state.x_max * 2 / 3,
             };
             if !in_zone {
-                log::info!(
-                    "[gesture] edge-slide ended: x={}/{} left edge zone ({} side)",
-                    x,
-                    state.x_max,
-                    match edge.side {
-                        EdgeSide::Left => "left",
-                        EdgeSide::Right => "right",
-                    },
-                );
+                let slot_switch = (x - edge.last_x).abs() > state.x_max / 2;
+                if slot_switch {
+                    log::debug!(
+                        "[gesture] edge-slide contact switch (dx={}) — re-anchoring",
+                        x - edge.last_x
+                    );
+                    edge.last_x = x;
+                    edge.last_y = y;
+                    edge.out_of_zone_frames = 0;
+                    return (0, 0);
+                }
+                edge.out_of_zone_frames = edge.out_of_zone_frames.saturating_add(1);
+                if edge.out_of_zone_frames <= OUT_OF_ZONE_GRACE {
+                    return (0, 0);
+                }
+                // Only a captured gesture is worth an INFO line: the audit
+                // counted 348 of these in 10 minutes from ordinary edge use.
+                if edge.captured {
+                    log::info!(
+                        "[gesture] edge-slide ended: side={} x={}/{} (was captured)",
+                        match edge.side {
+                            EdgeSide::Left => "left",
+                            EdgeSide::Right => "right",
+                        },
+                        x,
+                        state.x_max,
+                    );
+                } else {
+                    log::debug!(
+                        "[gesture] edge-slide ended (armed, never captured): x={}/{} side={}",
+                        x,
+                        state.x_max,
+                        match edge.side {
+                            EdgeSide::Left => "left",
+                            EdgeSide::Right => "right",
+                        },
+                    );
+                }
                 state.edge = None;
+                // A contact that already left the zone must not re-arm from
+                // its old session side.
+                state.edge_contact_start_side = None;
                 EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
                 return (0, 0);
             }
+            edge.out_of_zone_frames = 0;
 
             // Contact just restored after a brief tracking loss — re-anchor.
             if edge.lost_frames > 0 {
@@ -2011,13 +2282,15 @@ fn handle_edge_slide(
                     edge.last_y = y;
                     EDGE_GESTURE_ACTIVE.store(true, Ordering::Relaxed);
                     log::info!(
-                        "[gesture] edge-slide captured: side={} total_dy={} total_dx={}",
+                        "[gesture] edge-slide captured: side={} total_dy={} total_dx={} (y_step={} deadband={})",
                         match edge.side {
                             EdgeSide::Left => "left",
                             EdgeSide::Right => "right",
                         },
                         total_dy,
                         total_dx,
+                        y_step,
+                        charger_aware_y_deadband(state.y_max).min(y_step / 6),
                     );
                 } else {
                     // Stay armed but do not hijack pointer movement.
@@ -2040,10 +2313,14 @@ fn handle_edge_slide(
             edge.last_x = x;
             edge.last_y = y;
             // Apply charger-aware Y deadband to reject EMI-corrupted small deltas.
-            // Cap at half the y_step so the deadband never rejects a movement
-            // large enough to legitimately generate an action step (important
-            // when y_max is large but y_step is clamped to a small value).
-            let deadband = charger_aware_y_deadband(state.y_max).min(y_step / 2);
+            //
+            // The deadband must stay well below `y_step`: it used to be capped at
+            // `y_step/2`, and at 250 Hz a normal swipe moves ~15-30 logical units
+            // per frame while a 2124-unit pad gave a 42-unit deadband. Every real
+            // sample was therefore "noise" and the accumulator never reached a
+            // step — which is exactly why the log has captures but zero
+            // `edge-left steps=` lines. Cap at `y_step/6` instead.
+            let deadband = charger_aware_y_deadband(state.y_max).min(y_step / 6);
             if dy.abs() < deadband {
                 // Delta too small — likely EMI noise, skip it.
                 return (0, 0);
@@ -2076,6 +2353,18 @@ fn handle_edge_slide(
             }
             (brightness, volume)
         }
+    }
+}
+
+/// Which edge initiation zone `x` falls in, if any.
+#[cfg(windows)]
+fn edge_side_of(x: i32, x_max: i32, edge_thresh: i32) -> Option<EdgeSide> {
+    if x < edge_thresh {
+        Some(EdgeSide::Left)
+    } else if x > x_max - edge_thresh {
+        Some(EdgeSide::Right)
+    } else {
+        None
     }
 }
 
