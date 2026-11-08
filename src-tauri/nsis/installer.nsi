@@ -1320,6 +1320,39 @@ Function MigrateOldCurrentUserInstall
   migration_done:
 FunctionEnd
 
+Function un.WriteInstallerShutdownMarker
+  Push $9
+  Push $8
+  Push $7
+
+  ; 1) The user's log dir — read directly by the app at startup.
+  CreateDirectory "$LOCALAPPDATA\MiControl\logs"
+  ClearErrors
+  FileOpen $7 "$LOCALAPPDATA\MiControl\logs\session.marker" w
+  ${IfNot} ${Errors}
+    FileWrite $7 "state=installer-shutdown$\r$\n"
+    FileClose $7
+  ${EndIf}
+
+  ; 2) Machine-wide copy — the bridge launches this installer as SYSTEM, where
+  ;    $LOCALAPPDATA is the system profile, not the user's log dir.
+  ReadEnvStr $8 "ProgramData"
+  ${If} $8 == ""
+    StrCpy $8 "$WINDIR\..\ProgramData"
+  ${EndIf}
+  CreateDirectory "$8\MiControl"
+  ClearErrors
+  FileOpen $7 "$8\MiControl\installer-shutdown.marker" w
+  ${IfNot} ${Errors}
+    FileWrite $7 "state=installer-shutdown$\r$\n"
+    FileClose $7
+  ${EndIf}
+
+  Pop $7
+  Pop $8
+  Pop $9
+FunctionEnd
+
 Function un.KillAppProcess
   StrCpy $0 0  ; retry counter
   un_kill_loop:
@@ -1336,7 +1369,7 @@ Function un.KillAppProcess
     ${EndIf}
     ; Process found — announce the intentional kill, then kill it (same marker
     ; as the install path, so an uninstall does not look like a crash either).
-    Call WriteInstallerShutdownMarker
+    Call un.WriteInstallerShutdownMarker
     !if "${INSTALLMODE}" == "currentUser"
       nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
     !else
