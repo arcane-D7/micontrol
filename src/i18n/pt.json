@@ -582,6 +582,11 @@
   "system": {
     "title": "Sistema e Drivers",
     "subtitle": "Detecção de hardware, detalhes de drivers e acesso ao módulo IoT",
+    "smartModelTitle": "Modelo inteligente de brilho",
+    "smartModelSamples": "{count} amostras registadas em {buckets} intervalos de luz.",
+    "smartModelModeCurve": "Modo ativo: curve — o brilho segue a fórmula fixa mín/máx. As amostras aprendidas ficam guardadas mas NÃO são aplicadas; escolhe o modo Smart em Ecrã → Brilho adaptativo para as usar.",
+    "smartModelModeSmart": "Modo ativo: smart — a curva aprendida é aplicada nos intervalos com amostras suficientes; os intervalos sem dados usam a fórmula fixa.",
+    "smartModelUnavailable": "Estatísticas do modelo indisponíveis — o backend não respondeu.",
     "ac_connected": "AC conectado",
     "adapter_power": "Potência do adaptador",
     "battery_current": "Corrente da bateria",

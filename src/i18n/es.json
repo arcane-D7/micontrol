@@ -618,6 +618,11 @@
   "system": {
     "title": "Sistema y Controladores",
     "subtitle": "Detección de hardware, detalles de controladores y acceso al módulo IoT",
+    "smartModelTitle": "Modelo inteligente de brillo",
+    "smartModelSamples": "{count} muestras registradas en {buckets} intervalos de luz.",
+    "smartModelModeCurve": "Modo activo: curve — el brillo sigue la fórmula fija mín/máx. Las muestras aprendidas se guardan pero NO se aplican; elige el modo Smart en Pantalla → Brillo adaptativo para usarlas.",
+    "smartModelModeSmart": "Modo activo: smart — la curva aprendida se aplica en los intervalos con muestras suficientes; los intervalos sin datos usan la fórmula fija.",
+    "smartModelUnavailable": "Estadísticas del modelo no disponibles — el backend no respondió.",
     "ac_connected": "AC conectado",
     "adapter_power": "Potencia del adaptador",
     "battery_current": "Corriente de la batería",

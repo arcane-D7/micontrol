@@ -619,6 +619,73 @@ interface Props {
   hw: Hardware;
 }
 
+// ── Smart brightness model — honest status ──────────────────────────────────
+//
+// The learned model is only applied when the adaptive loop runs in "smart"
+// mode. Production currently holds 295,919 samples across 201 mature buckets
+// while `AiBrightnessMode` is 0 ("curve"): the fixed min/max formula drives
+// brightness and every learned sample is inert. The Display tab's "Learned
+// model" panel reports the sample count without saying that, which reads as
+// "the app is learning for you". This card states the active mode and what it
+// actually means, with live numbers instead of a hardcoded figure.
+function SmartModelStatusCard({ hw }: { hw: HardwareInstance }) {
+  const [stats, setStats] = useState<{ total: number; buckets: number } | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await invoke<{ total_samples?: number; mature_buckets?: number }>(
+          'get_smart_brightness_model',
+        );
+        if (!cancelled) {
+          setStats({ total: res.total_samples ?? 0, buckets: res.mature_buckets ?? 0 });
+        }
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const mode = hw.display?.ai_brightness_config?.mode ?? null;
+
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-title" style={{ marginBottom: 6 }}>
+        🧠 {t('system.smartModelTitle')}
+      </div>
+      {failed ? (
+        <p className="page-subtitle" style={{ margin: 0 }}>
+          {t('system.smartModelUnavailable')}
+        </p>
+      ) : (
+        <>
+          <p className="page-subtitle" style={{ margin: '0 0 6px' }}>
+            {t('system.smartModelSamples', {
+              count: stats?.total ?? 0,
+              buckets: String(stats?.buckets ?? 0),
+            })}
+          </p>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 12,
+              lineHeight: 1.5,
+              color: mode === 'smart' ? 'var(--text-muted)' : 'var(--warning)',
+            }}
+          >
+            {mode === 'smart' ? t('system.smartModelModeSmart') : t('system.smartModelModeCurve')}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SystemTab({ hw }: Props) {
   const [drivers, setDrivers] = useState<DriverDetail[] | null>(null);
   const [loadingDrivers, setLoadingDrivers] = useState(false);
@@ -740,6 +807,9 @@ function SystemTab({ hw }: Props) {
           <p className="text-muted">{t('updates.noDrivers')}</p>
         )}
       </div>
+
+      {/* Smart brightness model — what is actually in effect */}
+      <SmartModelStatusCard hw={hw as unknown as HardwareInstance} />
 
       {/* IoT Module Panel */}
       <IotModulePanel hw={hw as unknown as HardwareInstance} />

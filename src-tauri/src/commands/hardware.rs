@@ -13,10 +13,7 @@ use crate::hw::charging::{
 };
 use crate::hw::errors::{ErrorResponse, HardwareError};
 use crate::hw::iotservice;
-use crate::hw::iotservice::{
-    BindStatusInfo, IotDeviceInfo, IotEvent, IotWifiList, LaptopStatus, PowerEvent, WiFiItem,
-    WiFiItemInfo, WiFiStatusInfo,
-};
+use crate::hw::iotservice::{IotDeviceInfo, IotEvent, IotWifiList, WiFiItem};
 use crate::hw::performance::{
     get_perf_debug as hw_perf_debug, get_performance_mode as hw_get_perf, PerfDebugInfo,
     PerformanceResult,
@@ -407,103 +404,6 @@ pub async fn get_iot_device_info() -> Result<IotDeviceInfo, ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
-/// Get the device model via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_model() -> Result<String, ErrorResponse> {
-    run_blocking(iotservice::get_model)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the firmware version via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_fw_version() -> Result<String, ErrorResponse> {
-    run_blocking(iotservice::get_fw_version)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the IoT device bind status via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_bind_status() -> Result<BindStatusInfo, ErrorResponse> {
-    run_blocking(iotservice::get_bind_status)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the IoT device ID via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_device_id() -> Result<i64, ErrorResponse> {
-    run_blocking(iotservice::get_device_id)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the current device status via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_device_status() -> Result<String, ErrorResponse> {
-    run_blocking(iotservice::get_device_status)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Report laptop status to the IoT device via IPC.
-///
-/// Valid status values: `win_ready`, `suspending`, `shutting`.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn send_iot_laptop_status(status: String) -> Result<(), ErrorResponse> {
-    let status = match status.as_str() {
-        "win_ready" => LaptopStatus::WinReady,
-        "suspending" => LaptopStatus::Suspending,
-        "shutting" => LaptopStatus::Shutting,
-        _ => {
-            // S24-08: Use typed HardwareError instead of ad-hoc INVALID_STATUS code.
-            return Err(ErrorResponse::from(HardwareError::Other(format!(
-                "Invalid laptop status: {status}"
-            ))));
-        }
-    };
-    run_blocking(move || iotservice::send_laptop_status(status))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send WinReady status via IoTService IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn iot_report_windows_ready() -> Result<(), ErrorResponse> {
-    run_blocking(iotservice::report_windows_ready)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
 /// Get the full IoT WiFi provisioning list in one call.
 ///
 /// Consolidates `get_iot_wifi_status`, `get_iot_wifi_count`, and
@@ -512,42 +412,6 @@ pub async fn iot_report_windows_ready() -> Result<(), ErrorResponse> {
 #[tauri::command]
 pub async fn get_iot_wifi_list() -> Result<IotWifiList, ErrorResponse> {
     run_blocking(move || Ok(iotservice::get_wifi_list()))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get WiFi connection status via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_wifi_list` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_wifi_list instead")]
-pub async fn get_iot_wifi_status() -> Result<WiFiStatusInfo, ErrorResponse> {
-    run_blocking(iotservice::read_wifi_status)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the number of provisioned WiFi networks via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_wifi_list` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_wifi_list instead")]
-pub async fn get_iot_wifi_count() -> Result<u32, ErrorResponse> {
-    run_blocking(iotservice::read_wifi_count)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get a WiFi item by index via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_wifi_list` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_wifi_list instead")]
-pub async fn get_iot_wifi_by_index(index: u32) -> Result<WiFiItemInfo, ErrorResponse> {
-    run_blocking(move || iotservice::get_wifi_by_index(index))
         .await
         .map_err(ErrorResponse::from)
 }
@@ -609,54 +473,6 @@ pub async fn iot_reset_device() -> Result<(), ErrorResponse> {
 #[tauri::command]
 pub async fn iot_notify_event(event: IotEvent) -> Result<(), ErrorResponse> {
     run_blocking(move || iotservice::notify_event(&event))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send a power event notification to IoTService via IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::Power` instead.
-/// This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::Power instead")]
-pub async fn iot_notify_power_event(event: PowerEvent) -> Result<(), ErrorResponse> {
-    run_blocking(move || iotservice::notify_power_event(&event))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send an EC event notification to IoTService via IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::Ec` instead.
-/// This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::Ec instead")]
-pub async fn iot_notify_ec_event(event_func: u32, event_value: u32) -> Result<(), ErrorResponse> {
-    run_blocking(move || iotservice::notify_ec_event(event_func, event_value))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send Suspending status via IoTService IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn iot_report_suspending() -> Result<(), ErrorResponse> {
-    run_blocking(iotservice::report_suspending)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send Shutting status via IoTService IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn iot_report_shutting_down() -> Result<(), ErrorResponse> {
-    run_blocking(iotservice::report_shutting_down)
         .await
         .map_err(ErrorResponse::from)
 }

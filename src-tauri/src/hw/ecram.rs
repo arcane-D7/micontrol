@@ -1251,6 +1251,95 @@ struct PipeResponse {
     error: Option<String>,
 }
 
+/// Retry budget for opening the EC pipe.
+///
+/// `CreateFileW` fails with `ERROR_PIPE_BUSY` (0xE7) while every instance the
+/// service has created so far is connected to a client, and with
+/// `ERROR_FILE_NOT_FOUND` (0x2) in the window where the serve thread has just
+/// closed the previous instance and `ecram_service::run_pipe_server` has not
+/// created the next one yet (it creates ONE instance per accept-loop
+/// iteration — `PIPE_UNLIMITED_INSTANCES` only lifts the cap, it does not
+/// pre-create instances). Both errors are transient: the listener is back
+/// within milliseconds.
+///
+/// The elevated bridge pipe has had exactly this bounded retry since S32-005c /
+/// S55 FIX 22 (`elev_bridge`); the EC client never got it, so one unlucky
+/// millisecond turned into a hard failure:
+///
+/// ```text
+/// [iot] EC command get_fw_version failed: Open pipe: All pipe instances are
+/// busy. (0x800700E7)
+/// ```
+///
+/// — logged in the middle of a single `get_iot_device_info` run whose other
+/// five queries succeeded. The aggregate appeared healthy because it falls
+/// back to the cached model / registry values; the deprecated single-field
+/// wrappers propagated the error, which is why they measured 0/4 while the
+/// aggregate measured 2/2. External probes never lost a race because process
+/// startup spaces their opens milliseconds apart.
+const PIPE_OPEN_RETRIES: u32 = 20;
+/// Wait between open attempts (20 × 50 ms = 1 s worst case).
+const PIPE_OPEN_BACKOFF_MS: u64 = 50;
+/// Shorter budget for liveness probes — a BUSY pipe still proves the service
+/// is running, only the accept-loop gap needs covering.
+#[cfg(windows)]
+const PIPE_PROBE_RETRIES: u32 = 4;
+
+/// Open the EC pipe, retrying the two transient accept-loop errors.
+///
+/// Returns the raw handle on success; ownership passes to the caller.
+#[cfg(windows)]
+fn open_ecram_pipe_with_retry(
+    path_w: &[u16],
+    retries: u32,
+) -> Result<windows::Win32::Foundation::HANDLE, String> {
+    use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    // leak-check: the opened handle is handed to the caller on success —
+    // `send_pipe_request` adopts it into `OwnedHandle`, `is_pipe_broker_available`
+    // closes it explicitly. No path here drops an open handle.
+    for attempt in 0..=retries {
+        let opened = unsafe {
+            CreateFileW(
+                windows::core::PCWSTR(path_w.as_ptr()),
+                (windows::Win32::Foundation::GENERIC_READ
+                    | windows::Win32::Foundation::GENERIC_WRITE)
+                    .0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                HANDLE::default(),
+            )
+        };
+
+        match opened {
+            Ok(h) if h != INVALID_HANDLE_VALUE => return Ok(h),
+            Ok(_) => return Err("INVALID_HANDLE_VALUE opening pipe".to_string()),
+            Err(e) => {
+                let code = e.code();
+                let busy = code == windows::core::HRESULT(0x8007_00E7_u32 as i32);
+                let transient_absent = code == windows::core::HRESULT(0x8007_0002_u32 as i32);
+                if (!busy && !transient_absent) || attempt == retries {
+                    return Err(format!("Open pipe: {e}"));
+                }
+                log::debug!(
+                    target: "hw::ecram::pipe",
+                    "EC pipe transiently unavailable ({e}) — retry {}/{} in {PIPE_OPEN_BACKOFF_MS} ms",
+                    attempt + 1,
+                    retries
+                );
+                std::thread::sleep(std::time::Duration::from_millis(PIPE_OPEN_BACKOFF_MS));
+            }
+        }
+    }
+
+    Err("Open pipe: retry budget exhausted".to_string())
+}
+
 /// Send a JSON request to the custom IoTService.exe pipe server and return
 /// the raw JSON response string.
 ///
@@ -1267,24 +1356,7 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
         .chain(Some(0))
         .collect();
 
-    let handle = unsafe {
-        windows::Win32::Storage::FileSystem::CreateFileW(
-            windows::core::PCWSTR(path_w.as_ptr()),
-            (windows::Win32::Foundation::GENERIC_READ | windows::Win32::Foundation::GENERIC_WRITE)
-                .0,
-            windows::Win32::Storage::FileSystem::FILE_SHARE_READ
-                | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
-            None,
-            windows::Win32::Storage::FileSystem::OPEN_EXISTING,
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
-            windows::Win32::Foundation::HANDLE::default(),
-        )
-        .map_err(|e| format!("Open pipe: {e}"))?
-    };
-
-    if handle == windows::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return Err("INVALID_HANDLE_VALUE opening pipe".to_string());
-    }
+    let handle = open_ecram_pipe_with_retry(&path_w, PIPE_OPEN_RETRIES)?;
 
     // S67: RAII — this function had three separate manual CloseHandle sites and
     // the `WriteFile(...).map_err(...)?` in the middle leaked the pipe handle on
@@ -1439,9 +1511,16 @@ pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>>
 }
 
 /// Check if the custom IoTService.exe pipe broker is available.
+///
+/// An `ERROR_PIPE_BUSY` answer means the service IS running (all instances are
+/// connected to clients) — the old code reported `false` for that, which sent
+/// callers down the MCPI path whose broker does not exist on this install.
+/// The probe therefore retries the transient accept-loop window instead of
+/// mistaking a busy service for an absent one.
 #[cfg(windows)]
 pub fn is_pipe_broker_available() -> bool {
-    // leak-check: audited — every exit path closes the handle explicitly (S67).
+    // leak-check: audited — the helper hands back an owned handle and every
+    // exit path closes it explicitly.
     use std::os::windows::ffi::OsStrExt;
 
     let path_w: Vec<u16> = std::ffi::OsStr::new(ECRAM_PIPE_NAME)
@@ -1449,28 +1528,14 @@ pub fn is_pipe_broker_available() -> bool {
         .chain(Some(0))
         .collect();
 
-    let handle = unsafe {
-        windows::Win32::Storage::FileSystem::CreateFileW(
-            windows::core::PCWSTR(path_w.as_ptr()),
-            (windows::Win32::Foundation::GENERIC_READ | windows::Win32::Foundation::GENERIC_WRITE)
-                .0,
-            windows::Win32::Storage::FileSystem::FILE_SHARE_READ
-                | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
-            None,
-            windows::Win32::Storage::FileSystem::OPEN_EXISTING,
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
-            windows::Win32::Foundation::HANDLE::default(),
-        )
-    };
-
-    match handle {
-        Ok(h) if h != windows::Win32::Foundation::INVALID_HANDLE_VALUE => {
+    match open_ecram_pipe_with_retry(&path_w, PIPE_PROBE_RETRIES) {
+        Ok(h) => {
             unsafe {
                 windows::Win32::Foundation::CloseHandle(h).ok();
             }
             true
         }
-        _ => false,
+        Err(_) => false,
     }
 }
 
@@ -1787,6 +1852,160 @@ mod tests {
         fn message_mode_server_keeps_message_reads() {
             let pair = make_pair("msg", PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
             assert_eq!(configure_pipe_read_mode(pair.client), PipeReadMode::Message);
+        }
+
+        /// Regression for the `0x800700E7` that killed the single-field IoT
+        /// wrappers while `get_iot_device_info` "worked" (the aggregate masks
+        /// the error with cached model / registry values).
+        ///
+        /// `ecram_service::run_pipe_server` creates ONE instance per accept-loop
+        /// iteration. A one-instance server reproduces that gap exactly: while
+        /// the only instance is connected to a client, the next `CreateFileW`
+        /// fails with ERROR_PIPE_BUSY. The client must wait for the listener to
+        /// be recreated (as `elev_bridge` already does for the bridge pipe)
+        /// instead of failing the whole command on the first attempt.
+        #[test]
+        fn pipe_open_retries_while_all_instances_are_busy() {
+            // leak-check: test-only. `server` is closed by the recycler thread,
+            // `first_client` and the successfully retried handle are closed at
+            // the end of the test, and the second CreateFileW is expected to
+            // fail (that failure is the point of the test).
+            use std::time::{Duration, Instant};
+
+            let name = format!(
+                r"\\.\pipe\micontrol_test_busy_{}_{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::SeqCst)
+            );
+            let name_w: Vec<u16> = std::ffi::OsStr::new(&name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+
+            // nMaxInstances = 1: the accept loop has not created the next
+            // instance yet.
+            let server = unsafe {
+                CreateNamedPipeW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                    1,
+                    4096,
+                    4096,
+                    0,
+                    None,
+                )
+            };
+            assert_ne!(
+                server,
+                INVALID_HANDLE_VALUE,
+                "CreateNamedPipeW failed: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let first_client = unsafe {
+                CreateFileW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            }
+            .expect("the first client must connect to the only instance");
+
+            // Pre-condition: this is the live failure, reproduced hermetically.
+            let busy = unsafe {
+                CreateFileW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            };
+            assert_eq!(
+                busy.err().map(|e| e.code()),
+                Some(windows::core::HRESULT(0x8007_00E7_u32 as i32)),
+                "expected ERROR_PIPE_BUSY (0x800700E7) while the only instance is connected"
+            );
+
+            // Accept loop: recycle the instance after 150 ms and keep the pipe
+            // name listening long enough for the retry to land.
+            let server_raw = server.0 as isize;
+            let name_for_thread = name_w.clone();
+            let recycler = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                unsafe {
+                    CloseHandle(HANDLE(server_raw as *mut core::ffi::c_void)).ok();
+                }
+                let next = unsafe {
+                    CreateNamedPipeW(
+                        windows::core::PCWSTR(name_for_thread.as_ptr()),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                        1,
+                        4096,
+                        4096,
+                        0,
+                        None,
+                    )
+                };
+                std::thread::sleep(Duration::from_millis(500));
+                unsafe {
+                    CloseHandle(next).ok();
+                }
+            });
+
+            let started = Instant::now();
+            let opened = open_ecram_pipe_with_retry(&name_w, PIPE_OPEN_RETRIES);
+            let elapsed = started.elapsed();
+
+            assert!(
+                opened.is_ok(),
+                "client must retry the transient busy, got {:?}",
+                opened.err()
+            );
+            assert!(
+                elapsed >= Duration::from_millis(100),
+                "the client must actually wait for the listener, took {elapsed:?}"
+            );
+
+            unsafe {
+                CloseHandle(opened.unwrap()).ok();
+                CloseHandle(first_client).ok();
+            }
+            recycler.join().expect("recycler thread panicked");
+        }
+
+        /// Empirical companion to the hermetic test above: hammer the real
+        /// `ecram_service` pipe with back-to-back opens and require every one
+        /// to succeed. Pre-fix this failed with `All pipe instances are busy`
+        /// often enough to kill the single-field IoT wrappers (0/4 live) while
+        /// `get_iot_device_info` masked the same error behind its cache.
+        ///
+        /// Read-only: `iot_get` → model string. Run with:
+        /// `cargo test --features face live_pipe_requests -- --ignored --nocapture`
+        #[test]
+        #[ignore = "requires the installed ecram_service (read-only iot_get)"]
+        fn live_pipe_requests_never_fail_with_error_pipe_busy() {
+            const REQUESTS: usize = 100;
+            let mut failures = Vec::new();
+            for i in 0..REQUESTS {
+                if let Err(e) = send_pipe_request(r#"{"op":"iot_get","cmd":"model"}"#) {
+                    failures.push(format!("#{i}: {e}"));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "{}/{REQUESTS} pipe requests failed (first 5: {:?})",
+                failures.len(),
+                &failures[..failures.len().min(5)]
+            );
         }
     }
 }

@@ -618,6 +618,11 @@
   "system": {
     "title": "Système et Pilotes",
     "subtitle": "Détection matérielle, détails des pilotes et accès au module IoT",
+    "smartModelTitle": "Modèle intelligent de luminosité",
+    "smartModelSamples": "{count} échantillons enregistrés sur {buckets} plages de luminosité.",
+    "smartModelModeCurve": "Mode actif : curve — la luminosité suit la formule fixe min/max. Les échantillons appris sont stockés mais NON appliqués ; choisis le mode Smart dans Écran → Luminosité adaptative pour les utiliser.",
+    "smartModelModeSmart": "Mode actif : smart — la courbe apprise est appliquée là où la plage a assez d'échantillons ; les plages sans données utilisent la formule fixe.",
+    "smartModelUnavailable": "Statistiques du modèle indisponibles — le backend n'a pas répondu.",
     "ac_connected": "Secteur connecté",
     "adapter_power": "Puissance de l’adaptateur",
     "battery_current": "Courant de la batterie",
