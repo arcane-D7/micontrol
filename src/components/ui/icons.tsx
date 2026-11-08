@@ -18,15 +18,7 @@
 import type { ReactNode } from 'react';
 
 export type IconName =
-  | 'battery'
-  | 'plug'
-  | 'shield'
-  | 'thermometer'
-  | 'bolt'
-  | 'info'
-  | 'refresh'
-  | 'fan'
-  | 'x';
+  'battery' | 'plug' | 'shield' | 'thermometer' | 'bolt' | 'info' | 'refresh' | 'fan' | 'x';
 
 const PATHS: Record<IconName, ReactNode> = {
   battery: (

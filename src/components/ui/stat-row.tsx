@@ -29,7 +29,17 @@ export interface StatRowProps {
   className?: string;
 }
 
-export function StatRow({ label, value, unit, hint, icon, mono, dim, empty, className }: StatRowProps) {
+export function StatRow({
+  label,
+  value,
+  unit,
+  hint,
+  icon,
+  mono,
+  dim,
+  empty,
+  className,
+}: StatRowProps) {
   const valueClasses = ['mc-stat__v'];
   if (mono) valueClasses.push('mc-stat__v--mono');
   if (dim || empty) valueClasses.push('mc-stat__v--dim');

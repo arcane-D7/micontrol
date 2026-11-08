@@ -159,7 +159,8 @@ export default function ChargingProtection({
     if (care === null) return { text: t('common.loading'), tone: 'muted' as const };
     if (!careEnabled) return { text: t('battery.phase.careOff'), tone: 'muted' as const };
     if (display >= 100) return { text: t('battery.phase.noLimit'), tone: 'muted' as const };
-    if (currentLevel > display) return { text: t('battery.limitAboveLevel'), tone: 'warn' as const };
+    if (currentLevel > display)
+      return { text: t('battery.limitAboveLevel'), tone: 'warn' as const };
     return { text: t('battery.limitDerived', { limit: display }), tone: 'neutral' as const };
   })();
 
