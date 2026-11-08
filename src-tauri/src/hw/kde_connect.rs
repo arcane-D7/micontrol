@@ -206,7 +206,12 @@ pub async fn discover_devices(duration: Duration) -> Vec<KdeDevice> {
 
 /// Async UDP socket for discovery (broadcast + dual behavior).
 fn discovery_socket() -> std::io::Result<tokio::net::UdpSocket> {
-    let std_sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    // Bind the well-known KDE Connect discovery port (1716) instead of an
+    // ephemeral one: inbound announcements arrive on 1716, and a fixed port is
+    // what makes a deterministic firewall rule possible. An ephemeral bind used
+    // to both break inbound discovery AND pop the Windows firewall dialog on
+    // every run (no rule could ever cover a moving port).
+    let std_sock = std::net::UdpSocket::bind(("0.0.0.0", KDE_UDP_PORT))?;
     std_sock.set_nonblocking(true)?;
     std_sock.set_broadcast(true)?;
     tokio::net::UdpSocket::from_std(std_sock)
@@ -335,6 +340,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live LAN discovery: binds 0.0.0.0:1716 (triggers a Windows firewall dialog for every new test-binary hash). Run manually: cargo test discover_returns_empty -- --ignored"]
     fn discover_returns_empty_without_network() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

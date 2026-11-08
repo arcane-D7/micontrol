@@ -454,6 +454,21 @@
   ${If} $0 <> 0
     DetailPrint "  WARNING: public-profile block rule returned $0."
   ${EndIf}
+
+  ; KDE Connect discovery (UDP 1716): the discovery socket binds the fixed
+  ; protocol port (ephemeral binds were the recurring dialog — a moving port
+  ; can never be covered by a deterministic rule).
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl KDE Connect (UDP 1716)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=UDP localport=1716 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: KDE Connect (UDP 1716) rule returned $0."
+  ${EndIf}
+
+  ; Sweep the dev-artifact rules (`micontrol_lib-<hash>` under target\debug):
+  ; every new test-binary hash used to add one more Allow rule (created by the
+  ; firewall dialog while running cargo tests). Best effort, silent.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "Get-NetFirewallRule -DisplayName ''micontrol_lib-*'' -ErrorAction SilentlyContinue | Remove-NetFirewallRule"'
+  Pop $0
   DetailPrint "Firewall rules configured."
 
   ; ── Post-install service verification ───────────────────────────────────────

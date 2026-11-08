@@ -40,6 +40,11 @@ pub const RULE_BLOCK_PUBLIC: &str = "MiControl (block public)";
 /// Ports the app listens on (kept in sync with the audit + LocalSend).
 pub const PORT_MCP: u16 = 9223;
 pub const PORT_LOCALSEND: u16 = 53317;
+/// KDE Connect discovery port. The discovery socket binds this fixed port
+/// since the ephemeral-bind fix (see hw::kde_connect) — an ephemeral port
+/// could never be covered by a deterministic rule and popped the dialog.
+pub const PORT_KDE_UDP: u16 = 1716;
+pub const RULE_KDE_UDP: &str = "MiControl KDE Connect (UDP 1716)";
 
 /// `program=` token for `netsh`.
 ///
@@ -113,6 +118,21 @@ pub fn netsh_steps(exe: &str) -> Vec<Vec<String>> {
             program.clone(),
             s("protocol=UDP"),
             format!("localport={PORT_LOCALSEND}"),
+            s("profile=private,domain"),
+            s("enable=yes"),
+            s("edge=no"),
+        ],
+        vec![
+            s("advfirewall"),
+            s("firewall"),
+            s("add"),
+            s("rule"),
+            format!("name={RULE_KDE_UDP}"),
+            s("dir=in"),
+            s("action=allow"),
+            program.clone(),
+            s("protocol=UDP"),
+            format!("localport={PORT_KDE_UDP}"),
             s("profile=private,domain"),
             s("enable=yes"),
             s("edge=no"),
@@ -203,7 +223,7 @@ pub fn apply(install_dir: &Path) -> Result<(), String> {
         }
     }
     log::info!(
-        "[firewall] rules applied for {} (allow private,domain 9223/53317; block public)",
+        "[firewall] rules applied for {} (allow private,domain 9223/53317/1716-udp; block public)",
         exe.display()
     );
     Ok(())
@@ -294,7 +314,7 @@ mod tests {
     #[test]
     fn allow_rules_are_private_domain_only_and_never_edge_traversal() {
         let steps = netsh_steps(EXE);
-        for name in [RULE_MCP, RULE_LOCALSEND_TCP, RULE_LOCALSEND_UDP] {
+        for name in [RULE_MCP, RULE_LOCALSEND_TCP, RULE_LOCALSEND_UDP, RULE_KDE_UDP] {
             let step = find(&steps, &format!("name={name}"));
             assert!(step.contains(&"action=allow".to_string()), "{name}");
             assert!(step.contains(&"dir=in".to_string()), "{name}");
@@ -325,6 +345,13 @@ mod tests {
         let udp = find(&steps, &format!("name={RULE_LOCALSEND_UDP}"));
         assert!(udp.contains(&"protocol=UDP".to_string()));
         assert!(udp.contains(&format!("localport={PORT_LOCALSEND}")));
+
+        // KDE discovery must be a FIXED port (1716): an ephemeral bind can
+        // never be covered by a deterministic rule — that moving port was the
+        // recurring firewall dialog.
+        let kde = find(&steps, &format!("name={RULE_KDE_UDP}"));
+        assert!(kde.contains(&"protocol=UDP".to_string()));
+        assert!(kde.contains(&format!("localport={PORT_KDE_UDP}")));
     }
 
     #[test]
