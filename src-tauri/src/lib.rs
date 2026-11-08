@@ -648,6 +648,11 @@ pub fn run() {
             commands::crossdevice::localsend_receiver_start,
             commands::crossdevice::localsend_receiver_stop,
             commands::crossdevice::localsend_receiver_status,
+            // Cross-device (MIOT-06) — LocalSend consent + receiver settings
+            commands::crossdevice::localsend_respond_consent,
+            commands::crossdevice::localsend_config,
+            commands::crossdevice::localsend_set_auto_accept,
+            commands::crossdevice::localsend_set_max_upload_mb,
             // Cross-device (MIOT-07) — scrcpy phone-camera webcam
             commands::crossdevice::scrcpy_status,
             commands::crossdevice::scrcpy_start,
