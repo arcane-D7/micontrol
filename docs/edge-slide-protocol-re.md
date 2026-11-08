@@ -286,8 +286,8 @@ por isso o rato não anda no original*. **É falsa, e o binário mostra porquê.
 | Report | Quem usa | Payload | Significado |
 |---|---|---|---|
 | `0x02` | `PluginGesture!0x180018750` | `[0x32, 0xCE]`, fase `01`, **um só frame** | tick háptico por passo |
-| `0x58` | `PluginGesture!0x18001972e` | `[0x05]` | `WriteMotorSildeGears` (força 80) |
-| `0x5B` | `PluginGesture!0x18001968b` | `01 00 02 00` | `WriteForceGears` (sensibilidade) |
+| `0x58` (leitura) | `PluginGesture!0x18001968b` | len 0, op `02` → `HidD_GetInputReport` | lê o gear do slide; espera `byte[4] == 0x50` |
+| `0x58` (escrita) | `PluginGesture!0x18001972e` | `[0x05]` + commit `0x01 [0x58 0xA8]`, `Sleep(0x78)` = 120 ms | `WriteMotorSildeGears` — força do tick |
 | `0x5D` | `SvrCModule` (e nós) | 2 shorts LE, ex. `(80,104)` | **`WriteMotorGears`** — força do motor esquerdo/direito |
 | `0x59` | `SvrCModule` | LE short `01 00`/`02 00` | `WriteEnableHeavyPress` |
 
@@ -301,9 +301,11 @@ por isso o rato não anda no original*. **É falsa, e o binário mostra porquê.
   "Feature report 0x5D" do issue #106 é uma imprecisão de nomenclatura: 0x5D é um
   **Output report**, tal como o nosso `send_touchpad_command` já o envia.
 - `WriteMotorSildeGears` (0x58) é o único sítio onde aparece o `80` de
-  *"Ajust slide gears to 80"*: o original lê o report com `HidD_GetInputReport`,
-  compara `byte[12] == 0x50` e, se não bater, escreve 0x58 `[0x05]`. É afinação da
-  força do tick, não geometria.
+  *"Ajust slide gears to 80"*: o original lê o report (0x58, op `02`) com
+  `HidD_GetInputReport`, compara `byte[4] == 0x50` e, se não bater, escreve
+  0x58 `[0x05]` seguido do commit `0x01 [0x58 0xA8]` com `Sleep(0x78)` = 120 ms
+  entre os dois — a confirmação independente do par write+commit e do atraso de
+  120 ms do issue #106. É afinação da força do tick, não geometria.
 
 **Consequência para o código:** configurar uma "zona" via 0x5D seria escrever
 gears de háptica (104/128 = intensidade High) e estragar a preferência do
