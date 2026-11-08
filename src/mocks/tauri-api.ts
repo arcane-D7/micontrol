@@ -474,7 +474,43 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return false as T;
 
     case 'get_ecram_map':
-      return {} as T;
+      // Mirrors the real machine: the IoT driver refuses ERAM/SMA2 by address
+      // (0x80070005) even for SYSTEM, so the map is honestly unavailable and
+      // classified as the EXPECTED driver block (calm "—", no error banner).
+      return {
+        misc0: 0,
+        misc1: 0,
+        control_flags_1b: 0,
+        ai_limit_enabled: false,
+        long_battery_limit_enabled: false,
+        cpu_temp_c: 0,
+        fan_rpm: 0,
+        fan2_rpm: 0,
+        cpu_power_w: 0,
+        smart_mode_type: 0,
+        smart_mode_data: 0,
+        smart_mode_profile: null,
+        qfan_mode: 0,
+        perf_profile: 1,
+        tdp_w: 0,
+        ac_flags: 1,
+        ac_connected: true,
+        ac_adapter_w: 65,
+        battery_current_ma: 0,
+        battery_capacity_mah: 0,
+        battery_voltage_mv: 0,
+        charge_threshold_pct: 0,
+        battery_temp_c: 0,
+        display_brightness_level: 0,
+        keyboard_backlight_level: 0,
+        raw_hex: 'UNAVAILABLE',
+        available: false,
+        blocked_regions: ['ERAM', 'SMA2'],
+        blocked_reason:
+          'ERAM could not be read: ecram_service answered "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"',
+        blocked_kind: 'driver_blocked',
+        perf_profile_from_wmi: true,
+      } as T;
 
     case 'get_iot_device_info':
       return { device_name: 'Mock IoT Device', is_connected: true } as T;
@@ -638,8 +674,18 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return { method: command, req: String(args?.req ?? ''), ret: 'OK', success: true } as T;
 
     // ── IoT hex / region ─────────────────────────────────────────────────────
-    case 'get_iot_region_hex':
-      return '00000000' as T;
+    case 'get_iot_region_hex': {
+      // Same split as the real driver: ERAM/SMA2 are refused by address,
+      // IOT_STATUS/IOT_SENSORS answer.
+      const region = String(args?.region ?? '');
+      if (region === 'ERAM' || region === 'SMA2') {
+        throw JSON.stringify({
+          code: 'ecram_driver_blocked',
+          message: `${region} could not be read: ecram_service answered "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"`,
+        });
+      }
+      return '0008010200000000' as T;
+    }
 
     case 'write_iot_hex':
       return undefined as T;

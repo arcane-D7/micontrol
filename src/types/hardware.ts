@@ -269,6 +269,17 @@ export interface HardwareProfile {
 
 export type IotRegionName = 'ERAM' | 'SMA2' | 'IOT_STATUS' | 'IOT_SENSORS';
 
+/**
+ * Why an ECRAM region is unreadable — mirrors `RegionBlockKind` in
+ * `src-tauri/src/hw/errors.rs`.
+ *
+ * `driver_blocked` is this platform's EXPECTED state (the IoT driver refuses
+ * ERAM/SMA2 by address with 0x80070005 even for SYSTEM) and must render as a
+ * calm "—" with a hint. `service_unavailable`/`unknown` are real faults and
+ * keep the error banner.
+ */
+export type EramBlockKind = 'driver_blocked' | 'service_unavailable' | 'unknown';
+
 export interface EramMap {
   misc0: number;
   misc1: number;
@@ -308,6 +319,12 @@ export interface EramMap {
   blocked_regions: string[];
   /** Driver/pipe error explaining why the map is unavailable. */
   blocked_reason: string | null;
+  /** Classified cause of the block — `driver_blocked` is expected (calm "—"),
+   *  anything else is a real fault (error banner). */
+  blocked_kind?: EramBlockKind | null;
+  /** True when `perf_profile` was read via WMI instead of ERAM (real value
+   *  even while `available` is false). */
+  perf_profile_from_wmi?: boolean;
 }
 
 export interface AudioVolumeResult {

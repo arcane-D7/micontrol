@@ -5,6 +5,37 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Why an ECRAM region could not be read.
+///
+/// The distinction is UX-critical on this platform. The IoT driver's range/ACL
+/// check refuses ERAM (`0xFE0B0300`) and SMA2 (`0xFE0B0A00`) with `0x80070005`
+/// even for SYSTEM — only its own DriverStore service may read the three
+/// sensor ranges (`0xFE0B0E00`…`0xFE0B0F80`). That is the *expected* state on
+/// this machine and must render as a calm "—", never as an error banner.
+///
+/// A stopped/absent `ecram_service` is a genuine fault and must be surfaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionBlockKind {
+    /// Driver range/ACL check refused the address (`0x80070005`) — expected.
+    DriverBlocked,
+    /// `ecram_service` pipe unreachable or not answering — real fault.
+    ServiceUnavailable,
+    /// Anything else, including a short/corrupt answer.
+    Unknown,
+}
+
+impl RegionBlockKind {
+    /// Stable code carried in [`ErrorResponse::code`], switched on by the UI.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::DriverBlocked => "ecram_driver_blocked",
+            Self::ServiceUnavailable => "ecram_service_unavailable",
+            Self::Unknown => "ecram_unknown",
+        }
+    }
+}
+
 /// Hardware operation errors.
 ///
 /// Each variant maps to a stable `code` string that the frontend can switch on,
@@ -53,6 +84,23 @@ pub enum HardwareError {
     /// EC RAM validation error (out-of-bounds offset, short read).
     #[error("EC RAM error: {0}")]
     Ecram(String),
+
+    /// A whole ECRAM region could not be read, classified so the UI can tell
+    /// the platform's *expected* driver block (calm "—") from a real fault
+    /// (missing `ecram_service`, unknown failure → error banner).
+    ///
+    /// `detail` always names which side failed and why — never the app's own
+    /// "Open IoT driver device" alone, which is expected and used to mask the
+    /// service's actual answer.
+    #[error("{detail}")]
+    EcramBlocked {
+        /// Region name (`"ERAM"`, `"SMA2"`, …) or address for raw reads.
+        region: String,
+        /// Classification driving the presentation (calm vs alert).
+        kind: RegionBlockKind,
+        /// Human-readable explanation, including the service's own error text.
+        detail: String,
+    },
 
     /// WiFi operation error (invalid SSID, connection failure).
     #[error("WiFi error: {0}")]
@@ -124,6 +172,16 @@ impl std::fmt::Debug for HardwareError {
             Self::Timeout(arg0) => f.debug_tuple("Timeout").field(arg0).finish(),
             Self::NotSupported(arg0) => f.debug_tuple("NotSupported").field(arg0).finish(),
             Self::Ecram(arg0) => f.debug_tuple("Ecram").field(arg0).finish(),
+            Self::EcramBlocked {
+                region,
+                kind,
+                detail,
+            } => f
+                .debug_struct("EcramBlocked")
+                .field("region", region)
+                .field("kind", kind)
+                .field("detail", detail)
+                .finish(),
             Self::Wifi(arg0) => f.debug_tuple("Wifi").field(arg0).finish(),
             Self::Cast(arg0) => f.debug_tuple("Cast").field(arg0).finish(),
             Self::Display(arg0) => f.debug_tuple("Display").field(arg0).finish(),
@@ -156,6 +214,7 @@ impl HardwareError {
             Self::Timeout(_) => "timeout",
             Self::NotSupported(_) => "not_supported",
             Self::Ecram(_) => "ecram",
+            Self::EcramBlocked { kind, .. } => kind.code(),
             Self::Wifi(_) => "wifi",
             Self::Cast(_) => "cast",
             Self::Display(_) => "display",
