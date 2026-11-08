@@ -175,8 +175,8 @@ export default function ChargingThreshold({ threshold, onThresholdChange }: Prop
         <InfoSection>
           <div
             style={{
-              background: 'oklch(from var(--warning, #ff9800) l c h / 0.12)',
-              border: '1px solid oklch(from var(--warning, #ff9800) l c h / 0.3)',
+              background: 'color-mix(in oklab, var(--warning) 12%, transparent)',
+              border: '1px solid color-mix(in oklab, var(--warning) 30%, transparent)',
               borderRadius: 'var(--r-sm)',
               padding: '10px 12px',
               fontSize: 12,

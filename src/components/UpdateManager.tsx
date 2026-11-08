@@ -125,7 +125,7 @@ export default function UpdateManager({
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    background: 'oklch(from var(--success) l c h / 0.15)',
+                    background: 'color-mix(in oklab, var(--success) 15%, transparent)',
                     color: 'var(--success)',
                     fontSize: 12,
                     fontWeight: 700,
@@ -157,10 +157,10 @@ export default function UpdateManager({
                     fontWeight: 600,
                     color: 'var(--success)',
                     flexShrink: 0,
-                    background: 'oklch(from var(--success) l c h / 0.12)',
+                    background: 'color-mix(in oklab, var(--success) 12%, transparent)',
                     padding: '2px 8px',
                     borderRadius: 99,
-                    border: '1px solid oklch(from var(--success) l c h / 0.25)',
+                    border: '1px solid color-mix(in oklab, var(--success) 25%, transparent)',
                   }}
                 >
                   {t('updates.driverInstalled')}

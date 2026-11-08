@@ -1211,8 +1211,8 @@ input[type='range']:focus-visible::-webkit-slider-thumb {
   margin: 0 0 12px;
   padding: 8px 10px;
   border-radius: var(--r-sm);
-  background: oklch(from var(--success) l c h / 0.12);
-  border: 1px solid oklch(from var(--success) l c h / 0.32);
+  background: color-mix(in oklab, var(--success) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--success) 32%, transparent);
   font-size: 0.78125rem;
   line-height: 1.45;
   color: var(--text);

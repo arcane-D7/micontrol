@@ -85,8 +85,8 @@ export default function AppUpdateBanner({
         className="card"
         style={{
           marginBottom: 16,
-          borderColor: 'oklch(from var(--primary) l c h / 0.4)',
-          background: 'oklch(from var(--primary) l c h / 0.06)',
+          borderColor: 'color-mix(in oklab, var(--primary) 40%, transparent)',
+          background: 'color-mix(in oklab, var(--primary) 6%, transparent)',
         }}
       >
         <div
@@ -172,8 +172,8 @@ export default function AppUpdateBanner({
         className="card"
         style={{
           marginBottom: 16,
-          borderColor: 'oklch(from var(--success) l c h / 0.4)',
-          background: 'oklch(from var(--success) l c h / 0.06)',
+          borderColor: 'color-mix(in oklab, var(--success) 40%, transparent)',
+          background: 'color-mix(in oklab, var(--success) 6%, transparent)',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

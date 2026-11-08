@@ -280,7 +280,7 @@ function TaskManagerTab({ hw }: Props) {
             padding: '8px 12px',
             marginBottom: 8,
             borderRadius: 8,
-            background: 'oklch(from var(--error) l c h / 0.12)',
+            background: 'color-mix(in oklab, var(--error) 12%, transparent)',
             color: 'var(--error)',
             fontSize: 12,
           }}
@@ -426,10 +426,10 @@ function TaskManagerTab({ hw }: Props) {
                       aria-label={t('taskmgr.endProcess', { name: p.name })}
                       title={t('taskmgr.endProcess', { name: p.name })}
                       style={{
-                        background: 'oklch(from var(--error) l c h / 0.12)',
+                        background: 'color-mix(in oklab, var(--error) 12%, transparent)',
                         /* One step darker than --error so the ✕ clears AA on
                            its own 12% tint in light mode (3.7:1 → 5.2:1). */
-                        color: 'oklch(from var(--error) calc(l - 0.07) c h)',
+                        color: 'color-mix(in oklab, var(--error) 93%, black)',
                         border: 'none',
                         borderRadius: 6,
                         padding: '3px 8px',

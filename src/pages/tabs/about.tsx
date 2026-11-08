@@ -110,7 +110,7 @@ export default function AboutTab({
               width: 44,
               height: 44,
               borderRadius: 12,
-              background: 'oklch(from var(--warning) l c h / 0.15)',
+              background: 'color-mix(in oklab, var(--warning) 15%, transparent)',
               fontSize: 22,
               flexShrink: 0,
             }}
