@@ -605,6 +605,11 @@
   "system": {
     "title": "System & Drivers",
     "subtitle": "Hardware discovery, driver details, and IoT module access",
+    "smartModelTitle": "Smart brightness model",
+    "smartModelSamples": "{count} samples recorded across {buckets} light-level buckets.",
+    "smartModelModeCurve": "Active mode: curve — brightness follows the fixed min/max formula. The learned samples are stored but NOT applied; choose Smart mode in Display → Adaptive brightness to use them.",
+    "smartModelModeSmart": "Active mode: smart — the learned curve is applied where a bucket has enough samples; buckets without data fall back to the fixed formula.",
+    "smartModelUnavailable": "Model statistics unavailable — the backend did not answer.",
     "ac_connected": "AC connected",
     "adapter_power": "Adapter power",
     "battery_current": "Battery current",
