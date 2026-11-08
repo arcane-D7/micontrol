@@ -74,6 +74,8 @@ import type {
   NetworkInterfaceSample,
 } from '../types/hardware';
 
+import { createPollGuard, type PollGuard } from '../lib/pollGuard';
+
 // ── Hardware hook ────────────────────────────────────────────────────────────
 
 export function useHardware() {
@@ -129,6 +131,25 @@ export function useHardware() {
   const FAST_POLL_LEG_MS = 6000;
   const STALL_MS = 8000;
 
+  // Fan leg guard (dogfood H-04). The old Promise.race abandoned the *result*
+  // but not the call: every 2 s a new get_fan_info piled on top of the still
+  // running one (2 221 abandoned calls / 74 min). The guard allows one call in
+  // flight and backs off 6 s → 12 s → … → 60 s after a timeout; a read that
+  // returns resets the backoff. Created once per hook instance.
+  const fanGuardRef = useRef<PollGuard | null>(null);
+  if (!fanGuardRef.current) {
+    fanGuardRef.current = createPollGuard({
+      timeoutMs: FAST_POLL_LEG_MS,
+      baseBackoffMs: FAST_POLL_LEG_MS,
+      maxBackoffMs: 60_000,
+      onTimeout: ({ streak, retryInMs }) =>
+        console.warn(
+          `[hardware] get_fan_info exceeded ${FAST_POLL_LEG_MS} ms — abandoned` +
+            ` (streak ${streak}, next attempt in ${retryInMs} ms)`,
+        ),
+    });
+  }
+
   // ── Tiered polling (S11-002) ─────────────────────────────────────────────
   // Fast tier: 2 s — CPU usage, GPU usage, RAM (get_system_info) + fan speed,
   // CPU temp, GPU temp, audio. get_system_info is polled on its OWN leg so a
@@ -153,6 +174,17 @@ export function useHardware() {
         return fallback;
       }),
     [],
+  );
+
+  /** One bounded `get_fan_info`. `null` = skipped, timed out or failed. */
+  const pollFan = useCallback(
+    async (label: string): Promise<FanInfo | null> => {
+      const guard = fanGuardRef.current;
+      if (!guard) return null;
+      const outcome = await guard.run(() => safe(invoke<FanInfo>('get_fan_info'), null, label));
+      return outcome.status === 'ok' ? outcome.value : null;
+    },
+    [safe],
   );
 
   // System leg (CPU/GPU/RAM) — polled alone so a hung get_fan_info cannot
@@ -196,18 +228,9 @@ export function useHardware() {
     fastPollStartedAtRef.current = Date.now();
     try {
       const [fanResult, audioResult] = await Promise.all([
-        // Bounded fan leg: if get_fan_info exceeds FAST_POLL_LEG_MS, abandon it
-        // (the invoke keeps running in the background; the next poll reads the
-        // last value). Never let one slow query pin this poll forever.
-        Promise.race([
-          safe(invoke<FanInfo>('get_fan_info'), null, 'get_fan_info'),
-          new Promise<FanInfo | null>((resolve) =>
-            setTimeout(() => {
-              console.warn('[hardware] get_fan_info exceeded', FAST_POLL_LEG_MS, 'ms — abandoned');
-              resolve(null);
-            }, FAST_POLL_LEG_MS),
-          ),
-        ]),
+        // Bounded fan leg: one call in flight, exponential backoff after a
+        // timeout (see fanGuardRef). A skipped leg keeps the last value.
+        pollFan('get_fan_info'),
         safe(invoke<AudioVolumeResult>('get_audio_volume'), null, 'get_audio_volume'),
       ]);
       if (fanResult) setFan(fanResult);
@@ -218,7 +241,7 @@ export function useHardware() {
     } finally {
       fastPollInFlightRef.current = false;
     }
-  }, [safe]);
+  }, [safe, pollFan]);
 
   const slowPoll = useCallback(async () => {
     if (slowPollInFlightRef.current && slowPollStartedAtRef.current) {
@@ -288,22 +311,11 @@ export function useHardware() {
             perfMode,
             chargeThreshold,
           ] = await Promise.all([
-            // Bounded fan leg at boot too: get_fan_info can hang when WMI is
-            // wedged — never let it pin initialLoadInFlightRef forever (which
-            // would block ALL later polls → frozen overview).
-            Promise.race([
-              safe(invoke<FanInfo>('get_fan_info'), null, 'init:get_fan_info'),
-              new Promise<FanInfo | null>((resolve) =>
-                setTimeout(() => {
-                  console.warn(
-                    '[hardware] init get_fan_info exceeded',
-                    FAST_POLL_LEG_MS,
-                    'ms — abandoned',
-                  );
-                  resolve(null);
-                }, FAST_POLL_LEG_MS),
-              ),
-            ]),
+            // Bounded fan leg at boot too, through the same guard: get_fan_info
+            // can hang when WMI is wedged — never let it pin
+            // initialLoadInFlightRef forever (which would block ALL later polls
+            // → frozen overview), and never stack a second boot read on it.
+            pollFan('init:get_fan_info'),
             safe(invoke<SystemInfo>('get_system_info'), null, 'init:get_system_info'),
             safe(invoke<BatteryInfo>('get_battery_info'), null, 'init:get_battery_info'),
             safe(invoke<DisplayInfo>('get_display_info'), null, 'init:get_display_info'),
@@ -406,7 +418,7 @@ export function useHardware() {
       clearInterval(fastInterval);
       clearInterval(slowInterval);
     };
-  }, [fastPoll, fastPollSystem, slowPoll, safe]);
+  }, [fastPoll, fastPollSystem, slowPoll, safe, pollFan]);
 
   const setPerformanceMode = useCallback(async (mode: PerformanceMode) => {
     const snap = performanceModeRef.current;
@@ -448,6 +460,20 @@ export function useHardware() {
       throw e;
     }
   }, []);
+
+  /** Re-read the battery once (stale-state retry button). Additive: no contract change. */
+  const refreshBattery = useCallback(async () => {
+    const result = await safe(
+      invoke<BatteryInfo>('get_battery_info'),
+      null,
+      'refresh:get_battery_info',
+    );
+    if (result !== null) {
+      setBattery(result);
+      setError(null);
+    }
+    return result;
+  }, [safe]);
 
   const setBrightness = useCallback(async (level: number) => {
     const snap = displayRef.current;
@@ -527,9 +553,15 @@ export function useHardware() {
           : null,
       );
       try {
+        // Tauri v2 converts snake_case Rust parameters to camelCase JS keys.
+        // The command declares `speed_percent: u8`, so the payload key MUST be
+        // `speedPercent` — `speed_percent` is silently unmatched and the whole
+        // call fails with "missing required key speedPercent" (dogfood: every
+        // fan mode/fixed-speed change failed this way). Pinned by
+        // useHardware.setFanMode tests.
         const result = await invoke<FanModeResult>('set_fan_mode', {
           mode,
-          speed_percent: speedPercent ?? 50,
+          speedPercent: speedPercent ?? 50,
         });
         setError(null);
         return result;
@@ -1143,6 +1175,7 @@ export function useHardware() {
       clearError,
       setPerformanceMode,
       setChargingThreshold,
+      refreshBattery,
       setBrightness,
       setHdr,
       setAiBrightness,
@@ -1198,6 +1231,7 @@ export function useHardware() {
       clearError,
       setPerformanceMode,
       setChargingThreshold,
+      refreshBattery,
       setBrightness,
       setHdr,
       setAiBrightness,
