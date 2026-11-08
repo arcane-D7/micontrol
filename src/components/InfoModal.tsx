@@ -1,165 +1,41 @@
-import { createPortal } from 'react-dom';
-import { useRef, useEffect, useCallback } from 'react';
+import type { ReactNode } from 'react';
+import Dialog from './ui/dialog';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   title: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }
 
-/** Generic info modal rendered via portal. Click backdrop or × to close. */
+/**
+ * InfoModal — a API de ajuda que já existe, agora sobre o primitivo `Dialog`.
+ * O focus trap, o Escape e o restore de foco vivem no Dialog (uma vez, não
+ * quatro). Visual: véu sem blur, painel hairline, zero sombra.
+ */
 export default function InfoModal({ open, onClose, title, children }: Props) {
-  const modalRef = useRef<HTMLDivElement>(null);
-
-  // Focus the modal container on mount (neutral element)
-  useEffect(() => {
-    if (open) {
-      // Small delay to ensure the portal is in the DOM
-      requestAnimationFrame(() => modalRef.current?.focus());
-    }
-  }, [open]);
-
-  // Focus trap + Escape handler
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== 'Tab') return;
-
-      const focusable = modalRef.current?.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-      );
-      if (!focusable || focusable.length === 0) return;
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-
-      if (e.shiftKey) {
-        if (document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else {
-        if (document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    },
-    [onClose],
-  );
-
-  if (!open) return null;
-
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 9999,
-        background: 'oklch(0% 0 0 / 0.5)',
-        backdropFilter: 'blur(6px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '0 20px',
-      }}
-      onClick={onClose}
-      onKeyDown={handleKeyDown}
-    >
-      <div
-        ref={modalRef}
-        tabIndex={-1}
-        style={{
-          background: 'var(--surface)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--r-md)',
-          padding: '22px 24px',
-          maxWidth: 520,
-          width: '100%',
-          maxHeight: '80vh',
-          overflow: 'auto',
-          boxShadow: 'var(--shadow-glass)',
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 18,
-          }}
-        >
-          <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text)' }}>{title}</div>
-          <button
-            onClick={onClose}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--text-muted)',
-              fontSize: 20,
-              lineHeight: 1,
-              padding: '0 4px',
-              display: 'flex',
-              alignItems: 'center',
-            }}
-          >
-            ×
-          </button>
-        </div>
-
-        {/* Content */}
-        {children}
-      </div>
-    </div>,
-    document.body,
+  return (
+    <Dialog open={open} onClose={onClose} title={title}>
+      {children}
+    </Dialog>
   );
 }
 
 /** A single glossary row inside InfoModal. */
-export function InfoRow({ label, children }: { label: string; children: React.ReactNode }) {
+export function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>{children}</div>
+    <div className="mc-info-row">
+      <div className="mc-info-row__label">{label}</div>
+      <div className="mc-info-row__body">{children}</div>
     </div>
   );
 }
 
 /** A section divider with optional title used inside InfoModal. */
-export function InfoSection({ title, children }: { title?: string; children: React.ReactNode }) {
+export function InfoSection({ title, children }: { title?: string; children: ReactNode }) {
   return (
-    <div
-      style={{
-        borderTop: '1px solid var(--border)',
-        paddingTop: 14,
-        marginTop: 4,
-        marginBottom: 4,
-      }}
-    >
-      {title && (
-        <div
-          style={{
-            fontSize: 10.5,
-            fontWeight: 600,
-            textTransform: 'uppercase',
-            letterSpacing: '0.08em',
-            color: 'var(--text-dim)',
-            marginBottom: 10,
-          }}
-        >
-          {title}
-        </div>
-      )}
+    <div className="mc-info-section">
+      {title && <div className="mc-info-section__title">{title}</div>}
       {children}
     </div>
   );
