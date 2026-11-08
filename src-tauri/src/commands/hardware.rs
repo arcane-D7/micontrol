@@ -121,6 +121,92 @@ pub async fn get_perf_debug() -> Result<PerfDebugInfo, ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
+// ── Scenario rules (P2-6: auto perf-mode on AC/DC) ───────────────────────────
+//
+// The rules themselves live in `hw::scenario_rules` and are applied by the IoT
+// event listener (5 s tick) through the elevated dispatcher — i.e. they keep
+// working with the Performance tab unmounted and the window hidden. These
+// commands are the **user-scope** half: they read/create the HKCU config and
+// expose the backend's last-application status so the UI can subscribe instead
+// of owning the loop.
+
+/// Scenario-rules state exposed to the UI.
+///
+/// Flat fields (rather than nested `LastApplication`) keep the TypeScript
+/// contract trivial and tolerant of a not-yet-applied rule.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ScenarioRulesView {
+    /// Rules master switch — the registry `RulesEnabled` value, NOT the
+    /// notification switch `Enabled`.
+    pub enabled: bool,
+    pub on_ac_mode: Option<PerformanceMode>,
+    pub on_battery_mode: Option<PerformanceMode>,
+    pub last_event: Option<String>,
+    pub last_mode: Option<PerformanceMode>,
+    pub last_ok: Option<bool>,
+    pub last_detail: Option<String>,
+    pub last_at_unix_ms: Option<u64>,
+    pub applied_total: u64,
+    pub failed_total: u64,
+}
+
+#[cfg(windows)]
+fn scenario_rules_view() -> ScenarioRulesView {
+    let cfg = crate::hw::scenario_rules::ScenarioRulesConfig::load_or_create();
+    let status = crate::hw::scenario_rules::status();
+    let last = status.last_application;
+    ScenarioRulesView {
+        enabled: cfg.enabled,
+        on_ac_mode: cfg.on_ac_mode,
+        on_battery_mode: cfg.on_battery_mode,
+        last_event: last.as_ref().map(|l| l.event.clone()),
+        last_mode: last.as_ref().map(|l| l.mode),
+        last_ok: last.as_ref().map(|l| l.ok),
+        last_detail: last.as_ref().map(|l| l.detail.clone()),
+        last_at_unix_ms: last.as_ref().map(|l| l.at_unix_ms),
+        applied_total: status.applied_total,
+        failed_total: status.failed_total,
+    }
+}
+
+#[cfg(not(windows))]
+fn scenario_rules_view() -> ScenarioRulesView {
+    ScenarioRulesView::default()
+}
+
+/// Read the scenario-rule config (HKCU, no elevation) + last application.
+#[tauri::command]
+pub async fn get_scenario_rules() -> Result<ScenarioRulesView, ErrorResponse> {
+    run_blocking(|| -> crate::hw::errors::HardwareResult<ScenarioRulesView> {
+        Ok(scenario_rules_view())
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
+/// Persist the scenario-rule config (HKCU, no elevation) and echo it back.
+#[tauri::command]
+pub async fn set_scenario_rules(
+    enabled: bool,
+    on_ac_mode: Option<PerformanceMode>,
+    on_battery_mode: Option<PerformanceMode>,
+) -> Result<ScenarioRulesView, ErrorResponse> {
+    run_blocking(
+        move || -> crate::hw::errors::HardwareResult<ScenarioRulesView> {
+            #[cfg(windows)]
+            crate::hw::scenario_rules::set_rules(enabled, on_ac_mode, on_battery_mode)
+                .map_err(HardwareError::Registry)?;
+            #[cfg(not(windows))]
+            {
+                let _ = (enabled, on_ac_mode, on_battery_mode);
+            }
+            Ok(scenario_rules_view())
+        },
+    )
+    .await
+    .map_err(ErrorResponse::from)
+}
+
 /// Read all ACPI ERAM fields via direct IoTDriver IOCTL access.
 ///
 /// Returns the decoded `EramMap` with all known register fields.

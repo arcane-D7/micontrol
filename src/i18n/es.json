@@ -242,7 +242,9 @@
       "onBattery": "Con batería",
       "manual": "Manual (sin cambio automático)",
       "currentlyPluggedIn": "Cargador conectado — perfil AC activo",
-      "currentlyOnBattery": "Con batería — perfil DC activo"
+      "currentlyOnBattery": "Con batería — perfil DC activo",
+      "syncFailed": "Ajustes no sincronizados con el servicio en segundo plano — el cambio automático no se aplicará",
+      "lastApplied": "Último cambio automático: {event} → {mode}"
     },
     "osTurboTitle": "OS Turbo",
     "osTurboDesc": "Cambia al plan de energía Alto Rendimiento y limita procesos en segundo plano",

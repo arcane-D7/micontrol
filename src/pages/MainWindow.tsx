@@ -4,6 +4,7 @@ import { t } from '../hooks/useI18n';
 import type { useHardware } from '../hooks/useHardware';
 import TrayPopup from './TrayPopup';
 import { useSettings } from '../hooks/useSettings';
+import { usePowerProfiles } from '../hooks/usePowerProfiles';
 import { useAnalysisLogger } from '../hooks/useAnalysisLogger';
 import { useAutoUpdate } from '../hooks/useAutoUpdate';
 import { ConsentDialog } from '../components/ConsentDialog';
@@ -231,6 +232,11 @@ export default function MainWindow({
   toggleTheme,
 }: Props) {
   const aiSettings = useSettings();
+  // P2-6: the Power Profiles toggle must outlive tab switches. The hook lives
+  // in the shell (mounted once), not in the Performance tab, and the actual
+  // AC/DC application happens in Rust (`hw::scenario_rules`) — the UI only
+  // mirrors config + subscribes to status.
+  const powerProfiles = usePowerProfiles(aiSettings.settings, aiSettings.updateKey);
   const appUpdate = useAutoUpdate();
   const { onboardingCompleted } = aiSettings.settings;
   const [showTrayPreview, setShowTrayPreview] = useState(false);
@@ -303,6 +309,7 @@ export default function MainWindow({
           <PerformanceTab
             hw={hardware}
             ai={aiSettings}
+            pp={powerProfiles}
             onOpenSettings={() => onTabChange('settings')}
           />
         );
