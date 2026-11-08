@@ -1,11 +1,21 @@
+/**
+ * Card — superfície hairline: 1 px, raio 12, **zero sombra** (spec §2.4/§3.1).
+ *
+ * Sem `style={{}}`: a regra da vaga 1 é que nada em `components/ui/` escreve
+ * estilos inline. O título é `h2` real (a app hoje tem `h1=h2=h3=0`).
+ *
+ * `icon`/`meta`/`footer`/`selectable`/`selected`/`loading` vêm da API do
+ * theme-core e ficam para não deixar consumidores sem cartão. Só se desenham
+ * quando pedidos — o cartão da bateria continua a usar `title`+`action`.
+ */
+
 import type { ReactNode } from 'react';
-import { cx } from './cx';
 
 export interface CardProps {
   /** Título em sentence case, 13 px 600. Sem uppercase, sem tracking. */
   title?: ReactNode;
   icon?: ReactNode;
-  /** Acção à direita do título (normalmente um IconButton). */
+  /** Acção à direita do título (ex.: `IconButton` de ajuda). */
   action?: ReactNode;
   /** Metadados à direita (badge, "atualizado há 12 s"). */
   meta?: ReactNode;
@@ -15,20 +25,14 @@ export interface CardProps {
   selectable?: boolean;
   selected?: boolean;
   loading?: boolean;
-  /** Última leitura falhou: a hairline superior passa a --warning. */
-  stale?: boolean;
-  flush?: boolean;
   className?: string;
+  /** Marca o card como "sem leitura" — hairline superior passa a `--warning`. */
+  stale?: boolean;
   id?: string;
   onClick?: () => void;
   'aria-label'?: string;
 }
 
-/**
- * Card — a moldura hairline: 1 px, raio 12, ZERO sombra.
- * Sem `Card.Header/Body/Footer` inventados: o corpo é `children`, o resto é
- * `title`/`action`/`footer`.
- */
 export function Card({
   title,
   icon,
@@ -39,48 +43,43 @@ export function Card({
   selectable,
   selected,
   loading,
-  stale,
-  flush,
   className,
+  stale,
   id,
   onClick,
   'aria-label': ariaLabel,
 }: CardProps) {
-  const cls = cx(
-    'mc-card',
-    selectable && 'mc-card--selectable',
-    selected && 'mc-card--selected',
-    loading && 'mc-card--loading',
-    stale && 'mc-card--stale',
-    flush && 'mc-card--flush',
-    className,
-  );
+  const classes = ['mc-card'];
+  if (stale) classes.push('mc-card--stale');
+  if (selectable) classes.push('mc-card--selectable');
+  if (selected) classes.push('mc-card--selected');
+  if (loading) classes.push('mc-card--loading');
+  if (className) classes.push(className);
 
   const content = (
     <>
-      {title || action || meta ? (
+      {(title || action || meta || icon) && (
         <div className="mc-card__head">
-          {icon}
-          {title ? <div className="mc-card__title">{title}</div> : null}
-          {meta ? <div className="mc-card__meta">{meta}</div> : null}
-          {action ? <div className="mc-card__meta">{action}</div> : null}
+          {icon && <span className="mc-card__icon">{icon}</span>}
+          {title && <h2 className="mc-card__title">{title}</h2>}
+          {meta && <span className="mc-card__meta">{meta}</span>}
+          {action && <div className="mc-card__action">{action}</div>}
         </div>
-      ) : null}
+      )}
       {children}
-      {footer ? <div className="mc-card__foot">{footer}</div> : null}
+      {footer && <div className="mc-card__footer">{footer}</div>}
     </>
   );
 
-  if (onClick) {
+  if (selectable || onClick) {
     return (
       <button
         type="button"
-        className={cls}
+        className={classes.join(' ')}
         id={id}
-        onClick={onClick}
         aria-label={ariaLabel}
         aria-pressed={selectable ? Boolean(selected) : undefined}
-        aria-busy={loading || undefined}
+        onClick={onClick}
       >
         {content}
       </button>
@@ -88,7 +87,7 @@ export function Card({
   }
 
   return (
-    <section className={cls} id={id} aria-label={ariaLabel} aria-busy={loading || undefined}>
+    <section className={classes.join(' ')} id={id} aria-label={ariaLabel}>
       {content}
     </section>
   );

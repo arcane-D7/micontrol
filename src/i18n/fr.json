@@ -321,6 +321,7 @@
     }
   },
   "battery": {
+    "subtitle": "État de la batterie et protection de la charge",
     "title": "Batterie",
     "status": "État",
     "level": "Niveau",
@@ -375,7 +376,55 @@
     "timeToFullAt": "Restant jusqu'à {limit} %",
     "healthGood": "bonne",
     "healthFair": "correcte",
-    "healthPoor": "faible"
+    "healthPoor": "faible",
+    "details": "Détails",
+    "plugConnected": "Chargeur branché",
+    "onBattery": "Sur batterie",
+    "factoryCapacity": "Capacité d'usine",
+    "maxCapacity": "Capacité maximale actuelle",
+    "chargerSupplying": "Chargeur fournissant",
+    "notExposed": "non exposé par le matériel",
+    "healthOfFactory": "· {pct} % de la capacité d'usine",
+    "unavailable": "Cet appareil ne signale pas de batterie",
+    "unavailableHint": "Les fonctions de charge ne sont pas disponibles.",
+    "stale": "Aucune lecture depuis {time} — les valeurs peuvent être obsolètes",
+    "retry": "Réessayer",
+    "updatedNow": "Mis à jour à l'instant",
+    "updatedAgo": "Mis à jour il y a {s} s",
+    "levelBarLabel": "Niveau de batterie : {level} %",
+    "limitMark": "Limite de charge : {limit} %",
+    "healthBand": {
+      "good": "bonne",
+      "fair": "correcte",
+      "poor": "faible"
+    },
+    "phase": {
+      "charging": "Charge jusqu'à {target} %",
+      "holding": "En pause à {level} % — la limite est {limit} %",
+      "holdingBadge": "En pause",
+      "resuming": "Reprend sous {limit} %",
+      "full": "Entièrement chargée",
+      "fullBadge": "Pleine",
+      "discharging": "Sur batterie — {time} restantes",
+      "dischargingNoTime": "Sur batterie",
+      "noLimit": "Charge jusqu'à 100 % (sans limite)",
+      "careOff": "La protection est désactivée — charge jusqu'à 100 %"
+    },
+    "careTitle": "Protection de la batterie",
+    "careDesc": "Limite la charge à {limit} % pour prolonger la batterie",
+    "limitLabel": "Limite de charge",
+    "enableToChoose": "Activez la protection pour choisir la limite",
+    "limitDerived": "Charge jusqu'à {limit} % — arrête de charger à {limit} %",
+    "limitAboveLevel": "S'appliquera au prochain cycle — vous êtes au-dessus de la limite",
+    "applying": "Application de {limit} %…",
+    "applyFailed": "Impossible d'appliquer.",
+    "toast": {
+      "limitApplied": "Limite de {limit} % appliquée — arrête de charger à {limit} %",
+      "careAndLimit": "Protection activée — limite de {limit} %",
+      "careOff": "Protection désactivée — charge jusqu'à 100 %"
+    },
+    "reading": "Lecture de la batterie",
+    "careSwitch": "Limiter la charge"
   },
   "charging": {
     "title": "Contrôle de charge",

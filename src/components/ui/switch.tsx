@@ -1,89 +1,81 @@
+/**
+ * Switch — `button role="switch"`, 40×22, thumb que estica no press (spec §5.4).
+ *
+ * Substitui `ToggleRow` + `ToggleSwitch` (dois donos do mesmo controlo) e
+ * resolve o estado que faltava: `pending` (enquanto o EC grava) e
+ * `disabledReason` (desligado **com razão visível**, em vez do
+ * `opacity:.4 + pointer-events:none` mudo de hoje).
+ *
+ * `bare` + `ariaLabel` + `id` existem para os invólucros antigos
+ * (`ToggleSwitch`) continuarem a compilar sobre este único dono do controlo.
+ */
+
 import { useId } from 'react';
-import type { ReactNode } from 'react';
-import { cx } from './cx';
 
 export interface SwitchProps {
+  label?: string;
+  desc?: string;
   checked: boolean;
-  onChange: (value: boolean) => void;
-  label?: ReactNode;
-  desc?: ReactNode;
-  disabled?: boolean;
-  /** Escrita em curso: o track pulsa, o input fica bloqueado. */
+  onChange: (next: boolean) => void;
+  /** A gravar no hardware — o controlo aceita o clique mas não o repete. */
   pending?: boolean;
-  /** Porque está desligado. Nunca um controlo morto sem explicação. */
+  disabled?: boolean;
+  /** Mostrado quando `disabled`: diz o que fazer, não só que não dá. */
   disabledReason?: string;
-  ariaLabel?: string;
-  id?: string;
   /** Só o controlo, sem a linha label+descrição (ToggleSwitch). */
   bare?: boolean;
-  className?: string;
+  /** Nome acessível quando não há `label` visível (modo `bare`). */
+  ariaLabel?: string;
+  /** Id do controlo, para associação externa. */
+  id?: string;
 }
 
-/**
- * Switch — o dono único do controlo (substitui ToggleRow + ToggleSwitch).
- * Track 40×22, thumb 16, thumb estica 4 px no press e volta com EASE_THROW.
- * O input é um checkbox real: teclado, `Space`, e leitor de ecrã saem de graça.
- */
 export function Switch({
-  checked,
-  onChange,
   label,
   desc,
-  disabled,
+  checked,
+  onChange,
   pending,
+  disabled,
   disabledReason,
+  bare = false,
   ariaLabel,
   id,
-  bare,
-  className,
 }: SwitchProps) {
-  const autoId = useId();
-  const inputId = id ?? autoId;
-  const descId = `${inputId}-desc`;
-  const locked = disabled || pending;
-  /* O nome acessível é o label, não "label + descrição" colados. */
-  const name = bare ? ariaLabel : typeof label === 'string' ? label : ariaLabel;
+  const generatedId = useId();
+  const controlId = id ?? generatedId;
+  const isDisabled = disabled || pending;
+
+  const control = (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-labelledby={!bare && label ? controlId : undefined}
+      aria-label={bare ? ariaLabel : undefined}
+      aria-busy={pending || undefined}
+      className={`mc-switch${checked ? ' mc-switch--on' : ''}${pending ? ' mc-switch--pending' : ''}`}
+      disabled={isDisabled}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="mc-switch__thumb" />
+    </button>
+  );
+
+  if (bare) return control;
 
   return (
-    <div className={cx('mc-switch-wrap', className)}>
-      <label
-        className={cx(
-          'mc-switch',
-          bare && 'mc-switch--bare',
-          locked && 'mc-switch--disabled',
-          pending && 'mc-switch--pending',
+    <div className="mc-switchrow">
+      <div className="mc-switchrow__text">
+        <div className="mc-switchrow__label" id={controlId}>
+          {label}
+        </div>
+        {desc && <div className="mc-switchrow__desc">{desc}</div>}
+        {isDisabled && disabledReason && (
+          <div className="mc-switchrow__reason">{disabledReason}</div>
         )}
-        htmlFor={inputId}
-      >
-        {!bare && (label || desc) ? (
-          <span className="mc-switch__text">
-            {label ? <span className="mc-switch__label">{label}</span> : null}
-            {desc ? (
-              <span className="mc-switch__desc" id={descId}>
-                {desc}
-              </span>
-            ) : null}
-          </span>
-        ) : null}
-        <span className="mc-switch__control">
-          <input
-            id={inputId}
-            className="mc-switch__input"
-            type="checkbox"
-            role="switch"
-            checked={checked}
-            disabled={locked}
-            aria-label={name}
-            aria-describedby={desc ? descId : undefined}
-            onChange={(e) => onChange(e.target.checked)}
-          />
-          <span className="mc-switch__track" aria-hidden="true" />
-          <span className="mc-switch__knob" aria-hidden="true" />
-        </span>
-      </label>
-      {disabled && disabledReason ? (
-        <div className="mc-switch__reason">{disabledReason}</div>
-      ) : null}
+      </div>
+      {control}
     </div>
   );
 }

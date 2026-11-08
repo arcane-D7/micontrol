@@ -321,6 +321,7 @@
     }
   },
   "battery": {
+    "subtitle": "Battery state and charge protection",
     "title": "Battery",
     "status": "Status",
     "level": "Level",
@@ -375,7 +376,55 @@
     "timeToFullAt": "Time left to {limit}%",
     "healthGood": "good",
     "healthFair": "fair",
-    "healthPoor": "poor"
+    "healthPoor": "poor",
+    "details": "Details",
+    "plugConnected": "Charger connected",
+    "onBattery": "Running on battery",
+    "factoryCapacity": "Factory capacity",
+    "maxCapacity": "Current maximum capacity",
+    "chargerSupplying": "Charger supplying",
+    "notExposed": "not exposed by the hardware",
+    "healthOfFactory": "· {pct}% of factory capacity",
+    "unavailable": "This device does not report a battery",
+    "unavailableHint": "Charging features are not available.",
+    "stale": "No reading since {time} — values may be out of date",
+    "retry": "Try again",
+    "updatedNow": "Updated just now",
+    "updatedAgo": "Updated {s} s ago",
+    "levelBarLabel": "Battery level: {level}%",
+    "limitMark": "Charge limit: {limit}%",
+    "healthBand": {
+      "good": "good",
+      "fair": "fair",
+      "poor": "poor"
+    },
+    "phase": {
+      "charging": "Charging to {target}%",
+      "holding": "Paused at {level}% — the limit is {limit}%",
+      "holdingBadge": "Paused",
+      "resuming": "Resumes below {limit}%",
+      "full": "Fully charged",
+      "fullBadge": "Full",
+      "discharging": "Running on battery — {time} left",
+      "dischargingNoTime": "Running on battery",
+      "noLimit": "Charges to 100% (no limit)",
+      "careOff": "Protection is off — charges to 100%"
+    },
+    "careTitle": "Battery protection",
+    "careDesc": "Limits charging to {limit}% so the battery lasts longer",
+    "limitLabel": "Charge limit",
+    "enableToChoose": "Turn protection on to choose the limit",
+    "limitDerived": "Charges to {limit}% — stops charging at {limit}%",
+    "limitAboveLevel": "Applies on the next cycle — you are above the limit",
+    "applying": "Applying {limit}%…",
+    "applyFailed": "Could not apply.",
+    "toast": {
+      "limitApplied": "Limit of {limit}% applied — stops charging at {limit}%",
+      "careAndLimit": "Protection on — limit of {limit}%",
+      "careOff": "Protection off — charges to 100%"
+    },
+    "reading": "Reading the battery",
+    "careSwitch": "Limit charging"
   },
   "charging": {
     "title": "Charging Control",

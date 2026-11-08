@@ -1,265 +1,263 @@
-import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+/**
+ * Proteção da bateria — blocos 6, 7 e 8 da spec §5.3.
+ *
+ * Resolve o RED UX-01 (clique morto): com a proteção desligada, clicar num
+ * nível **liga a proteção e aplica o nível** num só gesto. Não há
+ * `pointer-events:none` nem `opacity:.4` mudo — há uma razão escrita e um
+ * caminho para agir.
+ *
+ * Resolve o RED UX-09 (feedback sem delta): o segmento marca em ≤100 ms
+ * (optimistic), a linha diz "A aplicar 80%…", a confirmação nomeia valor +
+ * hora, e o toast nomeia valor + consequência. Se a escrita no EC falhar, o
+ * segmento **reverte** e aparece um erro inline com "Tentar de novo" — nunca um
+ * toast que não diz o que mudou.
+ *
+ * Merge f4/battery-poc × f4/tabs-cognitive: o dono do estado `care` passou a
+ * ser a tab (para o herói poder dizer "carrega até 100%"), mas o cartão
+ * continua a nomear o estado do hardware (pausa/desligado da corrente) e a
+ * guardar a confirmação com hora, como na tab cognitiva.
+ */
+
+import { useState } from 'react';
 import { t } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
 import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
 import InfoModal, { InfoRow, InfoSection } from './InfoModal';
+import { Card } from './ui/card';
+import { Icon } from './ui/icons';
+import { IconButton } from './ui/icon-button';
+import { Segmented, type SegmentedOption } from './ui/segmented';
+import { Switch } from './ui/switch';
 
 // `t` from useI18n types keys as a literal union; error.ts' TranslateFn takes
 // any string — wrap it (matches the pattern used across the codebase).
 const translate: TranslateFn = (key) => t(key as never);
 
-interface Props {
-  /** Current charging threshold (0-100, where 100 = no limit) */
-  threshold: number;
-  /** Callback to change the threshold via parent state */
-  onThresholdChange: (threshold: number) => Promise<void>;
-  /**
-   * Live battery snapshot. Optional so the card still renders (and the tests
-   * still mount it) without hardware; when present it powers the charging
-   * state line — the app creates the state, so the app must name it
-   * (audit §4.3 #2).
-   */
-  battery?: { level: number; is_charging: boolean; is_plugged: boolean } | null;
-}
+const LEVELS = [40, 50, 60, 70, 80, 100] as const;
+const RECOMMENDED = 80;
 
-const LEVELS = [40, 50, 60, 70, 80] as const;
-
-/** Local wall-clock HH:MM — the confirmation must say *when*, not just *what*. */
+/** Local wall-clock HH:MM — a confirmação diz *quando*, não só *o quê*. */
 function clockTime(): string {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-/**
- * Unified charging protection card.
- *
- * Merges Battery Care (EC 0xA4 master toggle) and Charging Threshold
- * (EC 0xA7 charge limit) into a single, cohesive UI.
- *
- * - When Battery Care is ON, the threshold buttons are active and the EC
- *   respects the configured charge limit.
- * - When Battery Care is OFF, the threshold buttons are disabled and the
- *   EC charges to 100% regardless of the threshold register.
- */
-export default function ChargingProtection({ threshold, onThresholdChange, battery }: Props) {
-  const [batteryCare, setBatteryCare] = useState<boolean | null>(null);
-  const [savingCare, setSavingCare] = useState(false);
-  const [savingThreshold, setSavingThreshold] = useState(false);
+export interface ChargingProtectionProps {
+  /** Limite configurado; 100 = sem limite. */
+  threshold: number;
+  /** Nível atual da bateria — alternativa a `battery.level` (compat). */
+  level?: number;
+  /** null = a ler `get_battery_care`. */
+  care?: boolean | null;
+  carePending?: boolean;
+  /** Escreve o limite (o pai faz optimistic + revert). */
+  onThresholdChange: (threshold: number) => Promise<void>;
+  /** Liga a proteção **e** aplica o limite num só gesto. */
+  onEnableCare?: (limit: number) => Promise<void>;
+  /** Desliga a proteção (o limite passa a 100). */
+  onDisableCare?: () => Promise<void>;
+  /**
+   * Snapshot da bateria. Compat com os chamadores antigos: quando presente,
+   * permite nomear o estado "fora da corrente" que `level` sozinho não diz.
+   */
+  battery?: { level: number; is_charging: boolean; is_plugged: boolean } | null;
+}
+
+export default function ChargingProtection({
+  threshold,
+  level,
+  care = null,
+  carePending = false,
+  onThresholdChange,
+  onEnableCare,
+  onDisableCare,
+  battery = null,
+}: ChargingProtectionProps) {
+  const [optimistic, setOptimistic] = useState<number | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   const [showInfo, setShowInfo] = useState(false);
-  /** Last applied change, named with its value and the time it landed. */
+  /** Última alteração aplicada, nomeada com valor + hora em que entrou. */
   const [confirmation, setConfirmation] = useState<string | null>(null);
   const { addToast } = useToast();
 
-  // threshold === 100 means "no limit" (disabled)
-  const thresholdEnabled = threshold !== 100;
-  const [lastLevel, setLastLevel] = useState<number>(
-    LEVELS.includes(threshold as (typeof LEVELS)[number]) ? threshold : 80,
-  );
+  const careEnabled = care === true;
+  const display = optimistic ?? (careEnabled ? threshold : 100);
+  const busy = applying || carePending;
+  const currentLevel = level ?? battery?.level ?? 0;
+  const plugged = battery?.is_plugged ?? true;
 
-  const fetchBatteryCare = useCallback(async () => {
+  // Sem `onEnableCare`/`onDisableCare` o cartão continua a funcionar: delega no
+  // `onThresholdChange` (é o pai que escreve no EC e guarda `care`).
+  const enableCare = onEnableCare ?? onThresholdChange;
+  const disableCare = onDisableCare ?? (() => onThresholdChange(100));
+
+  const options: SegmentedOption[] = LEVELS.map((value) => ({
+    value,
+    label: `${value}%`,
+    badge: value === RECOMMENDED ? t('charging.recommended') : undefined,
+  }));
+
+  /** Um gesto: marca já, escreve depois, reverte se falhar. */
+  const apply = async (value: number) => {
+    if (busy || care === null) return;
+    setOptimistic(value);
+    setApplying(true);
+    setFailure(null);
     try {
-      const care = await invoke<boolean>('get_battery_care');
-      setBatteryCare(care);
-    } catch {
-      setBatteryCare(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    void fetchBatteryCare();
-  }, [fetchBatteryCare]);
-
-  // ── Battery Care toggle (master switch) ──────────────────────────
-  const handleToggleBatteryCare = async () => {
-    if (batteryCare === null) return;
-    const newState = !batteryCare;
-    setSavingCare(true);
-    try {
-      await invoke('set_battery_care', { enabled: newState });
-      setBatteryCare(newState);
-
-      // When enabling battery care, also set the threshold to the last level
-      // When disabling, set threshold to 100 (no limit)
-      if (newState) {
-        await onThresholdChange(lastLevel);
+      if (!careEnabled) {
+        await enableCare(value);
+        setConfirmation(t('charging.appliedCareOn', { time: clockTime(), limit: value }));
+        addToast({
+          message: t('battery.toast.careAndLimit', { limit: value }),
+          type: 'success',
+        });
       } else {
-        await onThresholdChange(100);
+        await onThresholdChange(value);
+        setConfirmation(t('charging.appliedLimit', { level: value, time: clockTime() }));
+        addToast({
+          message: t('battery.toast.limitApplied', { limit: value }),
+          type: 'success',
+        });
       }
-
-      // Name the change, its value and its effect (audit §4.3 #5: a toast
-      // that cannot name the delta should not exist).
-      const message = t(newState ? 'charging.appliedCareOn' : 'charging.appliedCareOff', {
-        time: clockTime(),
-        limit: lastLevel,
-      });
-      setConfirmation(message);
-      addToast({ message, type: 'info' });
     } catch (e) {
-      addToast({
-        message: `${t('charging.error')}: ${getUserFriendlyMessage(parseErrorResponse(e), translate)}`,
-        type: 'error',
-        onRetry: () => void handleToggleBatteryCare(),
-      });
+      setOptimistic(null);
+      setConfirmation(null);
+      setFailure(getUserFriendlyMessage(parseErrorResponse(e), translate));
     } finally {
-      setSavingCare(false);
+      setApplying(false);
+      setOptimistic(null);
     }
   };
 
-  /**
-   * Turn the protection on *and* apply the level in one interaction.
-   *
-   * Before, the 40–80% buttons were visible but dead (`pointerEvents: none`)
-   * whenever protection was off — the user's first click did nothing and the
-   * app read as broken (audit §4.3 #1). One click now does both, and the
-   * confirmation says exactly what happened.
-   */
-  const enableCareAndApply = async (level: number) => {
-    setSavingCare(true);
+  const toggleCare = async (next: boolean) => {
+    if (busy || care === null) return;
+    setFailure(null);
     try {
-      await invoke('set_battery_care', { enabled: true });
-      setBatteryCare(true);
-      await onThresholdChange(level);
-      setLastLevel(level);
-
-      const message = t('charging.appliedCareOn', { time: clockTime(), limit: level });
-      setConfirmation(message);
-      addToast({ message, type: 'success' });
+      if (next) {
+        const limit = display < 100 ? display : RECOMMENDED;
+        await enableCare(limit);
+        setConfirmation(t('charging.appliedCareOn', { time: clockTime(), limit }));
+        addToast({
+          message: t('battery.toast.careAndLimit', { limit }),
+          type: 'success',
+        });
+      } else {
+        await disableCare();
+        setConfirmation(t('charging.appliedCareOff', { time: clockTime() }));
+        addToast({ message: t('battery.toast.careOff'), type: 'info' });
+      }
     } catch (e) {
-      addToast({
-        message: `${t('charging.error')}: ${getUserFriendlyMessage(parseErrorResponse(e), translate)}`,
-        type: 'error',
-        onRetry: () => void enableCareAndApply(level),
-      });
-    } finally {
-      setSavingCare(false);
+      setFailure(getUserFriendlyMessage(parseErrorResponse(e), translate));
     }
   };
 
-  // ── Threshold level change ──────────────────────────────────────
-  const handleThresholdChange = async (level: number) => {
-    // Protection off (or not readable) → switch it on *and* apply the level.
-    // A click must never do nothing (audit §4.3 #1).
-    if (!careEnabled) {
-      await enableCareAndApply(level);
-      return;
-    }
-    setSavingThreshold(true);
-    try {
-      await onThresholdChange(level);
-      if (level !== 100) setLastLevel(level);
-      const message = t('charging.appliedLimit', { level, time: clockTime() });
-      setConfirmation(message);
-      addToast({ message, type: 'success' });
-    } catch (e) {
-      addToast({
-        message: `${t('charging.error')}: ${getUserFriendlyMessage(parseErrorResponse(e), translate)}`,
-        type: 'error',
-        onRetry: () => void handleThresholdChange(level),
-      });
-    } finally {
-      setSavingThreshold(false);
-    }
-  };
-
-  const careEnabled = batteryCare === true;
-  // Protection off no longer blocks the level buttons — a click turns it on
-  // and applies the level (see enableCareAndApply). Only an in-flight write
-  // makes them inert.
-  const saving = savingCare || savingThreshold;
-  const disabled = saving;
-
-  /**
-   * The charging state the hardware is actually in, in user language.
-   * 96% with an 80% limit used to read as "AC connected · 96%" and nothing
-   * else — the app created a state it never named (audit §4.3 #2).
-   */
-  const chargingState = (() => {
-    if (!careEnabled) return null;
-    if (!thresholdEnabled) return t('charging.noLimit');
-    if (!battery) return null;
-    if (!battery.is_plugged) return t('charging.state.unplugged');
-    if (battery.level > threshold)
-      return t('charging.state.paused', { level: battery.level, limit: threshold });
-    return t('charging.state.chargingTo', { limit: threshold });
+  const derived = (() => {
+    if (failure) return null;
+    if (applying)
+      return { text: t('battery.applying', { limit: display }), tone: 'muted' as const };
+    if (care === null) return { text: t('common.loading'), tone: 'muted' as const };
+    if (!careEnabled) return { text: t('battery.phase.careOff'), tone: 'muted' as const };
+    if (display >= 100) return { text: t('battery.phase.noLimit'), tone: 'muted' as const };
+    if (currentLevel > display) return { text: t('battery.limitAboveLevel'), tone: 'warn' as const };
+    return { text: t('battery.limitDerived', { limit: display }), tone: 'neutral' as const };
   })();
 
-  const showWhy =
-    careEnabled && thresholdEnabled && !!battery && battery.is_plugged && battery.level > threshold;
+  // Nomear o estado que o hardware está *agora* (96% com limite de 80% não é
+  // "a carregar até aos 80%"). Só quando a linha derivada não o diz sozinha.
+  const paused = careEnabled && display < 100 && currentLevel > display;
+  const stateText =
+    care === null || failure || applying || !careEnabled || display >= 100
+      ? null
+      : !plugged
+        ? t('charging.state.unplugged')
+        : paused
+          ? t('charging.state.paused', { level: currentLevel, limit: display })
+          : null;
 
   return (
-    <div className="card">
-      {/* Card header with info button */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 12,
-        }}
-      >
-        <h2 className="card-title" style={{ margin: 0 }}>
-          {t('charging.title')}
-        </h2>
-        <button
+    <Card
+      title={t('battery.careTitle')}
+      action={
+        <IconButton
+          icon="info"
+          label={t('charging.infoModal.title')}
           onClick={() => setShowInfo(true)}
-          title={t('charging.infoModal.title')}
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            color: 'var(--text-dim)',
-            fontSize: 16,
-            lineHeight: 1,
-            padding: '2px 4px',
-            borderRadius: 'var(--r-xs)',
-            transition: 'color var(--t-fast)',
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text)')}
-          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-dim)')}
-        >
-          ⓘ
-        </button>
+        />
+      }
+    >
+      <Switch
+        label={t('battery.careSwitch')}
+        desc={t('battery.careDesc', { limit: display < 100 ? display : RECOMMENDED })}
+        checked={careEnabled}
+        pending={carePending}
+        disabled={care === null}
+        disabledReason={care === null ? t('common.loading') : undefined}
+        onChange={(next) => void toggleCare(next)}
+      />
+
+      <div className="mc-seg-wrap">
+        <Segmented
+          label={t('battery.limitLabel')}
+          options={options}
+          value={display}
+          pending={applying}
+          onChange={(value) => void apply(value)}
+          disabledReason={
+            care === null
+              ? t('common.loading')
+              : !careEnabled
+                ? t('battery.enableToChoose')
+                : undefined
+          }
+          onDisabledSelect={(value) => void apply(value)}
+          onDisabledClick={() => void apply(RECOMMENDED)}
+        />
       </div>
 
-      <p className="page-subtitle" style={{ marginBottom: 16 }}>
-        {t('charging.subtitle')}
-      </p>
+      {stateText && (
+        <div className="charge-state" role="status" aria-live="polite">
+          {stateText}
+        </div>
+      )}
 
-      {/* Battery Care master toggle */}
-      <div className="stat-row" style={{ marginBottom: 16 }}>
-        <span className="stat-label" id="battery-care-label">
-          {t('battery.batteryCare')}
-        </span>
-        <label className="toggle-switch">
-          <input
-            type="checkbox"
-            checked={careEnabled}
-            disabled={savingCare || batteryCare === null}
-            onChange={() => void handleToggleBatteryCare()}
-            aria-label={t('battery.batteryCare')}
-          />
-          <span className="toggle-track" />
-          <span className="toggle-knob" />
-        </label>
-      </div>
-
-      {/* What the hardware is doing right now — named, not implied. */}
-      <div className="charge-state" role="status" aria-live="polite">
-        {batteryCare === null
-          ? t('common.loading')
-          : (chargingState ?? (careEnabled ? t('charging.noLimit') : t('battery.batteryCareOff')))}
-      </div>
-
-      {showWhy && battery && (
+      {paused && plugged && (
         <details className="charge-why">
           <summary>{t('common.why')}</summary>
-          <p>{t('charging.state.why', { level: battery.level, limit: threshold })}</p>
+          <p>{t('charging.state.why', { level: currentLevel, limit: display })}</p>
         </details>
       )}
 
-      {/* Confirmation of the last action: value + time + effect. */}
-      {confirmation && (
+      {failure ? (
+        <div className="mc-note mc-note--danger" role="alert">
+          <Icon name="info" size={16} />
+          <span>
+            {t('battery.applyFailed')} {failure}
+          </span>
+          <span className="mc-note__spacer" />
+          <button type="button" className="mc-linkbtn" onClick={() => void apply(display)}>
+            {t('battery.retry')}
+          </button>
+        </div>
+      ) : (
+        derived && (
+          <div
+            className={`mc-hero__phase${
+              derived.tone === 'warn'
+                ? ' mc-hero__phase--warn'
+                : derived.tone === 'muted'
+                  ? ' mc-hero__phase--muted'
+                  : ''
+            }`}
+            data-testid="limit-derived"
+          >
+            {derived.text}
+          </div>
+        )
+      )}
+
+      {/* Confirmação da última ação: valor + hora + efeito. */}
+      {confirmation && !failure && (
         <div className="charge-confirm" role="status" aria-live="polite">
           <span className="charge-confirm-icon" aria-hidden="true">
             ✓
@@ -268,49 +266,12 @@ export default function ChargingProtection({ threshold, onThresholdChange, batte
         </div>
       )}
 
-      {/* Threshold level buttons — always clickable; when the protection is
-          off a click turns it on and applies the level in one step. */}
-      <div style={{ marginBottom: 8 }}>
-        <div className="stat-label" style={{ marginBottom: 10 }}>
-          {t('charging.threshold')}
-        </div>
-        <div className={`threshold-options ${careEnabled ? '' : 'is-muted'}`}>
-          {LEVELS.map((level) => (
-            <button
-              key={level}
-              className={`threshold-btn ${threshold === level ? 'active' : ''}`}
-              onClick={() => void handleThresholdChange(level)}
-              disabled={disabled}
-              aria-pressed={threshold === level}
-            >
-              {level}%
-              {level === 80 && <span className="threshold-badge">{t('charging.recommended')}</span>}
-            </button>
-          ))}
-        </div>
-        {batteryCare === false && <p className="charge-hint">{t('charging.enableHint')}</p>}
-      </div>
-
-      {/* Show "no limit" indicator when threshold is 100 */}
-      {careEnabled && !thresholdEnabled && (
-        <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-muted)' }}>
-          {t('charging.noLimit')}
-        </div>
-      )}
-
-      {saving && (
-        <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-          {t('charging.pending')}
-        </div>
-      )}
-
-      {/* The engineering detail, one disclosure away — never in the main path. */}
-      <details className="charge-why" style={{ marginTop: 12 }}>
+      {/* O detalhe de engenharia, a um disclosure de distância. */}
+      <details className="charge-why">
         <summary>{t('common.technicalTerm')}</summary>
         <p>{t('charging.technicalTerm')}</p>
       </details>
 
-      {/* Info modal */}
       <InfoModal
         open={showInfo}
         onClose={() => setShowInfo(false)}
@@ -326,22 +287,12 @@ export default function ChargingProtection({ threshold, onThresholdChange, batte
           {t('charging.infoModal.behaviorDesc')}
         </InfoRow>
         <InfoSection>
-          <div
-            style={{
-              background: 'oklch(from var(--warning, #ff9800) l c h / 0.12)',
-              border: '1px solid oklch(from var(--warning, #ff9800) l c h / 0.3)',
-              borderRadius: 'var(--r-sm)',
-              padding: '10px 12px',
-              fontSize: 12,
-              color: 'var(--text-muted)',
-              lineHeight: 1.6,
-            }}
-          >
-            <strong style={{ color: 'var(--text)' }}>{t('charging.infoModal.warningLabel')}</strong>{' '}
+          <div className="mc-note mc-note--warning">
+            <strong>{t('charging.infoModal.warningLabel')}</strong>{' '}
             {t('charging.infoModal.warningDesc')}
           </div>
         </InfoSection>
       </InfoModal>
-    </div>
+    </Card>
   );
 }

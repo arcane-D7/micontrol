@@ -1,30 +1,34 @@
+/**
+ * Badge — pastel de superfície + tinta legível (spec §3.6, regra 1).
+ *
+ * `--x-soft` pinta o fundo, `--x` pinta a palavra. O pastel nunca é texto:
+ * nenhum pastel atinge 4,5:1 sobre fundo claro — é aritmética, não gosto.
+ *
+ * `dot` acrescenta o ponto de estado; a palavra continua obrigatória
+ * (regra 6: cor nunca sozinha). `icon`/`count` vêm da API do theme-core.
+ */
+
 import type { ReactNode } from 'react';
 import { Icon, type IconName } from './icons';
-import { cx } from './cx';
 
-export type BadgeTone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info';
+export type BadgeTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info' | 'accent';
 
 export interface BadgeProps {
   tone?: BadgeTone;
-  /** Ponto que herda a cor do texto. O estado nunca é só cor: há palavra. */
   dot?: boolean;
   icon?: IconName;
   count?: number;
-  children: ReactNode;
   className?: string;
+  children: ReactNode;
 }
 
-/**
- * Badge — pastel é superfície, tinta é texto (§3.6).
- * `--x-soft` pinta o fundo, `--x` pinta a palavra. Nunca o contrário.
- */
-export function Badge({ tone = 'neutral', dot, icon, count, children, className }: BadgeProps) {
+export function Badge({ tone = 'neutral', dot, icon, count, className, children }: BadgeProps) {
   return (
-    <span className={cx('mc-badge', `mc-badge--${tone}`, className)}>
-      {dot ? <span className="mc-badge__dot" aria-hidden="true" /> : null}
-      {icon ? <Icon name={icon} size={13} /> : null}
+    <span className={`mc-badge mc-badge--${tone}${className ? ` ${className}` : ''}`}>
+      {dot && <span className="mc-badge__dot" aria-hidden="true" />}
+      {icon && <Icon name={icon} size={13} />}
       {children}
-      {typeof count === 'number' ? <span className="mc-badge__count">{count}</span> : null}
+      {typeof count === 'number' && <span className="mc-badge__count">{count}</span>}
     </span>
   );
 }

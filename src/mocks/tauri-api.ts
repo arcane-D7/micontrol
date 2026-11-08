@@ -314,7 +314,10 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
 
     case 'set_fan_mode':
       _fanMode = (args?.mode as 'auto' | 'fixed' | 'off') ?? _fanMode;
-      _fanSpeedPercent = (args?.speed_percent as number) ?? _fanSpeedPercent;
+      // Mirrors the real Tauri v2 contract: the Rust arg `speed_percent`
+      // arrives as `speedPercent`. Reading `speed_percent` here would hide a
+      // frontend regression in mock mode.
+      _fanSpeedPercent = (args?.speedPercent as number) ?? _fanSpeedPercent;
       return {
         applied: true,
         method: 'registry+ec_profile',

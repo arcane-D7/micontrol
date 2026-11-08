@@ -1,102 +1,135 @@
-import { useRef } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
-import { cx } from './cx';
-
-export interface SegmentedOption<T extends string | number = number> {
-  value: T;
-  label: ReactNode;
-  /** Selo dentro do item ("recomendado"). */
-  badge?: ReactNode;
-  disabled?: boolean;
-}
-
-export interface SegmentedProps<T extends string | number = number> {
-  label?: ReactNode;
-  options: ReadonlyArray<SegmentedOption<T>>;
-  value: T;
-  onChange: (value: T) => void;
-  disabled?: boolean;
-  /** Porque está desligado — nunca um clique morto (§4.3 #1). */
-  disabledReason?: string;
-  ariaLabel?: string;
-  className?: string;
-}
-
 /**
- * Segmented — limite de carga, 40/50/60/70/80 + "recomendado".
+ * Segmented — selector de limite 40/50/60/70/80/100 (spec §5.4, §5.6.3).
  *
- * Seleccionado = `--accent-soft` + `--accent-ink` (5,81:1), NUNCA `--accent`
- * como fundo com texto branco (dava 3,59:1). Teclado: ←/→/Home/End.
- * `aria-pressed` é o contrato; a classe só pinta.
+ * Contraste: seleccionado = `--accent-soft` + `--accent-ink` + 1 px
+ * `--accent` (5,81:1); não seleccionado = `--surface-2` + `--ink-muted`;
+ * hover = `--hairline-2`. **Nunca** `--accent` como fundo com texto branco
+ * (daria 3,59:1).
+ *
+ * Teclado: setas ←/→ movem e aplicam (roving tabindex), Home/End nas pontas.
+ * `disabledReason` é a parte que hoje falta: o grupo não fica inerte sem
+ * explicação — mostra a razão e um caminho para agir.
  */
-export function Segmented<T extends string | number = number>({
+
+import { useId, useRef } from 'react';
+
+export interface SegmentedOption {
+  value: number;
+  label: string;
+  /** Selo dentro do item (ex.: "recomendado"). */
+  badge?: string;
+}
+
+export interface SegmentedProps {
+  label?: string;
+  options: SegmentedOption[];
+  value: number;
+  onChange: (value: number) => void;
+  /** A escrever no EC: o item escolhido mostra-se mas não aceita repetição. */
+  pending?: boolean;
+  /** Presente = o grupo está desactivado **com razão** (não há cliques mortos). */
+  disabledReason?: string;
+  /** Desactivado sem razão escrita (API do theme-core). */
+  disabled?: boolean;
+  /** Nome acessível quando não há `label` visível. */
+  ariaLabel?: string;
+  /** Clique num item desactivado: aplica-o ligando o master switch (1 gesto). */
+  onDisabledSelect?: (value: number) => void;
+  /** Clique na razão mostrada por baixo do grupo. */
+  onDisabledClick?: () => void;
+}
+
+export function Segmented({
   label,
   options,
   value,
   onChange,
-  disabled,
+  pending,
   disabledReason,
+  disabled: disabledProp,
   ariaLabel,
-  className,
-}: SegmentedProps<T>) {
-  const refs = useRef<Array<HTMLButtonElement | null>>([]);
+  onDisabledSelect,
+  onDisabledClick,
+}: SegmentedProps) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const labelId = useId();
+  const disabled = Boolean(disabledReason) || Boolean(disabledProp);
+  const currentIndex = Math.max(
+    0,
+    options.findIndex((o) => o.value === value),
+  );
 
-  const selectable = options
-    .map((option, index) => (!option.disabled && !disabled ? index : -1))
-    .filter((index) => index >= 0);
-
-  const handleKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-    if (selectable.length === 0) return;
-    e.preventDefault();
-
-    const current = options.findIndex((option) => option.value === value);
-    let next: number | undefined;
-
-    if (e.key === 'Home') {
-      next = selectable[0];
-    } else if (e.key === 'End') {
-      next = selectable[selectable.length - 1];
-    } else {
-      const position = selectable.indexOf(current);
-      const step = e.key === 'ArrowRight' ? 1 : -1;
-      const base = position === -1 ? 0 : position;
-      next = selectable[(base + step + selectable.length) % selectable.length];
-    }
-
-    if (next === undefined) return;
+  const move = (delta: number) => {
+    if (disabled || pending) return;
+    const next = (currentIndex + delta + options.length) % options.length;
     onChange(options[next].value);
     refs.current[next]?.focus();
   };
 
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      move(1);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      move(-1);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      move(-currentIndex);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      move(options.length - 1 - currentIndex);
+    }
+  };
+
   return (
-    <div className={cx('mc-segmented-group', className)}>
-      {label ? <div className="mc-switch__label">{label}</div> : null}
-      <div className="mc-segmented" role="group" aria-label={ariaLabel} onKeyDown={handleKeyDown}>
-        {options.map((option, index) => {
-          const pressed = option.value === value;
+    <div className={`mc-seg${disabled ? ' mc-seg--disabled' : ''}`}>
+      {label && (
+        <div className="mc-seg__label" id={labelId}>
+          {label}
+        </div>
+      )}
+      <div
+        className="mc-seg__group"
+        role="radiogroup"
+        aria-labelledby={label ? labelId : undefined}
+        aria-label={label ? undefined : ariaLabel}
+        aria-busy={pending || undefined}
+        onKeyDown={onKeyDown}
+      >
+        {options.map((opt, i) => {
+          const selected = opt.value === value;
           return (
             <button
-              key={String(option.value)}
-              ref={(node) => {
-                refs.current[index] = node;
+              key={opt.value}
+              ref={(el) => {
+                refs.current[i] = el;
               }}
               type="button"
-              className="mc-segmented__item"
-              aria-pressed={pressed}
-              disabled={disabled || option.disabled}
-              tabIndex={pressed ? 0 : -1}
-              onClick={() => onChange(option.value)}
+              role="radio"
+              aria-checked={selected}
+              tabIndex={selected ? 0 : -1}
+              className={`mc-seg__item${selected ? ' mc-seg__item--on' : ''}`}
+              disabled={pending}
+              onClick={() => {
+                if (disabled) {
+                  onDisabledSelect?.(opt.value);
+                  return;
+                }
+                onChange(opt.value);
+              }}
             >
-              {option.label}
-              {option.badge ? <span className="mc-segmented__badge">{option.badge}</span> : null}
+              <span className="mc-seg__value">{opt.label}</span>
+              {opt.badge && <span className="mc-seg__badge">{opt.badge}</span>}
             </button>
           );
         })}
       </div>
-      {disabled && disabledReason ? (
-        <div className="mc-segmented__note">{disabledReason}</div>
-      ) : null}
+      {disabledReason && (
+        <button type="button" className="mc-seg__reason" onClick={onDisabledClick}>
+          {disabledReason}
+        </button>
+      )}
     </div>
   );
 }
