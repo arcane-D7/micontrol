@@ -21,6 +21,28 @@
 //! - [`mark_panic`] runs from the panic hook: it records `state=panic` so the
 //!   next start can say "the previous session panicked" instead of guessing.
 //!
+//! Installer-initiated shutdown
+//! ────────────────────────────
+//! An update or uninstall kills the app with `KillProcess`/`taskkill`, which
+//! can never run the `RunEvent::Exit` handler — the marker stays at
+//! `state=running` and the next start would report a phantom
+//! "possible crash/kill" (audit 2026-11-08: the installer's KillAppProcess was
+//! the source of those false alarms).
+//!
+//! The installer therefore *announces* the intentional kill first, in two
+//! places:
+//!
+//! * `<log_dir>\session.marker` with `state=installer-shutdown` — correct when
+//!   the user runs the installer themselves (UAC elevation keeps the profile);
+//! * `%ProgramData%\MiControl\installer-shutdown.marker` — the machine-wide
+//!   copy, because the bridge launches the installer as SYSTEM, where
+//!   `%LOCALAPPDATA%` is the system profile and not the user's log dir.
+//!
+//! [`begin_session`] reads both. The machine-wide marker is only honoured when
+//! it is **newer than the session marker** (i.e. it was written during the
+//! session that just ended) and it is deleted afterwards; a leftover marker can
+//! therefore never mask a real crash on a later start.
+//!
 //! If the process is killed the marker is left at `state=running`, and the next
 //! start emits:
 //!
@@ -39,6 +61,13 @@ use std::path::{Path, PathBuf};
 /// File name of the marker inside the log directory.
 pub const MARKER_FILE_NAME: &str = "session.marker";
 
+/// Machine-wide marker written by the NSIS installer / setup shell right
+/// before it force-kills the app (see the module docs).
+pub const INSTALLER_MARKER_FILE_NAME: &str = "installer-shutdown.marker";
+
+/// Directory (under `%ProgramData%`) holding the machine-wide marker.
+pub const INSTALLER_MARKER_DIR: &str = "MiControl";
+
 /// Session states written to the marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
@@ -48,6 +77,9 @@ pub enum SessionState {
     Clean,
     /// The process panicked; the panic hook recorded it.
     Panic,
+    /// The installer/uninstaller announced the kill before terminating us.
+    /// Intentional termination — not a crash.
+    InstallerShutdown,
     /// A state written by a newer build / unknown value.
     Unknown(String),
 }
@@ -58,6 +90,7 @@ impl SessionState {
             SessionState::Running => "running",
             SessionState::Clean => "clean",
             SessionState::Panic => "panic",
+            SessionState::InstallerShutdown => "installer-shutdown",
             SessionState::Unknown(raw) => raw.as_str(),
         }
     }
@@ -70,6 +103,8 @@ pub struct MarkerState {
     pub started_at: Option<String>,
     pub clean_at: Option<String>,
     pub panic_at: Option<String>,
+    /// Timestamp of an installer-announced shutdown.
+    pub at: Option<String>,
     pub pid: Option<u32>,
     pub version: Option<String>,
 }
@@ -81,6 +116,7 @@ impl MarkerState {
             started_at: None,
             clean_at: None,
             panic_at: None,
+            at: None,
             pid: None,
             version: None,
         }
@@ -98,6 +134,8 @@ pub enum PreviousSession {
     Running { started_at: Option<String> },
     /// The panic hook fired and the marker was never upgraded to `clean`.
     Panic { at: Option<String> },
+    /// The installer/uninstaller announced the kill before terminating the app.
+    InstallerShutdown { at: Option<String> },
     /// Unknown state from a different build.
     Unknown { state: String },
 }
@@ -121,6 +159,15 @@ impl PreviousSession {
                 Some(at) => format!("previous session ended in a panic at {at}"),
                 None => "previous session ended in a panic".into(),
             },
+            PreviousSession::InstallerShutdown { at } => match at {
+                Some(at) => format!(
+                    "previous session was terminated by the installer at {at} (intentional, not a crash)"
+                ),
+                None => {
+                    "previous session was terminated by the installer (intentional, not a crash)"
+                        .into()
+                }
+            },
             PreviousSession::Unknown { state } => {
                 format!("previous session marker has unknown state '{state}'")
             }
@@ -134,6 +181,62 @@ impl PreviousSession {
             PreviousSession::Running { .. } | PreviousSession::Panic { .. }
         )
     }
+}
+
+/// Path of the machine-wide installer announcement
+/// (`%ProgramData%\MiControl\installer-shutdown.marker`).
+///
+/// Falls back to `C:\ProgramData` when the environment variable is absent, so
+/// the path is always resolvable in unit tests and in stripped environments.
+pub fn installer_marker_path() -> PathBuf {
+    let base = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    base.join(INSTALLER_MARKER_DIR)
+        .join(INSTALLER_MARKER_FILE_NAME)
+}
+
+/// A shutdown announced by the installer, as read at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallerAnnouncement {
+    /// Timestamp written by the installer (`at=`), when present.
+    pub at: Option<String>,
+    /// True when the announcement was written during the session that just
+    /// ended (its mtime is at or after the session marker's mtime).
+    pub during_last_session: bool,
+}
+
+/// Read the machine-wide installer announcement, if it exists.
+///
+/// `log_dir` is the directory holding `session.marker`; its mtime is the start
+/// of the last session. The announcement is only considered to belong to that
+/// session when it was written **after** the session started — a leftover
+/// marker from an older install can never mask a real crash.
+pub fn read_installer_announcement(
+    log_dir: &Path,
+    installer_marker: &Path,
+) -> Option<InstallerAnnouncement> {
+    let text = fs::read_to_string(installer_marker).ok()?;
+    let parsed = parse_marker(&text);
+    if parsed.state != SessionState::InstallerShutdown {
+        return None;
+    }
+    let marker_mtime = fs::metadata(installer_marker)
+        .and_then(|m| m.modified())
+        .ok();
+    let session_mtime = fs::metadata(marker_path(log_dir))
+        .and_then(|m| m.modified())
+        .ok();
+    let during_last_session = match (marker_mtime, session_mtime) {
+        (Some(announced), Some(started)) => announced >= started,
+        // Without a session marker there is no session to excuse: a stale
+        // machine-wide marker must never turn a missing marker into "clean".
+        _ => false,
+    };
+    Some(InstallerAnnouncement {
+        at: parsed.at,
+        during_last_session,
+    })
 }
 
 /// Path of the marker inside `log_dir`.
@@ -168,6 +271,7 @@ pub fn parse_marker(text: &str) -> MarkerState {
                     "running" => SessionState::Running,
                     "clean" => SessionState::Clean,
                     "panic" => SessionState::Panic,
+                    "installer-shutdown" => SessionState::InstallerShutdown,
                     other => SessionState::Unknown(other.to_string()),
                 };
                 saw_state = true;
@@ -175,6 +279,7 @@ pub fn parse_marker(text: &str) -> MarkerState {
             "started_at" => parsed.started_at = Some(value.to_string()),
             "clean_at" => parsed.clean_at = Some(value.to_string()),
             "panic_at" => parsed.panic_at = Some(value.to_string()),
+            "at" => parsed.at = Some(value.to_string()),
             "pid" => parsed.pid = value.parse().ok(),
             "version" => parsed.version = Some(value.to_string()),
             _ => {}
@@ -211,6 +316,9 @@ pub fn classify(previous: Option<MarkerState>) -> PreviousSession {
             SessionState::Panic => PreviousSession::Panic {
                 at: marker.panic_at.or(marker.started_at),
             },
+            SessionState::InstallerShutdown => PreviousSession::InstallerShutdown {
+                at: marker.at.or(marker.clean_at),
+            },
             SessionState::Unknown(state) => PreviousSession::Unknown { state },
         },
     }
@@ -219,10 +327,37 @@ pub fn classify(previous: Option<MarkerState>) -> PreviousSession {
 /// Read the previous marker, write the new `running` marker for this session
 /// and return how the previous session ended.
 ///
+/// Consults the machine-wide installer announcement as well: when the previous
+/// marker says `running` (i.e. no clean shutdown was recorded) but the
+/// installer wrote `installer-shutdown.marker` **during** that session, the
+/// session ended intentionally and is reported as
+/// [`PreviousSession::InstallerShutdown`] instead of "possible crash/kill".
+///
 /// The write is atomic (temp file + rename) so a crash mid-write cannot leave a
 /// truncated marker that the next start would misread.
 pub fn begin_session(log_dir: &Path) -> PreviousSession {
-    let previous = classify(read(log_dir));
+    begin_session_with(log_dir, &installer_marker_path())
+}
+
+/// [`begin_session`] with an explicit installer-announcement path (unit tests
+/// use a temp file instead of the real `%ProgramData%` one).
+fn begin_session_with(log_dir: &Path, installer_marker: &Path) -> PreviousSession {
+    let mut previous = classify(read(log_dir));
+
+    // Read (and consume) the machine-wide announcement written by the NSIS
+    // installer / setup shell. It is only valid for the session that just
+    // ended, which `read_installer_announcement` decides by mtime.
+    let announcement = read_installer_announcement(log_dir, installer_marker);
+    if announcement.is_some() {
+        // Consumed: even if the delete fails (ACL), the mtime rule keeps it
+        // from excusing any later session.
+        let _ = fs::remove_file(installer_marker);
+    }
+    if matches!(previous, PreviousSession::Running { .. }) {
+        if let Some(a) = announcement.as_ref().filter(|a| a.during_last_session) {
+            previous = PreviousSession::InstallerShutdown { at: a.at.clone() };
+        }
+    }
 
     let mut marker = MarkerState::new(SessionState::Running);
     marker.started_at = Some(now_iso());
@@ -307,6 +442,9 @@ fn write_marker(log_dir: &Path, marker: &MarkerState) -> io::Result<()> {
     if let Some(v) = &marker.panic_at {
         body.push_str(&format!("panic_at={v}\n"));
     }
+    if let Some(v) = &marker.at {
+        body.push_str(&format!("at={v}\n"));
+    }
     if let Some(v) = marker.pid {
         body.push_str(&format!("pid={v}\n"));
     }
@@ -338,10 +476,21 @@ mod tests {
         dir
     }
 
+    /// Installer-announcement path inside the temp dir: the real
+    /// `%ProgramData%` marker must never leak into a test (and a test must
+    /// never delete the machine-wide marker of the developer's install).
+    fn announcement(dir: &Path) -> PathBuf {
+        dir.join(INSTALLER_MARKER_FILE_NAME)
+    }
+
+    fn begin(dir: &Path) -> PreviousSession {
+        begin_session_with(dir, &announcement(dir))
+    }
+
     #[test]
     fn first_run_has_no_marker_and_arms_running_state() {
         let dir = temp_dir("first");
-        assert_eq!(begin_session(&dir), PreviousSession::None);
+        assert_eq!(begin(&dir), PreviousSession::None);
         let marker = read(&dir).expect("marker written");
         assert_eq!(marker.state, SessionState::Running);
         assert!(marker.started_at.is_some());
@@ -352,9 +501,9 @@ mod tests {
     #[test]
     fn a_running_marker_is_reported_as_possible_crash() {
         let dir = temp_dir("running");
-        begin_session(&dir);
+        begin(&dir);
         // Simulate a kill: no mark_clean, just start again.
-        let previous = begin_session(&dir);
+        let previous = begin(&dir);
         assert!(matches!(previous, PreviousSession::Running { .. }));
         assert!(previous.is_suspicious());
         let text = previous.describe();
@@ -369,13 +518,13 @@ mod tests {
     #[test]
     fn clean_shutdown_is_recorded_and_detected() {
         let dir = temp_dir("clean");
-        begin_session(&dir);
+        begin(&dir);
         let marker = mark_clean(&dir).expect("clean marker");
         assert_eq!(marker.state, SessionState::Clean);
         assert!(marker.clean_at.is_some());
         assert!(marker.started_at.is_some(), "started_at is preserved");
 
-        let previous = begin_session(&dir);
+        let previous = begin(&dir);
         assert!(matches!(previous, PreviousSession::Clean { .. }));
         assert!(!previous.is_suspicious());
         assert!(previous.describe().contains("ended cleanly"));
@@ -385,12 +534,12 @@ mod tests {
     #[test]
     fn panic_marker_is_detected_on_next_start() {
         let dir = temp_dir("panic");
-        begin_session(&dir);
+        begin(&dir);
         let marker = mark_panic(&dir).expect("panic marker");
         assert_eq!(marker.state, SessionState::Panic);
         assert!(marker.panic_at.is_some());
 
-        let previous = begin_session(&dir);
+        let previous = begin(&dir);
         assert!(matches!(previous, PreviousSession::Panic { .. }));
         assert!(previous.is_suspicious());
         assert!(previous.describe().contains("panic"));
@@ -401,7 +550,7 @@ mod tests {
     fn marker_without_state_counts_as_running() {
         let dir = temp_dir("nostate");
         fs::write(marker_path(&dir), "started_at=2026-01-01T00:00:00.000Z\n").unwrap();
-        let previous = begin_session(&dir);
+        let previous = begin(&dir);
         assert!(matches!(previous, PreviousSession::Running { .. }));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -420,7 +569,7 @@ mod tests {
     fn unknown_state_is_reported_but_not_suspicious() {
         let dir = temp_dir("unknown");
         fs::write(marker_path(&dir), "state=quarantined\n").unwrap();
-        let previous = begin_session(&dir);
+        let previous = begin(&dir);
         assert!(matches!(previous, PreviousSession::Unknown { .. }));
         assert!(!previous.is_suspicious());
         let _ = fs::remove_dir_all(&dir);
@@ -429,11 +578,108 @@ mod tests {
     #[test]
     fn marker_is_rewritten_atomically_without_leaving_temp_files() {
         let dir = temp_dir("atomic");
-        begin_session(&dir);
+        begin(&dir);
         mark_clean(&dir).unwrap();
         assert!(!dir.join(format!("{MARKER_FILE_NAME}.tmp")).exists());
         let marker = read(&dir).unwrap();
         assert_eq!(marker.state, SessionState::Clean);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── installer-announced shutdown ────────────────────────────────────────
+
+    #[test]
+    fn installer_shutdown_state_is_parsed_and_is_not_a_crash() {
+        let parsed = parse_marker("state=installer-shutdown\nat=2026-11-08T15:00:00.000Z\n");
+        assert_eq!(parsed.state, SessionState::InstallerShutdown);
+        assert_eq!(parsed.at.as_deref(), Some("2026-11-08T15:00:00.000Z"));
+
+        let previous = classify(Some(parsed));
+        assert!(matches!(
+            previous,
+            PreviousSession::InstallerShutdown { .. }
+        ));
+        assert!(
+            !previous.is_suspicious(),
+            "an installer kill is intentional, not a crash"
+        );
+        let text = previous.describe();
+        assert!(text.contains("terminated by the installer"), "got: {text}");
+        assert!(text.contains("not a crash"), "got: {text}");
+        assert!(
+            !text.contains("possible crash/kill"),
+            "the installer announcement must not produce the crash warning: {text}"
+        );
+    }
+
+    #[test]
+    fn installer_marker_written_into_the_log_dir_is_honoured() {
+        // The installer also writes the marker straight into the log dir
+        // (interactive install, UAC keeps the user's %LOCALAPPDATA%).
+        let dir = temp_dir("instlocal");
+        begin(&dir);
+        fs::write(marker_path(&dir), "state=installer-shutdown\n").unwrap();
+        let previous = begin(&dir);
+        assert!(matches!(
+            previous,
+            PreviousSession::InstallerShutdown { .. }
+        ));
+        assert!(!previous.is_suspicious());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn machine_wide_marker_rescues_a_running_session_and_is_consumed() {
+        // The bridge launches the installer as SYSTEM, so the marker lands in
+        // %ProgramData% instead of the user's log dir.
+        let dir = temp_dir("instglobal");
+        begin(&dir);
+        // begin() rewrote session.marker now; write the announcement after it.
+        let marker = announcement(&dir);
+        fs::write(&marker, "state=installer-shutdown\n").unwrap();
+
+        let previous = begin(&dir);
+        assert!(matches!(
+            previous,
+            PreviousSession::InstallerShutdown { .. }
+        ));
+        assert!(
+            !marker.exists(),
+            "the announcement must be consumed on read"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_machine_wide_marker_does_not_mask_a_crash() {
+        // A marker left over from an older install (older than the session
+        // start) must not turn a genuine crash into "installer shutdown".
+        let dir = temp_dir("inststale");
+        let marker = announcement(&dir);
+        fs::write(&marker, "state=installer-shutdown\n").unwrap();
+        // Make the announcement clearly older than the session marker that
+        // begin() is about to read: write the session marker last.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        begin(&dir); // arms session.marker (mtime now > marker mtime)
+
+        let previous = begin(&dir);
+        assert!(
+            matches!(previous, PreviousSession::Running { .. }),
+            "stale announcement must be ignored, got {previous:?}"
+        );
+        assert!(previous.is_suspicious());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn announcement_without_a_session_marker_is_not_trusted() {
+        let dir = temp_dir("instnosession");
+        let marker = announcement(&dir);
+        fs::write(&marker, "state=installer-shutdown\n").unwrap();
+        // No session.marker at all: there is no session to excuse.
+        let a = read_installer_announcement(&dir, &marker).expect("marker readable");
+        assert!(!a.during_last_session);
+        assert_eq!(begin(&dir), PreviousSession::None);
         let _ = fs::remove_dir_all(&dir);
     }
 }

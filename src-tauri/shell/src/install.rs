@@ -582,6 +582,15 @@ fn stop_everything(install_dir: &Path) -> Result<(), String> {
     let mut problems: Vec<String> = Vec::new();
 
     // App (interactive) — kill + wait so the exe is replaceable.
+    //
+    // Announce the intentional kill FIRST: `taskkill /F` cannot run the app's
+    // RunEvent::Exit handler, so without this the session marker stays at
+    // `state=running` and the next start reports a phantom crash/kill after
+    // every update (audit 2026-11-08). Only when the app is actually running —
+    // otherwise a clean marker would be overwritten for nothing.
+    if sys::process_exists(ctx::MAIN_EXE) {
+        crate::marker::announce_installer_shutdown();
+    }
     if !sys::kill_and_wait(ctx::MAIN_EXE, Duration::from_secs(10)) {
         problems.push(format!("{} did not exit", ctx::MAIN_EXE));
     }

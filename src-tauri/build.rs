@@ -259,11 +259,16 @@ fn copy_shell_binary(target_dir: &std::path::Path, dst_dir: &std::path::Path) {
         // bin/micontrol_setup.exe as a required resource. Create a temporary
         // 0-byte placeholder so resource validation passes — the same
         // pattern `copy_aux_binary_optional` uses for the face service.
-        // Safety: a 0-byte shell is never *used* — the NSIS hook's
-        // FileExists copy is followed by the runtime bootstrap's
-        // MIN_SHELL_SIZE check (bootstrap.rs), which rejects it and
-        // downloads the real shell from the release assets. The real
-        // publish path always builds the shell first
+        //
+        // A 0-byte shell MUST never reach a user machine (VAGA F4): if the
+        // installer deploys it, payload updates break. Three independent
+        // guards now enforce that:
+        //   1. NSIS_HOOK_POSTINSTALL validates the bundled shell's byte size
+        //      (FileSeek) before it replaces <INSTDIR>\setup\micontrol_setup.exe;
+        //   2. install_update rejects any shell outside MIN..MAX_SHELL_SIZE
+        //      (bootstrap::is_valid_shell) and bootstraps a real one;
+        //   3. bootstrap::ensure_shell refuses to treat it as present.
+        // The real publish path always builds the shell first
         // (`cargo build -p micontrol-setup --profile shell-release`), so
         // release bundles ship the real binary, never the placeholder.
         let _ = std::fs::write(&dst, []);
