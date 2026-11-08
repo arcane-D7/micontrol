@@ -598,48 +598,61 @@ struct AcPowerProbeCache {
     last_value_mw: Option<i32>,
 }
 
-/// Set once the in-process WMAA adapter-power read has proved it cannot work
-/// in THIS process (missing class or access denied to a non-elevated caller).
+/// Epoch-ms before which the in-process WMAA adapter-power probe is skipped.
 ///
-/// Deliberately separate from `adapter_power`'s hardware circuit: that one
-/// says "this machine has no such class" and is also consulted before the
-/// elevated bridge read, which runs at SYSTEM and can succeed where the app
-/// process is denied. Here the fact is narrower — the local probe is useless —
-/// so only the local probe is switched off.
+/// The app process is unprivileged, so `MICommonInterface` answers
+/// `0x80041003` (access denied) — a fact that cannot change while this process
+/// lives. That used to be recorded as a *permanent* `AtomicBool` latch, and the
+/// 0x80041002 provider hiccup was wrongly folded into the same latch, so a
+/// single bad sample at startup hid the reading for the rest of the session.
+/// A deadline is used instead: after it expires the probe runs again (cheap —
+/// an access-denied WMI call returns in microseconds).
 #[cfg(windows)]
-static LOCAL_AC_PROBE_DISABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static LOCAL_AC_PROBE_RETRY_AT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// How long the local (unprivileged) probe stays skipped after an
+/// access-denied verdict from the WMI provider.
+#[cfg(windows)]
+const LOCAL_AC_PROBE_DEFER_SECS: u64 = 300;
 
 #[cfg(windows)]
-fn local_ac_probe_is_useless() -> bool {
-    LOCAL_AC_PROBE_DISABLED.load(std::sync::atomic::Ordering::Relaxed)
-        || crate::hw::adapter_power::is_known_unsupported()
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(windows)]
-fn disable_local_ac_probe(reason: &str) {
-    if !LOCAL_AC_PROBE_DISABLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+fn local_ac_probe_is_useless() -> bool {
+    let retry_at = LOCAL_AC_PROBE_RETRY_AT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    retry_at != 0 && now_epoch_ms() < retry_at
+}
+
+#[cfg(windows)]
+fn defer_local_ac_probe(reason: &str) {
+    let retry_at = now_epoch_ms().saturating_add(LOCAL_AC_PROBE_DEFER_SECS * 1000);
+    let previous = LOCAL_AC_PROBE_RETRY_AT_MS.swap(retry_at, std::sync::atomic::Ordering::Relaxed);
+    if previous == 0 || previous < retry_at {
         log::info!(
             target: "hw::battery",
-            "local AC adapter-power probe disabled for this session ({reason}); \
-             the elevated bridge path is unaffected"
+            "local AC adapter-power probe skipped for {LOCAL_AC_PROBE_DEFER_SECS}s ({reason}); \
+             the elevated bridge path is unaffected and the local probe retries afterwards"
         );
     }
 }
 
-/// `true` when a failed LOCAL adapter-power read proves the probe can never
-/// succeed in this process: the WMI class is missing (`0x80041002` /
-/// `0x80041010`) or the caller is denied (`0x80041003` / `0x80070005`).
+/// `true` when a failed LOCAL adapter-power read is a fact about *this process*
+/// rather than a transient error: the caller is denied the WMI class
+/// (`0x80041003` / `0x80070005`).
 ///
-/// Transport failures (timeouts, provider hiccups, empty answers) stay
-/// retryable, so a transient WMI stall cannot silently disable the feature.
+/// `0x80041002` is deliberately NOT here: the production log shows it is a
+/// degraded-provider hiccup that recovers on the next attempt, so the local
+/// probe must keep trying (and `wmi_ec::read_adapter_power` retries it once
+/// before it ever reaches this function).
 #[cfg(windows)]
 fn local_probe_failure_is_permanent(message: &str) -> bool {
-    use crate::hw::adapter_power::{classify_failure, AdapterPowerFailure};
-
-    if classify_failure(message) == AdapterPowerFailure::HardwareUnsupported {
-        return true;
-    }
     let lowered = message.to_ascii_lowercase();
     [
         "0x80041003",
@@ -685,9 +698,13 @@ fn probe_ac_input_power_throttled() -> Option<i32> {
         Err(e) => {
             let message = e.to_string();
             if local_probe_failure_is_permanent(&message) {
-                disable_local_ac_probe(&message);
+                defer_local_ac_probe(&message);
             }
-            None
+            // A single bad sample must NOT erase a good reading: the adapter
+            // wattage is a slow-moving value (65 W / 100 W), and the UI hides
+            // the field entirely when this is `None`. Keep the last measured
+            // value and let the next poll refresh it.
+            crate::util::panic::lock_or_recover(ac_probe_cache()).last_value_mw
         }
     };
 
@@ -815,18 +832,20 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn local_probe_failure_classification() {
-        // Permanent: class missing or caller denied.
-        assert!(local_probe_failure_is_permanent(
-            "Hardware error: 0x80041002"
-        ));
-        assert!(local_probe_failure_is_permanent(
-            "WMI query failed: 0x80041010"
-        ));
+        // Permanent for THIS process: the caller is denied the class.
         assert!(local_probe_failure_is_permanent(
             "Hardware error: 0x80041003 (Access denied)"
         ));
         assert!(local_probe_failure_is_permanent(
             "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"
+        ));
+        // Retryable: the 0x80041002 degraded-provider hiccup recovered on the
+        // next poll 18 451 times in production — it must never latch.
+        assert!(!local_probe_failure_is_permanent(
+            "Hardware error: 0x80041002"
+        ));
+        assert!(!local_probe_failure_is_permanent(
+            "WMI query failed: 0x80041010"
         ));
         // Transient: keep retrying.
         assert!(!local_probe_failure_is_permanent(

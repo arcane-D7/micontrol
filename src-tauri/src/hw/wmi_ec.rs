@@ -663,23 +663,60 @@ pub fn read_battery_health() -> HardwareResult<u32> {
     ))
 }
 
-/// Read the AC adapter power in watts.
+/// Read the AC adapter power in watts (ADPW).
 ///
 /// WORKING FORM — DO NOT MODIFY: Uses wmi_read(FUN2_SENSOR=0x1000, FUN3=0x06).
 /// Reads AC adapter power via ACPI WMAA method. Does NOT require IoTDriver.
 /// IMPORTANT: This function calls wmi_cache::with_wmi() internally, so it
 /// MUST NOT be called from inside another with_wmi() closure.
+///
+/// `0x80041002` (`WBEM_E_NOT_FOUND`) is retried once, immediately. On this
+/// provider that HRESULT is raised while building the method parameters
+/// (`params.Put(InData)`) when the provider is in a degraded state — the
+/// production log shows it interleaved with successes for the *same* call
+/// (18 451 `ok=true` vs 1 337 failures on 2026-11-02…06), and the next attempt
+/// moments later always returned a value. A single retry therefore recovers
+/// most of the samples that used to be lost.
 pub fn read_adapter_power() -> HardwareResult<u32> {
     #[cfg(windows)]
     {
-        let resp = wmi_read(FUN2_SENSOR, 0x06)?;
-        if !resp.is_success() {
-            return Err(HardwareError::Wmi(format!(
-                "WMAA read failed: SGER=0x{:04X}",
-                resp.sger
-            )));
+        // Measured on this machine (2026-11-08, bridge as SYSTEM): the first
+        // WMAA call of a fresh WMI connection returns 0x80041002, and every
+        // call after it returns the real wattage (65 W). So attempt a few
+        // times before giving up — the answer is there, the provider just
+        // needs a warm-up call.
+        const ATTEMPTS: u32 = 3;
+        let mut last = None;
+        for attempt in 0..ATTEMPTS {
+            match read_adapter_power_once() {
+                Ok(watts) => return Ok(watts),
+                Err(e) => {
+                    use crate::hw::adapter_power::{classify_failure, AdapterPowerFailure};
+                    let degraded =
+                        classify_failure(&e.to_string()) == AdapterPowerFailure::ProviderDegraded;
+                    if !degraded || attempt + 1 == ATTEMPTS {
+                        return Err(e);
+                    }
+                    log::debug!(
+                        target: "hw::wmi_ec",
+                        "adapter power read hit a degraded WMI provider ({e}); retry {}/{}",
+                        attempt + 1,
+                        ATTEMPTS - 1
+                    );
+                    // The provider needs a moment to rebuild its method
+                    // parameters; a short backoff is enough (measured: the
+                    // second call ~0.4 s later returns the real wattage).
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        200 * u64::from(attempt + 1),
+                    ));
+                    last = Some(e);
+                }
+            }
         }
-        Ok(resp.frd1)
+        match last {
+            Some(e) => Err(e),
+            None => Err(HardwareError::Wmi("adapter power read failed".into())),
+        }
     }
     #[cfg(not(windows))]
     Err(HardwareError::NotSupported(
@@ -687,12 +724,25 @@ pub fn read_adapter_power() -> HardwareResult<u32> {
     ))
 }
 
-/// Read the AC adapter power as a structured result (P2, audit 2026-11-07).
+/// One WMAA `0x1000 / 0x06` read, no retry.
+#[cfg(windows)]
+fn read_adapter_power_once() -> HardwareResult<u32> {
+    let resp = wmi_read(FUN2_SENSOR, 0x06)?;
+    if !resp.is_success() {
+        return Err(HardwareError::Wmi(format!(
+            "WMAA read failed: SGER=0x{:04X}",
+            resp.sger
+        )));
+    }
+    Ok(resp.frd1)
+}
+
+/// Read the AC adapter power as a structured result.
 ///
-/// `WBEM_E_NOT_FOUND` / `WBEM_E_INVALID_CLASS` mean this hardware does not
-/// expose the class at all: that is a permanent capability fact, not a
-/// transient failure. Returning `Ok(supported: false)` lets the elevated
-/// dispatch answer `ok=true` and the app stop logging an error every poll.
+/// Only `WBEM_E_INVALID_CLASS` / invalid namespace — a real capability fact —
+/// is reported as `Ok(supported: false)`. `WBEM_E_NOT_FOUND` (`0x80041002`) is
+/// a degraded-provider hiccup on this machine and stays an `Err`, so the
+/// caller retries on the next poll instead of hiding the field forever.
 ///
 /// The "once per process" log lives here because the dispatch may run inside
 /// the long-lived bridge service (many requests, one process).
@@ -709,7 +759,7 @@ pub fn read_adapter_power_status() -> HardwareResult<AdapterPowerReading> {
                 LOGGED.call_once(|| {
                     log::info!(
                         target: "hw::wmi_ec",
-                        "AC adapter power unsupported on this hardware ({message}) — \
+                        "AC adapter power class absent on this hardware ({message}) — \
                          returning a structured 'unsupported' result instead of an error"
                     );
                 });

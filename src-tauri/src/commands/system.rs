@@ -50,12 +50,17 @@ pub async fn get_battery_info() -> Result<BatteryInfo, ErrorResponse> {
     // plugged in, re-probe via the elevated bridge so the UI gets a real
     // wattage instead of hiding the charging field.
     //
-    // P2: this goes through `hw::adapter_power` so the "hardware does not
-    // expose the WMI class" verdict is cached (circuit) and logged once,
-    // instead of re-probing WMI and failing 115× as before.
+    // P2 (corrected): this goes through `hw::adapter_power`, which now uses a
+    // *time-bounded* gate instead of a permanent latch. `0x80041002` is a
+    // degraded-provider hiccup on this machine (18 451 successful reads on
+    // 2026-11-02…06), so a failure pauses the probe for 60 s and then retries —
+    // it never hides the wattage for the rest of the session.
     let mut result = result;
     if let Ok(info) = &mut result {
-        if info.is_plugged && info.ac_input_power_mw.is_none() {
+        if info.is_plugged
+            && info.ac_input_power_mw.is_none()
+            && !crate::hw::adapter_power::probe_deferred()
+        {
             match crate::hw::adapter_power::read_via_bridge_no_prompt().await {
                 Ok(reading) => {
                     if let Some(watts) = reading.watts {
@@ -68,7 +73,7 @@ pub async fn get_battery_info() -> Result<BatteryInfo, ErrorResponse> {
                     } else {
                         log::debug!(
                             target: "cmd::system",
-                            "get_battery_info: adapter power not supported by this hardware ({})",
+                            "get_battery_info: adapter power unavailable this poll ({})",
                             reading.reason.as_deref().unwrap_or("unknown")
                         );
                     }
