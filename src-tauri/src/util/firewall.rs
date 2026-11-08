@@ -314,7 +314,12 @@ mod tests {
     #[test]
     fn allow_rules_are_private_domain_only_and_never_edge_traversal() {
         let steps = netsh_steps(EXE);
-        for name in [RULE_MCP, RULE_LOCALSEND_TCP, RULE_LOCALSEND_UDP, RULE_KDE_UDP] {
+        for name in [
+            RULE_MCP,
+            RULE_LOCALSEND_TCP,
+            RULE_LOCALSEND_UDP,
+            RULE_KDE_UDP,
+        ] {
             let step = find(&steps, &format!("name={name}"));
             assert!(step.contains(&"action=allow".to_string()), "{name}");
             assert!(step.contains(&"dir=in".to_string()), "{name}");
