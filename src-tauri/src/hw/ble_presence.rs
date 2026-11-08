@@ -704,4 +704,99 @@ mod tests {
         // "far" means signal is weaker (numerically lower) than threshold.
         assert!(-80 < cfg.rssi_lock_dbm);
     }
+
+    /// One discovery pass returning every peripheral's address and advertised
+    /// name. Test-only helper.
+    async fn scan_all_addresses(window: Duration) -> Vec<(String, Option<String>)> {
+        use btleplug::api::{Central, Manager as _, Peripheral, ScanFilter};
+
+        let mut out = Vec::new();
+        let Ok(manager) = btleplug::platform::Manager::new().await else {
+            return out;
+        };
+        let Ok(adapters) = manager.adapters().await else {
+            return out;
+        };
+        for central in adapters {
+            if central.start_scan(ScanFilter::default()).await.is_err() {
+                continue;
+            }
+            tokio::time::sleep(window).await;
+            if let Ok(peripherals) = central.peripherals().await {
+                for p in peripherals {
+                    if let Ok(Some(props)) = p.properties().await {
+                        out.push((props.address.to_string(), props.local_name));
+                    }
+                }
+            }
+            let _ = central.stop_scan().await;
+        }
+        out
+    }
+
+    /// **Radio test — needs the phone next to the PC.** Not part of the normal
+    /// suite:
+    ///
+    /// ```text
+    /// cargo test --lib ble_presence_passive_scan -- --ignored --nocapture
+    /// ```
+    ///
+    /// It does ONE scan pass and asserts that the configured phone is matched
+    /// by canonical MAC — the exact comparison the audit found broken
+    /// (`FC-43-45-81-4B-9A` stored vs `FC:43:45:81:4B:9A` reported). The
+    /// address comes from `MICONTROL_BLE_TEST_MAC`, falling back to the
+    /// registry `PhoneMac`, so the saved configuration is not modified.
+    ///
+    /// btleplug's Windows backend always probes as well as listens, so this is
+    /// not strictly passive; it is a single, bounded pass with no loop.
+    #[test]
+    #[ignore = "radio: requires the phone nearby (run explicitly with --ignored)"]
+    fn ble_presence_passive_scan_matches_canonical_mac() {
+        let cfg = PresenceConfig::load();
+        let raw = std::env::var("MICONTROL_BLE_TEST_MAC")
+            .ok()
+            .or(cfg.phone_mac.clone())
+            .expect(
+                "set MICONTROL_BLE_TEST_MAC or HKCU\\Software\\MiControl\\BlePresence\\PhoneMac",
+            );
+        let canonical =
+            canonical_mac(&raw).expect("the configured MAC is not 12 hexadecimal digits");
+        let target = MatchTarget {
+            mac: Some(canonical.clone()),
+            name: None,
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build the test runtime");
+        let seen = runtime.block_on(scan_all_addresses(Duration::from_secs(6)));
+
+        println!("[ble_presence.test] looking for {canonical} ({raw})");
+        println!("[ble_presence.test] {} peripheral(s) seen:", seen.len());
+        for (addr, name) in &seen {
+            println!("  {addr:<20} name={name:?}");
+        }
+        assert!(
+            !seen.is_empty(),
+            "no BLE advertisements at all — is the Bluetooth radio on?"
+        );
+
+        let hit = seen
+            .iter()
+            .find(|(addr, _)| canonical_mac(addr).as_deref() == Some(canonical.as_str()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "phone {canonical} was not seen in one pass. If it appears above under a \
+                     different address it uses a randomised BLE address: configure PhoneName and \
+                     the monitor will fall back to the name"
+                )
+            });
+        assert_eq!(
+            target.matches(&hit.0, hit.1.as_deref()),
+            Some(MatchKind::Mac),
+            "the canonical comparison must match the address btleplug prints"
+        );
+        println!("[ble_presence.test] matched {} ({:?})", hit.0, hit.1);
+    }
 }

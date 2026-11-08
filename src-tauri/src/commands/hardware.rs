@@ -717,9 +717,9 @@ fn is_known_safe_single_byte_write(addr: u64, data: &[u8]) -> bool {
 /// Scan for available WiFi networks.
 #[tauri::command]
 pub async fn wifi_scan() -> Result<Vec<WifiNetwork>, ErrorResponse> {
-    run_blocking(wifi::scan_networks)
-        .await
-        .map_err(ErrorResponse::from)
+    // `scan_networks` is async on purpose: the 4 s radio settle is an async
+    // sleep, so it no longer parks a fixed-pool thread doing nothing.
+    wifi::scan_networks().await.map_err(ErrorResponse::from)
 }
 
 /// Get current WiFi connection status.
@@ -731,9 +731,18 @@ pub async fn wifi_status() -> Result<WifiStatus, ErrorResponse> {
 }
 
 /// Connect to a WiFi network.
+///
+/// `security` is the label reported by `wifi_scan` (`WPA2-Personal`,
+/// `WPA3-Personal`, `Open`, `Enterprise (802.1X)`, …). It selects the profile
+/// that is written, and lets 802.1X / legacy networks fail with an explicit
+/// reason instead of a 15 s "association not confirmed" timeout.
 #[tauri::command]
-pub async fn wifi_connect(ssid: String, password: Option<String>) -> Result<(), ErrorResponse> {
-    run_blocking(move || wifi::connect(&ssid, password.as_deref()))
+pub async fn wifi_connect(
+    ssid: String,
+    password: Option<String>,
+    security: Option<String>,
+) -> Result<(), ErrorResponse> {
+    run_blocking(move || wifi::connect(&ssid, password.as_deref(), security.as_deref()))
         .await
         .map_err(ErrorResponse::from)
 }

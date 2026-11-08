@@ -7,7 +7,7 @@
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
 use crate::hw::ble_scan::BleScanResult;
 use crate::hw::kde_connect::{KdeDevice, KdeMessage};
-use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
+use crate::hw::localsend::{LocalSendConfig, LocalSendPeer, ReceiverStatus, SendReport};
 use crate::hw::nfc_pairing::{NfcGuidance, NfcHandshake};
 use crate::hw::scrcpy_bridge::ScrcpyStatus;
 use crate::hw::syncthing::{SyncthingConfig, SyncthingEvent, SyncthingFolder, SyncthingStatus};
@@ -95,10 +95,14 @@ pub async fn localsend_send_files(
     crate::hw::localsend::send_files(&peer, &paths).await
 }
 
-/// Start the embedded LocalSend receiver (auto-accept → Downloads).
+/// Start the embedded LocalSend receiver.
+///
+/// The app handle is what lets an incoming transfer ask the UI for consent;
+/// without it every transfer is declined. Nothing is auto-accepted except the
+/// devices the user explicitly added to the auto-accept list.
 #[tauri::command]
-pub async fn localsend_receiver_start() -> Result<ReceiverStatus, String> {
-    let port = crate::hw::localsend::start_receiver()?;
+pub async fn localsend_receiver_start(app: tauri::AppHandle) -> Result<ReceiverStatus, String> {
+    let port = crate::hw::localsend::start_receiver(app)?;
     let mut status = crate::hw::localsend::receiver_status();
     status.port = port;
     Ok(status)
@@ -115,6 +119,70 @@ pub async fn localsend_receiver_stop() -> Result<ReceiverStatus, String> {
 #[tauri::command]
 pub async fn localsend_receiver_status() -> Result<ReceiverStatus, String> {
     Ok(crate::hw::localsend::receiver_status())
+}
+
+/// Answer the consent prompt for an incoming transfer.
+///
+/// `remember` opts the sending device into the auto-accept list, so the next
+/// transfer from it is not interrupted. Returns an error when the prompt has
+/// already expired (the sender gave up, or the 60 s window closed), so the UI
+/// can say so instead of pretending it was accepted.
+#[tauri::command]
+pub async fn localsend_respond_consent(
+    session_id: String,
+    accept: bool,
+    remember: Option<bool>,
+) -> Result<(), String> {
+    if remember.unwrap_or(false) && accept {
+        // Only a device that just asked can be remembered, and only after the
+        // user said yes — the fingerprint comes from the pending prompt, not
+        // from the caller, so the UI cannot whitelist an arbitrary id.
+        if let Some(pending) = crate::hw::localsend::pending_device(&session_id) {
+            let mut cfg = LocalSendConfig::load();
+            if cfg.allow_device(&pending) {
+                cfg.save();
+                log::info!("[localsend] device {pending} added to the auto-accept list");
+            }
+        }
+    }
+    if crate::hw::localsend::respond_consent(&session_id, accept) {
+        Ok(())
+    } else {
+        Err("This transfer request has expired — ask the sender to retry.".into())
+    }
+}
+
+/// Read the receiver settings (auto-accept list + size limit).
+#[tauri::command]
+pub async fn localsend_config() -> Result<LocalSendConfig, String> {
+    Ok(LocalSendConfig::load())
+}
+
+/// Opt a device in/out of auto-accept.
+#[tauri::command]
+pub async fn localsend_set_auto_accept(
+    fingerprint: String,
+    enabled: bool,
+) -> Result<LocalSendConfig, String> {
+    let mut cfg = LocalSendConfig::load();
+    let changed = if enabled {
+        cfg.allow_device(&fingerprint)
+    } else {
+        cfg.forget_device(&fingerprint)
+    };
+    if changed {
+        cfg.save();
+    }
+    Ok(cfg)
+}
+
+/// Change the per-file size limit (MiB).
+#[tauri::command]
+pub async fn localsend_set_max_upload_mb(max_upload_mb: u64) -> Result<LocalSendConfig, String> {
+    let mut cfg = LocalSendConfig::load();
+    cfg.max_upload_mb = max_upload_mb.clamp(1, crate::hw::localsend::MAX_MAX_UPLOAD_MB);
+    cfg.save();
+    Ok(cfg)
 }
 
 /// scrcpy orchestration (MIOT-07): turn the phone camera into a webcam.

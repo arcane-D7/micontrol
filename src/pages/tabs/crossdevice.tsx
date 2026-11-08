@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { QRCodeCanvas } from 'qrcode.react';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
@@ -71,10 +72,36 @@ interface SendReport {
   total_bytes: number;
 }
 
+/// Payload of the `localsend-incoming` event: a sender is waiting for the user
+/// to accept or decline. Nothing is written to disk until it is accepted.
+interface IncomingTransfer {
+  sessionId: string;
+  alias: string;
+  fingerprint: string;
+  deviceType?: string | null;
+  files: { name: string; size: number }[];
+  totalBytes: number;
+  expiresInSeconds: number;
+}
+
+/// Human size for the consent prompt (the backend reports raw bytes).
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 interface ReceiverStatus {
   running: boolean;
   port: number;
   received_count: number;
+}
+
+/// Receiver settings: which devices skip the prompt, and the per-file cap.
+interface LocalSendConfig {
+  auto_accept_fingerprints: string[];
+  max_upload_mb: number;
 }
 
 // ── MIOT-07 scrcpy camera ───────────────────────────────────────────────────
@@ -189,6 +216,12 @@ export default function CrossDeviceTab() {
   const [sendingTo, setSendingTo] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<string | null>(null);
   const [receiver, setReceiver] = useState<ReceiverStatus | null>(null);
+  // Incoming LocalSend transfer waiting for Accept/Decline.
+  const [incoming, setIncoming] = useState<IncomingTransfer | null>(null);
+  const [consentBusy, setConsentBusy] = useState(false);
+  const [rememberIncoming, setRememberIncoming] = useState(false);
+  const [lsConfig, setLsConfig] = useState<LocalSendConfig | null>(null);
+  const [maxMbDraft, setMaxMbDraft] = useState('');
 
   // scrcpy camera (MIOT-07)
   const [camera, setCamera] = useState<ScrcpyStatus | null>(null);
@@ -266,6 +299,17 @@ export default function CrossDeviceTab() {
     }
   }, []);
 
+  // Receiver settings (auto-accept list + size cap) for the LocalSend card.
+  const fetchLsConfig = useCallback(async () => {
+    try {
+      const cfg = await invoke<LocalSendConfig>('localsend_config');
+      setLsConfig(cfg);
+      setMaxMbDraft(String(cfg.max_upload_mb));
+    } catch {
+      setLsConfig(null);
+    }
+  }, []);
+
   const fetchCamera = useCallback(async () => {
     try {
       const s = await invoke<ScrcpyStatus>('scrcpy_status');
@@ -338,6 +382,7 @@ export default function CrossDeviceTab() {
     void fetchStatus();
     void fetchPresence();
     void fetchReceiver();
+    void fetchLsConfig();
     void fetchCamera();
     void fetchTranscription();
     void fetchNfc();
@@ -347,6 +392,7 @@ export default function CrossDeviceTab() {
     fetchStatus,
     fetchPresence,
     fetchReceiver,
+    fetchLsConfig,
     fetchCamera,
     fetchTranscription,
     fetchNfc,
@@ -363,6 +409,18 @@ export default function CrossDeviceTab() {
     }, 5000);
     return () => window.clearInterval(id);
   }, [fetchAdvertiseStatus]);
+
+  // Consent prompt: the receiver emits `localsend-incoming` and blocks the
+  // sender until the user answers here. No answer within the advertised window
+  // means the transfer is declined — nothing is written to disk.
+  useEffect(() => {
+    const unlisten = listen<IncomingTransfer>('localsend-incoming', (event) => {
+      setIncoming(event.payload);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
 
   const handleDiscover = async () => {
     setDiscovering(true);
@@ -408,6 +466,59 @@ export default function CrossDeviceTab() {
         const r = await invoke<ReceiverStatus>('localsend_receiver_start');
         setReceiver(r);
       }
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleConsent = async (accept: boolean, remember: boolean) => {
+    if (!incoming) return;
+    setConsentBusy(true);
+    try {
+      await invoke('localsend_respond_consent', {
+        sessionId: incoming.sessionId,
+        accept,
+        remember,
+      });
+      addToast({
+        message: accept
+          ? t('crossDevice.lsAccepted', { alias: incoming.alias })
+          : t('crossDevice.lsDeclined', { alias: incoming.alias }),
+        type: accept ? 'success' : 'info',
+      });
+    } catch (e) {
+      // The prompt expired before the answer arrived (sender gave up).
+      setErrorMsg(String(e));
+    } finally {
+      setIncoming(null);
+      setConsentBusy(false);
+      void fetchReceiver();
+    }
+  };
+
+  const handleForgetDevice = async (fingerprint: string) => {
+    try {
+      const cfg = await invoke<LocalSendConfig>('localsend_set_auto_accept', {
+        fingerprint,
+        enabled: false,
+      });
+      setLsConfig(cfg);
+      addToast({ message: t('crossDevice.lsForgotDevice'), type: 'info' });
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleSaveMaxMb = async () => {
+    const mb = Math.floor(Number(maxMbDraft));
+    if (!Number.isFinite(mb) || mb < 1) return;
+    try {
+      const cfg = await invoke<LocalSendConfig>('localsend_set_max_upload_mb', {
+        maxUploadMb: mb,
+      });
+      setLsConfig(cfg);
+      setMaxMbDraft(String(cfg.max_upload_mb));
+      addToast({ message: t('crossDevice.lsMaxSizeSaved'), type: 'success' });
     } catch (e) {
       setErrorMsg(String(e));
     }
@@ -1244,6 +1355,109 @@ export default function CrossDeviceTab() {
           <p className="text-muted" style={{ fontSize: 12, marginBottom: 8 }}>
             {t('crossDevice.lsReceived')}: {receiver.received_count}
           </p>
+        )}
+
+        {/* Receiver settings: opt-in devices + size cap */}
+        {lsConfig && (
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span>{t('crossDevice.lsMaxSize')}</span>
+              <input
+                className="text-input"
+                type="number"
+                min={1}
+                value={maxMbDraft}
+                onChange={(e) => setMaxMbDraft(e.target.value)}
+                style={{ width: 90, fontSize: 12 }}
+              />
+              <button
+                className="btn btn-secondary"
+                style={{ padding: '2px 8px', fontSize: 12 }}
+                onClick={() => void handleSaveMaxMb()}
+                disabled={maxMbDraft === String(lsConfig.max_upload_mb)}
+              >
+                {t('crossDevice.lsSave')}
+              </button>
+            </div>
+            {lsConfig.auto_accept_fingerprints.length > 0 && (
+              <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <span>{t('crossDevice.lsAutoAccept')}:</span>
+                {lsConfig.auto_accept_fingerprints.map((fp) => (
+                  <span key={fp} style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                    <code>{fp.slice(0, 10)}…</code>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: '0 6px', fontSize: 11 }}
+                      title={t('crossDevice.lsReject')}
+                      onClick={() => void handleForgetDevice(fp)}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Consent: nothing is written until the user answers */}
+        {incoming && (
+          <div
+            role="alertdialog"
+            aria-label={t('crossDevice.lsIncomingTitle')}
+            style={{
+              marginBottom: 12,
+              padding: 12,
+              borderRadius: 8,
+              border: '1px solid var(--warning)',
+              background: 'var(--surface-hover)',
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              📥 {t('crossDevice.lsIncomingTitle')}
+            </div>
+            <div style={{ fontSize: 13, marginBottom: 6 }}>
+              {t('crossDevice.lsIncomingFrom', {
+                alias: incoming.alias,
+                count: incoming.files.length,
+              })}
+            </div>
+            <ul style={{ margin: '0 0 8px 18px', fontSize: 12, color: 'var(--text-dim)' }}>
+              {incoming.files.slice(0, 5).map((f, i) => (
+                <li key={`${f.name}-${i}`}>
+                  {f.name} — {formatBytes(f.size)}
+                </li>
+              ))}
+              {incoming.files.length > 5 && <li>+{incoming.files.length - 5}</li>}
+            </ul>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                disabled={consentBusy}
+                onClick={() => void handleConsent(true, rememberIncoming)}
+              >
+                {t('crossDevice.lsAccept')}
+              </button>
+              <button
+                className="btn btn-secondary"
+                disabled={consentBusy}
+                onClick={() => void handleConsent(false, false)}
+              >
+                {t('crossDevice.lsReject')}
+              </button>
+              <label style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={rememberIncoming}
+                  onChange={(e) => setRememberIncoming(e.target.checked)}
+                />
+                {t('crossDevice.lsRemember')}
+              </label>
+            </div>
+            <p style={{ fontSize: 11, color: 'var(--text-dim)', margin: '8px 0 0' }}>
+              {t('crossDevice.lsConsentNote', { seconds: incoming.expiresInSeconds })}
+            </p>
+          </div>
         )}
 
         {/* Discover + send */}
