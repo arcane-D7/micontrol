@@ -24,13 +24,61 @@
   ; replaces itself) instead of the NSIS installer killing the bridge that
   ; launched it. The shell binary has a stable hash across releases, so an
   ; unconditional copy is safe and keeps the deployed shell fresh.
+  ;
+  ; VAGA F4 (audit 2026-11-08 §8.1): the bundled resource was deployed
+  ; verbatim, and a **0-byte** resource left
+  ; `setup\micontrol_setup.exe` unusable since 2026-11-07 — `install_update`
+  ; saw a file, skipped the runtime bootstrap, and every payload update died
+  ; spawning it. The shell is now size-validated before it replaces anything:
+  ; copy to `.new`, check the size, and only then rename over the live shell.
+  ; A bad bundle therefore never destroys a working shell.
   ${If} ${FileExists} "$INSTDIR\micontrol_setup.exe"
-    CreateDirectory "$INSTDIR\setup"
-    CopyFiles /SILENT "$INSTDIR\micontrol_setup.exe" "$INSTDIR\setup\micontrol_setup.exe"
-    ${If} ${FileExists} "$INSTDIR\setup\micontrol_setup.exe"
-      DetailPrint "Setup shell deployed to setup\micontrol_setup.exe (decoupled updates enabled)."
+    ; Exact byte size via FileSeek (FileFunc's ${GetSize} requires a unit
+    ; suffix and silently warns "unknown variable" on a typo).
+    StrCpy $0 0
+    ClearErrors
+    FileOpen $1 "$INSTDIR\micontrol_setup.exe" r
+    ${IfNot} ${Errors}
+      FileSeek $1 0 END $0
+      FileClose $1
+    ${EndIf}
+    ${If} $0 >= 500000
+      CreateDirectory "$INSTDIR\setup"
+      Delete "$INSTDIR\setup\micontrol_setup.exe.new"
+      CopyFiles /SILENT "$INSTDIR\micontrol_setup.exe" "$INSTDIR\setup\micontrol_setup.exe.new"
+      StrCpy $1 0
+      ClearErrors
+      FileOpen $2 "$INSTDIR\setup\micontrol_setup.exe.new" r
+      ${IfNot} ${Errors}
+        FileSeek $2 0 END $1
+        FileClose $2
+      ${EndIf}
+      ${If} $1 >= 500000
+        ; Rename must replace the destination in one step (MOVEFILE_REPLACE_
+        ; EXISTING) so the live shell is never truncated first.
+        Rename "$INSTDIR\setup\micontrol_setup.exe.new" "$INSTDIR\setup\micontrol_setup.exe"
+        ; Post-condition: verify the deployed shell is still a real binary.
+        ; Rename fails when the destination is in use (a shell is running an
+        ; update right now) — in that case the existing shell is kept.
+        StrCpy $2 0
+        ClearErrors
+        FileOpen $3 "$INSTDIR\setup\micontrol_setup.exe" r
+        ${IfNot} ${Errors}
+          FileSeek $3 0 END $2
+          FileClose $3
+        ${EndIf}
+        Delete "$INSTDIR\setup\micontrol_setup.exe.new"
+        ${If} $2 >= 500000
+          DetailPrint "Setup shell deployed to setup\micontrol_setup.exe (decoupled updates enabled)."
+        ${Else}
+          DetailPrint "WARNING: could not replace setup\micontrol_setup.exe (in use) — previous shell kept; the runtime bootstrap keeps updates working."
+        ${EndIf}
+      ${Else}
+        Delete "$INSTDIR\setup\micontrol_setup.exe.new"
+        DetailPrint "WARNING: setup shell copy is only $1 bytes — previous shell preserved; updates fall back to the runtime bootstrap."
+      ${EndIf}
     ${Else}
-      DetailPrint "WARNING: failed to deploy setup shell — first payload update will download it at runtime."
+      DetailPrint "WARNING: bundled setup shell is only $0 bytes (corrupt resource) — not deployed; the runtime bootstrap will download a valid one."
     ${EndIf}
     ; The root copy is only the transport vehicle for the resource system.
     Delete "$INSTDIR\micontrol_setup.exe"
@@ -352,8 +400,61 @@
     WriteRegDWORD HKLM "SOFTWARE\Classes\CLSID\{E071A7CE-5D7F-4063-9A10-AE39AEC64EE8}" "DisableModeless" 1
   ${EndIf}
   ; Ensure the face data directory exists (SYSTEM-writable).
-  CreateDirectory "$PROGRAMDATA\MiControl\face"
+  ; NSIS has no $PROGRAMDATA constant (3.11 warns "unknown variable" and the
+  ; path silently degrades to "\MiControl\face" on the current drive), so read
+  ; it from the environment.
+  ReadEnvStr $0 "ProgramData"
+  ${If} $0 == ""
+    StrCpy $0 "$WINDIR\..\ProgramData"
+  ${EndIf}
+  CreateDirectory "$0\MiControl\face"
   DetailPrint "Face Unlock configured."
+
+  ; ── Windows Firewall: deterministic rules (no "Allow access" prompt) ──────
+  ; The app opens 0.0.0.0:9223 (MCP bridge WebSocket; now loopback-only, this
+  ; rule covers older builds) and 0.0.0.0:53317 TCP+UDP (LocalSend receiver).
+  ; With no matching rule Windows raises "Allow MiControl to communicate on
+  ; these networks: Private / Public" — once per program path and profile, so
+  ; every new build asked again (28 stale rules for target\debug\deps\...).
+  ;
+  ; Rules applied here:
+  ;   1. delete every rule scoped to this exe (removes the Defer=User rules
+  ;      created by the dialog — they are named after the binary description,
+  ;      so deleting by name is not possible) → idempotent re-apply;
+  ;   2. allow TCP 9223 + TCP/UDP 53317 on private,domain only, edge=no;
+  ;   3. block everything else for this exe on public. The block rule is what
+  ;      suppresses the dialog: Windows only asks when NO rule matches.
+  ; Best effort by design: a firewall failure must never fail the install
+  ; (the app works; it may only prompt again). The app re-applies the same set
+  ; through util::firewall on every payload update.
+  DetailPrint "Configuring Windows Firewall rules..."
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name=all program="$INSTDIR\micontrol.exe"'
+  Pop $0
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl MCP (TCP 9223)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=TCP localport=9223 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: MCP (TCP 9223) rule returned $0."
+  ${EndIf}
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl LocalSend (TCP 53317)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=TCP localport=53317 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: LocalSend (TCP 53317) rule returned $0."
+  ${EndIf}
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl LocalSend (UDP 53317)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=UDP localport=53317 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: LocalSend (UDP 53317) rule returned $0."
+  ${EndIf}
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl (block public)" dir=in action=block program="$INSTDIR\micontrol.exe" protocol=any profile=public enable=yes'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: public-profile block rule returned $0."
+  ${EndIf}
+  DetailPrint "Firewall rules configured."
 
   ; ── Post-install service verification ───────────────────────────────────────
   ; `micontrol_face_svc.exe install` exits 0 as soon as SCM accepts the create
@@ -391,6 +492,14 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; ── Windows Firewall: remove every rule scoped to our exe ─────────────────
+  ; Deletes the allow/block rules added by POSTINSTALL *and* any rule the
+  ; firewall dialog created (all of them are keyed by the program path), so an
+  ; uninstall never leaves orphan rules behind. Best effort.
+  DetailPrint "Removing Windows Firewall rules..."
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name=all program="$INSTDIR\micontrol.exe"'
+  Pop $0
+
   ; Remove desktop shortcut and startup entry (if they were created)
   Delete "$DESKTOP\MiControl.lnk"
   DeleteRegValue SHCTX "Software\Microsoft\Windows\CurrentVersion\Run" "MiControl"

@@ -2135,12 +2135,29 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
         // the shell only re-applies install points (see bootstrap.rs docs).
         // The response includes `bootstrapped: true` and `sig_verified` so
         // the app UI can report the migration outcome to the user.
-        let boot_result = if !shell.is_file() {
+        //
+        // VAGA F4 (audit 2026-11-08 §8.1): the previous gate was
+        // `!shell.is_file()`, and a **0-byte** `setup\micontrol_setup.exe`
+        // deployed by a bad bundle resource IS a file — so the bootstrap was
+        // skipped, the 0-byte exe was spawned, and the update died with an
+        // opaque "Failed to launch setup shell" (ERROR_BAD_EXE_FORMAT) after
+        // the app had already begun shutting down. Validate the real size
+        // window instead, and if the shell cannot be restored, fail HERE,
+        // before spawning anything: the payload is never handed to a shell
+        // that cannot run and the installed app is left untouched.
+        let boot_result = if crate::bootstrap::is_valid_shell(&shell) {
+            None
+        } else {
+            log::warn!(
+                "[install_update] setup shell unusable ({}); attempting bootstrap",
+                crate::bootstrap::shell_problem(&shell)
+            );
             let result = crate::bootstrap::ensure_shell(&app_dir, None).map_err(|e| {
                 format!(
-                    "Bootstrap of the setup shell failed ({e}). \
-                     Legacy installation cannot apply the payload update. \
-                     Reinstall MiControl manually to deploy the decoupled installer."
+                    "Setup shell unusable: {}. The automatic re-download also failed ({e}). \
+                     The payload update was NOT started — MiControl is unchanged and still running. \
+                     Reinstall MiControl (NSIS installer) to restore the decoupled updater.",
+                    crate::bootstrap::shell_problem(&shell)
                 )
             })?;
             log::info!(
@@ -2150,9 +2167,26 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
                 result.sig_verified,
             );
             Some(result)
-        } else {
-            None
         };
+
+        // Hard gate: never spawn a shell that is still not a real binary.
+        if !crate::bootstrap::is_valid_shell(&shell) {
+            return Err(format!(
+                "Setup shell is still unusable after bootstrap: {}. \
+                 The payload update was NOT started — MiControl is unchanged.",
+                crate::bootstrap::shell_problem(&shell)
+            ));
+        }
+
+        // ── VAGA F4: Windows Firewall rules (best effort) ──────────────────
+        // The bridge runs as SYSTEM, so netsh needs no further elevation.
+        // This only suppresses the "Allow MiControl to communicate on these
+        // networks" dialog (allow on private/domain, block on public); a
+        // failure must NEVER block an update — the app still works, it may
+        // just prompt again.
+        if let Err(e) = crate::util::firewall::apply(&app_dir) {
+            log::warn!("[install_update] firewall rules not applied: {e}");
+        }
 
         let child = {
             // S65-004: hand the shell the version it should expect from the

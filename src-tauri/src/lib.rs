@@ -442,11 +442,23 @@ pub fn run() {
     // release build impossible to debug remotely — exactly when we need it.
     // The toggle gate (`start_socket_server`/bridge init) is the security
     // boundary, not the build profile.
+    //
+    // VAGA F4 (audit 2026-11-07 §7.1): the bare `init()` binds 0.0.0.0, i.e.
+    // the WebSocket gives *any host on the LAN* screenshots/DOM/input control
+    // — and 0.0.0.0 is exactly what makes Windows raise the "Allow MiControl
+    // to communicate on these networks" firewall dialog. The bridge now binds
+    // 127.0.0.1 (util::mcp_config::bridge_config), which is enough for every
+    // local MCP client and never triggers the prompt. The separate
+    // tauri-plugin-mcp server below already listens on loopback:4000.
     #[cfg(debug_assertions)]
-    let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    let builder = builder.plugin(tauri_plugin_mcp_bridge::init_with_config(
+        crate::util::mcp_config::bridge_config(),
+    ));
     #[cfg(not(debug_assertions))]
     let builder = if crate::util::mcp_config::is_enabled() {
-        builder.plugin(tauri_plugin_mcp_bridge::init())
+        builder.plugin(tauri_plugin_mcp_bridge::init_with_config(
+            crate::util::mcp_config::bridge_config(),
+        ))
     } else {
         builder
     };
