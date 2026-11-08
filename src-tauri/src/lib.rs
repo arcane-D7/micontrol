@@ -60,13 +60,12 @@ use commands::hotkeys::{
 };
 use commands::privacy::{export_user_data, open_external_url, reveal_in_explorer};
 use commands::system::{
-    check_official_driver_updates, clean_junk_files, clear_error_log, custom_security_scan,
-    debug_ecram_dump, download_driver_package, fetch_official_drivers,
+    clean_junk_files, clear_error_log, custom_security_scan, debug_ecram_dump,
     find_latest_downloaded_installer, full_security_scan, get_ai_brightness_config,
     get_audio_effects, get_auto_update_config, get_autostart, get_available_refresh_rates,
     get_battery_info, get_color_status, get_crash_recovery_status, get_defender_status,
     get_display_info, get_drivers_detail, get_error_log_config, get_eye_protection, get_fan_info,
-    get_hardware_profile, get_hardware_state_batch, get_model_code, get_network_perf, get_os_turbo,
+    get_hardware_profile, get_hardware_state_batch, get_network_perf, get_os_turbo,
     get_phone_link_status, get_process_list, get_smart_brightness_model, get_sys_opt_status,
     get_system_info, get_task_manager, get_threat_history, get_touchpad_info, get_update_status,
     install_driver, install_update, kill_process, launch_color_calibration_wizard,
@@ -661,18 +660,13 @@ pub fn run() {
             // Cross-device (MIOT-10) — KDE Connect discovery + ping MVP
             commands::crossdevice::kde_discover,
             commands::crossdevice::kde_ping,
-            commands::crossdevice::kde_status,
-            commands::crossdevice::kde_identity,
-            // Cross-device (MIOT-11) — NFC pairing guidance + NDEF handshake
+            // Cross-device (MIOT-11) — NFC pairing guidance + custom tag payload
             commands::crossdevice::nfc_guidance,
-            commands::crossdevice::nfc_encode_handshake,
             commands::crossdevice::nfc_build_custom,
             commands::crossdevice::nfc_open_link,
-            // Cross-device (MIOT-12) — Syncthing REST status/folders
+            // Cross-device (MIOT-12) — Syncthing REST status + folder toggle
             commands::crossdevice::syncthing_status,
-            commands::crossdevice::syncthing_folders,
             commands::crossdevice::syncthing_set_folder,
-            commands::crossdevice::syncthing_events,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,
@@ -718,11 +712,6 @@ pub fn run() {
             mark_clean_exit,
             // Driver Details
             get_drivers_detail,
-            // Official Driver Update Check
-            check_official_driver_updates,
-            fetch_official_drivers,
-            get_model_code,
-            download_driver_package,
             // AI Noise Cancellation
             get_audio_effects,
             set_mic_noise_canceling,
@@ -944,18 +933,16 @@ pub fn run() {
             // Start touchpad gesture listener (5-finger screenshot, edge slide volume/brightness)
             crate::hw::touchpad::start_gesture_listener();
 
-            // S53: re-apply enabled System Optimization tweaks (feature
-            // updates and Windows servicing reset HKLM policies).
-            // S55 FIX 17: the automatic boot re-apply is DISABLED. It was the
-            // trigger of a service crash-loop: app boot → restore_sys_opt_all
-            // → bridge spawns restore threads → bridge crashes (0xc0000005)
-            // → SCM restarts → app health check sees pipe down → dispatches
-            // again → crash again, indefinitely. Every tweak is already
+            // System Optimization tweaks are NOT re-applied at boot.
+            // The automatic sweep was disabled in S55 FIX 17: it triggered a
+            // SYSTEM-service crash-loop (boot → sweep → bridge crash 0xc0000005
+            // → SCM restart → health check redispatch → crash again). The
+            // unreachable elevated branch behind it (`restore_sys_opt_all` +
+            // `sys_opt::restore_all`) was removed in the 2026-11 audit cleanup
+            // — no command or frontend path ever dispatched it. Every tweak is
             // persisted in the registry and the user can re-apply any of them
-            // individually from the Debloater UI, so the boot-time sweep adds
-            // risk without benefit. If an automatic re-apply is wanted later,
-            // it must first be made crash-proof (the restore path panics under
-            // concurrency inside the SYSTEM service).
+            // individually from the Debloater UI. Reinstate a sweep only
+            // alongside a crash-proof, observable implementation.
 
             // Give the gesture thread access to the app handle so it can show the OSD.
             crate::hw::touchpad::set_app_handle(app.handle().clone());

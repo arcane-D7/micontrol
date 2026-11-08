@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rand::RngCore;
@@ -267,23 +267,6 @@ pub async fn send_ping(device: &KdeDevice, timeout: Duration) -> Result<bool, St
     }
     let text = String::from_utf8_lossy(&buffer);
     Ok(text.contains("kdeconnect.ping.reply"))
-}
-
-// ── Shared discovery cache (for status/UI refresh) ──────────────────────────
-
-static CACHE: OnceLock<Arc<Mutex<Vec<KdeDevice>>>> = OnceLock::new();
-
-pub fn cache() -> &'static Arc<Mutex<Vec<KdeDevice>>> {
-    CACHE.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-}
-
-/// Refresh the shared cache with a bounded discovery sweep.
-pub async fn refresh_cache(duration: Duration) -> Vec<KdeDevice> {
-    let devs = discover_devices(duration).await;
-    if let Ok(mut c) = cache().lock() {
-        *c = devs.clone();
-    }
-    devs
 }
 
 #[cfg(test)]

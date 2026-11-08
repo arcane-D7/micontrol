@@ -624,46 +624,6 @@ pub async fn get_drivers_detail() -> Result<Vec<crate::hw::update::DriverDetail>
         .map_err(ErrorResponse::from)
 }
 
-// ── Official Driver Update Check ──────────────────────────────────────────────
-
-/// Check installed drivers against Xiaomi's official driver portal.
-#[tauri::command]
-pub async fn check_official_driver_updates(
-) -> Result<crate::hw::driver_update::DriverUpdateCheck, ErrorResponse> {
-    crate::hw::driver_update::check_driver_updates()
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Fetch the list of official drivers for a specific model code.
-#[tauri::command]
-pub async fn fetch_official_drivers(
-    model_code: Option<String>,
-) -> Result<Vec<crate::hw::driver_update::OfficialDriver>, ErrorResponse> {
-    let code = match model_code {
-        Some(c) => c,
-        None => crate::hw::driver_update::detect_model_code().map_err(ErrorResponse::from)?,
-    };
-    crate::hw::driver_update::fetch_official_drivers(&code)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Detect the laptop model code (e.g. "TM2424").
-#[tauri::command]
-pub async fn get_model_code() -> Result<String, ErrorResponse> {
-    crate::hw::driver_update::detect_model_code().map_err(ErrorResponse::from)
-}
-
-/// Download a driver package from Xiaomi's CDN.
-#[tauri::command]
-pub async fn download_driver_package(url: String) -> Result<String, ErrorResponse> {
-    let path = crate::hw::driver_update::download_driver_package(&url)
-        .await
-        .map_err(ErrorResponse::from)?;
-    Ok(path.to_string_lossy().to_string())
-}
-
 // ── Security Scan ────────────────────────────────────────────────────────────
 
 /// Run a quick security scan via Windows Defender.
