@@ -467,7 +467,9 @@
   ; Sweep the dev-artifact rules (`micontrol_lib-<hash>` under target\debug):
   ; every new test-binary hash used to add one more Allow rule (created by the
   ; firewall dialog while running cargo tests). Best effort, silent.
-  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "Get-NetFirewallRule -DisplayName ''micontrol_lib-*'' -ErrorAction SilentlyContinue | Remove-NetFirewallRule"'
+  ; -EncodedCommand (UTF-16LE base64): immune to the NSIS/PowerShell quoting
+  ; collision that silently broke the literal -Command form.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -EncodedCommand RwBlAHQALQBOAGUAdABGAGkAcgBlAHcAYQBsAGwAUgB1AGwAZQAgAC0ARABpAHMAcABsAGEAeQBOAGEAbQBlACAAJwBtAGkAYwBvAG4AdAByAG8AbABfAGwAaQBiAC0AKgAnACAALQBFAHIAcgBvAHIAQQBjAHQAaQBvAG4AIABTAGkAbABlAG4AdABsAHkAQwBvAG4AdABpAG4AdQBlACAAfAAgAFIAZQBtAG8AdgBlAC0ATgBlAHQARgBpAHIAZQB3AGEAbABsAFIAdQBsAGUA'
   Pop $0
   DetailPrint "Firewall rules configured."
 
