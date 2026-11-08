@@ -119,7 +119,11 @@ function getNestedValue(obj: unknown, path: string): string {
 /** Translate a key with optional variable interpolation and pluralization.
  *  When `vars` includes a `count` field, the function resolves pluralized keys
  *  using the `_one` (count === 1) / `_other` (count !== 1) suffix convention.
- *  Falls back to the base key if no pluralized variant exists. */
+ *  Falls back to the base key if no pluralized variant exists.
+ *
+ *  Every occurrence of a placeholder is replaced: strings such as
+ *  "Limit of {level}% applied — stops charging at {level}%" name the same
+ *  value twice, and a single `String.replace` left the second one raw. */
 export function t(key: StringKey, vars?: Record<string, string | number>): string {
   let resolvedKey = key;
 
@@ -137,7 +141,7 @@ export function t(key: StringKey, vars?: Record<string, string | number>): strin
   let value = getNestedValue(_strings, resolvedKey);
   if (vars) {
     for (const [k, v] of Object.entries(vars)) {
-      value = value.replace(`{${k}}`, String(v));
+      value = value.split(`{${k}}`).join(String(v));
     }
   }
   return value;

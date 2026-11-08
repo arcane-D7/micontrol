@@ -41,12 +41,12 @@
     "performance": "Desempenho",
     "battery": "Bateria",
     "display": "Ecrã",
-    "fan": "Ventilação",
+    "fan": "Ventoinha",
     "audio": "Áudio",
-    "cast": "Transmissão",
+    "cast": "Transmitir",
     "touchpad": "Touchpad",
     "faceUnlock": "Desbloqueio facial",
-    "iot": "Dispositivo IoT",
+    "iot": "Dispositivos ligados",
     "wifi": "Wi-Fi",
     "startup": "Arranque",
     "system": "Sistema",
@@ -58,7 +58,17 @@
     "cleanup": "Limpeza do Sistema",
     "settings": "Definições",
     "aiAnalysis": "Análise IA",
-    "about": "Sobre"
+    "about": "Sobre",
+    "groups": {
+      "system": "Sistema",
+      "energy": "Energia",
+      "screen": "Ecrã e som",
+      "devices": "Dispositivos",
+      "settings": "Definições"
+    },
+    "label": "Navegação principal",
+    "search": "Pesquisar destinos…",
+    "noResults": "Nenhum destino corresponde a «{query}»"
   },
   "keyboard": {
     "title": "Remapeador de Teclado",
@@ -138,7 +148,22 @@
     "filterPlaceholder": "Filtrar por nome ou PID…",
     "refresh": "Atualizar",
     "noProcesses": "Nenhum processo encontrado",
-    "noMatches": "Nenhum processo corresponde ao filtro"
+    "noMatches": "Nenhum processo corresponde ao filtro",
+    "endProcess": "Terminar {name}",
+    "endProcessConfirm": "Terminar o processo «{name}» (PID {pid})?",
+    "sortBy": "Ordenar por {column}",
+    "filterLabel": "Filtrar processos por nome ou PID",
+    "colProcess": "Processo",
+    "colPid": "PID",
+    "colCpu": "CPU %",
+    "colGpu": "GPU %",
+    "colNpu": "NPU %",
+    "colRam": "RAM",
+    "colThreads": "Tarefas",
+    "colActions": "Ações",
+    "noTraffic": "sem tráfego",
+    "footer": "{count} processos · atualiza a cada 2,5 s · NPU = motores neuronais Intel Arc",
+    "killFailed": "Não foi possível terminar o processo"
   },
   "performance": {
     "title": "Modo de Desempenho",
@@ -212,8 +237,8 @@
     "techDetails": {
       "title": "Detalhes Técnicos",
       "tdp": "TDP",
-      "peak": "Pico",
-      "sustained": "Sustentado",
+      "peak": "Rápido",
+      "sustained": "Mantém-se rápido",
       "temp": "Temp. pico",
       "fanBehavior": "Ventoinha",
       "windowsOverlay": "Energia Windows",
@@ -233,7 +258,8 @@
         "overdriveHigh": "Perfil oculto ODV1=5. Medido: ~62-67 W SUSTENTADO (sem throttle PL1 detetado em 25 s). PL1 ≈ PL2 ≈ 62 W — burst efetivamente sem limite. Pico 99°C. Comando WMI: 5.",
         "overdriveMax": "Perfil oculto ODV1=6 — maior índice DPTF. Medido: ~60-77 W sustentado (PL1 sem limite, 100°C). Quase idêntico a Overdrive+ com variação de pico ligeiramente maior. Comando WMI: 6.",
         "smartAdaptive": "Modo adaptativo real do EC. QFAN=9 instrui o EC a ler o sub-registo SMMT e escalar automaticamente pela gama ODV1. Medido: ~65-73 W burst (~13 s) / ~35 W sustentado. Comando WMI: 9."
-      }
+      },
+      "show": "Detalhes técnicos (PL1 / PL2, WMI)"
     },
     "powerProfiles": {
       "title": "Perfis de Energia",
@@ -279,17 +305,30 @@
       "registry": "Registo Mi",
       "overlay": "Sobreposição de Energia",
       "note": "O registo MI armazena o modo de desempenho exato. O Windows Power Overlay tem apenas 3 níveis (Eficiência, Equilibrado, Desempenho), pelo que vários modos MI partilham o mesmo GUID de overlay. Este comportamento é esperado."
+    },
+    "userHint": {
+      "silence": "O mais silencioso, mas o mais lento. Para ler, escrever e navegar.",
+      "longBattery": "Poupa bateria sem grande perda de velocidade. Para trabalho longo fora da tomada.",
+      "balance": "O equilíbrio por omissão. Para o dia a dia.",
+      "turbo": "Arranca depressa e abranda. Para picos curtos de trabalho.",
+      "decepticon": "Potência estável e mais fresco. Para cargas longas e constantes.",
+      "smart": "Ajusta-se ao que está a fazer. Para uso variado.",
+      "smartAcceleration": "Como o Smart, mas reage a picos súbitos. Para edição e compilação.",
+      "smartAdaptive": "Ajuste automático controlado pelo controlador. Para uso imprevisível.",
+      "overdrive": "Velocidade sustentada, com mais calor e ruído. Para jogos.",
+      "overdriveHigh": "O perfil sustentado mais rápido. Para renderização.",
+      "overdriveMax": "No limite do hardware. Só para cargas muito curtas."
     }
   },
   "battery": {
     "title": "Bateria",
     "status": "Estado",
     "level": "Nível",
-    "health": "Saúde",
+    "health": "Saúde da bateria",
     "healthHint": "Capacidade de carga total vs. capacidade original de fábrica. O medidor reaprende a capacidade total após um ciclo completo de descarga/carga, portanto este valor pode subir após descargas profundas — não é desgaste.",
     "capacity": "Capacidade",
-    "designedCapacity": "Capacidade Original",
-    "fullCapacity": "Capacidade de Carga Total",
+    "designedCapacity": "Capacidade de fábrica",
+    "fullCapacity": "Capacidade máxima atual",
     "manufacturer": "Fabricante",
     "temperature": "Temperatura",
     "voltage": "Tensão",
@@ -297,8 +336,8 @@
     "discharging": "A Descarregar",
     "full": "Totalmente Carregada",
     "powerSource": "Fonte de energia",
-    "acConnected": "AC ligado",
-    "acOnBattery": "Com bateria",
+    "acConnected": "Carregador ligado",
+    "acOnBattery": "A usar a bateria",
     "unknown": "Desconhecido",
     "timeRemaining": "Tempo restante",
     "hours": "h",
@@ -307,17 +346,17 @@
     "celsius": "°C",
     "volts": "V",
     "timeToFull": "Tempo até carregar",
-    "chargeRate": "Taxa de carga",
-    "dischargeRate": "Taxa de descarga",
-    "acInputPower": "Potência do adaptador AC",
+    "chargeRate": "A carregar a",
+    "dischargeRate": "A consumir",
+    "acInputPower": "Carregador a fornecer",
     "wh": "Wh",
     "voltageUnit": "V",
     "slowCharger": "Carregador lento detectado",
     "slowChargerHint": "O adaptador conectado fornece menos de 45 W. O carregamento levará consideravelmente mais tempo. Use o adaptador original de 100 W para velocidade total.",
-    "batteryCare": "Modo Cuidado de Bateria",
-    "batteryCareDesc": "Ativa cuidado de bateria via EC (registro 0xA4) para otimizar padrões de carga e prolongar vida útil",
-    "batteryCareOn": "Cuidado de Bateria ativado",
-    "batteryCareOff": "Cuidado de Bateria desativado",
+    "batteryCare": "Proteção da bateria",
+    "batteryCareDesc": "Deixa de carregar no limite que escolher, para a bateria durar mais.",
+    "batteryCareOn": "Proteção da bateria ligada",
+    "batteryCareOff": "Proteção da bateria desligada",
     "infoModal": {
       "title": "Informações da Bateria",
       "levelLabel": "Nível da Bateria (%)",
@@ -332,7 +371,11 @@
       "chargeRateDesc": "Potência que flui para ou da bateria, medida pelo driver em mW. Esta é a taxa da própria bateria — não a saída total do adaptador AC. Potência do adaptador = taxa de carga da bateria + consumo do sistema, mas o consumo do sistema não está disponível através das APIs padrão do Windows.",
       "timeLabel": "Tempo Restante / Tempo até Carregar",
       "timeDesc": "Estimativa instantânea baseada na energia atual e taxa de potência. Ao descarregar: energia restante ÷ taxa de descarga. Ao carregar: energia necessária para encher ÷ taxa de carga. Flutua com a carga de trabalho."
-    }
+    },
+    "timeToFullAt": "Faltam para os {limit}%",
+    "healthGood": "boa",
+    "healthFair": "razoável",
+    "healthPoor": "fraca"
   },
   "charging": {
     "title": "Controlo de Carga",
@@ -354,7 +397,7 @@
     "enableToggle": "Limite de Carga",
     "limitEnabled": "Limite de carga ativado",
     "limitDisabled": "Limite de carga desativado",
-    "noLimit": "Sem limite — a carregar até 100%",
+    "noLimit": "Carrega até 100%",
     "infoModal": {
       "title": "Como Funciona o Controlo de Carga",
       "functionLabel": "O que faz",
@@ -365,7 +408,21 @@
       "behaviorDesc": "Isto é um limite máximo de carga — não descarrega a bateria. Se já estiver acima do limite configurado, o limite aplica-se no próximo ciclo de carga (descarregue abaixo do limite e depois ligue o carregador).",
       "warningLabel": "⚠️ Nota:",
       "warningDesc": "Esta funcionalidade foi obtida por engenharia reversa do binário Xiaomi IoTService (tipo de mensagem 0x1003). Os valores 40–80 são interpretados como percentagens de limite de carga, mas em algumas variantes de firmware o mesmo comando pode controlar a taxa de corrente de carga. Se a bateria carregar consistentemente para além do limite configurado, o IoTDriver pode não estar ativo no seu dispositivo."
-    }
+    },
+    "state": {
+      "heading": "Estado do carregamento",
+      "chargingTo": "A carregar até {limit}%",
+      "paused": "Em pausa aos {level}% — retoma abaixo de {limit}%",
+      "aboveLimit": "Já acima dos {limit}% — o limite aplica-se no próximo ciclo",
+      "unplugged": "A usar a bateria",
+      "why": "A bateria está nos {level}%, acima do limite de {limit}%, por isso a carga fica em pausa. Retoma quando o nível descer abaixo dos {limit}%."
+    },
+    "appliedLimit": "Limite de {level}% aplicado às {time} — deixa de carregar aos {level}%",
+    "appliedCareOn": "Proteção da bateria ligada às {time} — a carga para aos {limit}%",
+    "appliedCareOff": "Proteção da bateria desligada às {time} — passa a carregar até 100%",
+    "enableHint": "A proteção da bateria está desligada. Escolha um nível para a ligar e aplicar de uma vez.",
+    "pending": "A aplicar…",
+    "technicalTerm": "O limite é escrito no controlador embutido (EC), registo 0xA7. A proteção usa o registo 0xA4."
   },
   "display": {
     "title": "Ecrã",
@@ -418,7 +475,7 @@
     "error": "Falha ao aplicar definição de ecrã"
   },
   "fan": {
-    "title": "Controlo de Ventilação",
+    "title": "Ventoinha",
     "mode": "Modo de Ventilação",
     "modes": {
       "auto": "Auto (Gerido pelo Sistema)",
@@ -577,7 +634,9 @@
     "seconds_other": "{count} segundos",
     "minutes": "{count} minutos",
     "minutes_one": "{count} minuto",
-    "minutes_other": "{count} minutos"
+    "minutes_other": "{count} minutos",
+    "technicalTerm": "Termo técnico",
+    "why": "Porquê?"
   },
   "system": {
     "title": "Sistema e Drivers",
@@ -786,7 +845,7 @@
       "description": "O miPC está pronto a usar. Pode repetir este assistente a qualquer momento em Definições.",
       "finish": "Concluir"
     },
-    "step": "Passo {{current}} de {{total}}",
+    "step": "Passo {current} de {total}",
     "next": "Seguinte",
     "back": "Anterior",
     "skip": "Saltar"
@@ -830,7 +889,7 @@
     }
   },
   "wifi": {
-    "title": "Gestor WiFi",
+    "title": "Wi-Fi",
     "connectedTo": "Ligado a",
     "notConnected": "Não ligado",
     "signal": "Sinal",
@@ -847,7 +906,7 @@
     "enterpriseUnsupported": "Esta rede exige credenciais 802.1X/Empresa — ligue-a uma vez nas Definições do Windows (o MiControl não fornece inícios de sessão EAP)."
   },
   "cast": {
-    "title": "Screen Cast",
+    "title": "Transmitir para outro ecrã",
     "subtitle": "Projete para um ecrã sem fios através do painel do Windows",
     "noDevices": "Ainda não há ecrãs emparelhados com este PC. Abra o painel de projeção para descobrir um.",
     "scanError": "Erro de pesquisa",

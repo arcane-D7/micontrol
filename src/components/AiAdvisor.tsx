@@ -98,12 +98,12 @@ export default function AiAdvisor({ hw, ai, onOpenSettings }: Props) {
         }}
         onClick={() => setExpanded((v) => !v)}
       >
-        <div
+        <h2
           className="card-title"
           style={{ marginBottom: 0, display: 'flex', alignItems: 'center', gap: 8 }}
         >
           🤖 {t('ai.title')}
-        </div>
+        </h2>
         <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
           {expanded ? '▲' : '▼'}
         </span>

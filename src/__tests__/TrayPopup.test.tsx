@@ -69,12 +69,14 @@ describe('TrayPopup', () => {
     expect(buttons.length).toBeGreaterThan(0);
   });
 
-  it('shows the AC-connected state, not "Discharging", with the charger plugged in', () => {
+  it('shows the charger-connected state, not "Discharging", with the charger plugged in', () => {
     // Reported bug: 96 % on AC with ChargeRate = 0 (is_charging=false,
     // is_plugged=true) rendered "Discharging" in the tray popup.
     const hw = makeMockHardware({ is_charging: false, is_plugged: true });
     const { container } = render(<TrayPopup hardware={hw} />);
-    expect(container.textContent).toContain('AC connected');
+    // "AC connected" was renamed to "Charger connected" in the glossary pass
+    // (theme-migration §4.4): the object, not the adapter label.
+    expect(container.textContent).toContain('Charger connected');
     expect(container.textContent).not.toContain('Discharging');
   });
 

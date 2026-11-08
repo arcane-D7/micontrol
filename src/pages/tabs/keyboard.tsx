@@ -207,9 +207,9 @@ function KeyBindingRow({
           <span className="toggle-knob" />
         </label>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="card-title" style={{ margin: 0, fontSize: 13.5 }}>
+          <h2 className="card-title" style={{ margin: 0, fontSize: 13.5 }}>
             {label}
-          </div>
+          </h2>
           <div
             style={{
               fontSize: 11.5,

@@ -197,9 +197,9 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
         }}
       >
         <div>
-          <div className="card-title" style={{ marginBottom: 2 }}>
+          <h2 className="card-title" style={{ marginBottom: 2 }}>
             IoT Module
-          </div>
+          </h2>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             Full ECRAM access via IoTDriver.
           </div>
@@ -229,9 +229,9 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
         <>
           {!ecramMap.available && (
             <div className="card" style={{ marginBottom: 14, borderColor: 'var(--warning)' }}>
-              <div className="card-title" style={{ fontSize: 13 }}>
+              <h2 className="card-title" style={{ fontSize: 13 }}>
                 {t('ecrDebug.ecramBlockedTitle')}
-              </div>
+              </h2>
               <p className="page-subtitle" style={{ margin: 0 }}>
                 {t('ecrDebug.ecramBlockedBody', {
                   reason: ecramMap.blocked_reason ?? '0x80070005',
@@ -242,9 +242,9 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
           {ecramMap.available && (
             <div className="grid-2" style={{ marginBottom: 14 }}>
               <div className="card" style={{ marginBottom: 0 }}>
-                <div className="card-title" style={{ fontSize: 13 }}>
+                <h2 className="card-title" style={{ fontSize: 13 }}>
                   System State
-                </div>
+                </h2>
                 <div className="stat-row">
                   <span className="stat-label">{t('system.ac_connected')}</span>
                   <span className="stat-value">{ecramMap.ac_connected ? 'Yes' : 'No'}</span>
@@ -293,9 +293,9 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
                 )}
               </div>
               <div className="card" style={{ marginBottom: 0 }}>
-                <div className="card-title" style={{ fontSize: 13 }}>
+                <h2 className="card-title" style={{ fontSize: 13 }}>
                   Mode / Limits (decoded)
-                </div>
+                </h2>
                 <div className="stat-row">
                   <span className="stat-label">{t('system.performance_profile')}</span>
                   <span className="stat-value">
@@ -360,9 +360,9 @@ function IotModulePanel({ hw }: { hw: HardwareInstance }) {
           )}
 
           <div className="card" style={{ marginBottom: 14 }}>
-            <div className="card-title" style={{ fontSize: 13 }}>
+            <h2 className="card-title" style={{ fontSize: 13 }}>
               Write Controls (known-safe registers)
-            </div>
+            </h2>
             <div style={{ display: 'grid', gap: 12 }}>
               {ERAM_KNOWN_WRITES.map((reg) => (
                 <div
@@ -655,9 +655,9 @@ function SmartModelStatusCard({ hw }: { hw: HardwareInstance }) {
 
   return (
     <div className="card" style={{ marginTop: 16 }}>
-      <div className="card-title" style={{ marginBottom: 6 }}>
+      <h2 className="card-title" style={{ marginBottom: 6 }}>
         🧠 {t('system.smartModelTitle')}
-      </div>
+      </h2>
       {failed ? (
         <p className="page-subtitle" style={{ margin: 0 }}>
           {t('system.smartModelUnavailable')}

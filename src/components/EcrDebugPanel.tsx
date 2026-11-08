@@ -120,7 +120,7 @@ export default function EcrDebugPanel() {
 
   return (
     <div className="card">
-      <div className="card-title">{t('ecrDebug.title')}</div>
+      <h2 className="card-title">{t('ecrDebug.title')}</h2>
       <p className="page-subtitle">{t('ecrDebug.subtitle')}</p>
 
       {/* Read */}

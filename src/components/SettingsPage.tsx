@@ -131,7 +131,7 @@ export default function SettingsPage({
     <>
       {/* Language selector */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.language')}</div>
+        <h2 className="card-title">{t('settings.language')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.languageDesc')}
         </p>
@@ -166,7 +166,7 @@ export default function SettingsPage({
 
       {/* Error Logging */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.errorLogging')}</div>
+        <h2 className="card-title">{t('settings.errorLogging')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.errorLoggingDesc')}
         </p>
@@ -234,7 +234,7 @@ export default function SettingsPage({
 
       {/* MCP Integration (DOM control for AI agents / debug tools) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.mcpIntegration')}</div>
+        <h2 className="card-title">{t('settings.mcpIntegration')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.mcpIntegrationDesc')}
         </p>
@@ -275,7 +275,7 @@ export default function SettingsPage({
 
       {/* Replay onboarding */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.onboarding')}</div>
+        <h2 className="card-title">{t('settings.onboarding')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.onboardingDesc')}
         </p>

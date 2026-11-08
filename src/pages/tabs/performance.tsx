@@ -163,9 +163,9 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
           }}
         >
           <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
+            <h2 className="card-title" style={{ marginBottom: 2 }}>
               {t('performance.powerProfiles.title')}
-            </div>
+            </h2>
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               {t('performance.powerProfiles.subtitle')}
             </div>
@@ -287,9 +287,9 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
           }}
         >
           <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
+            <h2 className="card-title" style={{ marginBottom: 2 }}>
               {t('ai.logsTitle')}
-            </div>
+            </h2>
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               {isAiMode && aiApiKeySet
                 ? t('ai.loggingActive')
@@ -469,9 +469,9 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div className="card-title" style={{ marginBottom: 2 }}>
+              <h2 className="card-title" style={{ marginBottom: 2 }}>
                 {t('performance.channels.title')}
-              </div>
+              </h2>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                 {t('performance.channels.subtitle')}
               </div>
@@ -686,9 +686,9 @@ function OsTurboCard() {
         }}
       >
         <div>
-          <div className="card-title" style={{ marginBottom: 2 }}>
+          <h2 className="card-title" style={{ marginBottom: 2 }}>
             ⚡ {t('performance.osTurboTitle')}
-          </div>
+          </h2>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {t('performance.osTurboDesc')}
           </div>

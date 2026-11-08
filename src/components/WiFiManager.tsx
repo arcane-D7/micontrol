@@ -112,7 +112,7 @@ export default function WiFiManager() {
   if (loading) {
     return (
       <div className="card">
-        <div className="card-title">📶 {t('wifi.title')}</div>
+        <h2 className="card-title">📶 {t('wifi.title')}</h2>
         <p className="page-subtitle">{t('common.loading')}</p>
       </div>
     );
@@ -120,7 +120,7 @@ export default function WiFiManager() {
 
   return (
     <div className="card">
-      <div className="card-title">📶 {t('wifi.title')}</div>
+      <h2 className="card-title">📶 {t('wifi.title')}</h2>
       <p className="page-subtitle">
         {status?.connected && status.ssid
           ? `${t('wifi.connectedTo')}: ${status.ssid}`

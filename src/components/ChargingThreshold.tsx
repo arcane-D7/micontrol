@@ -76,9 +76,9 @@ export default function ChargingThreshold({ threshold, onThresholdChange }: Prop
           marginBottom: 12,
         }}
       >
-        <div className="card-title" style={{ margin: 0 }}>
+        <h2 className="card-title" style={{ margin: 0 }}>
           {t('charging.title')}
-        </div>
+        </h2>
         <button
           onClick={() => setShowInfo(true)}
           title={t('charging.infoModal.title')}

@@ -14,7 +14,7 @@ export default function SystemInfoCard({ info, getProcessList }: Props) {
   if (!info) {
     return (
       <div className="card">
-        <div className="card-title">{t('overview.system')}</div>
+        <h2 className="card-title">{t('overview.system')}</h2>
         <div className="skeleton" style={{ height: 120 }} />
       </div>
     );
@@ -46,7 +46,7 @@ export default function SystemInfoCard({ info, getProcessList }: Props) {
 
   return (
     <div className="card">
-      <div className="card-title">{t('overview.system')}</div>
+      <h2 className="card-title">{t('overview.system')}</h2>
 
       <div className="stat-row">
         <span className="stat-label">{t('overview.cpu')}</span>

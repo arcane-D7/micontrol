@@ -109,7 +109,7 @@ export default function IotDeviceCard() {
   if (loading) {
     return (
       <div className="card">
-        <div className="card-title">🔌 IoT Device</div>
+        <h2 className="card-title">🔌 IoT Device</h2>
         <p className="page-subtitle">Loading device information...</p>
       </div>
     );
@@ -118,7 +118,7 @@ export default function IotDeviceCard() {
   if (!info?.pipe_available) {
     return (
       <div className="card">
-        <div className="card-title">🔌 IoT Device</div>
+        <h2 className="card-title">🔌 IoT Device</h2>
         <p className="page-subtitle" style={{ color: 'var(--text-dim)' }}>
           IoT Service not available. The Xiaomi IoT chip was not detected on this system.
         </p>
@@ -152,7 +152,7 @@ export default function IotDeviceCard() {
 
   return (
     <div className="card">
-      <div className="card-title">🔌 IoT Device</div>
+      <h2 className="card-title">🔌 IoT Device</h2>
       <p className="page-subtitle">Xiaomi IoT chip information</p>
 
       {/* ── Device Info ─────────────────────────────────────────── */}

@@ -57,7 +57,7 @@ export default function DisplaySettings({
   if (!display) {
     return (
       <div className="card">
-        <div className="card-title">{t('display.title')}</div>
+        <h2 className="card-title">{t('display.title')}</h2>
         <div className="skeleton" style={{ height: 80 }} />
       </div>
     );
@@ -84,7 +84,7 @@ export default function DisplaySettings({
 
   return (
     <div className="card">
-      <div className="card-title">{t('display.title')}</div>
+      <h2 className="card-title">{t('display.title')}</h2>
       <div className="slider-row" style={{ marginBottom: 20 }}>
         <span className="slider-label">{t('display.brightness')}</span>
         <input

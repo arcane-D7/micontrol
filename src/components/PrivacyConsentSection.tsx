@@ -66,7 +66,7 @@ export default function PrivacyConsentSection({
     <>
       {/* ── S49: Crash Reports (Sentry) — dedicated, plain-language card ── */}
       <div className="card">
-        <div className="card-title">{t('consent.dialog.settingsTitle')}</div>
+        <h2 className="card-title">{t('consent.dialog.settingsTitle')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 14 }}>
           {t('consent.dialog.settingsDesc')}
         </p>
@@ -105,7 +105,7 @@ export default function PrivacyConsentSection({
 
       {/* Privacy & Consent */}
       <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-title">{t('settings.privacy')}</div>
+        <h2 className="card-title">{t('settings.privacy')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 16 }}>
           {t('settings.consentStatus')}:{' '}
           <strong
@@ -163,7 +163,7 @@ export default function PrivacyConsentSection({
       {/* Data Deletion — GDPR Art.17 */}
       {onDeleteAllData && (
         <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-title">{t('settings.dataDeletion')}</div>
+          <h2 className="card-title">{t('settings.dataDeletion')}</h2>
           <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 16 }}>
             {t('settings.dataDeletionDesc')}
           </p>
@@ -207,7 +207,7 @@ export default function PrivacyConsentSection({
 
       {/* Data Export — GDPR Art.20 (S19-16) */}
       <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-title">{t('settings.dataExport')}</div>
+        <h2 className="card-title">{t('settings.dataExport')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 16 }}>
           {t('settings.dataExportDesc')}
         </p>

@@ -60,7 +60,7 @@ export default function FanControl({ fan, onModeChange }: Props) {
   if (!fan) {
     return (
       <div className="card">
-        <div className="card-title">{t('fan.title')}</div>
+        <h2 className="card-title">{t('fan.title')}</h2>
         <div className="skeleton" style={{ height: 120 }} />
       </div>
     );
@@ -72,7 +72,7 @@ export default function FanControl({ fan, onModeChange }: Props) {
 
   return (
     <div className="card">
-      <div className="card-title">{t('fan.title')}</div>
+      <h2 className="card-title">{t('fan.title')}</h2>
 
       <div className="grid-3" style={{ marginBottom: 20 }}>
         {(['auto', 'fixed', 'off'] as const).map((m) => (

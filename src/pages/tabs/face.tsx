@@ -1221,7 +1221,7 @@ export default function FaceUnlockTab() {
 
       {diagnostics && (
         <div className="card">
-          <div className="card-title">{t('face.diagnostics')}</div>
+          <h2 className="card-title">{t('face.diagnostics')}</h2>
           <div
             style={{
               display: 'grid',
@@ -1284,7 +1284,7 @@ export default function FaceUnlockTab() {
       )}
       {diagnosticsError && (
         <div className="card">
-          <div className="card-title">{t('face.diagnostics_error')}</div>
+          <h2 className="card-title">{t('face.diagnostics_error')}</h2>
           <p style={{ margin: 0, fontSize: 13, color: 'var(--error)' }}>{diagnosticsError}</p>
         </div>
       )}
@@ -1300,9 +1300,9 @@ export default function FaceUnlockTab() {
           }}
         >
           <div>
-            <div className="card-title" style={{ marginBottom: 4 }}>
+            <h2 className="card-title" style={{ marginBottom: 4 }}>
               Settings
-            </div>
+            </h2>
             <p className="page-subtitle" style={{ margin: 0 }}>
               Tune how strictly the camera matches your face. Defaults work well for most people.
             </p>
@@ -1599,7 +1599,7 @@ export default function FaceUnlockTab() {
 
       {/* Master toggle + password + templates together under "Manage" */}
       <div className="card">
-        <div
+        <h2
           className="card-title"
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
         >
@@ -1610,7 +1610,7 @@ export default function FaceUnlockTab() {
             disabled={busy}
             ariaLabel="Face Unlock power"
           />
-        </div>
+        </h2>
         {phase === 'off' ? (
           <p className="page-subtitle" style={{ margin: 0 }}>
             Turn it on and follow the checklist above. Your enrolled faces, settings and stored

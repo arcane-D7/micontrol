@@ -6,6 +6,10 @@ import InfoModal, { InfoRow, InfoSection } from './InfoModal';
 
 interface Props {
   battery: BatteryData | null;
+  /** Active charge limit (0–100). When set, time-to-full says which level it
+   *  is counting to — "Faltam para os 80%" answers the question the bare
+   *  duration does not (glossary §4.4). */
+  limit?: number;
 }
 
 function formatTime(minutes: number | null): string {
@@ -40,13 +44,27 @@ function mwhToMah(mwh: number, voltage_mv: number): string | null {
   return Math.round((mwh * 1000) / voltage_mv).toLocaleString();
 }
 
-export default function BatteryInfo({ battery }: Props) {
+/** A number without a scale is a number without meaning (glossary §4.4). */
+function healthWord(pct: number): string {
+  if (pct >= 80) return t('battery.healthGood');
+  if (pct >= 60) return t('battery.healthFair');
+  return t('battery.healthPoor');
+}
+
+/**
+ * `--success` is tuned for fills (badges, bars), not for 13px text: on the
+ * light surface it measures 3.0:1. One step darker clears AA (4.6:1) and
+ * stays readable in dark mode too (5.6:1).
+ */
+const SUCCESS_TEXT = 'oklch(from var(--success) calc(l - 0.1) c h)';
+
+export default function BatteryInfo({ battery, limit }: Props) {
   const [showInfo, setShowInfo] = useState(false);
 
   if (!battery) {
     return (
       <div className="card">
-        <div className="card-title">{t('battery.title')}</div>
+        <h2 className="card-title">{t('battery.title')}</h2>
         <div className="skeleton" style={{ height: 120 }} />
       </div>
     );
@@ -67,9 +85,9 @@ export default function BatteryInfo({ battery }: Props) {
           marginBottom: 16,
         }}
       >
-        <div className="card-title" style={{ margin: 0 }}>
+        <h2 className="card-title" style={{ margin: 0 }}>
           {t('battery.title')}
-        </div>
+        </h2>
         <button
           onClick={() => setShowInfo(true)}
           title={t('battery.infoModal.title')}
@@ -122,8 +140,8 @@ export default function BatteryInfo({ battery }: Props) {
         <span className={`badge ${healthColor(battery.health_percent)}`}>
           {t('battery.health')}
         </span>
-        <span style={{ fontSize: 13, color: 'var(--text-dim)', fontWeight: 500 }}>
-          {battery.health_percent.toFixed(1)}%
+        <span style={{ fontSize: 13, color: 'var(--text-muted)', fontWeight: 500 }}>
+          {battery.health_percent.toFixed(0)}% ({healthWord(battery.health_percent)})
         </span>
       </div>
 
@@ -134,7 +152,7 @@ export default function BatteryInfo({ battery }: Props) {
         <span className="stat-label">{t('battery.powerSource')}</span>
         <span
           className="stat-value"
-          style={{ color: battery.is_plugged ? 'var(--success, #4caf50)' : undefined }}
+          style={{ color: battery.is_plugged ? SUCCESS_TEXT : undefined }}
         >
           {battery.is_plugged ? t('battery.acConnected') : t('battery.acOnBattery')}
         </span>
@@ -212,7 +230,7 @@ export default function BatteryInfo({ battery }: Props) {
             className="stat-value"
             style={{
               fontFamily: 'var(--font-mono)',
-              color: 'var(--success, #4caf50)',
+              color: SUCCESS_TEXT,
               fontWeight: 600,
             }}
           >
@@ -228,7 +246,7 @@ export default function BatteryInfo({ battery }: Props) {
           <span
             className="stat-value"
             style={{
-              color: battery.charge_rate_mw > 0 ? 'var(--success, #4caf50)' : undefined,
+              color: battery.charge_rate_mw > 0 ? SUCCESS_TEXT : undefined,
               fontWeight: battery.charge_rate_mw > 0 ? 600 : undefined,
               fontFamily: 'var(--font-mono)',
             }}
@@ -240,7 +258,9 @@ export default function BatteryInfo({ battery }: Props) {
       )}
       {battery.is_charging && battery.time_to_full_minutes != null && (
         <div className="stat-row">
-          <span className="stat-label">{t('battery.timeToFull')}</span>
+          <span className="stat-label">
+            {limit ? t('battery.timeToFullAt', { limit }) : t('battery.timeToFull')}
+          </span>
           <span className="stat-value">{formatTime(battery.time_to_full_minutes)}</span>
         </div>
       )}

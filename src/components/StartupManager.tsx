@@ -32,7 +32,7 @@ export default function StartupManager({ autostart }: Props) {
 
   return (
     <div className="card">
-      <div className="card-title">{t('startup.title')}</div>
+      <h2 className="card-title">{t('startup.title')}</h2>
 
       <ToggleRow
         label={t('startup.runAtStartup')}

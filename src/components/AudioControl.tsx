@@ -178,7 +178,7 @@ export default function AudioControl({
 
   return (
     <div className="card">
-      <div className="card-title">{t('audio.title')}</div>
+      <h2 className="card-title">{t('audio.title')}</h2>
       <p className="page-subtitle">{t('audio.subtitle')}</p>
 
       {/* Volume Slider */}

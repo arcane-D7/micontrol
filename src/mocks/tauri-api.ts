@@ -19,6 +19,59 @@ import type {
 
 let _performanceMode: PerformanceMode = 'balance';
 let _chargingThreshold = 80;
+// Mirrors the EC 0xA4 master switch. Without it the mock returned `undefined`
+// and the charging card could only ever render its "protection off" branch,
+// so the on-path (state line, confirmation) was untestable in mock mode.
+let _batteryCare = false;
+
+/** Deterministic process sample so the Task Manager renders in mock mode. */
+const MOCK_PROCESSES = [
+  {
+    name: 'System Idle Process',
+    pid: 0,
+    cpu_percent: 78.4,
+    memory_mb: 0,
+    gpu_percent: 0,
+    npu_percent: 0,
+    thread_count: 8,
+  },
+  {
+    name: 'MiControl.exe',
+    pid: 4821,
+    cpu_percent: 6.2,
+    memory_mb: 184,
+    gpu_percent: 1.4,
+    npu_percent: 0,
+    thread_count: 32,
+  },
+  {
+    name: 'msedge.exe',
+    pid: 7314,
+    cpu_percent: 4.8,
+    memory_mb: 612,
+    gpu_percent: 2.1,
+    npu_percent: 0,
+    thread_count: 41,
+  },
+  {
+    name: 'XiaomiIoTService.exe',
+    pid: 2204,
+    cpu_percent: 0.7,
+    memory_mb: 46,
+    gpu_percent: 0,
+    npu_percent: 0,
+    thread_count: 11,
+  },
+  {
+    name: 'explorer.exe',
+    pid: 1180,
+    cpu_percent: 0.4,
+    memory_mb: 128,
+    gpu_percent: 0.2,
+    npu_percent: 0,
+    thread_count: 58,
+  },
+];
 let _brightness = 72;
 let _hdr = false;
 let _adaptiveRefreshRate = true;
@@ -326,6 +379,23 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     case 'set_charging_threshold':
       _chargingThreshold = (args?.threshold as number) ?? _chargingThreshold;
       return undefined as T;
+
+    case 'get_battery_care':
+      return _batteryCare as T;
+
+    case 'set_battery_care':
+      _batteryCare = (args?.enabled as boolean) ?? _batteryCare;
+      return undefined as T;
+
+    // ── Task manager ───────────────────────────────────────────────────────
+    case 'get_task_manager':
+      return MOCK_PROCESSES as T;
+
+    case 'kill_process':
+      return undefined as T;
+
+    case 'get_network_perf':
+      return [{ name: 'Wi-Fi', bytes_per_sec: 182000 }] as T;
 
     // ── Startup ────────────────────────────────────────────────────────────
     case 'get_autostart':

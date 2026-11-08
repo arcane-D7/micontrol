@@ -118,7 +118,8 @@ function TaskManagerTab({ hw }: Props) {
   const totalNet = useMemo(() => network.reduce((s, n) => s + n.bytes_per_sec, 0), [network]);
 
   const doKill = async (pid: number, name: string) => {
-    if (!window.confirm(`End process "${name}" (PID ${pid})?`)) return;
+    // Name what is lost, not just "are you sure" (audit #6 / Nielsen #5).
+    if (!window.confirm(t('taskmgr.endProcessConfirm', { name, pid }))) return;
     setKilling(pid);
     setKillError(null);
     try {
@@ -133,27 +134,47 @@ function TaskManagerTab({ hw }: Props) {
     }
   };
 
-  const sortableHeader = (key: SortKey, label: string, align: 'left' | 'right' = 'right') => (
-    <th
-      onClick={() => toggleSort(key)}
-      style={{
-        textAlign: align,
-        padding: '6px 8px',
-        color: 'var(--color-text-dim)',
-        fontWeight: 600,
-        fontSize: 11,
-        textTransform: 'uppercase',
-        letterSpacing: '0.04em',
-        cursor: 'pointer',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-      }}
-      title={`Sort by ${label}`}
-    >
-      {label}
-      {sortKey === key ? (sortDesc ? ' ↓' : ' ↑') : ''}
-    </th>
-  );
+  /**
+   * Sortable column header.
+   *
+   * P0-2 (audit 2026-11-07): `<th onClick>` was unreachable by keyboard and
+   * carried no sort state. The interactive element is now a real <button>
+   * (Enter/Space free, native focus ring), `aria-sort` lives on the <th> as
+   * the spec requires, and the glyph is aria-hidden so it is not read out.
+   */
+  const sortableHeader = (key: SortKey, label: string, align: 'left' | 'right' = 'right') => {
+    const active = sortKey === key;
+    return (
+      <th
+        scope="col"
+        aria-sort={active ? (sortDesc ? 'descending' : 'ascending') : 'none'}
+        style={{
+          textAlign: align,
+          padding: 0,
+          color: 'var(--color-text-muted)',
+          fontWeight: 600,
+          fontSize: 11,
+          textTransform: 'uppercase',
+          letterSpacing: '0.04em',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <button
+          type="button"
+          className="th-sort"
+          onClick={() => toggleSort(key)}
+          aria-label={t('taskmgr.sortBy', { column: label })}
+          title={t('taskmgr.sortBy', { column: label })}
+          style={{ justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}
+        >
+          {label}
+          <span className="th-sort-glyph" aria-hidden="true">
+            {active ? (sortDesc ? '↓' : '↑') : ''}
+          </span>
+        </button>
+      </th>
+    );
+  };
 
   return (
     <>
@@ -170,7 +191,7 @@ function TaskManagerTab({ hw }: Props) {
       >
         {(['cpu', 'gpu', 'npu'] as const).map((k) => (
           <div key={k} className="card" style={{ padding: '10px 14px' }}>
-            <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>{SORT_LABELS[k]} %</div>
+            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{SORT_LABELS[k]} %</div>
             <div style={{ fontSize: 22, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
               {k === 'cpu'
                 ? (hw.systemInfo?.cpu_usage?.toFixed(1) ?? '—')
@@ -200,21 +221,21 @@ function TaskManagerTab({ hw }: Props) {
           </div>
         ))}
         <div className="card" style={{ padding: '10px 14px' }}>
-          <div style={{ fontSize: 11, color: 'var(--color-text-dim)' }}>NET ↓↑</div>
+          <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>NET ↓↑</div>
           <div style={{ fontSize: 22, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
             {fmtBps(totalNet)}
           </div>
           <div
             style={{
               fontSize: 11,
-              color: 'var(--color-text-dim)',
+              color: 'var(--color-text-muted)',
               marginTop: 4,
               whiteSpace: 'nowrap',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
             }}
           >
-            {network.map((n) => n.name).join(' · ') || 'no traffic'}
+            {network.map((n) => n.name).join(' · ') || t('taskmgr.noTraffic')}
           </div>
         </div>
       </div>
@@ -225,6 +246,7 @@ function TaskManagerTab({ hw }: Props) {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder={t('taskmgr.filterPlaceholder')}
+          aria-label={t('taskmgr.filterLabel')}
           style={{
             flex: 1,
             padding: '7px 10px',
@@ -253,6 +275,7 @@ function TaskManagerTab({ hw }: Props) {
 
       {killError && (
         <div
+          role="alert"
           style={{
             padding: '8px 12px',
             marginBottom: 8,
@@ -262,7 +285,7 @@ function TaskManagerTab({ hw }: Props) {
             fontSize: 12,
           }}
         >
-          {killError}
+          {t('taskmgr.killFailed')}: {killError}
         </div>
       )}
 
@@ -271,21 +294,23 @@ function TaskManagerTab({ hw }: Props) {
         style={{ padding: 0, overflow: 'auto', maxHeight: 'calc(100vh - 320px)' }}
       >
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+          <caption className="sr-only">{t('nav.taskmgr')}</caption>
           <thead
             style={{ position: 'sticky', top: 0, background: 'var(--color-surface, #1e1e2e)' }}
           >
             <tr style={{ borderBottom: '1px solid var(--color-border, rgba(255,255,255,0.1))' }}>
-              {sortableHeader('name', 'Process', 'left')}
-              {sortableHeader('pid', 'PID')}
-              {sortableHeader('cpu', 'CPU %')}
-              {sortableHeader('gpu', 'GPU %')}
-              {sortableHeader('npu', 'NPU %')}
-              {sortableHeader('ram', 'RAM')}
+              {sortableHeader('name', t('taskmgr.colProcess'), 'left')}
+              {sortableHeader('pid', t('taskmgr.colPid'))}
+              {sortableHeader('cpu', t('taskmgr.colCpu'))}
+              {sortableHeader('gpu', t('taskmgr.colGpu'))}
+              {sortableHeader('npu', t('taskmgr.colNpu'))}
+              {sortableHeader('ram', t('taskmgr.colRam'))}
               <th
+                scope="col"
                 style={{
                   padding: '6px 8px',
                   textAlign: 'right',
-                  color: 'var(--color-text-dim)',
+                  color: 'var(--color-text-muted)',
                   fontWeight: 600,
                   fontSize: 11,
                   textTransform: 'uppercase',
@@ -293,9 +318,11 @@ function TaskManagerTab({ hw }: Props) {
                   whiteSpace: 'nowrap',
                 }}
               >
-                Threads
+                {t('taskmgr.colThreads')}
               </th>
-              <th style={{ padding: '6px 8px', width: 56 }} />
+              <th scope="col" style={{ padding: '6px 8px', width: 56 }}>
+                <span className="sr-only">{t('taskmgr.colActions')}</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -303,7 +330,7 @@ function TaskManagerTab({ hw }: Props) {
               <tr>
                 <td
                   colSpan={7}
-                  style={{ textAlign: 'center', padding: 28, color: 'var(--color-text-dim)' }}
+                  style={{ textAlign: 'center', padding: 28, color: 'var(--color-text-muted)' }}
                 >
                   {t('common.loading')}…
                 </td>
@@ -312,7 +339,7 @@ function TaskManagerTab({ hw }: Props) {
               <tr>
                 <td
                   colSpan={7}
-                  style={{ textAlign: 'center', padding: 28, color: 'var(--color-text-dim)' }}
+                  style={{ textAlign: 'center', padding: 28, color: 'var(--color-text-muted)' }}
                 >
                   {filter ? t('taskmgr.noMatches') : t('taskmgr.noProcesses')}
                 </td>
@@ -340,7 +367,7 @@ function TaskManagerTab({ hw }: Props) {
                     style={{
                       padding: '5px 8px',
                       textAlign: 'right',
-                      color: 'var(--color-text-dim)',
+                      color: 'var(--color-text-muted)',
                       fontVariantNumeric: 'tabular-nums',
                     }}
                   >
@@ -387,7 +414,7 @@ function TaskManagerTab({ hw }: Props) {
                       padding: '5px 8px',
                       textAlign: 'right',
                       fontVariantNumeric: 'tabular-nums',
-                      color: 'var(--color-text-dim)',
+                      color: 'var(--color-text-muted)',
                     }}
                   >
                     {p.thread_count || '—'}
@@ -396,18 +423,23 @@ function TaskManagerTab({ hw }: Props) {
                     <button
                       onClick={() => void doKill(p.pid, p.name)}
                       disabled={killing === p.pid}
-                      title={`End ${p.name}`}
+                      aria-label={t('taskmgr.endProcess', { name: p.name })}
+                      title={t('taskmgr.endProcess', { name: p.name })}
                       style={{
                         background: 'oklch(from var(--error) l c h / 0.12)',
-                        color: 'var(--error)',
+                        /* One step darker than --error so the ✕ clears AA on
+                           its own 12% tint in light mode (3.7:1 → 5.2:1). */
+                        color: 'oklch(from var(--error) calc(l - 0.07) c h)',
                         border: 'none',
                         borderRadius: 6,
                         padding: '3px 8px',
                         fontSize: 11,
+                        minWidth: 24,
+                        minHeight: 24,
                         cursor: 'pointer',
                       }}
                     >
-                      {killing === p.pid ? '…' : '✕'}
+                      <span aria-hidden="true">{killing === p.pid ? '…' : '✕'}</span>
                     </button>
                   </td>
                 </tr>
@@ -417,8 +449,8 @@ function TaskManagerTab({ hw }: Props) {
         </table>
       </div>
 
-      <div style={{ marginTop: 8, fontSize: 11, color: 'var(--color-text-dim)' }}>
-        {rows.length} process(es) · refreshes every 2.5 s · NPU = Intel Arc neural engines
+      <div style={{ marginTop: 8, fontSize: 11, color: 'var(--color-text-muted)' }}>
+        {t('taskmgr.footer', { count: rows.length })}
       </div>
     </>
   );
