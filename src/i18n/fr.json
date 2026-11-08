@@ -425,7 +425,11 @@
     "applying": "Application...",
     "applied": "Mode ventilateur défini",
     "error": "Échec de la définition du mode ventilateur",
-    "warning": "Le contrôle manuel du ventilateur peut affecter les performances thermiques"
+    "warning": "Le contrôle manuel du ventilateur peut affecter les performances thermiques",
+    "noSensor": "N/A — pas de capteur de tr/min sur cette plateforme",
+    "noSensorHint": "Ce portable n'expose pas le régime du ventilateur au logiciel (Win32_Fan.DesiredSpeed est vide et l'EC RAM est refusé). Le ventilateur est géré par l'EC.",
+    "fixedProfileNote": "Ce portable n'expose aucune lecture de régime : le curseur choisit une bande de profil EC (Quiet / Balanced / Performance), il ne fixe pas un régime exact.",
+    "ambient": "Ambiante"
   },
   "touchpad": {
     "title": "Pavé tactile",

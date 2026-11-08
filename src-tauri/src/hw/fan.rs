@@ -10,23 +10,139 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant as StdInstant};
 
+/// Where a temperature reading came from. Lets the UI distinguish "sensor not
+/// available on this platform" from "sensor exists but read failed".
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TempSource {
+    /// Intel ESIF/DPTF (`EsifDeviceInformation`) — real CPU/GPU die sensors.
+    Esif,
+    /// A non-ambient ACPI thermal zone. Never `TZ00` (ambient on this platform).
+    Acpi,
+    /// EC RAM block via the `ecram_service` pipe.
+    EcRam,
+    /// No source produced a plausible reading.
+    #[default]
+    Unavailable,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FanInfo {
     pub mode: FanMode,
-    /// Fan RPM from Win32_Fan.CurrentReading — 0 when the EC does not expose
-    /// RPM via WMI (common on Xiaomi Book Pro 14 and similar Intel platforms).
-    pub speed_rpm: u32,
-    pub speed_percent: u8,
+    /// Measured fan RPM — `None` when the platform exposes **no** RPM sensor.
+    ///
+    /// This is the normal state here: `Win32_Fan.DesiredSpeed` comes back empty
+    /// and every EC RAM read is denied (`Access denied` / IOCTL failure, even
+    /// as SYSTEM). `None` is deliberately not `0`: "0 RPM" reads as "the fan is
+    /// stopped", a claim we cannot make.
+    pub speed_rpm: Option<u32>,
+    /// Measured fan speed as a percentage of full scale, derived from
+    /// [`FanInfo::speed_rpm`]. `None` whenever `speed_rpm` is `None` — the
+    /// registry value is a *request*, not a measurement, and must never be
+    /// drawn as a gauge.
+    pub speed_percent: Option<u8>,
+    /// Percentage last requested by the user (`HKLM\SOFTWARE\MI\FanControl`,
+    /// value `FixedSpeed`). Always present. This is what the slider shows; it is
+    /// not evidence of the current fan speed.
+    pub requested_speed_percent: u8,
     /// GPU temperature in Celsius. None when no sensor is available
     /// (ESIF/DPTF driver absent and ACPI thermal zone unavailable).
     pub gpu_temp_celsius: Option<f32>,
-    /// CPU temperature in Celsius. None when no sensor is available
-    /// (ESIF/DPTF driver absent and ACPI thermal zone unavailable).
+    /// CPU temperature in Celsius. None when no sensor is available.
+    ///
+    /// The ACPI ambient zone is **never** used as a CPU temperature: `TZ00`
+    /// read 27.85 °C while ESIF reported 57 °C on the CPU hotspot, so falling
+    /// back to it would show the room as the processor.
     pub cpu_temp_celsius: Option<f32>,
+    /// Ambient/chassis temperature (`TZ00`), when ACPI exposes it. This is the
+    /// only thing `TZ00` is reported as.
+    pub ambient_temp_celsius: Option<f32>,
     /// CPU package power from Intel ESIF/DPTF (EsifDeviceInformation._0 Power
     /// field), in watts. The raw WMI value is in deciwatts (×0.1 W). None when
     /// the DPTF driver is absent or reports zero.
     pub tdp_watts: Option<f32>,
+    /// Which source produced [`FanInfo::cpu_temp_celsius`].
+    #[serde(default)]
+    pub temp_source: TempSource,
+}
+
+/// What `set_fan_mode` actually did — as opposed to what the mode is called.
+///
+/// The old API returned `Ok(())` unconditionally, so the UI showed "Fan mode
+/// set" even when every hardware path had failed. This carries the real
+/// outcome, without changing which hardware writes are attempted.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct FanModeResult {
+    /// The mode was persisted and at least one hardware path accepted it.
+    /// `true` does **not** mean the fan speed changed — see `rpm_control`.
+    pub applied: bool,
+    /// What actually ran, e.g. `registry+ec_profile`, `registry+ec_profile+igcl`,
+    /// or `registry` when no hardware path accepted the mode.
+    pub method: String,
+    /// `true` only when an IGCL fan handle was programmed with a fixed speed —
+    /// i.e. RPM were really pinned. Always `false` on this platform (IGCL
+    /// enumerates no fans), which is why "Fixed Speed" cannot fix RPM here.
+    pub rpm_control: bool,
+    /// Honest caveat to show next to the result, when there is one.
+    pub warning: Option<String>,
+}
+
+impl FanModeResult {
+    /// Build the result from the outcomes of the individual hardware paths.
+    pub fn new(mode: &FanMode, ec_profile: &str, ec_applied: bool, rpm_control: bool) -> Self {
+        let mut method = String::from("registry");
+        if ec_applied {
+            method.push_str("+ec_profile");
+        }
+        if rpm_control {
+            method.push_str("+igcl");
+        }
+        let warning = match mode {
+            FanMode::Fixed if !rpm_control => Some(format!(
+                "Fixed speed requested, but this platform exposes no RPM control \
+                 (IGCL enumerates no fans): the EC fan profile '{ec_profile}' was \
+                 applied instead. Fan RPM are not pinned."
+            )),
+            FanMode::Fixed => None,
+            FanMode::Off => Some(
+                "This platform cannot stop the fan: the EC was set to Super Quiet \
+                 (minimum profile). The fan keeps running."
+                    .to_string(),
+            ),
+            FanMode::Auto if !ec_applied => Some(
+                "The EC fan profile could not be written; only the stored setting changed."
+                    .to_string(),
+            ),
+            FanMode::Auto => None,
+        };
+        Self {
+            applied: ec_applied || rpm_control,
+            method,
+            rpm_control,
+            warning,
+        }
+    }
+
+    /// Parse the elevated helper's reply.
+    ///
+    /// An older helper (pre-0.2.21) answers `null` for `set_fan_mode`. Rather
+    /// than turning that into a hard UI error, report it plainly: the registry
+    /// write is what the old code guaranteed, and there is no readback.
+    pub fn from_bridge(value: &serde_json::Value) -> Self {
+        match serde_json::from_value::<Self>(value.clone()) {
+            Ok(result) => result,
+            Err(_) => Self {
+                applied: true,
+                method: "registry".to_string(),
+                rpm_control: false,
+                warning: Some(
+                    "The elevated helper did not report the fan result (older build); \
+                     only the stored setting is confirmed."
+                        .to_string(),
+                ),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -53,6 +169,11 @@ pub struct EsifReadings {
     pub cpu_temp: Option<f32>,
     pub gpu_temp: Option<f32>,
     pub tdp_watts: Option<f32>,
+    /// Chassis/ambient temperature from the ACPI `TZ00` zone, when available.
+    /// Kept separate on purpose: it is real data, but it is not the CPU.
+    pub ambient_temp: Option<f32>,
+    /// Which source produced `cpu_temp`.
+    pub cpu_source: TempSource,
 }
 
 fn get_esif_readings() -> HardwareResult<EsifReadings> {
@@ -221,6 +342,12 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
             cpu_temp,
             gpu_temp,
             tdp_watts,
+            ambient_temp: None,
+            cpu_source: if cpu_temp.is_some() {
+                TempSource::Esif
+            } else {
+                TempSource::Unavailable
+            },
         })
     }
     #[cfg(not(windows))]
@@ -229,6 +356,8 @@ fn get_esif_readings() -> HardwareResult<EsifReadings> {
             cpu_temp: None,
             gpu_temp: None,
             tdp_watts: None,
+            ambient_temp: None,
+            cpu_source: TempSource::Unavailable,
         })
     }
 }
@@ -456,6 +585,8 @@ impl EsifReadings {
             cpu_temp: None,
             gpu_temp: None,
             tdp_watts: None,
+            ambient_temp: None,
+            cpu_source: TempSource::Unavailable,
         }
     }
 }
@@ -582,6 +713,7 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
     // Success — close the circuit and reset the failure counter.
     attempt.success();
     let mut cpu_temp: Option<f32> = None;
+    let mut cpu_source = TempSource::Unavailable;
     let mut gpu_temp: Option<f32> = None;
     let mut tdp_watts: Option<f32> = None;
 
@@ -597,6 +729,7 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
             .fold(f32::NEG_INFINITY, f32::max);
         if max_temp.is_finite() {
             cpu_temp = Some(max_temp.clamp(0.0, 120.0));
+            cpu_source = TempSource::Esif;
         }
         gpu_temp = esif
             .iter()
@@ -618,27 +751,52 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
             .map(|dw| ((dw as f32) / 10.0).clamp(0.0, 150.0));
     }
 
-    // ACPI thermal zone fallback (CPU-side).
-    if cpu_temp.is_none() {
-        if let Some(zones) = raw
-            .get("acpi")
-            .and_then(|v| v.get("zones"))
-            .and_then(|a| a.as_array())
-        {
-            if let Some(t) = zones.iter().find_map(|z| {
-                z.get("temp_c")
-                    .and_then(|t| t.as_f64())
-                    .filter(|t| *t > 0.0)
-            }) {
-                cpu_temp = Some((t as f32).clamp(0.0, 120.0));
+    // ACPI thermal zone fallback (CPU-side) — **ambient zone excluded**.
+    // On this platform the only ACPI zone is TZ00, which is the chassis sensor
+    // (27.85 °C in the same sample where ESIF read 57 °C on the CPU hotspot).
+    // Using it as the CPU temperature would report the room as the processor,
+    // so an ambient-only zone list leaves `cpu_temp` at `None` (P2-8).
+    let mut ambient_temp: Option<f32> = None;
+    let acpi_zones = raw
+        .get("acpi")
+        .and_then(|v| v.get("zones"))
+        .and_then(|a| a.as_array());
+    if let Some(zones) = acpi_zones {
+        let temp_of = |z: &serde_json::Value| -> Option<f32> {
+            z.get("temp_c")
+                .and_then(|t| t.as_f64())
+                .filter(|t| t.is_finite() && *t > 0.0)
+                .map(|t| (t as f32).clamp(0.0, 120.0))
+        };
+        if cpu_temp.is_none() {
+            cpu_temp = zones
+                .iter()
+                .filter(|z| {
+                    z.get("instance")
+                        .and_then(|i| i.as_str())
+                        .is_some_and(|name| !crate::hw::thermal::is_ambient_zone(name))
+                })
+                .find_map(temp_of);
+            if cpu_temp.is_some() {
+                cpu_source = TempSource::Acpi;
             }
         }
+        ambient_temp = zones
+            .iter()
+            .filter(|z| {
+                z.get("instance")
+                    .and_then(|i| i.as_str())
+                    .is_some_and(crate::hw::thermal::is_ambient_zone)
+            })
+            .find_map(temp_of);
     }
 
     let readings = EsifReadings {
         cpu_temp,
         gpu_temp,
         tdp_watts,
+        ambient_temp,
+        cpu_source,
     };
 
     // ── S37-004: Store the successful reading in the TTL cache ──────────────
@@ -656,22 +814,78 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
 /// [`get_fan_info_seeded`] with readings fetched via the elevated bridge,
 /// because the thermal WMI classes deny unprivileged callers.
 pub fn get_fan_info() -> HardwareResult<FanInfo> {
-    get_fan_info_seeded(EsifReadings {
-        cpu_temp: None,
-        gpu_temp: None,
-        tdp_watts: None,
+    get_fan_info_seeded(EsifReadings::unavailable())
+}
+
+/// EC RAM reading via the `ecram_service` pipe.
+struct EcRamReading {
+    cpu_temp_celsius: f32,
+    rpm: Option<u32>,
+}
+
+/// Read the ACPI ERAM block (0xFE0B0300, 256 bytes) via the pipe.
+///
+/// CPU temp is at offset 0x03, fan RPM at 0x04-0x05, GPU temp is not available
+/// here. The block is **known to read back as all zeros on this platform**
+/// while still reporting success (the IOCTL is denied even to SYSTEM), so a
+/// zero temperature or zero RPM is treated as "no reading" — never as data.
+fn read_ecram_reading() -> Option<EcRamReading> {
+    let eram = crate::hw::ecram::read_ecram_via_pipe(crate::hw::ecram::get_eram_base(), 0x10)?;
+    if eram.len() < 0x08 {
+        return None;
+    }
+    let cpu_t = eram[0x03] as f32;
+    let fan_rpm = u16::from_le_bytes([eram[0x04], eram[0x05]]) as u32;
+    log::debug!(
+        target: "hw::fan",
+        "EC RAM via pipe: cpu_temp={cpu_t}°C, fan_rpm={fan_rpm}"
+    );
+    Some(EcRamReading {
+        cpu_temp_celsius: cpu_t,
+        rpm: (fan_rpm > 0).then_some(fan_rpm),
     })
+}
+
+/// Assemble `FanInfo` from already-gathered parts. Pure — unit-testable.
+fn build_fan_info(
+    mode: FanMode,
+    requested_speed_percent: u8,
+    speed_rpm: Option<u32>,
+    thermal: ThermalTotals,
+) -> FanInfo {
+    FanInfo {
+        mode,
+        // A percentage of full scale is only meaningful next to a measured RPM.
+        // Without one we report "unavailable", never the requested value.
+        speed_percent: speed_rpm.map(|rpm| ((rpm as f32 / 5000.0) * 100.0).clamp(0.0, 100.0) as u8),
+        speed_rpm,
+        requested_speed_percent,
+        gpu_temp_celsius: thermal.gpu_temp,
+        cpu_temp_celsius: thermal.cpu_temp,
+        ambient_temp_celsius: thermal.ambient_temp,
+        tdp_watts: thermal.tdp_watts,
+        temp_source: thermal.source,
+    }
+}
+
+/// Temperature half of [`build_fan_info`].
+struct ThermalTotals {
+    cpu_temp: Option<f32>,
+    gpu_temp: Option<f32>,
+    ambient_temp: Option<f32>,
+    tdp_watts: Option<f32>,
+    source: TempSource,
 }
 
 /// Compute `FanInfo`, seeding the ESIF readings with values fetched from the
 /// elevated bridge when the direct (in-process) WMI query is denied.
 pub fn get_fan_info_seeded(elevated: EsifReadings) -> HardwareResult<FanInfo> {
-    let speed_rpm = get_fan_rpm_wmi().unwrap_or(0);
-    let esif = get_esif_readings().unwrap_or(EsifReadings {
-        cpu_temp: None,
-        gpu_temp: None,
-        tdp_watts: None,
-    });
+    // ── RPM: only a real sensor reading is reported ──────────────────────────
+    // Win32_Fan.DesiredSpeed is empty on this platform and every EC RAM path is
+    // denied, so this is normally `None` — not `0`.
+    let wmi_rpm = get_fan_rpm_wmi().unwrap_or(None);
+
+    let esif = get_esif_readings().unwrap_or_else(|_| EsifReadings::unavailable());
 
     // If the direct (unprivileged) WMI read returned nothing — which is
     // expected on this platform because the thermal classes deny non-elevated
@@ -682,54 +896,61 @@ pub fn get_fan_info_seeded(elevated: EsifReadings) -> HardwareResult<FanInfo> {
         esif
     };
 
+    // The EC RAM pipe is only worth a round-trip when WMI gave neither an RPM
+    // nor a CPU temperature. On this platform it always is (both are empty).
+    let ecram = if wmi_rpm.is_none() || esif.cpu_temp.is_none() {
+        read_ecram_reading()
+    } else {
+        None
+    };
+
     // ── Temperature fallback chain ──────────────────────────────────────────
-    // 1. Intel ESIF/DPTF (WMI EsifDeviceInformation) — most accurate
-    // 2. ACPI thermal zone (MSAcpi_ThermalZoneTemperature) — CPU only
-    // 3. EC RAM via ecram_service pipe — CPU temp at offset 0x03, fan RPM at 0x04
-    let acpi_fallback = || -> Option<f32> {
-        match crate::hw::thermal::get_primary_thermal_zone() {
-            Ok(zone) => Some(zone.current_temp_celsius as f32),
+    // 1. Intel ESIF/DPTF (Wmi EsifDeviceInformation) — real die sensors
+    // 2. EC RAM via ecram_service pipe (CPU temp at 0x03)
+    // 3. A non-ambient ACPI zone — never TZ00 (ambient here: 27.85 °C vs 57 °C)
+    // 4. Nothing → `None` + TempSource::Unavailable
+    let (cpu_temp, cpu_source) = if let Some(t) = esif.cpu_temp {
+        // `esif.cpu_source` distinguishes a real ESIF die sensor from a
+        // non-ambient ACPI zone picked up by the elevated read.
+        (Some(t), esif.cpu_source)
+    } else if let Some(t) = ecram
+        .as_ref()
+        .map(|e| e.cpu_temp_celsius)
+        .filter(|t| t.is_finite() && *t > 0.0 && *t <= 120.0)
+    {
+        (Some(t), TempSource::EcRam)
+    } else {
+        match crate::hw::thermal::cpu_temp_from_acpi() {
+            Ok(Some(t)) => (Some(t), TempSource::Acpi),
+            Ok(None) => {
+                log::debug!(
+                    target: "hw::fan",
+                    "no CPU sensor: ESIF unavailable, EC RAM unusable, ACPI only has the \
+                     ambient zone — reporting unavailable instead of the room temperature"
+                );
+                (None, TempSource::Unavailable)
+            }
             Err(e) => {
                 log::debug!(target: "hw::fan", "ACPI thermal zone unavailable: {e}");
-                None
+                (None, TempSource::Unavailable)
             }
         }
     };
 
-    // EC RAM via pipe fallback — reads the ACPI ERAM block (0xFE0B0300, 256 bytes)
-    // CPU temp is at offset 0x03, fan RPM at 0x04-0x05, GPU temp not available here.
-    let ecram_fallback = || -> Option<(f32, u32, Option<f32>)> {
-        let eram = crate::hw::ecram::read_ecram_via_pipe(crate::hw::ecram::get_eram_base(), 0x10)?;
-        if eram.len() < 0x08 {
-            return None;
-        }
-        let cpu_t = eram[0x03] as f32;
-        let fan_rpm = u16::from_le_bytes([eram[0x04], eram[0x05]]) as u32;
-        let tdp = if eram.len() > 0x0A {
-            Some(eram[0x0A] as f32)
-        } else {
-            None
-        };
-        log::debug!(target: "hw::fan", "EC RAM via pipe: cpu_temp={cpu_t}°C, fan_rpm={fan_rpm}, tdp={tdp:?}");
-        Some((cpu_t, fan_rpm, tdp))
-    };
+    // GPU temp: ESIF only. The ACPI zone is the ambient sensor here — using it
+    // as the GPU temperature would repeat the P2-8 mistake on the other metric.
+    let gpu_temp = esif.gpu_temp;
 
-    let cpu_temp = esif
-        .cpu_temp
-        .or_else(acpi_fallback)
-        .or_else(|| ecram_fallback().map(|(t, _, _)| t));
-    // GPU temp: use ESIF, then ACPI fallback (same thermal zone — better than None)
-    let gpu_temp = esif.gpu_temp.or_else(acpi_fallback);
+    let ambient_temp = esif
+        .ambient_temp
+        .or_else(|| crate::hw::thermal::ambient_temp_from_acpi().ok().flatten());
+
     let tdp_watts = esif.tdp_watts;
 
-    // Fan RPM: WMI first, then EC RAM via pipe
-    let speed_rpm = if speed_rpm > 0 {
-        speed_rpm
-    } else {
-        ecram_fallback().map(|(_, rpm, _)| rpm).unwrap_or(0)
-    };
+    // Fan RPM: WMI first, then EC RAM via pipe. `None` means "no sensor".
+    let speed_rpm = wmi_rpm.or_else(|| ecram.as_ref().and_then(|e| e.rpm));
 
-    let (mode, speed_percent) = get_fan_mode_registry().unwrap_or((FanMode::Auto, 50));
+    let (mode, requested_speed_percent) = get_fan_mode_registry().unwrap_or((FanMode::Auto, 50));
 
     // WORKING FORM — DO NOT MODIFY: EC performance mode is read via WMI
     // MiInterface (ACPI WMAA method), NOT via IoTDriver or ECRAM.
@@ -742,46 +963,47 @@ pub fn get_fan_info_seeded(elevated: EsifReadings) -> HardwareResult<FanInfo> {
         log::debug!(target: "hw::fan", "EC performance mode via WMI: {:?}", ec_mode);
     }
 
-    let speed_percent_actual = if speed_rpm > 0 {
-        ((speed_rpm as f32 / 5000.0) * 100.0).clamp(0.0, 100.0) as u8
-    } else {
-        speed_percent
-    };
-
-    Ok(FanInfo {
+    Ok(build_fan_info(
         mode,
+        requested_speed_percent,
         speed_rpm,
-        speed_percent: speed_percent_actual,
-        gpu_temp_celsius: gpu_temp,
-        cpu_temp_celsius: cpu_temp,
-        tdp_watts,
-    })
+        ThermalTotals {
+            cpu_temp,
+            gpu_temp,
+            ambient_temp,
+            tdp_watts,
+            source: cpu_source,
+        },
+    ))
 }
 
-pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<()> {
+/// Apply a fan mode and report what actually happened.
+///
+/// The hardware writes are unchanged: for every mode the registry is
+/// persisted, the EC performance profile is written over WMAA, and IGCL is
+/// asked to take over the fan (which is a no-op on this platform, where IGCL
+/// enumerates no fans). What changed is the **return value**: instead of a
+/// bare `Ok(())`, the caller gets [`FanModeResult`], which says whether a
+/// hardware path accepted the mode and whether RPM were really pinned.
+///
+/// `Fixed Speed` cannot pin RPM here — there is no controllable fan handle and
+/// no RPM readback — so it degrades to "the EC profile closest to the requested
+/// band" and says so in `warning`. `Off` cannot stop the fan: it maps to the
+/// SuperQuiet profile and says so too.
+pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<FanModeResult> {
     persist_fan_registry(&mode, speed_percent)?;
 
     // WORKING FORM — DO NOT MODIFY: EC performance mode is set via WMI
     // MiInterface (ACPI WMAA method), NOT via IoTDriver or ECRAM.
     // wmi_ec::set_performance_mode() calls wmi_write(FUN2_EC_FUNC, mode, 0)
     // which goes through the MICommonInterface WMI class in root\WMI.
-    // FanMode mapping to EcPerformanceMode:
+    // FanMode → EcPerformanceMode mapping (unchanged):
     //   Auto/Fixed >=80% → UltraPerformance (9)
     //   Auto/Fixed >=50% → Balanced (6)
     //   Auto/Fixed <50%  → Quiet (7)
     //   Off              → SuperQuiet (8)
     let ec_mode = match mode {
-        FanMode::Auto => {
-            // Map to EC balanced/performance based on speed
-            if speed_percent >= 80 {
-                crate::hw::wmi_ec::EcPerformanceMode::UltraPerformance
-            } else if speed_percent >= 50 {
-                crate::hw::wmi_ec::EcPerformanceMode::Balanced
-            } else {
-                crate::hw::wmi_ec::EcPerformanceMode::Quiet
-            }
-        }
-        FanMode::Fixed => {
+        FanMode::Auto | FanMode::Fixed => {
             if speed_percent >= 80 {
                 crate::hw::wmi_ec::EcPerformanceMode::UltraPerformance
             } else if speed_percent >= 50 {
@@ -792,22 +1014,69 @@ pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<()> {
         }
         FanMode::Off => crate::hw::wmi_ec::EcPerformanceMode::SuperQuiet,
     };
-    crate::hw::wmi_ec::set_performance_mode(ec_mode)
-        .unwrap_or_else(|e| log::warn!("WMI EC set_performance_mode: {e}"));
-
-    match mode {
-        FanMode::Auto => set_fan_auto_igcl().unwrap_or_else(|e| log::warn!("IGCL fan auto: {e}")),
-        FanMode::Fixed => {
-            set_fan_fixed_igcl(speed_percent).unwrap_or_else(|e| log::warn!("IGCL fan fixed: {e}"))
+    let ec_profile = ec_profile_label(ec_mode);
+    let ec_applied = match crate::hw::wmi_ec::set_performance_mode(ec_mode) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("WMI EC set_performance_mode: {e}");
+            false
         }
-        FanMode::Off => log::warn!("Fan off mode not directly supported — using minimum speed"),
+    };
+
+    // `true` only when an IGCL fan handle was actually programmed — i.e. the
+    // fixed speed was really applied to a fan. Always false here.
+    let rpm_control = match mode {
+        FanMode::Auto => set_fan_auto_igcl().unwrap_or_else(|e| {
+            log::warn!("IGCL fan auto: {e}");
+            false
+        }),
+        FanMode::Fixed => set_fan_fixed_igcl(speed_percent).unwrap_or_else(|e| {
+            log::warn!("IGCL fan fixed: {e}");
+            false
+        }),
+        FanMode::Off => {
+            log::warn!("Fan off mode not directly supported — using minimum speed");
+            false
+        }
+    };
+
+    let result = FanModeResult::new(&mode, ec_profile, ec_applied, rpm_control);
+    log::info!(
+        target: "hw::fan",
+        "set_fan_mode {mode:?} {speed_percent}% → applied={} method={} rpm_control={} profile={ec_profile}",
+        result.applied,
+        result.method,
+        result.rpm_control
+    );
+    Ok(result)
+}
+
+/// Human-readable name of the EC fan profile written by `set_fan_mode`.
+///
+/// The WMAA values map to the EC's fan profile bands; the names mirror
+/// [`crate::hw::wmi_ec::EcPerformanceMode`] and are what the honest result
+/// message quotes back to the user.
+fn ec_profile_label(mode: crate::hw::wmi_ec::EcPerformanceMode) -> &'static str {
+    use crate::hw::wmi_ec::EcPerformanceMode as Ec;
+    match mode {
+        Ec::Performance => "Performance",
+        Ec::Balanced => "Balanced",
+        Ec::Quiet => "Quiet",
+        Ec::SuperQuiet => "SuperQuiet",
+        Ec::UltraPerformance => "UltraPerformance",
+        Ec::Extreme => "Extreme",
     }
-    Ok(())
 }
 
 // ── WMI helpers ─────────────────────────────────────────────────────────────
 
-fn get_fan_rpm_wmi() -> HardwareResult<u32> {
+/// Read fan RPM from `Win32_Fan`.
+///
+/// Returns `None` when the platform exposes no RPM sensor — which is the case
+/// here: the class exists but `DesiredSpeed` comes back empty, and no other
+/// property carries a tachometer reading. Callers must not turn `None` into
+/// `0`: "0 RPM" claims the fan has stopped.
+fn get_fan_rpm_wmi() -> HardwareResult<Option<u32>> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
@@ -816,9 +1085,8 @@ fn get_fan_rpm_wmi() -> HardwareResult<u32> {
 
         // Win32_Fan does not have a CurrentReading property on most Xiaomi Book platforms.
         // It does have DesiredSpeed (UInt64) and VariableSpeed (Boolean), but these are
-        // typically empty. We query all available properties and try DesiredSpeed first,
-        // then fall back to 0 (fan RPM is not exposed via WMI on this platform).
-        // The ESIF/DPTF driver provides temperature data separately via get_esif_readings().
+        // typically empty. The ESIF/DPTF driver provides temperature data separately via
+        // get_esif_readings().
         let query_result = wmi_cache::with_cimv2(|wmi| {
             match wmi.raw_query("SELECT DesiredSpeed, VariableSpeed FROM Win32_Fan") {
                 Ok(r) => Ok(r),
@@ -832,22 +1100,24 @@ fn get_fan_rpm_wmi() -> HardwareResult<u32> {
             Ok(r) => r,
             Err(e) => {
                 log::debug!(target: "hw::fan", "Win32_Fan query failed: {e}");
-                return Ok(0); // No fan data — don't fail the whole call
+                return Ok(None); // No fan data — don't fail the whole call
             }
         };
         if let Some(row) = results.first() {
-            // Try DesiredSpeed first (UInt64, may be null on some platforms)
+            // DesiredSpeed is UInt64 and may be null on some platforms. A zero
+            // here means "not populated", not "fan stopped": no Xiaomi Book Pro
+            // reports 0 through this property while the fan is spinning.
             if let Some(rpm) = wmi_extract::extract_u64(row, "DesiredSpeed") {
                 if rpm > 0 {
-                    return Ok(rpm as u32);
+                    return Ok(Some(rpm as u32));
                 }
             }
         }
-        Ok(0)
+        Ok(None)
     }
     #[cfg(not(windows))]
     {
-        Ok(0)
+        Ok(None)
     }
 }
 
@@ -1084,7 +1354,13 @@ where
     Ok(0)
 }
 
-fn set_fan_auto_igcl() -> HardwareResult<()> {
+/// Hand the fan back to the EC's automatic curve.
+///
+/// Returns `true` only when at least one IGCL fan handle was programmed. On
+/// this platform IGCL enumerates no fans, so it returns `false` — the EC keeps
+/// managing the fan, which is the same end state, but it is not something we
+/// can claim to have done.
+fn set_fan_auto_igcl() -> HardwareResult<bool> {
     #[cfg(windows)]
     {
         use igcl_fan::*;
@@ -1107,11 +1383,20 @@ fn set_fan_auto_igcl() -> HardwareResult<()> {
         if n == 0 {
             log::debug!("[fan] Auto mode: no IGCL fans — performance mode controls EC fan");
         }
+        Ok(n > 0)
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
 }
 
-fn set_fan_fixed_igcl(speed_percent: u8) -> HardwareResult<()> {
+/// Pin the fan to a fixed percentage through IGCL.
+///
+/// Returns `true` only when a fan handle was actually programmed — i.e. the
+/// speed really was pinned. `false` means "nothing to control": the EC profile
+/// written by the caller is the only thing that changed.
+fn set_fan_fixed_igcl(speed_percent: u8) -> HardwareResult<bool> {
     #[cfg(windows)]
     {
         use igcl_fan::*;
@@ -1142,8 +1427,12 @@ fn set_fan_fixed_igcl(speed_percent: u8) -> HardwareResult<()> {
         if n == 0 {
             log::debug!("[fan] Fixed {clamped}%: no IGCL fans — only perf mode affects EC fan");
         }
+        Ok(n > 0)
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -1279,5 +1568,128 @@ mod tests {
         circuit.reset();
         assert!(!circuit.was_active());
         assert_eq!(circuit.begin(now), CircuitDecision::Proceed);
+    }
+
+    // ── P2-1: no RPM sensor must read as "unavailable", never 0 RPM + 50 % ──
+
+    fn thermal(cpu: Option<f32>) -> ThermalTotals {
+        ThermalTotals {
+            cpu_temp: cpu,
+            gpu_temp: None,
+            ambient_temp: Some(27.85),
+            tdp_watts: None,
+            source: if cpu.is_some() {
+                TempSource::Esif
+            } else {
+                TempSource::Unavailable
+            },
+        }
+    }
+
+    /// The production state: no tachometer, registry `FixedSpeed = 50`. The old
+    /// code reported `rpm = 0` *and* a 50 % gauge at the same time.
+    #[test]
+    fn no_rpm_sensor_reports_unavailable_not_zero() {
+        let info = build_fan_info(FanMode::Fixed, 50, None, thermal(Some(57.0)));
+        assert_eq!(info.speed_rpm, None, "no sensor must not be reported as 0");
+        assert_eq!(info.speed_percent, None, "gauge must not be synthesised");
+        assert_eq!(
+            info.requested_speed_percent, 50,
+            "the requested value is still carried, but separately"
+        );
+        assert_eq!(info.cpu_temp_celsius, Some(57.0));
+    }
+
+    /// With a real tachometer reading the gauge is derived from it — never from
+    /// the registry.
+    #[test]
+    fn measured_rpm_derives_the_percentage() {
+        let info = build_fan_info(FanMode::Fixed, 50, Some(3000), thermal(Some(57.0)));
+        assert_eq!(info.speed_rpm, Some(3000));
+        assert_eq!(info.speed_percent, Some(60), "3000 / 5000 = 60 %");
+    }
+
+    #[test]
+    fn gauge_is_capped_at_full_scale() {
+        let info = build_fan_info(FanMode::Auto, 100, Some(9000), thermal(None));
+        assert_eq!(info.speed_percent, Some(100));
+    }
+
+    /// An unavailable CPU sensor stays unavailable — no ambient value sneaks in.
+    #[test]
+    fn unavailable_cpu_temperature_stays_none() {
+        let info = build_fan_info(FanMode::Auto, 50, None, thermal(None));
+        assert_eq!(info.cpu_temp_celsius, None);
+        assert_eq!(info.temp_source, TempSource::Unavailable);
+        assert_eq!(
+            info.ambient_temp_celsius,
+            Some(27.85),
+            "TZ00 is ambient only"
+        );
+    }
+
+    // ── P2-2: set_fan_mode reports the real effect ──────────────────────────
+
+    /// "Fixed Speed" on a platform with no IGCL fan: the EC profile is the only
+    /// thing that happened, and the result says so instead of claiming success.
+    #[test]
+    fn fixed_without_igcl_does_not_claim_rpm_control() {
+        let result = FanModeResult::new(&FanMode::Fixed, "Balanced", true, false);
+        assert!(result.applied, "the EC profile was applied");
+        assert!(!result.rpm_control, "RPM were not pinned");
+        assert_eq!(result.method, "registry+ec_profile");
+        let warning = result.warning.expect("a caveat is required");
+        assert!(warning.contains("Balanced"), "names the profile applied");
+        assert!(warning.contains("not pinned"), "does not promise RPM");
+    }
+
+    #[test]
+    fn fixed_with_igcl_reports_rpm_control_and_no_warning() {
+        let result = FanModeResult::new(&FanMode::Fixed, "Balanced", true, true);
+        assert!(result.applied && result.rpm_control);
+        assert_eq!(result.method, "registry+ec_profile+igcl");
+        assert_eq!(result.warning, None);
+    }
+
+    #[test]
+    fn off_mode_says_the_fan_keeps_running() {
+        let result = FanModeResult::new(&FanMode::Off, "SuperQuiet", true, false);
+        assert!(result.applied);
+        let warning = result.warning.expect("a caveat is required");
+        assert!(warning.contains("cannot stop the fan"));
+        assert!(warning.contains("Super Quiet"));
+    }
+
+    /// No hardware path accepted the mode: `applied` must be false so the UI
+    /// does not show a success toast.
+    #[test]
+    fn auto_with_no_hardware_path_is_not_applied() {
+        let result = FanModeResult::new(&FanMode::Auto, "Balanced", false, false);
+        assert!(!result.applied);
+        assert_eq!(result.method, "registry");
+        assert!(result.warning.is_some());
+    }
+
+    /// An older elevated helper answers `null`; that must not become a hard
+    /// failure in the UI, but it must not be presented as a verified result
+    /// either.
+    #[test]
+    fn legacy_null_bridge_reply_is_reported_as_unverified() {
+        let result = FanModeResult::from_bridge(&serde_json::Value::Null);
+        assert!(result.applied);
+        assert!(!result.rpm_control);
+        assert_eq!(result.method, "registry");
+        assert!(result
+            .warning
+            .as_deref()
+            .is_some_and(|w| w.contains("did not report")));
+    }
+
+    /// A new helper's payload round-trips through JSON unchanged.
+    #[test]
+    fn bridge_reply_round_trips() {
+        let original = FanModeResult::new(&FanMode::Fixed, "Quiet", true, false);
+        let value = serde_json::to_value(&original).expect("serialisable");
+        assert_eq!(FanModeResult::from_bridge(&value), original);
     }
 }

@@ -120,14 +120,47 @@ export interface DisplayInfo {
 
 export interface FanInfo {
   mode: 'auto' | 'fixed' | 'off';
-  speed_rpm: number;
-  speed_percent: number;
+  /**
+   * Measured fan RPM. `null` when the platform exposes no RPM sensor — which is
+   * the normal state here (`Win32_Fan.DesiredSpeed` is empty and every EC RAM
+   * read is denied). Deliberately not `0`: "0 RPM" means the fan is stopped.
+   */
+  speed_rpm: number | null;
+  /**
+   * Measured fan speed as a percentage, derived from `speed_rpm`. `null` when
+   * there is no RPM reading — the stored value is a request, not a measurement,
+   * and must never be drawn as a gauge.
+   */
+  speed_percent: number | null;
+  /** Last requested percentage (registry). Drives the slider, not the gauge. */
+  requested_speed_percent: number;
   /** GPU temperature in Celsius. Null when no sensor is available. */
   gpu_temp_celsius: number | null;
   /** CPU temperature in Celsius. Null when no sensor is available. */
   cpu_temp_celsius: number | null;
+  /**
+   * Ambient/chassis temperature (ACPI `TZ00`). This is the only reading that
+   * zone is allowed to contribute — it is never used as the CPU temperature.
+   */
+  ambient_temp_celsius: number | null;
   /** System package power from RAPL (\\Power Meter(_Total)\\Power). Null for ~1.5 s after launch. */
   tdp_watts: number | null;
+  /** Which source produced `cpu_temp_celsius`. */
+  temp_source: 'esif' | 'acpi' | 'ecram' | 'unavailable';
+}
+
+/**
+ * What `set_fan_mode` actually did. `applied` does not mean the fan speed
+ * changed — `rpm_control` says whether RPM were really pinned, and `warning`
+ * carries the honest caveat to show next to the result.
+ */
+export interface FanModeResult {
+  applied: boolean;
+  /** `registry+ec_profile`, `registry+ec_profile+igcl` or `registry`. */
+  method: string;
+  /** True only when an IGCL fan handle was programmed with a fixed speed. */
+  rpm_control: boolean;
+  warning: string | null;
 }
 
 export interface AiPerfLogEntry {

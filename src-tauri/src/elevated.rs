@@ -576,7 +576,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 Err(e) => return make_err(format!("Bad speed_percent arg: {e}")),
             };
             match crate::hw::fan::set_fan_mode(mode, speed_percent) {
-                Ok(()) => make_ok(Value::Null),
+                Ok(result) => make_ok(serde_json::to_value(result).unwrap_or(Value::Null)),
                 Err(e) => make_err(e.to_string()),
             }
         }

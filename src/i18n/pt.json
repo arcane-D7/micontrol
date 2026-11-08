@@ -425,7 +425,11 @@
     "applying": "A aplicar...",
     "applied": "Modo de ventilação definido",
     "error": "Falha ao definir modo de ventilação",
-    "warning": "O controlo manual da ventoinha pode afetar o desempenho térmico"
+    "warning": "O controlo manual da ventoinha pode afetar o desempenho térmico",
+    "noSensor": "N/A — sem sensor de RPM nesta plataforma",
+    "noSensorHint": "Este portátil não expõe o RPM da ventoinha ao software (Win32_Fan.DesiredSpeed vem vazio e o EC RAM está negado). A ventoinha é gerida pelo EC.",
+    "fixedProfileNote": "Este portátil não expõe leitura de RPM: o cursor escolhe uma faixa de perfil do EC (Quiet / Balanced / Performance), não fixa um RPM exato.",
+    "ambient": "Ambiente"
   },
   "touchpad": {
     "title": "Touchpad",

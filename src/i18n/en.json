@@ -425,7 +425,11 @@
     "applying": "Applying...",
     "applied": "Fan mode set",
     "error": "Failed to set fan mode",
-    "warning": "Manual fan control may affect thermal performance"
+    "warning": "Manual fan control may affect thermal performance",
+    "noSensor": "N/A — no RPM sensor on this platform",
+    "noSensorHint": "This laptop does not expose fan RPM to software (Win32_Fan.DesiredSpeed is empty and EC RAM is denied). The fan is managed by the EC.",
+    "fixedProfileNote": "This laptop exposes no RPM readback: the slider selects an EC fan-profile band (Quiet / Balanced / Performance), it does not pin an exact RPM.",
+    "ambient": "Ambient"
   },
   "touchpad": {
     "title": "Touchpad",

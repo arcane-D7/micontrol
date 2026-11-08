@@ -438,7 +438,9 @@ export default function TrayPopup({ hardware }: Props) {
                       gap: 12,
                     }}
                   >
-                    <span>{fan.speed_rpm} RPM</span>
+                    <span>
+                      {fan.speed_rpm != null ? `${fan.speed_rpm.toLocaleString()} RPM` : '— RPM'}
+                    </span>
                     <span>
                       {fan.gpu_temp_celsius != null ? `${fan.gpu_temp_celsius}°C GPU` : '— GPU'}
                     </span>
