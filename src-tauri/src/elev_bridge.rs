@@ -446,6 +446,14 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         // SCM query + start is quick (~1-2 s), but `sc failure` may hit a
         // busy SCM on cold boot — give it the medium timeout.
         "ensure_face_service" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
+        // `archive_event_log` shells out twice (`wevtutil epl` of a full
+        // 20 MB channel, then `wevtutil cl`). Both are single-digit seconds on
+        // a healthy disk, but the export rewrites the whole `.evtx` and the
+        // EventLog service serializes it, so the 15 s default is too tight.
+        // Note: when this runs through the bridge PIPE, the service's own
+        // 30 s dispatch deadline still caps it; the scheduled-task path gets
+        // the full medium budget under the task's PT120S ExecutionTimeLimit.
+        "archive_event_log" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
         // S64: `ensure_ecram_service` legitimately takes ~15.2 s (it probes the
         // pipe, compares the DriverStore binary, may copy ~500 KB and run
         // `sc stop/delete/create/failure`, then waits up to 10 s for the pipe).

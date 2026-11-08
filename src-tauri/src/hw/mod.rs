@@ -21,6 +21,7 @@ pub mod driver_update;
 pub mod ecram;
 pub mod ecram_service_mgmt;
 pub mod errors;
+pub mod event_log;
 pub mod eye_protection;
 pub mod face;
 pub mod fan;
