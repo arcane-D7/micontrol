@@ -62,8 +62,9 @@ Consequências de desenho que o código tem de respeitar:
   log: gesto do lado **esquerdo** com `x=3240/3282` (borda direita).
 - **O relatório pode trazer vários `dwCount`** no mesmo `WM_INPUT`; processar só o
   primeiro descarta amostras e transforma movimento normal em "saltos".
-- Não há eixo de "zona"; a noção de bordo é **nossa** (`x < x_max/8` para iniciar,
-  `x < x_max/3` para continuar).
+- Não há eixo de "zona"; a noção de bordo é **nossa** (era `x < x_max/8` para
+  iniciar e `x < x_max/3` para continuar — valores **substituídos** em §8 pelo que
+  o `PluginGesture.dll` realmente usa: banda de 4 % + pré-rolo de 250 unidades).
 
 ## 3. O que a Xiaomi faz (cadeia real)
 
@@ -266,3 +267,119 @@ Duas conclusões:
    rotação: houve uma re-vinculação do telemóvel para o relógio. Isto também explica
    porque o fallback por nome nunca teria salvado o caso antigo (o telemóvel não
    anuncia nome).
+
+---
+
+## 8. O reconhecedor original, desmontado (2026-11-08)
+
+Até aqui o RE tinha sido feito sobre *strings* do `SvrCModule.dll`. Esta secção vem
+do binário que **faz** o gesto: `C:\MI_Backup\XiaomiPCManager\5.8.0.57\Plugins\PluginGesture.dll`
+(244 952 bytes, PDB `...\src\Plugins\PluginGesture\plugin_gesture.cpp`) e
+`MiTouchGesture.dll` (50 392 bytes), desmontados com capstone. Todos os endereços
+abaixo são RVA + image base `0x180000000`, build 5.8.0.57.
+
+### 8.1 Não existe "zona de gesto" no controlador — 0x5D é o motor háptico
+
+A hipótese de trabalho era: *0x5D configuraria a banda de gesto no controlador, e
+por isso o rato não anda no original*. **É falsa, e o binário mostra porquê.**
+
+| Report | Quem usa | Payload | Significado |
+|---|---|---|---|
+| `0x02` | `PluginGesture!0x180018750` | `[0x32, 0xCE]`, fase `01`, **um só frame** | tick háptico por passo |
+| `0x58` (leitura) | `PluginGesture!0x18001968b` | len 0, op `02` → `HidD_GetInputReport` | lê o gear do slide; espera `byte[4] == 0x50` |
+| `0x58` (escrita) | `PluginGesture!0x18001972e` | `[0x05]` + commit `0x01 [0x58 0xA8]`, `Sleep(0x78)` = 120 ms | `WriteMotorSildeGears` — força do tick |
+| `0x5D` | `SvrCModule` (e nós) | 2 shorts LE, ex. `(80,104)` | **`WriteMotorGears`** — força do motor esquerdo/direito |
+| `0x59` | `SvrCModule` | LE short `01 00`/`02 00` | `WriteEnableHeavyPress` |
+
+- `0x5D` `High = (104, 128)` é o **par de gears dos dois motores** (issue #106), não
+  uma largura de banda. `(104, 104)` era ignorado porque o firmware descarta o
+  segundo short quando é igual ao primeiro — daí a correcção do Oksion. Não há
+  nenhum campo de posição/largura em 0x5D.
+- **Não existe `HidD_SetFeature` em lado nenhum.** As importações de
+  `PluginGesture.dll` são `HidD_SetOutputReport` e `HidD_GetInputReport` (mais
+  `HidP_GetUsages`/`HidP_GetUsageValue`/`HidD_GetPreparsedData`). O
+  "Feature report 0x5D" do issue #106 é uma imprecisão de nomenclatura: 0x5D é um
+  **Output report**, tal como o nosso `send_touchpad_command` já o envia.
+- `WriteMotorSildeGears` (0x58) é o único sítio onde aparece o `80` de
+  *"Ajust slide gears to 80"*: o original lê o report (0x58, op `02`) com
+  `HidD_GetInputReport`, compara `byte[4] == 0x50` e, se não bater, escreve
+  0x58 `[0x05]` seguido do commit `0x01 [0x58 0xA8]` com `Sleep(0x78)` = 120 ms
+  entre os dois — a confirmação independente do par write+commit e do atraso de
+  120 ms do issue #106. É afinação da força do tick, não geometria.
+
+**Consequência para o código:** configurar uma "zona" via 0x5D seria escrever
+gears de háptica (104/128 = intensidade High) e estragar a preferência do
+utilizador. Não foi implementado — e o comentário em `motor_gears()` já estava
+certo.
+
+### 8.2 A geometria real (constantes do binário)
+
+`handle_edge_slide` original ≈ `0x1800190d3`–`0x1800193d8`:
+
+| Constante | Onde | Efeito |
+|---|---|---|
+| `24/25` = 96 % (`0x180018ae3`) | `xmm12` | bordo **direito**: `x > 0.96·x_max` |
+| `1/25` = 4 % (`0x180018ada` → `x_max/25`) | `xmm11` | bordo **esquerdo**: `x < 0.04·x_max` |
+| `-100.0` (`0x180018aec`) | `xmm10` | converte Δy em **percentagem da altura** |
+| `cmp eax, 0xFA` (250) | `0x1800191a3` | **pré-rolo**: só captura depois de 250 unidades (8 mm) de Δy |
+| `cmp r8d, 2` (volume) | `0x1800191c0` | cada passo = 2 % da altura (≈1,4 mm) |
+| `cmp r8d, 4` (brilho) | `0x180019390` | cada passo = 4 % da altura (≈2,7 mm) |
+| `0xAF`/`0xAE` | `0x1800191e2` | `SendInput(VK_VOLUME_UP/DOWN)` |
+| `0x6F`/`0x70` | `0x180018182` | `SendInput(VK_BRIGHTNESS_DOWN/UP)` |
+
+Notas de comportamento que só o binário revela:
+
+1. **Âncora obrigatória na banda**: o primeiro ponto do traço *e* o ponto actual têm
+   de estar dentro dos 4 %. Não há histerese — se o dedo derivar para dentro, o
+   gesto morre e a âncora é reposta a `-1.0f` (`0xbf800000` em `0x180019242`).
+2. **Pré-rolo de 250 unidades** antes de qualquer acção. É este — e não a largura da
+   banda — o mecanismo que impede o gesto de disparar num clique/scroll normal. Com
+   o pré-rolo satisfeito, o original emite **uma** acção nesse mesmo frame e
+   re-ancora (o `pct > 2` já está garantido pelos 250 unidades).
+3. O `g_timer.GetMs() > 500` que aparece nas strings **é só do log**: o frame háptico
+   é enviado na mesma; o gate de 500 ms protege a linha de log.
+4. **O original lê `TipSwitch` (0x42) *e* `Confidence` (0x47)** —
+   `HidP_GetUsages` sobre as duas usage arrays em `0x180018dde`. O nosso
+   `select_contact` só usa TipSwitch; `Confidence` continua por explorar como
+   métrica de qualidade de contacto.
+5. **Não há supressão de cursor nenhuma**: `PluginGesture.dll` não importa
+   `ClipCursor`, `SetCursorPos` nem `ShowCursor`. No original o ponteiro **também
+   se move**; o que o torna invisível é a banda de 4 % manter o cursor encostado ao
+   bordo do ecrã. Quem quiser "rato parado" tem de o fazer explicitamente (§8.3).
+
+### 8.3 O que mudou neste branch (`f4b/edge-zone`)
+
+| Área | Antes | Agora | Porquê |
+|---|---|---|---|
+| Cursor | `WH_MOUSE_LL` desligado por constante (`EDGE_POINTER_SUPPRESSION = false`), o rato andava | `ClipCursor` para um pixel no frame de captura, libertado em todos os caminhos terminais + watchdog de 4 s | O hook LL corria na thread do gesto (que faz WMI/OSD) e o movimento engolido era re-aplicado como salto ao largar. `ClipCursor` prende de facto (verificado nesta máquina: 638,805 mantém-se após `SetCursorPos(+300,+200)`) e não salta ao libertar |
+| Banda | `x_max/8` (12,5 %) / `x_max/3` (33 %) | **16 % / 28 %**, configurável (`ZoneStartPct`, `ZoneContinuePct`) | 4 % do original é ~4 mm — não se acerta com o dedo. 16 % ≈ 17 mm é uma área utilizável; a histerese de 28 % deixa derivar sem matar o gesto |
+| Captura | `y_max/80` = 0,85 mm | `y_max·118/1000` = **250 unidades = 8 mm** (o `0xFA` do original) | É o que impede o gesto de "interferir no uso normal": um toque normal no bordo não percorre 8 mm |
+| Acção no 1.º frame | nenhuma (só depois de mais `y_step`) | **uma**, exactamente como o original | Feedback imediato no momento em que o gesto compromete |
+| Acumulador | decaimento de 1/8 em **todos** os frames, deadband `y_step/6` | decaimento só nos frames de ruído, deadband `y_step/10` | A 10 unidades/frame o equilíbrio era `8×10 = 80 < y_step = 88` — o gesto capturava e **nunca** dava passo, a mesma classe de bug de §4 |
+| Tick háptico | frame construído e testado, **nunca enviado** | `0D 09 FD 01 00 03 00 00 02 32 CE` por passo, limitado a ~25/s | É o único efeito no dispositivo que o original produz por passo |
+| Log de escrita | INFO em todas | INFO nas configurações (0x5D/0x59/0x5B), DEBUG no tick | Os bytes exactos continuam registados para reversão sem inundar o log a 25 Hz |
+
+O `WH_MOUSE_LL` foi **removido** (não apenas desligado): era código morto que
+prometia uma supressão que nunca aconteceu.
+
+### 8.4 Plano de teste de campo
+
+1. Ligar EdgeSlide; no log deve aparecer
+   `[gesture] edge-slide zone: start<16% continue<28% of x_max`.
+2. Deslizar devagar no bordo esquerdo: **nada** durante os primeiros ~8 mm
+   (`armed`, sem `captured`), depois
+   `edge-slide captured … activation=250` seguido de `pointer pinned at (x, y)`.
+   O cursor tem de ficar imóvel durante todo o gesto.
+3. Ao levantar o dedo: `pointer released at (x, y) after N ms (gesture ended)` e o
+   cursor move-se outra vez. Se o `released` não aparecer em 4 s, o watchdog
+   dispara (`reason=watchdog`).
+4. Repetir no bordo direito (volume) e confirmar 1 tick por passo (o LED/motor
+   vibra; com `RUST_LOG=hw::touchpad=debug` vê-se o frame).
+5. **Não interferência**: clicar e arrastar uma scrollbar no bordo, fazer scroll de
+   dois dedos e um clique simples no canto — nenhum deve produzir `steps=`.
+6. Afinar a área sem rebuild:
+   `reg add HKCU\Software\MiControl\Touchpad /v ZoneStartPct /t REG_DWORD /d 10`
+   (e `ZoneContinuePct`), desligar/ligar o toggle, repetir o passo 2.
+7. Se o cursor "saltar" ao libertar, o culpado é um `SetCursorPos` de outro
+   programa, não o `ClipCursor` — recolher `RUST_LOG=hw::touchpad=info` e a posição
+   antes/depois.

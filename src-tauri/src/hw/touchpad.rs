@@ -75,7 +75,7 @@ const TP_REG_EDGE_SLIDE: &str = "EdgeSlide";
 // ─── Gesture feature flags (Windows-only) ───────────────────────────────────
 
 #[cfg(windows)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 /// Whether the 5-finger screenshot gesture is currently enabled.
 #[cfg(windows)]
@@ -84,19 +84,86 @@ static GESTURE_SCREENSHOT_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Whether the left/right edge slide gesture is currently enabled.
 #[cfg(windows)]
 static EDGE_SLIDE_ENABLED: AtomicBool = AtomicBool::new(false);
-/// Emergency stability switch: keep cursor movement untouched even during
-/// edge-slide handling. This avoids pointer conflicts on some touchpad/driver
-/// stacks where WM_MOUSEMOVE suppression causes jumpy behavior.
+
+/// Edge **initiation** band width, in percent of the pad's logical X range,
+/// measured from the physical left/right border.
+///
+/// Xiaomi's own gesture recogniser (`PluginGesture.dll` 5.8.0.57, disassembled
+/// 2026-11-08) uses the outer **4 %** only: the anchor and every following
+/// sample must satisfy `x < x_max/25` (left) or `x > x_max*24/25` (right).
+/// On the BLTP7853 (x_max 3282 ≈ 31.25 units/mm) that is a ~4.2 mm strip, so a
+/// finger landing 6 mm from the border never arms. Our default is deliberately
+/// ~4× wider, and the "don't hijack normal use" job is done by the activation
+/// gate (`EDGE_ACTIVATION_PERMILLE`) exactly as the original does with its
+/// 250-unit (`cmp |dy|, 0xFA`) pre-roll.
+///
+/// Overridable at runtime through `HKCU\Software\MiControl\Touchpad`
+/// (`ZoneStartPct`, `ZoneContinuePct`) — see `load_edge_zone_config`.
 #[cfg(windows)]
-const EDGE_POINTER_SUPPRESSION: bool = false;
+static EDGE_ZONE_START_PCT: AtomicI32 = AtomicI32::new(16);
+/// Continuation band, wider than the initiation band so ordinary finger drift
+/// does not kill a running gesture (exit hysteresis). Xiaomi has no hysteresis
+/// (the same 4 % is required for the whole gesture, which is why their gesture
+/// dies if you drift inward); we keep a wider band on purpose.
+#[cfg(windows)]
+static EDGE_ZONE_CONTINUE_PCT: AtomicI32 = AtomicI32::new(28);
+/// Vertical travel that must be covered **inside the band** before a swipe is
+/// captured, in permille of `y_max`.
+///
+/// 118 ‰ of 2124 = 250 logical units = 8.0 mm, which is the literal constant in
+/// `PluginGesture.dll` (`cmp |dy|, 0xFA` before it sets its "captured" flag).
+/// This single gate is what keeps a normal click/scroll near the border from
+/// turning into a brightness/volume change; our previous 0.85 mm gate
+/// (`y_max/80`) fired on the first flick of an ordinary touch.
+#[cfg(windows)]
+const EDGE_ACTIVATION_PERMILLE: i32 = 118;
+
 /// True while an edge-slide gesture is actively tracking a contact.
-/// Used by the WH_MOUSE_LL hook proc to suppress cursor movement without
-/// accessing the thread-local RefCell (which may be mutably borrowed).
+/// Used as the single source of truth for the cursor pin watchdog.
 #[cfg(windows)]
 static EDGE_GESTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Prevents the Raw Input listener thread from being started more than once.
 #[cfg(windows)]
 static GESTURE_THREAD_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Cursor position captured when the edge gesture pinned the pointer.
+#[cfg(windows)]
+struct CursorPin {
+    x: i32,
+    y: i32,
+    at: std::time::Instant,
+}
+
+/// `Some(..)` while we hold a `ClipCursor` confinement. Stored outside the
+/// gesture thread so `set_touchpad_edge_slide(false)` (Tauri command thread) and
+/// the watchdog can both release it.
+#[cfg(windows)]
+static CURSOR_PIN: std::sync::Mutex<Option<CursorPin>> = std::sync::Mutex::new(None);
+
+/// Hard ceiling on how long the pointer may stay confined. If the state machine
+/// ever fails to deliver a terminal frame (missed HID report, device reset) the
+/// clip is dropped after this instead of leaving the user without a cursor.
+#[cfg(windows)]
+const CURSOR_PIN_MAX: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Monotonic milliseconds since process start (used to rate-limit the haptic
+/// tick without pulling in another Win32 feature).
+#[cfg(windows)]
+fn monotonic_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+#[cfg(windows)]
+static LAST_EDGE_TICK_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Cached `OutputReportByteLength` for the haptics handle (33 on COL05).
+/// Querying `HidP_GetCaps` on every write is wasteful on the per-step tick path.
+#[cfg(windows)]
+static OUTPUT_REPORT_LEN: AtomicU32 = AtomicU32::new(0);
 
 /// App handle stored at startup so the gesture thread can emit Tauri events
 /// (e.g. show the brightness OSD) without needing a channel or mutex.
@@ -133,6 +200,238 @@ fn charger_aware_y_deadband(y_max: i32) -> i32 {
 /// Called once during app setup to give the gesture thread access to Tauri.
 pub fn set_app_handle(h: tauri::AppHandle) {
     let _ = APP_HANDLE.set(h);
+}
+
+// ─── Edge-slide geometry configuration ───────────────────────────────────────
+
+/// Read a single DWORD from `HKCU\Software\MiControl\Touchpad`, if present.
+#[cfg(windows)]
+fn read_tp_reg_dword(value_name: &str) -> Option<u32> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE,
+    };
+    unsafe {
+        // SAFETY: both strings are null-terminated wide buffers that outlive the
+        // calls; `hkey` is only used after RegOpenKeyExW reports success, and
+        // RegQueryValueExW writes at most 4 bytes into a stack-local u32.
+        let key_w: Vec<u16> = OsStr::new(TP_REG_KEY)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let mut hkey = std::mem::MaybeUninit::uninit();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(key_w.as_ptr()),
+            0,
+            KEY_READ,
+            hkey.as_mut_ptr(),
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let hkey = hkey.assume_init();
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut value: u32 = 0;
+        let mut size = 4u32;
+        let name_w: Vec<u16> = OsStr::new(value_name)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let res = RegQueryValueExW(
+            hkey,
+            PCWSTR(name_w.as_ptr()),
+            None,
+            Some(&mut ty),
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey).ok();
+        // WIN32_ERROR is a newtype around u32; 0 == ERROR_SUCCESS.
+        if res.0 == 0 {
+            Some(value)
+        } else {
+            None
+        }
+    }
+}
+
+/// Refresh [`EDGE_ZONE_START_PCT`] / [`EDGE_ZONE_CONTINUE_PCT`] from the
+/// registry. Called at startup and on every EdgeSlide toggle, so the band can be
+/// tuned without a rebuild:
+///
+/// ```text
+/// reg add HKCU\Software\MiControl\Touchpad /v ZoneStartPct    /t REG_DWORD /d 10
+/// reg add HKCU\Software\MiControl\Touchpad /v ZoneContinuePct /t REG_DWORD /d 22
+/// ```
+#[cfg(windows)]
+pub fn load_edge_zone_config() {
+    let start = read_tp_reg_dword("ZoneStartPct")
+        .map(|v| v as i32)
+        .unwrap_or(EDGE_ZONE_START_PCT.load(Ordering::Relaxed));
+    // 4 % is Xiaomi's own band; 30 % is already 3 cm on this pad — beyond that the
+    // gesture would own a third of the touchpad.
+    let start = start.clamp(4, 30);
+    let continue_pct = read_tp_reg_dword("ZoneContinuePct")
+        .map(|v| v as i32)
+        .unwrap_or(EDGE_ZONE_CONTINUE_PCT.load(Ordering::Relaxed));
+    // Hysteresis must exist: the continuation band has to be strictly wider.
+    let continue_pct = continue_pct.clamp(start + 4, 40);
+
+    EDGE_ZONE_START_PCT.store(start, Ordering::Relaxed);
+    EDGE_ZONE_CONTINUE_PCT.store(continue_pct, Ordering::Relaxed);
+    log::info!(
+        "[gesture] edge-slide zone: start<{}% continue<{}% of x_max",
+        start,
+        continue_pct
+    );
+}
+
+/// Current `(start_pct, continue_pct)` band, clamped so a corrupted atomic can
+/// never produce a zero-width or inverted zone.
+#[cfg(windows)]
+fn edge_zone_pcts() -> (i32, i32) {
+    let start = EDGE_ZONE_START_PCT.load(Ordering::Relaxed).clamp(4, 40);
+    let cont = EDGE_ZONE_CONTINUE_PCT
+        .load(Ordering::Relaxed)
+        .clamp(start + 2, 50);
+    (start, cont)
+}
+
+// ─── Cursor confinement ("o rato não anda") ─────────────────────────────────
+
+/// Pin the pointer for the duration of an edge gesture with `ClipCursor`.
+///
+/// Why not a `WH_MOUSE_LL` hook (the previous, always-disabled approach): the
+/// hook runs on *this* thread, and this thread also performs the Tauri/OSD and
+/// brightness work for every step — a slow step stalls mouse input system-wide,
+/// and the low-level movement the hook swallows is re-applied as a jump when it
+/// is released. `ClipCursor` is a one-call kernel-side clamp: no hook, no
+/// per-event latency, and — because the clamp discards the excess instead of
+/// queueing it — no jump when the gesture ends.
+///
+/// Xiaomi's original does **not** do this (PluginGesture.dll imports neither
+/// `ClipCursor` nor `SetCursorPos`); it relies on its 4 % band keeping the
+/// pointer against the screen border. We keep the pointer genuinely still
+/// because that is what the field report asked for.
+#[cfg(windows)]
+fn pin_cursor() {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{ClipCursor, GetCursorPos};
+
+    if lock_or_recover(&CURSOR_PIN).is_some() {
+        return; // already pinned — keep the original anchor and deadline
+    }
+
+    unsafe {
+        // SAFETY: POINT/RECT are plain C structs; ClipCursor copies the rect.
+        let mut p = POINT::default();
+        if GetCursorPos(&mut p).is_err() {
+            return;
+        }
+        // RECT is *inclusive* on right/bottom for ClipCursor: a rect of
+        // (x, y, x+1, y+1) still allows one pixel of travel (measured:
+        // 638,805 → 639,806). right==left/bottom==top pins the single pixel.
+        let rect = RECT {
+            left: p.x,
+            top: p.y,
+            right: p.x,
+            bottom: p.y,
+        };
+        if ClipCursor(Some(&rect)).is_err() {
+            log::debug!("[gesture] ClipCursor failed — pointer will follow the gesture");
+            return;
+        }
+        *lock_or_recover(&CURSOR_PIN) = Some(CursorPin {
+            x: p.x,
+            y: p.y,
+            at: std::time::Instant::now(),
+        });
+        log::info!(
+            "[gesture] pointer pinned at ({}, {}) for the edge gesture",
+            p.x,
+            p.y
+        );
+    }
+}
+
+/// Drop the `ClipCursor` confinement. Safe to call when nothing is pinned.
+#[cfg(windows)]
+fn release_cursor_pin(reason: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::ClipCursor;
+
+    let pin = {
+        let mut guard = lock_or_recover(&CURSOR_PIN);
+        guard.take()
+    };
+    if let Some(p) = pin {
+        unsafe {
+            // SAFETY: passing NULL releases the confinement for this desktop.
+            let _ = ClipCursor(None);
+        }
+        log::info!(
+            "[gesture] pointer released at ({}, {}) after {} ms ({reason})",
+            p.x,
+            p.y,
+            p.at.elapsed().as_millis()
+        );
+    }
+}
+
+/// True when the pin has outlived [`CURSOR_PIN_MAX`] and must be dropped.
+#[cfg(windows)]
+fn cursor_pin_expired() -> bool {
+    lock_or_recover(&CURSOR_PIN)
+        .as_ref()
+        .is_some_and(|p| p.at.elapsed() > CURSOR_PIN_MAX)
+}
+
+// ─── Per-step haptic tick ───────────────────────────────────────────────────
+
+/// Send the one-frame haptic tick the original emits after every edge-slide step.
+///
+/// Byte-for-byte from `PluginGesture.dll` (function at `0x180018750` in the
+/// 5.8.0.57 build, which builds the frame inline and calls `HidD_SetOutputReport`
+/// with a 33-byte buffer):
+///
+/// ```text
+/// 0D 09 FD 01 00 03 00 00 02 32 CE
+/// │  │  │  │  │  │  │  │  │  └── payload[1] = 0xCE
+/// │  │  │  │  │  │  │  │  └───── payload[0] = 0x32 (50)
+/// │  │  │  │  │  │  │  └─────── cmd = 0x02 (single click)
+/// │  │  │  │  │  │  └────────── reserved
+/// │  │  │  │  │  └───────────── payload_len + 1 = 3
+/// │  │  │  │  └──────────────── phase 0x01 (this frame IS the commit)
+/// │  │  │  └─────────────────── checksum = XOR(bytes[3..31]) + 1
+/// │  │  └────────────────────── len = payload_len + 7 = 9
+/// │  └───────────────────────── magic
+/// └──────────────────────────── HID report id (0x0D) of the vendor collection
+/// ```
+///
+/// Note there is **no** second commit frame and no 120 ms gap here: that pair
+/// (`cmd 0x01`, `payload [cmd, 0x100-cmd]`) is only for *configuration* writes
+/// such as 0x5D (motor gears), 0x59 (heavy press) and 0x5B (force threshold).
+#[cfg(windows)]
+fn send_edge_slide_tick(reason: &str) {
+    /// The tick is a nicety, not the function: never queue more than ~25/s, and
+    /// never let a slow HID write back up the raw-input thread.
+    const TICK_MIN_INTERVAL_MS: u64 = 40;
+
+    let now = monotonic_ms();
+    let last = LAST_EDGE_TICK_MS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < TICK_MIN_INTERVAL_MS {
+        return;
+    }
+    LAST_EDGE_TICK_MS.store(now, Ordering::Relaxed);
+
+    let frame = build_touchpad_report(0x02, &[0x32, 0xCE], true);
+    match send_touchpad_output_report(&frame) {
+        Ok(()) => log::trace!("[gesture] edge haptic tick sent ({reason})"),
+        Err(e) => log::debug!("[gesture] edge haptic tick failed ({reason}): {e}"),
+    }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -251,10 +550,14 @@ pub fn set_touchpad_edge_slide(enabled: bool) -> HardwareResult<()> {
     #[cfg(windows)]
     {
         EDGE_SLIDE_ENABLED.store(enabled, Ordering::Relaxed);
+        // Re-read the band so a registry tweak applies on the next toggle.
+        load_edge_zone_config();
         // Defensive reset: if edge-slide is disabled while a gesture is active,
-        // immediately release WM_MOUSEMOVE suppression.
+        // drop the pointer confinement immediately — never leave the user
+        // without a cursor because a toggle landed mid-gesture.
         if !enabled {
             EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
+            release_cursor_pin("edge-slide disabled");
         }
     }
     persist_reg_dword(TP_REG_EDGE_SLIDE, if enabled { 1 } else { 0 })?;
@@ -275,7 +578,10 @@ pub fn start_gesture_listener() {
         }
     }
     #[cfg(windows)]
-    ensure_gesture_listener();
+    {
+        load_edge_zone_config();
+        ensure_gesture_listener();
+    }
 }
 
 // ─── Registry persistence ─────────────────────────────────────────────────────
@@ -563,6 +869,22 @@ pub fn close_haptics_handle() {
     }
 }
 
+/// Log an output report with its exact bytes (needed to undo any write).
+///
+/// The per-step click tick (cmd 0x02, ~25×/s during a swipe) is logged at debug
+/// so it does not drown the log; every configuration write (0x5D motor gears,
+/// 0x59 heavy press, 0x5B force threshold) stays at INFO with its full byte
+/// sequence, which is what makes a field change reversible.
+#[cfg(windows)]
+fn log_output_report(prefix: &str, data: &[u8]) {
+    let is_click_tick = data.get(8).copied() == Some(0x02);
+    if is_click_tick {
+        log::debug!("{prefix}: {} bytes, data={:02X?}", data.len(), data);
+    } else {
+        log::info!("{prefix}: {} bytes, data={:02X?}", data.len(), data);
+    }
+}
+
 /// Send an output report to the BLTP7853 touchpad via `HidD_SetOutputReport`.
 ///
 /// This is the exact same API call that Xiaomi's SvrCModule.dll makes:
@@ -584,24 +906,34 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
 
     let handle = get_haptics_handle().context("Get touchpad HID handle")?;
 
-    // Query output report byte length from the device's HID descriptor.
-    let output_len = unsafe {
-        // SAFETY: HidD_GetPreparsedData allocates a preparsed data buffer associated with the
-        // HID handle. If it succeeds, we query the caps and immediately free the buffer.
-        let mut preparsed = PHIDP_PREPARSED_DATA(0);
-        let mut caps = HIDP_CAPS::default();
-        if HidD_GetPreparsedData(handle, &mut preparsed).as_bool() && preparsed.0 != 0 {
-            let _ = HidP_GetCaps(preparsed, &mut caps);
-            log::info!(
-                "[touchpad] HID caps: OutputReportByteLength={}, InputReportByteLength={}, FeatureReportByteLength={}",
-                caps.OutputReportByteLength,
-                caps.InputReportByteLength,
-                caps.FeatureReportByteLength,
-            );
-            HidD_FreePreparsedData(preparsed);
+    // Query output report byte length from the device's HID descriptor once and
+    // cache it: the per-step haptic tick calls this path up to ~25×/s and the
+    // preparsed-data round trip is pure overhead after the first write.
+    let cached_len = OUTPUT_REPORT_LEN.load(Ordering::Relaxed) as usize;
+    let output_len = if cached_len > 0 {
+        cached_len
+    } else {
+        unsafe {
+            // SAFETY: HidD_GetPreparsedData allocates a preparsed data buffer associated with the
+            // HID handle. If it succeeds, we query the caps and immediately free the buffer.
+            let mut preparsed = PHIDP_PREPARSED_DATA(0);
+            let mut caps = HIDP_CAPS::default();
+            if HidD_GetPreparsedData(handle, &mut preparsed).as_bool() && preparsed.0 != 0 {
+                let _ = HidP_GetCaps(preparsed, &mut caps);
+                log::debug!(
+                    "[touchpad] HID caps: OutputReportByteLength={}, InputReportByteLength={}, FeatureReportByteLength={}",
+                    caps.OutputReportByteLength,
+                    caps.InputReportByteLength,
+                    caps.FeatureReportByteLength,
+                );
+                HidD_FreePreparsedData(preparsed);
+            }
+            caps.OutputReportByteLength as usize
         }
-        caps.OutputReportByteLength as usize
     };
+    if output_len > 0 {
+        OUTPUT_REPORT_LEN.store(output_len as u32, Ordering::Relaxed);
+    }
 
     // The output report length includes the Report ID byte at position 0.
     // BLTP7853 COL05 has OutputReportByteLength=33 (1 byte ID + 32 bytes data).
@@ -629,10 +961,9 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
     close_haptics_handle();
 
     if ok {
-        log::info!(
-            "[touchpad] BLTP7853 output report sent: {} bytes, data={:02X?}",
-            copy_len,
-            &report_data[..copy_len]
+        log_output_report(
+            "[touchpad] BLTP7853 output report sent",
+            &report_data[..copy_len],
         );
         Ok(())
     } else {
@@ -646,10 +977,9 @@ fn send_touchpad_output_report(report_data: &[u8]) -> HardwareResult<()> {
         close_haptics_handle();
 
         if ok {
-            log::info!(
-                "[touchpad] BLTP7853 output report sent (retry): {} bytes, data={:02X?}",
-                copy_len,
-                &report_data[..copy_len]
+            log_output_report(
+                "[touchpad] BLTP7853 output report sent (retry)",
+                &report_data[..copy_len],
             );
             Ok(())
         } else {
@@ -962,26 +1292,11 @@ unsafe fn win_gesture_loop() {
         log::info!("[gesture] Raw Input gesture listener active");
     }
 
-    // Install mouse suppression hook only when explicitly enabled.
-    if EDGE_POINTER_SUPPRESSION {
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WINDOWS_HOOK_ID};
-        match SetWindowsHookExW(
-            WINDOWS_HOOK_ID(14), // WH_MOUSE_LL
-            Some(mouse_hook_proc),
-            HINSTANCE::default(),
-            0,
-        ) {
-            Ok(_hook) => {
-                log::info!(
-                    "[gesture] Mouse hook installed — cursor suppressed during edge gestures"
-                );
-                let _ = _hook;
-            }
-            Err(e) => log::warn!("[gesture] Failed to install mouse hook: {e}"),
-        }
-    } else {
-        log::info!("[gesture] Pointer suppression disabled for edge-slide stability");
-    }
+    // Pointer confinement is per-gesture (ClipCursor in `pin_cursor`), not a
+    // permanent hook: see the rationale on that function. Nothing to install
+    // here, but the listener owns the pin lifecycle, so drop any stale pin left
+    // behind by a previous session before the message pump starts.
+    release_cursor_pin("listener start");
 
     // Message pump — WM_INPUT messages are delivered here.
     let mut msg = MSG::default();
@@ -990,6 +1305,9 @@ unsafe fn win_gesture_loop() {
         DispatchMessageW(&msg);
     }
 
+    // The thread is going away: a live ClipCursor would leave the desktop
+    // cursor stuck, so release it before unwinding.
+    release_cursor_pin("listener stop");
     log::info!("[gesture] Gesture listener stopped");
 }
 
@@ -1011,38 +1329,6 @@ unsafe extern "system" fn gesture_wnd_proc(
         process_raw_input(lparam.0);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
-}
-
-/// Low-level mouse hook proc — blocks WM_MOUSEMOVE while an edge gesture is
-/// active so the cursor does not drift while the user swipes the edge zone.
-///
-/// # Safety
-///
-/// Must be installed via SetWindowsHookExW with WH_MOUSE_LL. Runs on the gesture
-/// thread and accesses the EDGE_GESTURE_ACTIVE atomic. Reads thread-local
-/// GESTURE_STATE which is safe because this runs on the gesture thread only.
-#[cfg(windows)]
-unsafe extern "system" fn mouse_hook_proc(
-    code: i32,
-    wparam: windows::Win32::Foundation::WPARAM,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::Foundation::LRESULT;
-    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, WM_MOUSEMOVE};
-
-    if !EDGE_POINTER_SUPPRESSION {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    if code >= 0 && wparam.0 as u32 == WM_MOUSEMOVE {
-        // Use the dedicated atomic — avoids touching the RefCell which may
-        // already be mutably borrowed on this thread (gesture loop).
-        let suppress = EDGE_GESTURE_ACTIVE.load(Ordering::Relaxed);
-        if suppress {
-            return LRESULT(1); // swallow the event
-        }
-    }
-    CallNextHookEx(None, code, wparam, lparam)
 }
 
 // ─── Gesture state (gesture thread — thread-local) ────────────────────────────
@@ -1068,6 +1354,17 @@ struct GestureState {
     /// Consecutive frames without a valid single-finger contact.
     /// Used to preserve edge state across brief contact losses (palm rejection).
     edge_contact_lost_frames: u8,
+    /// The handler asks for the pointer to be confined on the frame that
+    /// captures the gesture. The caller performs `ClipCursor` **after** the
+    /// RefCell borrow is released, so the state machine stays pure (and unit
+    /// tests can run it without touching the real cursor).
+    edge_want_pin: bool,
+    /// The handler asks for the confinement to be dropped (gesture ended, finger
+    /// lifted, zone left, feature disabled).
+    edge_want_release: bool,
+    /// Haptic ticks the caller must emit for this frame (one per logical step,
+    /// capped at 4). The original sends exactly one per step.
+    edge_ticks: u8,
 }
 
 #[cfg(windows)]
@@ -1083,6 +1380,9 @@ impl Default for GestureState {
             edge_contact_active: false,
             edge_contact_start_side: None,
             edge_contact_lost_frames: 0,
+            edge_want_pin: false,
+            edge_want_release: false,
+            edge_ticks: 0,
         }
     }
 }
@@ -1467,8 +1767,8 @@ unsafe fn process_raw_input(lparam: isize) {
         return;
     }
 
-    // If edge-slide has been disabled, force-release suppression and clear
-    // any stale in-progress session state.
+    // If edge-slide has been disabled, force-release the pointer confinement and
+    // clear any stale in-progress session state.
     if !EDGE_SLIDE_ENABLED.load(Ordering::Relaxed) {
         EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
         GESTURE_STATE.with(|state| {
@@ -1477,7 +1777,11 @@ unsafe fn process_raw_input(lparam: isize) {
             s.edge_contact_active = false;
             s.edge_contact_start_side = None;
             s.edge_contact_lost_frames = 0;
+            s.edge_want_pin = false;
+            s.edge_want_release = false;
+            s.edge_ticks = 0;
         });
+        release_cursor_pin("edge-slide disabled");
     }
 
     // ── Get/cache preparsed data for this device ──────────────────────────────
@@ -1649,6 +1953,45 @@ unsafe fn process_raw_input(lparam: isize) {
     } else {
         (0, 0)
     };
+
+    // ── Drain per-frame side effects ──────────────────────────────────────────
+    // Pin/release/tick are the only operations here that touch the desktop or
+    // the HID device. They run with the GESTURE_STATE borrow released, for the
+    // same reason the simulate_* calls do: a nested call can pump the message
+    // loop and re-enter this function.
+    let (want_pin, want_release, ticks) = GESTURE_STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        let v = (s.edge_want_pin, s.edge_want_release, s.edge_ticks);
+        s.edge_want_pin = false;
+        s.edge_want_release = false;
+        s.edge_ticks = 0;
+        v
+    });
+
+    if want_release {
+        release_cursor_pin("gesture ended");
+    }
+    if want_pin {
+        pin_cursor();
+    }
+    for _ in 0..ticks {
+        send_edge_slide_tick("edge step");
+    }
+
+    // Watchdog: if the terminal frame of a gesture never arrives (missed report,
+    // device reset, Tauri shutdown mid-gesture) never leave the user without a
+    // cursor — drop the confinement and reset the state machine so the next
+    // touch can arm normally.
+    if EDGE_GESTURE_ACTIVE.load(Ordering::Relaxed) && cursor_pin_expired() {
+        release_cursor_pin("watchdog");
+        EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
+        GESTURE_STATE.with(|state| {
+            let mut s = state.borrow_mut();
+            s.edge = None;
+            s.edge_contact_start_side = None;
+            s.edge_contact_active = false;
+        });
+    }
 
     // ── Execute actions — borrow fully released here ───────────────────────────
     if fire_screenshot {
@@ -1853,33 +2196,119 @@ mod tests {
     }
 
     #[test]
-    fn edge_slide_captures_only_after_clear_vertical_intent() {
-        let mut state = super::GestureState::default();
-        // Arm on edge-start, but do not capture immediately.
-        let _ = handle_edge_slide(&mut state, 1, 200, 4000, true);
-        assert!(!state.edge.as_ref().expect("edge state").captured);
+    fn edge_slide_requires_the_eight_millimetre_pre_roll() {
+        // PluginGesture.dll gates the gesture on |dy| > 0xFA = 250 units, which
+        // on this pad (2124 units ≈ 68 mm) is ~8 mm. Nothing may commit before
+        // that, no matter how long the finger rests in the band.
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        assert!(state.edge.is_some(), "must arm from the edge");
 
-        // Small drift should still not capture.
-        let _ = handle_edge_slide(&mut state, 1, 240, 3992, true);
-        assert!(!state.edge.as_ref().expect("edge state").captured);
+        // 240 units of travel: still armed, still not captured, pointer untouched.
+        let (b, v) = handle_edge_slide(&mut state, 1, 200, 1_560, true);
+        assert_eq!((b, v), (0, 0));
+        assert!(!state.edge.as_ref().expect("edge").captured);
+        assert!(
+            !state.edge_want_pin,
+            "the pointer must not be pinned before the gesture commits"
+        );
+        assert_eq!(state.edge_ticks, 0);
 
-        // Strong vertical intent with limited lateral drift captures.
-        let _ = handle_edge_slide(&mut state, 1, 240, 3600, true);
-        assert!(state.edge.as_ref().expect("edge state").captured);
+        // 260 units: commits, and does so with exactly one action + one tick.
+        let (b, v) = handle_edge_slide(&mut state, 1, 200, 1_540, true);
+        assert!(state.edge.as_ref().expect("edge").captured);
+        assert_eq!((b, v), (1, 0), "capture emits exactly one brightness step");
+        assert_eq!(state.edge_ticks, 1, "one haptic tick per step");
+        assert!(state.edge_want_pin, "capture must ask for the pointer pin");
     }
 
     #[test]
-    fn edge_slide_generates_steps_after_capture() {
-        let mut state = super::GestureState::default();
-        // Start in left edge.
-        let _ = handle_edge_slide(&mut state, 1, 200, 4000, true);
-        // Trigger capture with clear vertical movement.
-        let _ = handle_edge_slide(&mut state, 1, 220, 3860, true);
-        assert!(state.edge.as_ref().expect("edge state").captured);
-        // Continue moving up enough to generate at least one brightness step.
-        let (b, v) = handle_edge_slide(&mut state, 1, 220, 3500, true);
-        assert!(b > 0, "expected brightness step after capture");
-        assert_eq!(v, 0);
+    fn edge_slide_ignores_diagonal_travel_that_is_mostly_lateral() {
+        // 300 units down but 400 units inward is a pan, not an edge swipe.
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        let (b, v) = handle_edge_slide(&mut state, 1, 700, 1_500, true);
+        assert_eq!((b, v), (0, 0));
+        assert!(!state.edge.as_ref().expect("edge").captured);
+    }
+
+    #[test]
+    fn edge_slide_releases_the_pin_when_the_finger_leaves_the_band() {
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_500, true); // capture
+        assert!(state.edge_want_pin);
+        state.edge_want_pin = false; // what the caller does after pinning
+
+        // Continuation band is 28 % of 3282 = 919; walk out of it.
+        let mut released = false;
+        for x in [1_000, 1_200, 1_400, 1_600] {
+            let _ = handle_edge_slide(&mut state, 1, x, 1_500, true);
+            released |= state.edge_want_release;
+        }
+        assert!(released, "leaving the band must release the pointer");
+        assert!(state.edge.is_none());
+    }
+
+    #[test]
+    fn edge_slide_survives_drift_inside_the_continuation_band() {
+        // Hysteresis: armed at 6 %, drifted to 20 % — outside the start band,
+        // inside the continuation band. The gesture must live.
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_500, true); // capture
+        let _ = handle_edge_slide(&mut state, 1, 656, 1_490, true);
+        assert!(
+            state.edge.is_some(),
+            "drift inside the continuation band must not end the gesture"
+        );
+    }
+
+    #[test]
+    fn edge_slide_releases_the_pin_on_the_first_frame_without_contact() {
+        // A PTP pad may send no further report after a lift, so waiting for the
+        // 5-frame grace (or worse, the 4 s watchdog) would leave the pointer
+        // frozen. The pin must be handed back immediately.
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_500, true); // capture
+        state.edge_want_pin = false; // caller pinned
+
+        let _ = handle_edge_slide(&mut state, 0, 0, 0, false); // finger lifted
+        assert!(
+            state.edge_want_release,
+            "a lift must release the pointer on the same frame"
+        );
+        assert!(
+            state.edge.is_some(),
+            "the state machine keeps its grace period for palm-rejection gaps"
+        );
+
+        // Contact comes back inside the grace window: re-pin, keep the gesture.
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_480, true);
+        assert!(state.edge_want_pin, "resuming must re-pin the pointer");
+        assert!(state.edge.as_ref().expect("edge").captured);
+    }
+
+    #[test]
+    fn edge_slide_slow_swipe_still_steps() {
+        // 10 units/frame at 250 Hz ≈ 7 cm/s: deliberate but unhurried. The old
+        // unconditional accumulator decay reached equilibrium at 8×10 = 80 <
+        // y_step = 88, so the gesture would capture and then never emit a step.
+        let mut state = real_pad();
+        let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
+
+        let mut brightness_total = 0;
+        let mut y = 1_800;
+        for _ in 0..90 {
+            y -= 10;
+            let (b, _v) = handle_edge_slide(&mut state, 1, 200, y, true);
+            brightness_total += b;
+        }
+        assert!(
+            brightness_total >= 3,
+            "a slow swipe must still produce steps (got {brightness_total})"
+        );
     }
 
     #[test]
@@ -1895,12 +2324,13 @@ mod tests {
         assert!(state.edge.is_some());
         assert!(!state.edge.as_ref().expect("edge state").captured);
 
-        // Moderate vertical swipe should now capture due to threshold clamp.
-        let _ = handle_edge_slide(&mut state, 1, 2_100, 31_700, true);
+        // The pre-roll is capped at 900 units for absurd logical ranges, so this
+        // 1 000-unit swipe must commit.
+        let _ = handle_edge_slide(&mut state, 1, 2_000, 31_000, true);
         assert!(state.edge.as_ref().expect("edge state").captured);
 
         // Additional motion should generate at least one step.
-        let (b, v) = handle_edge_slide(&mut state, 1, 2_100, 31_200, true);
+        let (b, v) = handle_edge_slide(&mut state, 1, 2_000, 30_000, true);
         assert!(b > 0, "expected brightness step with high y_max");
         assert_eq!(v, 0);
     }
@@ -1925,14 +2355,16 @@ mod tests {
     #[test]
     fn edge_slide_real_geometry_emits_steps_at_250hz() {
         let mut state = real_pad();
-        // Contact starts in the left edge zone (x < 3282/8 = 410).
+        // Contact starts in the left edge zone (x < 16% of 3282 = 525).
         let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
         assert!(state.edge.is_some(), "must arm from the edge");
 
-        // 18 logical units per frame ≈ a 4 cm/s swipe at 250 Hz.
+        // 18 logical units per frame ≈ a 4 cm/s swipe at 250 Hz. The 8 mm
+        // pre-roll (250 units) is crossed around frame 14; steps follow every
+        // y_step = 88 units (~2.8 mm).
         let mut brightness_total = 0;
         let mut y = 1_800;
-        for i in 0..40 {
+        for i in 0..80 {
             y -= 18;
             let (b, _v) = handle_edge_slide(&mut state, 1, 200 + (i % 3), y, true);
             brightness_total += b;
@@ -1941,27 +2373,31 @@ mod tests {
             brightness_total > 0,
             "a normal swipe must produce brightness steps (got {brightness_total})"
         );
+        assert!(
+            state.edge.as_ref().expect("edge").captured,
+            "the swipe must capture before it can step"
+        );
     }
 
     #[test]
     fn edge_slide_survives_a_contact_slot_shuffle() {
         let mut state = real_pad();
         let _ = handle_edge_slide(&mut state, 1, 200, 1_800, true);
-        // Capture with vertical intent.
-        let _ = handle_edge_slide(&mut state, 1, 205, 1_760, true);
+        // Capture with vertical intent (300 units > the 250-unit pre-roll).
+        let _ = handle_edge_slide(&mut state, 1, 205, 1_500, true);
         assert!(state.edge.as_ref().expect("edge").captured);
 
         // One frame reads the *other* contact slot: x jumps to the right edge,
         // exactly what the deployed log recorded (`ended: x=3240/3282` on a
         // left-side gesture). This must re-anchor, not kill the gesture.
-        let _ = handle_edge_slide(&mut state, 1, 3_240, 1_742, true);
+        let _ = handle_edge_slide(&mut state, 1, 3_240, 1_500, true);
         assert!(
             state.edge.is_some(),
             "a slot shuffle must not end the gesture"
         );
 
         let mut brightness_total = 0;
-        let mut y = 1_742;
+        let mut y = 1_500;
         for _ in 0..30 {
             y -= 18;
             let (b, _v) = handle_edge_slide(&mut state, 1, 205, y, true);
@@ -2064,10 +2500,18 @@ fn handle_five_finger_gesture(state: &mut GestureState, contact_count: u32) -> b
 }
 
 /// Single-finger vertical swipe in the left (brightness) or right (volume)
-/// edge zone triggers one action per step of Y movement.
-/// Returns `(brightness_steps, volume_steps)` — positive = up, negative = down.
-/// The caller must invoke simulate_* AFTER this function returns so that the
-/// GESTURE_STATE borrow is fully released before any COM/WMI call.
+/// edge band triggers one action per step of Y movement.
+///
+/// Returns `(brightness_steps, volume_steps)` — positive = up, negative = down —
+/// and leaves two side-effect requests on `state` for the caller to drain after
+/// the RefCell borrow is released:
+///   * `edge_want_pin` / `edge_want_release` → `ClipCursor` confinement of the
+///     pointer ("o rato não anda"),
+///   * `edge_ticks` → number of haptic tick frames to write.
+///
+/// The caller must invoke simulate_*/ClipCursor/HidD_* AFTER this function
+/// returns so that the GESTURE_STATE borrow is fully released before any
+/// COM/WMI/HID call.
 #[cfg(windows)]
 fn handle_edge_slide(
     state: &mut GestureState,
@@ -2076,6 +2520,10 @@ fn handle_edge_slide(
     y: i32,
     tip_switch: bool,
 ) -> (i32, i32) {
+    // Per-frame side effects are drained by the caller; start from zero so a
+    // frame that produces nothing never replays the previous frame's requests.
+    state.edge_ticks = 0;
+
     // Reject frames whose coordinates are outside the pad's logical range.
     // The BLTP7853 emits out-of-range X/Y on EMI-corrupted reports (the audit
     // saw x=3240 on a pad whose logical max is 3282, and start_x values that
@@ -2084,23 +2532,6 @@ fn handle_edge_slide(
     // machine at all. `contact_count`/`tip_switch` are still honoured below so
     // a lifted finger is not ignored just because the coordinates are junk.
     let coords_valid = x >= 0 && y >= 0 && x <= state.x_max && y <= state.y_max;
-
-    // Exponential decay: drift the accumulator toward zero during idle/noise
-    // frames so stale Y-deltas don't accumulate into phantom gestures.
-    // This is defense-in-depth against EMI-corrupted Y values that could
-    // otherwise build up in the accumulator. 1/8 per frame: gentle enough that
-    // a normal 250 Hz report stream still accumulates a step, strong enough
-    // that a stopped finger does not leave a charged accumulator behind.
-    if let Some(edge) = &mut state.edge {
-        if edge.accum != 0 {
-            let decay = edge.accum.abs() / 8;
-            if decay > 0 {
-                edge.accum -= if edge.accum > 0 { decay } else { -decay };
-            } else {
-                edge.accum = 0; // snap small residual to zero
-            }
-        }
-    }
 
     // Allow up to 5 consecutive frames of lost contact before resetting.
     const GRACE_FRAMES: u8 = 5;
@@ -2122,6 +2553,14 @@ fn handle_edge_slide(
         }
         if let Some(edge) = &mut state.edge {
             edge.lost_frames += 1;
+            // Hand the cursor back on the FIRST frame without contact. The grace
+            // period below exists so a one-frame palm-rejection gap does not kill
+            // a running gesture, but the pointer must not stay frozen while we
+            // wait: the pad may not emit another report at all after a lift, and
+            // then nothing but the 4 s watchdog would release it.
+            if edge.captured && edge.lost_frames == 1 {
+                state.edge_want_release = true;
+            }
             if edge.lost_frames > GRACE_FRAMES {
                 log::debug!(
                     "[gesture] edge-slide dropped: contact lost for {} frames",
@@ -2129,19 +2568,27 @@ fn handle_edge_slide(
                 );
                 state.edge = None;
                 EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
+                state.edge_want_release = true;
             }
         }
         return (0, 0);
     }
 
-    let edge_thresh = state.x_max / 8; // 12.5% of width
+    // Band geometry (percent of x_max) and the activation gate both come from
+    // the RE of PluginGesture.dll — see EDGE_ZONE_START_PCT / EDGE_ACTIVATION_PERMILLE.
+    let (start_pct, continue_pct) = edge_zone_pcts();
+    let edge_thresh = (state.x_max * start_pct / 100).max(1);
+    let continue_thresh = (state.x_max * continue_pct / 100).max(edge_thresh + 1);
     let y_step = (state.y_max / 24).clamp(28, 320); // ~4.2% of height per action
                                                     // A Y jump larger than this in one frame means a new finger was placed
                                                     // (the touchpad sent no intermediate contact_count=0 report).
     let jump_thresh = state.y_max * 15 / 100; // 15% of height
-                                              // Edge slide is only captured after clear vertical intent so the edge
-                                              // region continues to behave like a normal touchpad zone by default.
-    let activation_dy = (state.y_max / 80).clamp(12, 120); // ~1.25% of height
+                                              // Pre-roll: a swipe is only captured after this much vertical travel
+                                              // *inside the band*, so an ordinary click/scroll near the border never
+                                              // turns into a brightness/volume change. 118 ‰ of 2124 = 250 units
+                                              // = 8 mm, the literal `cmp |dy|, 0xFA` of the original.
+    let activation_dy =
+        ((state.y_max as i64 * EDGE_ACTIVATION_PERMILLE as i64 / 1000) as i32).clamp(180, 900);
 
     // Contact-session gating: edge slide can only start if the finger touch
     // itself started in the edge initiation zone.
@@ -2205,8 +2652,8 @@ fn handle_edge_slide(
             // HID report switching which contact slot we are reading. Re-anchor
             // instead of ending, otherwise a slot shuffle kills the gesture.
             let in_zone = match edge.side {
-                EdgeSide::Left => x < state.x_max / 3,
-                EdgeSide::Right => x > state.x_max * 2 / 3,
+                EdgeSide::Left => x < continue_thresh,
+                EdgeSide::Right => x > state.x_max - continue_thresh,
             };
             if !in_zone {
                 let slot_switch = (x - edge.last_x).abs() > state.x_max / 2;
@@ -2252,15 +2699,21 @@ fn handle_edge_slide(
                 // its old session side.
                 state.edge_contact_start_side = None;
                 EDGE_GESTURE_ACTIVE.store(false, Ordering::Relaxed);
+                state.edge_want_release = true;
                 return (0, 0);
             }
             edge.out_of_zone_frames = 0;
 
-            // Contact just restored after a brief tracking loss — re-anchor.
+            // Contact just restored after a brief tracking loss — re-anchor and, if the
+            // gesture was already committed, re-pin the pointer (it was released on
+            // the first lost frame so the user never sees a frozen cursor).
             if edge.lost_frames > 0 {
                 edge.last_x = x;
                 edge.last_y = y;
                 edge.lost_frames = 0;
+                if edge.captured {
+                    state.edge_want_pin = true;
+                }
                 return (0, 0);
             }
 
@@ -2270,8 +2723,7 @@ fn handle_edge_slide(
             if !edge.captured {
                 let total_dy = edge.start_y - y;
                 let total_dx = x - edge.start_x;
-                // Capture only when vertical movement is clear enough and
-                // stronger than lateral drift.
+                // Pre-roll gate (8 mm on this pad) + vertical dominance.
                 if total_dy.abs() >= activation_dy
                     && (total_dy.abs() >= total_dx.abs()
                         || total_dy.abs() >= activation_dy.saturating_mul(2))
@@ -2281,17 +2733,32 @@ fn handle_edge_slide(
                     edge.last_x = x;
                     edge.last_y = y;
                     EDGE_GESTURE_ACTIVE.store(true, Ordering::Relaxed);
+                    let side = match edge.side {
+                        EdgeSide::Left => "left",
+                        EdgeSide::Right => "right",
+                    };
                     log::info!(
-                        "[gesture] edge-slide captured: side={} total_dy={} total_dx={} (y_step={} deadband={})",
-                        match edge.side {
-                            EdgeSide::Left => "left",
-                            EdgeSide::Right => "right",
-                        },
+                        "[gesture] edge-slide captured: side={} total_dy={} total_dx={} (y_step={} activation={} band={}%/{})",
+                        side,
                         total_dy,
                         total_dx,
                         y_step,
-                        charger_aware_y_deadband(state.y_max).min(y_step / 6),
+                        activation_dy,
+                        start_pct,
+                        continue_pct,
                     );
+                    // Confine the pointer for the rest of the gesture and give one
+                    // haptic tick. The original also emits exactly ONE action on the
+                    // activation frame (its `pct > 2` test is already satisfied by
+                    // the 250-unit pre-roll), then re-anchors — so the user gets
+                    // feedback the moment the gesture commits, not 3 mm later.
+                    state.edge_want_pin = true;
+                    state.edge_ticks = 1;
+                    let first = if total_dy > 0 { 1 } else { -1 };
+                    return match edge.side {
+                        EdgeSide::Left => (first, 0),
+                        EdgeSide::Right => (0, first),
+                    };
                 } else {
                     // Stay armed but do not hijack pointer movement.
                     edge.last_x = x;
@@ -2319,10 +2786,25 @@ fn handle_edge_slide(
             // per frame while a 2124-unit pad gave a 42-unit deadband. Every real
             // sample was therefore "noise" and the accumulator never reached a
             // step — which is exactly why the log has captures but zero
-            // `edge-left steps=` lines. Cap at `y_step/6` instead.
-            let deadband = charger_aware_y_deadband(state.y_max).min(y_step / 6);
+            // `edge-left steps=` lines. `y_step/10` (8 units ≈ 0.26 mm) keeps
+            // rejecting 1-3 unit jitter while letting a 7 cm/s swipe through; the
+            // 250-unit pre-roll now does the "is this intentional?" work that the
+            // oversized deadband was wrongly doing before.
+            let deadband = charger_aware_y_deadband(state.y_max).min(y_step / 10);
             if dy.abs() < deadband {
-                // Delta too small — likely EMI noise, skip it.
+                // Idle/noise frame: bleed the accumulator instead of adding to it,
+                // so a finger resting on the border does not leave a charged
+                // accumulator behind for the next touch. Decaying *only* here —
+                // rather than on every frame — is what lets a slow swipe
+                // (≈10 units/frame, 8 cm/s) still reach a step; decaying
+                // unconditionally gives an equilibrium of 8×dy = 80 < y_step and
+                // the gesture would capture and then never step.
+                let decay = edge.accum.abs() / 8;
+                if decay > 0 {
+                    edge.accum -= if edge.accum > 0 { decay } else { -decay };
+                } else {
+                    edge.accum = 0; // snap small residual to zero
+                }
                 return (0, 0);
             }
             edge.accum += dy;
@@ -2347,9 +2829,11 @@ fn handle_edge_slide(
 
             if brightness != 0 {
                 log::info!("[gesture] edge-left steps={brightness}");
+                state.edge_ticks = brightness.unsigned_abs().min(4) as u8;
             }
             if volume != 0 {
                 log::info!("[gesture] edge-right steps={volume}");
+                state.edge_ticks = volume.unsigned_abs().min(4) as u8;
             }
             (brightness, volume)
         }
