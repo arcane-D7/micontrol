@@ -519,6 +519,34 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        // Event Log archival — the machine-wide `Application` channel has been
+        // at 100 % since 2026-10-22 and is dropping events. `wevtutil epl`
+        // (export) and `wevtutil cl` (clear) both need an administrator token:
+        // the channel ACL grants clear (0x4) only to BA / SY / SO. This
+        // dispatcher has it on both paths — `MiControlBridge` runs as
+        // LocalSystem (`sc qc` → SERVICE_START_NAME: LocalSystem) and
+        // `MiControlElevated` runs the interactive token at HighestAvailable
+        // (`schtasks /query /v` → Run As User: <user>, Logon Mode:
+        // Interactive only). The task path is therefore elevated-but-not-
+        // SYSTEM, so the implementation resolves paths from %PROGRAMDATA%
+        // only — never the caller's profile.
+        //
+        // Protections:
+        //   * the channel is a compile-time constant (`Application`) and this
+        //     arm reads NO args, so a forged payload cannot retarget the
+        //     export/clear at Security or System;
+        //   * at most one archival per hour per machine (latch at
+        //     %PROGRAMDATA%\MiControl\logs\.archive_latch) — a second call
+        //     returns an explicit `too soon` error instead of re-exporting;
+        //   * the archive keeps only the newest 5 `.evtx` files;
+        //   * returns { archived_to, cleared, size_bytes } (+ clear_error /
+        //     pruned when relevant); a failed export errors out and leaves no
+        //     latch, so the operator can retry immediately.
+        "archive_event_log" => match crate::hw::event_log::archive_event_log() {
+            Ok(outcome) => make_ok(serde_json::to_value(outcome).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
+
         "set_brightness" => {
             let level: u8 = match serde_json::from_value(cmd.args["level"].clone()) {
                 Ok(v) => v,
