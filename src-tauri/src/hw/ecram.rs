@@ -69,7 +69,7 @@
 /// allowed address ranges, so ADPW CANNOT be read through IoTDriver.
 /// However, AC adapter wattage IS available via WMI (ACPI WMAA method) —
 /// see `wmi_ec::read_adapter_power()`. This is the primary path used by MiControl.
-use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::hw::errors::{HardwareError, HardwareResult, RegionBlockKind};
 use anyhow::Context;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -879,27 +879,67 @@ pub fn read_named_region(region: &str) -> HardwareResult<Vec<u8>> {
 
     // Direct driver access works for IOT_STATUS/IOT_SENSORS and may work for
     // ERAM/SMA2 on some configurations. If it fails, fall back to the pipe
-    // broker. If both fail, report the region as blocked — returning zeros
-    // made the UI display "0 °C / 0 RPM / 0 mAh" as if they were real
-    // readings (the driver returns 0x80070005 for ERAM/SMA2 even to SYSTEM).
-    read_ecram(addr, size)
-        .or_else(|e| {
-            log::debug!(target: "hw::ecram", "Direct read of {region} failed ({e}), trying pipe broker");
-            read_ecram_via_pipe(addr, size)
-                .ok_or(e)
-                .inspect(|data| {
-                    log::debug!(target: "hw::ecram", "Pipe broker read {region}: {len} bytes", len = data.len());
-                })
-        })
-        .map_err(|e| {
+    // broker, and report the region as blocked — returning zeros made the UI
+    // display "0 °C / 0 RPM / 0 mAh" as if they were real readings (the driver
+    // returns 0x80070005 for ERAM/SMA2 even to SYSTEM).
+    //
+    // The two failures are NOT equivalent and must never be merged into one
+    // sentence: the app process is refused when it opens the device (message
+    // "Open IoT driver device") simply because the driver only admits its own
+    // DriverStore IoTService.exe — that is expected. The service's own answer
+    // is the ground truth, so it is the one that classifies the failure.
+    let direct_err = match read_ecram(addr, size) {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) => e,
+    };
+
+    match read_ecram_via_pipe_result(addr, size) {
+        Ok(data) => {
+            log::debug!(
+                target: "hw::ecram",
+                "Pipe broker read {region}: {len} bytes",
+                len = data.len()
+            );
+            Ok(data)
+        }
+        Err(pipe_err) => {
+            let kind = classify_region_block(&pipe_err);
             log::warn!(
                 target: "hw::ecram",
-                "Region {region} unavailable (direct + pipe broker failed): {e}"
+                "Region {region} unavailable ({kind:?}): ecram_service: {pipe_err} | direct IOCTL: {direct_err}"
             );
-            HardwareError::Ecram(format!(
-                "ECRAM region {region} is blocked by the IoT driver (direct IOCTL and ecram_service both failed): {e}"
-            ))
-        })
+            Err(HardwareError::EcramBlocked {
+                region: region.to_ascii_uppercase(),
+                kind,
+                detail: format!(
+                    "{region} could not be read: ecram_service answered \"{pipe_err}\" \
+                     (the app's own direct IOCTL is refused by the driver's process check: {direct_err})"
+                ),
+            })
+        }
+    }
+}
+
+/// Classify a failed region read from the error text of the authoritative
+/// source (`ecram_service`).
+///
+/// `0x80070005` / "Access is denied" from `DeviceIoControl ECRAM_READ` means
+/// the service **did** open the driver device and the driver refused the
+/// *address* — the expected state for ERAM/SMA2 on this platform. A dead or
+/// busy pipe is a genuine fault that the UI must surface as an error.
+pub fn classify_region_block(reason: &str) -> RegionBlockKind {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("0x80070005") || lower.contains("access is denied") {
+        RegionBlockKind::DriverBlocked
+    } else if lower.contains("open pipe")
+        || lower.contains("no response from pipe")
+        || lower.contains("pipe refuses")
+        || lower.contains("pipe client only supported")
+    {
+        RegionBlockKind::ServiceUnavailable
+    } else {
+        RegionBlockKind::Unknown
+    }
 }
 
 /// Returns `true` when the current process token is elevated (administrator).
@@ -991,6 +1031,15 @@ pub struct EramMap {
     pub blocked_regions: Vec<String>,
     /// Human-readable reason from the driver/pipe when `available == false`.
     pub blocked_reason: Option<String>,
+    /// Why the ERAM block is unreadable, classified for the UI:
+    /// `driver_blocked` is this platform's EXPECTED state (render a calm "—"
+    /// with a hint), `service_unavailable`/`unknown` are real faults (error
+    /// banner). `None` while `available == true`.
+    pub blocked_kind: Option<RegionBlockKind>,
+    /// True when `perf_profile` came from WMI (ACPI MICommonInterface) instead
+    /// of ERAM — i.e. it is a real reading even while `available == false`.
+    #[serde(default)]
+    pub perf_profile_from_wmi: bool,
 }
 
 /// Read the ACPI ERAM block and decode all known fields.
@@ -1005,28 +1054,31 @@ pub struct EramMap {
 /// are populated. The remaining fields are zero **placeholders**; callers
 /// must check `available` before presenting them as readings.
 pub fn read_eram_map() -> HardwareResult<EramMap> {
-    let eram = read_ecram(get_eram_base(), 0x100)
-        .or_else(|e| {
-            log::debug!(target: "hw::ecram", "Direct ERAM read failed ({e}), trying pipe broker");
-            read_ecram_via_pipe(get_eram_base(), 0x100)
-                .ok_or(e)
-                .inspect(|data| {
-                    log::debug!(target: "hw::ecram", "Pipe broker ERAM read: {len} bytes", len = data.len());
-                })
-        });
-
-    match eram {
+    // `read_named_region` already merges the direct IOCTL and the
+    // ecram_service pipe and classifies the failure (`EcramBlocked`), so the
+    // map never has to guess which side refused and why.
+    match read_named_region("ERAM") {
         Ok(bytes) if bytes.len() >= 0x100 => decode_eram_map(&bytes),
         Ok(bytes) => Err(HardwareError::Ecram(format!(
             "Short ERAM read: {} bytes",
             bytes.len()
         ))),
-        Err(e) => {
+        Err(HardwareError::EcramBlocked { kind, detail, .. }) => {
             log::warn!(
                 target: "hw::ecram",
-                "ERAM read unavailable (direct + pipe broker failed: {e}); building partial map (available=false)"
+                "ERAM read unavailable ({kind:?}); building partial map (available=false): {detail}"
             );
-            Ok(partial_eram_map_from_wmi(&e.to_string()))
+            Ok(partial_eram_map_from_wmi(kind, &detail))
+        }
+        Err(other) => {
+            log::warn!(
+                target: "hw::ecram",
+                "ERAM read unavailable ({other}); building partial map (available=false)"
+            );
+            Ok(partial_eram_map_from_wmi(
+                RegionBlockKind::Unknown,
+                &other.to_string(),
+            ))
         }
     }
 }
@@ -1083,13 +1135,15 @@ fn decode_eram_map(eram: &[u8]) -> HardwareResult<EramMap> {
         available: true,
         blocked_regions: Vec::new(),
         blocked_reason: None,
+        blocked_kind: None,
+        perf_profile_from_wmi: false,
     })
 }
 
 /// ERAM map for the "region blocked" case: every ERAM-derived field is a
 /// zero placeholder and `available` is `false`. Split out so the honesty
 /// contract is unit-testable without touching WMI or the driver.
-fn unavailable_eram_map(reason: &str) -> EramMap {
+fn unavailable_eram_map(kind: RegionBlockKind, reason: &str) -> EramMap {
     EramMap {
         misc0: 0,
         misc1: 0,
@@ -1120,6 +1174,8 @@ fn unavailable_eram_map(reason: &str) -> EramMap {
         available: false,
         blocked_regions: vec!["ERAM".to_string(), "SMA2".to_string()],
         blocked_reason: Some(reason.to_string()),
+        blocked_kind: Some(kind),
+        perf_profile_from_wmi: false,
     }
 }
 
@@ -1130,8 +1186,8 @@ fn unavailable_eram_map(reason: &str) -> EramMap {
 /// The result is explicitly flagged `available: false`: the zeroed fields are
 /// placeholders, not measurements. Only AC adapter power and performance mode
 /// (WMI, no ERAM involved) carry real values.
-fn partial_eram_map_from_wmi(reason: &str) -> EramMap {
-    let mut map = unavailable_eram_map(reason);
+fn partial_eram_map_from_wmi(kind: RegionBlockKind, reason: &str) -> EramMap {
+    let mut map = unavailable_eram_map(kind, reason);
 
     if let Ok(sensor) = crate::hw::wmi_ec::read_sensor_data() {
         map.ac_connected = sensor.adapter_power > 0;
@@ -1140,6 +1196,7 @@ fn partial_eram_map_from_wmi(reason: &str) -> EramMap {
 
     if let Ok(mode) = crate::hw::wmi_ec::get_performance_mode() {
         map.perf_profile = mode as u8;
+        map.perf_profile_from_wmi = true;
     }
 
     map
@@ -1458,6 +1515,19 @@ pub fn send_pipe_request(_request: &str) -> Result<String, String> {
 /// Returns `None` if the pipe server is not running or the request fails.
 #[cfg(windows)]
 pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>> {
+    read_ecram_via_pipe_result(phys_addr, byte_count).ok()
+}
+
+/// Read ECRAM through the `ecram_service` pipe, keeping the service's own
+/// error text.
+///
+/// [`read_ecram_via_pipe`] throws that text away (`Option`), which is how the
+/// UI ended up showing the app's *expected* "Open IoT driver device" refusal
+/// as if it were the reason a region is blocked. Callers that report to the
+/// user must use this variant: the service runs as SYSTEM inside the
+/// DriverStore, so its answer is the ground truth.
+#[cfg(windows)]
+pub fn read_ecram_via_pipe_result(phys_addr: u64, byte_count: usize) -> Result<Vec<u8>, String> {
     // Reuse the hardened generic client: it tolerates byte-mode servers,
     // enforces a 5 s deadline and owns its handle through an RAII guard.
     let request = serde_json::json!({
@@ -1467,36 +1537,38 @@ pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>>
     })
     .to_string();
 
-    let response = match send_pipe_request(&request) {
-        Ok(response) => response,
-        Err(e) => {
-            log::debug!(target: "hw::ecram::pipe", "Pipe read request failed: {e}");
-            return None;
-        }
-    };
+    let response = send_pipe_request(&request).map_err(|e| {
+        log::debug!(target: "hw::ecram::pipe", "Pipe read request failed: {e}");
+        e
+    })?;
 
-    let resp: PipeResponse = match serde_json::from_str(response.trim()) {
-        Ok(resp) => resp,
-        Err(e) => {
-            log::warn!(target: "hw::ecram::pipe", "Pipe read returned invalid JSON: {e}");
-            return None;
-        }
-    };
+    let resp: PipeResponse = serde_json::from_str(response.trim()).map_err(|e| {
+        log::warn!(target: "hw::ecram::pipe", "Pipe read returned invalid JSON: {e}");
+        format!(
+            "invalid JSON from ecram_service: {e} (response: {})",
+            response.trim().chars().take(120).collect::<String>()
+        )
+    })?;
 
     if !resp.ok {
-        log::debug!(
-            target: "hw::ecram::pipe",
-            "Pipe read failed: {}",
-            resp.error.unwrap_or_default()
-        );
-        return None;
+        let err = resp
+            .error
+            .unwrap_or_else(|| "ecram_service refused the read without a reason".to_string());
+        log::debug!(target: "hw::ecram::pipe", "Pipe read failed: {err}");
+        return Err(err);
     }
 
-    // Decode hex data
-    let hex = resp.data?;
+    // Decode hex data. `get` instead of slicing: a malformed (odd-length or
+    // non-ASCII) answer must be an error, not a panic in the UI thread.
+    let hex = resp
+        .data
+        .ok_or_else(|| "ecram_service returned ok without data".to_string())?;
     let data: Vec<u8> = (0..hex.len())
         .step_by(2)
-        .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .filter_map(|i| {
+            hex.get(i..i + 2)
+                .and_then(|p| u8::from_str_radix(p, 16).ok())
+        })
         .collect();
 
     if data.len() != byte_count {
@@ -1507,7 +1579,7 @@ pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>>
             byte_count
         );
     }
-    Some(data)
+    Ok(data)
 }
 
 /// Check if the custom IoTService.exe pipe broker is available.
@@ -1542,6 +1614,11 @@ pub fn is_pipe_broker_available() -> bool {
 #[cfg(not(windows))]
 pub fn read_ecram_via_pipe(_phys_addr: u64, _byte_count: usize) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(not(windows))]
+pub fn read_ecram_via_pipe_result(_phys_addr: u64, _byte_count: usize) -> Result<Vec<u8>, String> {
+    Err("ecram_service pipe is Windows-only".to_string())
 }
 
 #[cfg(not(windows))]
@@ -1725,14 +1802,29 @@ mod tests {
             eram.map(|b| b.len()).unwrap_or(0)
         );
         eprintln!("ERAM correctly reported unavailable: {:?}", eram.err());
+
+        // The decoded map must carry the same classification, so the UI can
+        // render the calm "—" instead of an error banner.
+        let map = read_eram_map().expect("map is always returned (partial when blocked)");
+        if !map.available {
+            assert_eq!(
+                map.blocked_kind,
+                Some(RegionBlockKind::DriverBlocked),
+                "0x80070005 from the service = expected driver block"
+            );
+            eprintln!(
+                "ERAM map blocked_kind = {:?} / regions = {:?}",
+                map.blocked_kind, map.blocked_regions
+            );
+        }
     }
 
     /// The driver blocks ERAM/SMA2 with 0x80070005. The map must say so
     /// instead of presenting zeros as measurements.
     #[test]
     fn blocked_eram_map_is_flagged_unavailable() {
-        let map =
-            unavailable_eram_map("DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)");
+        let reason = "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)";
+        let map = unavailable_eram_map(classify_region_block(reason), reason);
         assert!(
             !map.available,
             "blocked ERAM map must not claim availability"
@@ -1745,6 +1837,41 @@ mod tests {
                 .is_some_and(|r| r.contains("0x80070005")),
             "reason should carry the driver error, got {:?}",
             map.blocked_reason
+        );
+        assert_eq!(
+            map.blocked_kind,
+            Some(RegionBlockKind::DriverBlocked),
+            "0x80070005 from the service is the platform's expected driver block"
+        );
+    }
+
+    /// The UI renders `driver_blocked` as a calm "—" and everything else as an
+    /// error banner, so the classification must follow the *service's* answer.
+    #[test]
+    fn region_block_classification() {
+        assert_eq!(
+            classify_region_block("DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"),
+            RegionBlockKind::DriverBlocked
+        );
+        assert_eq!(
+            classify_region_block(
+                "Open pipe: The system cannot find the file specified. (0x80070002)"
+            ),
+            RegionBlockKind::ServiceUnavailable
+        );
+        assert_eq!(
+            classify_region_block("No response from pipe"),
+            RegionBlockKind::ServiceUnavailable
+        );
+        assert_eq!(
+            classify_region_block("something unexpected"),
+            RegionBlockKind::Unknown
+        );
+        // The app's own open failure must NOT be read as a driver block: it is
+        // expected and says nothing about the region.
+        assert_eq!(
+            classify_region_block("Hardware error: Open IoT driver device."),
+            RegionBlockKind::Unknown
         );
     }
 

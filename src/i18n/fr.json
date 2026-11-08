@@ -1294,6 +1294,12 @@
     }
   },
   "ecrDebug": {
+    "ecramBlockedDetailLabel": "Détail technique",
+    "ecramRegionBlockedChip": "bloquée",
+    "ecramRegionBlockedHint": "indisponible — le pilote IoT bloque cette région (0x80070005). Ce n'est pas une défaillance de l'application.",
+    "ecramRegionErrorChip": "erreur",
+    "ecramRegionErrorHint": "la lecture de cette région a échoué.",
+    "ecramWriteBlockedHint": "Écritures indisponibles tant qu'ERAM est bloquée — le pilote refuse d'ouvrir le périphérique à ce processus.",
     "title": "🔧 Panneau de Débogage EC",
     "subtitle": "Accès direct à la RAM EC (avancé)",
     "readEcram": "Lire ECRAM",
@@ -1308,8 +1314,8 @@
     "readError": "Erreur de lecture : {error}",
     "writeError": "Erreur d'écriture : {error}",
     "mapError": "Erreur de carte : {error}",
-    "ecramBlockedTitle": "RAM EC bloquée par le pilote IoT",
-    "ecramBlockedBody": "ERAM/SMA2 ne sont pas lisibles sur cet ordinateur — le pilote renvoie 0x80070005 même à SYSTEM. Les températures, ventilateurs et données de batterie issus de l'EC sont masqués au lieu d'être affichés à zéro. Raison : {reason}",
+    "ecramBlockedTitle": "Régions bloquées par le pilote IoT",
+    "ecramBlockedBody": "Le pilote n'expose ces régions qu'à son propre service. Les valeurs issues de l'EC s'affichent — au lieu de zéros qui ressemblent à des mesures ; les plages que le pilote autorise (IOT_STATUS, IOT_SENSORS) continuent d'afficher des données réelles.",
     "invalidHexData": "Données hex invalides : ne doivent contenir que des caractères hex (0-9, A-F)",
     "invalidAddress": "Format d'adresse invalide : doit être un nombre hex",
     "addressOutOfRange": "Adresse hors de la plage sécurisée de la RAM EC (0x{min}–0x{max})",

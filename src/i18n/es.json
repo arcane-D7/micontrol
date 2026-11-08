@@ -1294,6 +1294,12 @@
     }
   },
   "ecrDebug": {
+    "ecramBlockedDetailLabel": "Detalle técnico",
+    "ecramRegionBlockedChip": "bloqueada",
+    "ecramRegionBlockedHint": "no disponible — el driver IoT bloquea esta región (0x80070005). No es un fallo de la aplicación.",
+    "ecramRegionErrorChip": "error",
+    "ecramRegionErrorHint": "la lectura de esta región ha fallado.",
+    "ecramWriteBlockedHint": "Las escrituras no están disponibles mientras ERAM esté bloqueada — el driver rechaza abrir el dispositivo a este proceso.",
     "title": "🔧 Panel de Depuración EC",
     "subtitle": "Acceso directo a RAM EC (avanzado)",
     "readEcram": "Leer ECRAM",
@@ -1308,8 +1314,8 @@
     "readError": "Error de lectura: {error}",
     "writeError": "Error de escritura: {error}",
     "mapError": "Error de mapa: {error}",
-    "ecramBlockedTitle": "RAM EC bloqueada por el driver IoT",
-    "ecramBlockedBody": "ERAM/SMA2 no se pueden leer en este equipo: el driver devuelve 0x80070005 incluso a SYSTEM. Las temperaturas, ventiladores y datos de batería derivados de la EC se ocultan en lugar de mostrarse como cero. Motivo: {reason}",
+    "ecramBlockedTitle": "Regiones bloqueadas por el driver IoT",
+    "ecramBlockedBody": "El driver solo expone estas regiones a su propio servicio. Los valores derivados de la EC se muestran como — en lugar de ceros que parecen lecturas; las regiones que el driver sí permite (IOT_STATUS, IOT_SENSORS) siguen mostrando datos reales.",
     "invalidHexData": "Datos hex inválidos: deben contener solo caracteres hex (0-9, A-F)",
     "invalidAddress": "Formato de dirección inválido: debe ser un número hex",
     "addressOutOfRange": "Dirección fuera del rango seguro de RAM EC (0x{min}–0x{max})",

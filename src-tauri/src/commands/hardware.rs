@@ -309,34 +309,41 @@ pub async fn read_ecram_raw(address: String, count: u32) -> Result<String, Error
         }
 
         // The direct IOCTL requires the caller to be the DriverStore
-        // `IoTService.exe`; the unprivileged app is always refused ("Open IoT
-        // driver device"). The same address is readable through the
-        // ecram_service JSON pipe, so fall back to it instead of failing.
+        // `IoTService.exe`; the unprivileged app is always refused at open
+        // ("Open IoT driver device") — expected, not the reason a read fails.
+        // The ecram_service JSON pipe is the authoritative source.
         let count = count as usize;
-        let bytes = match crate::hw::ecram::read_ecram(addr, count) {
-            Ok(bytes) => bytes,
-            Err(direct_err) => {
-                log::debug!(
-                    target: "commands::hardware",
-                    "read_ecram_raw: direct IOCTL failed for 0x{addr:08X} ({direct_err}); trying ecram_service pipe"
-                );
-                match crate::hw::ecram::read_ecram_via_pipe(addr, count) {
-                    Some(bytes) if bytes.len() == count => bytes,
-                    Some(bytes) => {
-                        return Err(HardwareError::Ecram(format!(
-                            "Short read from ecram_service pipe at 0x{addr:08X}: {} of {count} bytes",
-                            bytes.len()
-                        )));
-                    }
-                    None => {
-                        return Err(HardwareError::Ecram(format!(
-                            "Failed to read 0x{addr:08X} ({count} bytes): direct driver: {direct_err}; ecram_service pipe: unavailable or refused"
-                        )));
-                    }
-                }
+        let direct_err = match crate::hw::ecram::read_ecram(addr, count) {
+            Ok(bytes) => {
+                return Ok(bytes.iter().map(|b| format!("{b:02x}")).collect());
             }
+            Err(e) => e,
         };
-        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        log::debug!(
+            target: "commands::hardware",
+            "read_ecram_raw: direct IOCTL failed for 0x{addr:08X} ({direct_err}); trying ecram_service pipe"
+        );
+
+        match crate::hw::ecram::read_ecram_via_pipe_result(addr, count) {
+            Ok(bytes) if bytes.len() == count => {
+                Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+            }
+            Ok(bytes) => Err(HardwareError::Ecram(format!(
+                "Short read from ecram_service pipe at 0x{addr:08X}: {} of {count} bytes",
+                bytes.len()
+            ))),
+            Err(pipe_err) => {
+                let kind = crate::hw::ecram::classify_region_block(&pipe_err);
+                Err(HardwareError::EcramBlocked {
+                    region: format!("0x{addr:08X}"),
+                    kind,
+                    detail: format!(
+                        "read of 0x{addr:08X} ({count} bytes) failed — ecram_service: {pipe_err}; \
+                         the app's own direct IOCTL was refused by the driver: {direct_err}"
+                    ),
+                })
+            }
+        }
     })
     .await
     .map_err(ErrorResponse::from)
