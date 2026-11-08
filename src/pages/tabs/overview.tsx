@@ -19,7 +19,9 @@ function OverviewTab({ hw, ai, onOpenSettings }: Props) {
       <PageHeader title={t('overview.title')} />
       <div className="grid-2">
         <SystemInfoCard info={hw.systemInfo} getProcessList={hw.getProcessList} />
-        <BatteryInfoCard battery={hw.battery} />
+        {/* O limite entra aqui para a linha de fase não mentir: sem ele, uma
+            bateria em pausa aos 96% com limite de 80% diria "carrega até 100%". */}
+        <BatteryInfoCard battery={hw.battery} threshold={hw.chargingThreshold} />
       </div>
       <div className="card">
         <div className="card-title">{t('nav.performance')}</div>
