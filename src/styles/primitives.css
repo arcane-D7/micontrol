@@ -182,8 +182,11 @@
 /* ═══ Card ═════════════════════════════════════════════════════════════════ */
 .mc-card {
   background: var(--surface);
-  border: var(--hair) solid var(--hairline);
-  border-radius: var(--r-card);
+  /* Fallbacks para o caso de o cartão ser usado fora do scope `.mc-hairline`
+     (antes de o theme-core promover os tokens a `:root`): sem eles a borda cai
+     em `currentColor` e o raio em 0. */
+  border: var(--hair, 1px) solid var(--hairline, var(--border));
+  border-radius: var(--r-card, var(--r-md, 12px));
   padding: 20px;
   box-shadow: none;
 }

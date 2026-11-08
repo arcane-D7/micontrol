@@ -20,8 +20,12 @@ function OverviewTab({ hw, ai, onOpenSettings }: Props) {
       <div className="grid-2">
         <SystemInfoCard info={hw.systemInfo} getProcessList={hw.getProcessList} />
         {/* O limite entra aqui para a linha de fase não mentir: sem ele, uma
-            bateria em pausa aos 96% com limite de 80% diria "carrega até 100%". */}
-        <BatteryInfoCard battery={hw.battery} threshold={hw.chargingThreshold} />
+            bateria em pausa aos 96% com limite de 80% diria "carrega até 100%".
+            O wrapper `mc-hairline` é o scope dos tokens do POC — fora da tab
+            Bateria o cartão herdaria tokens que ainda não existem em :root. */}
+        <div className="mc-hairline">
+          <BatteryInfoCard battery={hw.battery} threshold={hw.chargingThreshold} />
+        </div>
       </div>
       <div className="card">
         <div className="card-title">{t('nav.performance')}</div>
