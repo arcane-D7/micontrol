@@ -22,16 +22,54 @@
 //! device discovery scan; the module therefore treats "no result for N cycles"
 //! as *unknown*, never as "gone", unless the target was previously seen with a
 //! strong signal (then absence is treated as presence loss).
+//!
+//! ## Anti-false-lock policy (REV 2026-11)
+//!
+//! A single RSSI sample is **never** evidence that the bound device left. BLE
+//! RSSI on a wrist-worn tracker swings 20-30 dB between advertisements (body
+//! shadowing, arm position, radio duty cycle), and the 5 s scan window inside a
+//! 30 s cycle *misses* most advertisements even when the device is on the desk.
+//! The old code locked on either event, which produced two false locks 60 s
+//! apart with the device at -52 dBm.
+//!
+//! Now a lock requires ALL of:
+//!   * `FAR_CONFIRM_SAMPLES` consecutive far observations (seen below
+//!     `RssiLockDbm`, or absent for longer than `MISS_GRACE`);
+//!   * the device continuously far for at least `FAR_CONFIRM_WINDOW`;
+//!   * no lock in the previous `LOCK_COOLDOWN`;
+//!   * hysteresis: once far, the state only returns to `near` above
+//!     `RssiLockDbm + HYSTERESIS_DBM`, so a device sitting at the threshold
+//!     cannot flap.
+//!
+//! Every sample is logged raw (`rssi=`, `streak=`, `far_for=`) so a field test
+//! can be read without a debugger.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CONFIG_KEY: &str = r"SOFTWARE\MiControl\BlePresence";
 
 /// How often the scanner wakes up (seconds).
 const SCAN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Consecutive far observations required before a lock is even considered.
+const FAR_CONFIRM_SAMPLES: u32 = 3;
+
+/// How long the device must have been continuously far before locking.
+const FAR_CONFIRM_WINDOW: Duration = Duration::from_secs(60);
+
+/// Minimum spacing between two automatic locks.
+const LOCK_COOLDOWN: Duration = Duration::from_secs(120);
+
+/// Hysteresis width: after a `far` classification the state only returns to
+/// `near` once RSSI climbs `RssiLockDbm + HYSTERESIS_DBM`.
+const HYSTERESIS_DBM: i32 = 10;
+
+/// Absence shorter than this is an advertising gap, not a departure. The scan
+/// window is 5 s out of every 30 s, so missing a whole cycle proves nothing.
+const MISS_GRACE: Duration = Duration::from_secs(75);
 
 /// Registry key names.
 const K_ENABLED: &str = "Enabled";
@@ -128,6 +166,159 @@ pub struct PresenceStatus {
     pub last_seen_seconds_ago: Option<u64>,
     pub phone: Option<String>,
     pub scan_ok: bool,
+    /// Consecutive far observations in the current streak (0 = near/unknown).
+    #[serde(default)]
+    pub far_streak: u32,
+    /// How long the device has been continuously far, in seconds.
+    #[serde(default)]
+    pub far_seconds: u64,
+    /// Consecutive samples that did not match the bound device.
+    #[serde(default)]
+    pub miss_streak: u32,
+}
+
+/// Classified presence of the bound device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateState {
+    Unknown,
+    Near,
+    Far,
+}
+
+impl GateState {
+    fn as_str(self) -> &'static str {
+        match self {
+            GateState::Unknown => "unknown",
+            GateState::Near => "near",
+            GateState::Far => "far",
+        }
+    }
+}
+
+/// One observation fed to the lock gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sample {
+    /// The bound device was seen advertising; `rssi` is the raw dBm value when
+    /// the advertisement carried one.
+    Seen(Option<i32>),
+    /// No advertisement from the bound device in this scan cycle.
+    Miss,
+}
+
+/// What the gate decided for one observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GateOutcome {
+    state: GateState,
+    far_streak: u32,
+    far_seconds: u64,
+    miss_streak: u32,
+    /// True only when every confirmation rule passed.
+    lock: bool,
+}
+
+/// Confirmation state machine for the auto-lock.
+///
+/// Pure (no I/O, `now` injected) so the policy is unit-testable without a radio
+/// and without ever calling `LockWorkStation`.
+#[derive(Debug, Default, Clone)]
+struct LockGate {
+    state: Option<GateState>,
+    far_streak: u32,
+    far_since: Option<Instant>,
+    last_lock: Option<Instant>,
+    last_seen: Option<Instant>,
+    miss_streak: u32,
+}
+
+impl LockGate {
+    fn state(&self) -> GateState {
+        self.state.unwrap_or(GateState::Unknown)
+    }
+
+    fn clear_far(&mut self) {
+        self.far_streak = 0;
+        self.far_since = None;
+        self.miss_streak = 0;
+    }
+
+    /// Record a far observation and, if the full confirmation policy passes,
+    /// authorise a lock. Callers must not lock on anything else.
+    fn observe(&mut self, sample: Sample, cfg: &PresenceConfig, now: Instant) -> GateOutcome {
+        match sample {
+            Sample::Seen(rssi) => {
+                self.last_seen = Some(now);
+                self.miss_streak = 0;
+                match rssi {
+                    // Presence proven, distance unmeasured: never a departure.
+                    None => {
+                        self.clear_far();
+                        self.state = Some(GateState::Near);
+                    }
+                    Some(dbm) if dbm >= cfg.rssi_lock_dbm + HYSTERESIS_DBM => {
+                        self.clear_far();
+                        self.state = Some(GateState::Near);
+                    }
+                    Some(dbm) if dbm < cfg.rssi_lock_dbm => {
+                        self.far_streak = self.far_streak.saturating_add(1);
+                        self.far_since.get_or_insert(now);
+                        self.state = Some(GateState::Far);
+                    }
+                    // Dead band (-70..-60 for a -70 threshold): keep the current
+                    // state, count neither near nor far evidence.
+                    Some(_) => {
+                        if self.state.is_none() {
+                            self.state = Some(GateState::Near);
+                        }
+                    }
+                }
+            }
+            Sample::Miss => {
+                self.miss_streak = self.miss_streak.saturating_add(1);
+                let absent_for = self.last_seen.map(|t| now.saturating_duration_since(t));
+                match absent_for {
+                    // Never seen, or absent for less than the grace window: the
+                    // 5 s/30 s scan duty cycle makes this uninformative.
+                    None => {}
+                    Some(d) if d < MISS_GRACE => {}
+                    Some(_) => {
+                        self.far_streak = self.far_streak.saturating_add(1);
+                        self.far_since
+                            .get_or_insert(now.checked_sub(MISS_GRACE).unwrap_or(now));
+                        self.state = Some(GateState::Far);
+                    }
+                }
+            }
+        }
+
+        let far_for = self
+            .far_since
+            .map(|t| now.saturating_duration_since(t))
+            .unwrap_or_default();
+        let cooled_down = self
+            .last_lock
+            .map(|t| now.saturating_duration_since(t) >= LOCK_COOLDOWN)
+            .unwrap_or(true);
+        let confirmed = self.state == Some(GateState::Far)
+            && self.far_streak >= FAR_CONFIRM_SAMPLES
+            && far_for >= FAR_CONFIRM_WINDOW
+            && cooled_down;
+
+        let lock = confirmed && cfg.lock_enabled;
+        if lock {
+            self.last_lock = Some(now);
+            // A second lock requires a fresh, fully confirmed departure.
+            self.far_streak = 0;
+            self.far_since = None;
+        }
+
+        GateOutcome {
+            state: self.state(),
+            far_streak: self.far_streak,
+            far_seconds: far_for.as_secs(),
+            miss_streak: self.miss_streak,
+            lock,
+        }
+    }
 }
 
 /// Runtime state shared between the scanner thread and the app.
@@ -140,6 +331,8 @@ struct PresenceState {
     /// (cycles are 30 s apart, so the old counter reported "seconds" that
     /// were really half-minutes).
     last_seen: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Lock confirmation state machine (see `LockGate`).
+    gate: std::sync::Mutex<LockGate>,
 }
 
 static STATE: OnceLock<PresenceState> = OnceLock::new();
@@ -154,9 +347,20 @@ fn state() -> &'static PresenceState {
             last_seen_seconds_ago: None,
             phone: None,
             scan_ok: false,
+            far_streak: 0,
+            far_seconds: 0,
+            miss_streak: 0,
         }),
         last_seen: std::sync::Mutex::new(None),
+        gate: std::sync::Mutex::new(LockGate::default()),
     })
+}
+
+fn lock_gate() -> std::sync::MutexGuard<'static, LockGate> {
+    state()
+        .gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn lock_last_seen() -> std::sync::MutexGuard<'static, Option<std::time::Instant>> {
@@ -239,46 +443,67 @@ async fn scan_once() -> Result<(), String> {
         );
     }
 
+    let now = Instant::now();
     match scan_for_device(&target).await {
         Ok(Some(found)) => {
-            // A phone that advertises without RSSI is still *present*; the
+            // A device that advertises without RSSI is still *present*; the
             // threshold only applies when we actually measured a signal.
-            let far = found.rssi.is_some_and(|rssi| rssi < cfg.rssi_lock_dbm);
-            let new_state = if far { "far" } else { "near" };
-            let mut st = lock_status();
-            st.state = new_state.to_string();
-            st.last_rssi_dbm = found.rssi;
-            st.last_seen_seconds_ago = Some(0);
-            st.scan_ok = true;
-            st.phone = cfg
-                .phone_name
-                .clone()
-                .or(found.name.clone())
-                .or(Some(found.address.clone()));
+            let outcome = lock_gate().observe(Sample::Seen(found.rssi), &cfg, now);
+            {
+                let mut st = lock_status();
+                st.state = outcome.state.as_str().to_string();
+                st.last_rssi_dbm = found.rssi;
+                st.last_seen_seconds_ago = Some(0);
+                st.scan_ok = true;
+                st.far_streak = outcome.far_streak;
+                st.far_seconds = outcome.far_seconds;
+                st.miss_streak = outcome.miss_streak;
+                st.phone = cfg
+                    .phone_name
+                    .clone()
+                    .or(found.name.clone())
+                    .or(Some(found.address.clone()));
+            }
+            *lock_last_seen() = Some(now);
+            // Raw sample, always at INFO: this is the line a field test reads.
             log::info!(
-                "[ble_presence] phone seen rssi={:?} state={new_state} matched={:?} addr={}",
+                "[ble_presence] sample rssi={:?} dbm threshold={} state={} streak={}/{} far_for={}s matched={:?} addr={}",
                 found.rssi,
+                cfg.rssi_lock_dbm,
+                outcome.state.as_str(),
+                outcome.far_streak,
+                FAR_CONFIRM_SAMPLES,
+                outcome.far_seconds,
                 found.matched,
                 found.address
             );
-            *lock_last_seen() = Some(std::time::Instant::now());
-            if far && cfg.lock_enabled {
-                request_lock();
+            if outcome.lock {
+                request_lock(&cfg, found.rssi, outcome.far_seconds);
             }
         }
         Ok(None) => {
-            let mut st = lock_status();
-            st.scan_ok = true;
-            // Only ever downgrade to "far" if the phone was previously near —
-            // absence alone is inconclusive (randomized advertising).
-            if st.state == "near" {
-                st.state = "far".into();
-                if cfg.lock_enabled {
-                    request_lock();
-                }
+            let outcome = lock_gate().observe(Sample::Miss, &cfg, now);
+            {
+                let mut st = lock_status();
+                st.scan_ok = true;
+                st.state = outcome.state.as_str().to_string();
+                st.far_streak = outcome.far_streak;
+                st.far_seconds = outcome.far_seconds;
+                st.miss_streak = outcome.miss_streak;
+                st.last_seen_seconds_ago = last_seen_seconds_ago();
             }
-            st.last_seen_seconds_ago = last_seen_seconds_ago();
-            log::debug!("[ble_presence] phone not seen this cycle");
+            log::info!(
+                "[ble_presence] sample rssi=none (no advertisement) state={} streak={}/{} far_for={}s misses={} last_seen={:?}s",
+                outcome.state.as_str(),
+                outcome.far_streak,
+                FAR_CONFIRM_SAMPLES,
+                outcome.far_seconds,
+                outcome.miss_streak,
+                last_seen_seconds_ago()
+            );
+            if outcome.lock {
+                request_lock(&cfg, None, outcome.far_seconds);
+            }
         }
         Err(e) => {
             log::warn!("[ble_presence] scan failed: {e}");
@@ -306,9 +531,17 @@ pub fn get_presence_status() -> PresenceStatus {
     st
 }
 
-/// Lock the workstation with a purpose-specific action (LockWorkStation).
-fn request_lock() {
-    log::info!("[ble_presence] phone far — locking workstation");
+/// Lock the workstation. Only ever called after `LockGate` confirmed the
+/// departure (N samples + minimum window + cooldown).
+fn request_lock(cfg: &PresenceConfig, rssi: Option<i32>, far_seconds: u64) {
+    log::info!(
+        "[ble_presence] LOCK: device '{}' confirmed far (rssi={:?} dbm, threshold={} dbm, far for {}s, {}+ samples) — locking workstation",
+        cfg.phone_name.as_deref().unwrap_or("?"),
+        rssi,
+        cfg.rssi_lock_dbm,
+        far_seconds,
+        FAR_CONFIRM_SAMPLES
+    );
     tauri::async_runtime::spawn_blocking(|| {
         use windows::Win32::System::Shutdown::LockWorkStation;
         let _ = unsafe { LockWorkStation() };
@@ -369,11 +602,20 @@ impl MatchTarget {
     /// Match a device identity. `address` is whatever the backend prints
     /// (dashes or colons — both are canonicalised); `local_name` is the
     /// advertisement's local name, when present.
+    ///
+    /// **Exact MAC wins.** When a parseable MAC is configured it is the only
+    /// accepted identity: a name match alone must never drive a lock, because
+    /// any device can advertise any local name and a second tracker with the
+    /// same model name would otherwise be able to lock the workstation. The
+    /// name is used as the identity only when no MAC is configured (or the
+    /// stored MAC is unparseable), and `name_only_hit` reports the near-miss
+    /// case so a rotated address is visible in the log instead of silent.
     fn matches(&self, address: &str, local_name: Option<&str>) -> Option<MatchKind> {
-        if let (Some(want), Some(got)) = (self.mac.as_deref(), canonical_mac(address)) {
-            if want == got {
-                return Some(MatchKind::Mac);
-            }
+        if let Some(want) = self.mac.as_deref() {
+            return match canonical_mac(address) {
+                Some(got) if got == want => Some(MatchKind::Mac),
+                _ => None,
+            };
         }
         if let (Some(want), Some(got)) = (self.name.as_deref(), local_name) {
             if want == normalize_name(got) {
@@ -381,6 +623,15 @@ impl MatchTarget {
             }
         }
         None
+    }
+
+    /// True when the advertisement carries the configured name but the address
+    /// is not the bound one — i.e. a possible BLE address rotation.
+    fn name_only_hit(&self, local_name: Option<&str>) -> bool {
+        match (self.name.as_deref(), local_name) {
+            (Some(want), Some(got)) => want == normalize_name(got),
+            _ => false,
+        }
     }
 }
 
@@ -436,6 +687,7 @@ async fn scan_for_device(target: &MatchTarget) -> Result<Option<FoundDevice>, St
 
     // Try every adapter — a phone may be bound to the second radio.
     let mut last_err: Option<String> = None;
+    let mut name_only: Vec<String> = Vec::new();
     for central in adapters {
         if let Err(e) = central.start_scan(ScanFilter::default()).await {
             last_err = Some(e.to_string());
@@ -450,9 +702,29 @@ async fn scan_for_device(target: &MatchTarget) -> Result<Option<FoundDevice>, St
                     let _ = central.stop_scan().await;
                     return Ok(Some(found));
                 }
+                // Diagnostic only: the configured name showed up under a
+                // different address. Never used for the decision (see
+                // `MatchTarget::matches`), but it is the signature of a BLE
+                // address rotation and must not be silent.
+                if target.mac.is_some() {
+                    use btleplug::api::Peripheral as _;
+                    if let Ok(Some(props)) = p.properties().await {
+                        if target.name_only_hit(props.local_name.as_deref()) {
+                            name_only.push(props.address.to_string());
+                        }
+                    }
+                }
             }
         }
         let _ = central.stop_scan().await;
+    }
+    if !name_only.is_empty() {
+        log::warn!(
+            "[ble_presence] device named {:?} seen at a different address ({}) — the bound MAC {} did not match; re-bind the device if its BLE address rotated",
+            target.name.as_deref().unwrap_or("?"),
+            name_only.join(", "),
+            target.mac.as_deref().unwrap_or("?")
+        );
     }
     match last_err {
         Some(e) => Err(e),
@@ -631,19 +903,17 @@ mod tests {
         assert_eq!(t.matches("fc:43:45:81:4b:9a", None), Some(MatchKind::Mac));
     }
 
-    /// H2: a phone that advertises a randomised BLE address must still be
-    /// recognised by name even when a MAC is configured.
+    /// A configured MAC is the ONLY accepted identity. A device that merely
+    /// advertises the same name must not be able to drive a lock (two trackers
+    /// of the same model, or a spoofed local name).
     #[test]
-    fn target_falls_back_to_name_when_the_advertised_address_differs() {
+    fn target_ignores_name_when_a_mac_is_configured() {
         let t = target(Some("FC-43-45-81-4B-9A"), Some("Xiaomi 14T")).unwrap();
-        assert_eq!(
-            t.matches("6E:11:22:33:44:55", Some("Xiaomi 14T")),
-            Some(MatchKind::Name)
-        );
-        assert_eq!(
-            t.matches("6E:11:22:33:44:55", Some("  xiaomi 14t ")),
-            Some(MatchKind::Name)
-        );
+        assert_eq!(t.matches("6E:11:22:33:44:55", Some("Xiaomi 14T")), None);
+        assert_eq!(t.matches("6E:11:22:33:44:55", Some("  xiaomi 14t ")), None);
+        // ...but the near-miss is reported so an address rotation is visible.
+        assert!(t.name_only_hit(Some("  xiaomi 14t ")));
+        assert!(!t.name_only_hit(Some("TV Box")));
     }
 
     #[test]
@@ -694,6 +964,211 @@ mod tests {
         let c = PresenceConfig::load();
         assert!(!c.enabled);
         assert_eq!(c.rssi_lock_dbm, -70);
+    }
+
+    // ── Lock gate: the false-lock regression suite ───────────────────────────
+    //
+    // Reproduces the 2026-11-08 incident: the bound device (Amazfit Balance 2,
+    // D8:80:3C:D0:1C:A4) read -52 dBm, one advertisement was missed, and the
+    // workstation locked twice in 60 s. None of these tests touch the radio or
+    // `LockWorkStation` — the gate is pure.
+
+    fn lock_cfg() -> PresenceConfig {
+        PresenceConfig {
+            enabled: true,
+            phone_mac: Some("D8-80-3C-D0-1C-A4".into()),
+            phone_name: Some("Amazfit Balance 2".into()),
+            rssi_lock_dbm: -70,
+            lock_enabled: true,
+        }
+    }
+
+    /// Feed `samples` at `step` intervals starting at `t0`; return the index of
+    /// the first observation that authorised a lock.
+    fn run_gate(
+        gate: &mut LockGate,
+        cfg: &PresenceConfig,
+        t0: Instant,
+        step: Duration,
+        samples: &[Sample],
+    ) -> Option<usize> {
+        let mut locked_at = None;
+        for (i, s) in samples.iter().enumerate() {
+            let now = t0 + step * (i as u32);
+            if gate.observe(*s, cfg, now).lock && locked_at.is_none() {
+                locked_at = Some(i);
+            }
+        }
+        locked_at
+    }
+
+    #[test]
+    fn one_far_sample_never_locks() {
+        // The exact incident: near at -52, then a single -71 sample.
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        let samples = [
+            Sample::Seen(Some(-52)),
+            Sample::Seen(Some(-71)),
+            Sample::Seen(Some(-52)),
+        ];
+        assert_eq!(
+            run_gate(&mut gate, &cfg, t0, Duration::from_secs(30), &samples),
+            None
+        );
+    }
+
+    #[test]
+    fn one_missed_advertisement_never_locks() {
+        // The second false lock: the scan cycle saw nothing and the old code
+        // locked on the near -> absent transition.
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        let samples = [
+            Sample::Seen(Some(-52)),
+            Sample::Miss,
+            Sample::Seen(Some(-50)),
+        ];
+        assert_eq!(
+            run_gate(&mut gate, &cfg, t0, Duration::from_secs(30), &samples),
+            None
+        );
+    }
+
+    #[test]
+    fn absence_shorter_than_the_grace_window_is_not_far() {
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        gate.observe(Sample::Seen(Some(-50)), &cfg, t0);
+        // 30 s and 60 s of silence: still inside MISS_GRACE (75 s).
+        let a = gate.observe(Sample::Miss, &cfg, t0 + Duration::from_secs(30));
+        let b = gate.observe(Sample::Miss, &cfg, t0 + Duration::from_secs(60));
+        assert_eq!(a.state, GateState::Near);
+        assert_eq!(b.state, GateState::Near);
+        assert_eq!(b.far_streak, 0);
+        assert!(!a.lock && !b.lock);
+    }
+
+    #[test]
+    fn three_far_samples_over_a_minute_lock() {
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        let samples = [
+            Sample::Seen(Some(-50)),
+            Sample::Seen(Some(-78)),
+            Sample::Seen(Some(-80)),
+            Sample::Seen(Some(-79)),
+        ];
+        // 30 s cadence: the 3rd far sample lands at t0+90 s, i.e. 60 s after
+        // the first far sample -> the window is satisfied exactly there.
+        assert_eq!(
+            run_gate(&mut gate, &cfg, t0, Duration::from_secs(30), &samples),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn sustained_absence_locks_only_after_the_grace_window() {
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        gate.observe(Sample::Seen(Some(-50)), &cfg, t0);
+        // Misses at 30/60 s are advertising gaps (grace is 75 s). The first
+        // counting miss is at 90 s (streak 1), then 120 s (2) and 150 s (3,
+        // far for 135 s) — so a lock by absence alone needs 2.5 min, never a
+        // single dropped advertisement.
+        let mut locked = None;
+        for i in 1..=6u32 {
+            let now = t0 + Duration::from_secs(30 * i as u64);
+            if gate.observe(Sample::Miss, &cfg, now).lock {
+                locked = Some(30 * i);
+                break;
+            }
+        }
+        assert_eq!(locked, Some(150));
+    }
+
+    #[test]
+    fn hysteresis_holds_far_until_ten_db_above_the_threshold() {
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        gate.observe(Sample::Seen(Some(-80)), &cfg, t0);
+        // -65 is inside the dead band (-70..-60): the state must stay far and
+        // the streak must not be reset by a single noisy sample.
+        let mid = gate.observe(Sample::Seen(Some(-65)), &cfg, t0 + Duration::from_secs(30));
+        assert_eq!(mid.state, GateState::Far);
+        assert_eq!(mid.far_streak, 1);
+        // -60 is the release point (threshold + 10).
+        let near = gate.observe(Sample::Seen(Some(-60)), &cfg, t0 + Duration::from_secs(60));
+        assert_eq!(near.state, GateState::Near);
+        assert_eq!(near.far_streak, 0);
+    }
+
+    #[test]
+    fn cooldown_blocks_a_second_lock_within_two_minutes() {
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        // Confirm a departure and lock.
+        let first = [
+            Sample::Seen(Some(-80)),
+            Sample::Seen(Some(-80)),
+            Sample::Seen(Some(-80)),
+        ];
+        assert_eq!(
+            run_gate(&mut gate, &cfg, t0, Duration::from_secs(30), &first),
+            Some(2)
+        );
+        // Device comes back, then leaves again 30 s later: the cooldown must
+        // swallow the second lock.
+        let t1 = t0 + Duration::from_secs(90);
+        gate.observe(Sample::Seen(Some(-45)), &cfg, t1);
+        let second = [
+            Sample::Seen(Some(-80)),
+            Sample::Seen(Some(-80)),
+            Sample::Seen(Some(-80)),
+        ];
+        assert_eq!(
+            run_gate(&mut gate, &cfg, t1, Duration::from_secs(30), &second),
+            None
+        );
+    }
+
+    #[test]
+    fn lock_disabled_never_locks_even_when_confirmed() {
+        let mut cfg = lock_cfg();
+        cfg.lock_enabled = false;
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        let samples = [
+            Sample::Seen(Some(-90)),
+            Sample::Seen(Some(-90)),
+            Sample::Seen(Some(-90)),
+            Sample::Seen(Some(-90)),
+        ];
+        assert_eq!(
+            run_gate(&mut gate, &cfg, t0, Duration::from_secs(30), &samples),
+            None
+        );
+        // The state is still reported truthfully.
+        assert_eq!(gate.state(), GateState::Far);
+    }
+
+    #[test]
+    fn advertisement_without_rssi_is_presence_not_departure() {
+        let cfg = lock_cfg();
+        let mut gate = LockGate::default();
+        let t0 = Instant::now();
+        gate.observe(Sample::Seen(Some(-80)), &cfg, t0);
+        let out = gate.observe(Sample::Seen(None), &cfg, t0 + Duration::from_secs(30));
+        assert_eq!(out.state, GateState::Near);
+        assert_eq!(out.far_streak, 0);
+        assert!(!out.lock);
     }
 
     #[test]
