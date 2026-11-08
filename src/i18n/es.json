@@ -856,6 +856,8 @@
     "columnGpuPct": "GPU%",
     "disclaimer": "El contenido generado por IA puede ser impreciso. Verifique la información crítica.",
     "usage": {
+      "openSettings": "Abrir Configuración",
+      "noRequests": "Aún no hay solicitudes de IA registradas — el uso aparece tras el primer análisis.",
       "title": "Uso de IA",
       "requests": "Total de Solicitudes",
       "tokens": "Total de Tokens",
@@ -1140,6 +1142,9 @@
     "tabSwitch": "Alt+1 a Alt+9 para cambiar de pestaña"
   },
   "audio": {
+    "volume": "Volumen",
+    "unmutedByVolume": "Sonido reactivado — el volumen cambió con el audio silenciado",
+    "volumeError": "No se pudo cambiar el volumen",
     "loadingDevices": "Cargando dispositivos de audio...",
     "noDevices": "No se encontraron dispositivos de audio",
     "loadDevicesError": "Error al cargar dispositivos de audio",

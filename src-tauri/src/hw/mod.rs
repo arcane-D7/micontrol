@@ -17,7 +17,6 @@ pub mod color_calibration;
 pub mod crash_recovery;
 pub mod discovery;
 pub mod display;
-pub mod driver_update;
 pub mod ecram;
 pub mod ecram_service_mgmt;
 pub mod errors;

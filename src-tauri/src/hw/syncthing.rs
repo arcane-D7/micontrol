@@ -91,17 +91,6 @@ pub struct SyncthingStatus {
     pub folders: Vec<SyncthingFolder>,
 }
 
-/// A single `events` SSE payload (only the fields we need).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncthingEvent {
-    pub id: u64,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    #[serde(default)]
-    pub time: String,
-}
-
 /// Build a reqwest client with the Syncthing API key header (X-API-Key).
 fn client_for(cfg: &SyncthingConfig) -> reqwest::Client {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -222,21 +211,6 @@ pub async fn set_folder_paused(
         return Err(format!("syncthing folder patch: HTTP {}", put.status()));
     }
     Ok(())
-}
-
-/// Poll `events` with `since` cursor — non-blocking: reads whatever is
-/// available and returns immediately (empty vec when nothing new).
-pub async fn events_since(cfg: &SyncthingConfig, since: u64, limit: u32) -> Vec<SyncthingEvent> {
-    let url = format!(
-        "{}/rest/events?since={since}&limit={limit}&timeout=0",
-        base_url(cfg)
-    );
-    match client_for(cfg).get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            resp.json::<Vec<SyncthingEvent>>().await.unwrap_or_default()
-        }
-        _ => Vec::new(),
-    }
 }
 
 #[cfg(test)]

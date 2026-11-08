@@ -6,11 +6,11 @@
 
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
 use crate::hw::ble_scan::BleScanResult;
-use crate::hw::kde_connect::{KdeDevice, KdeMessage};
+use crate::hw::kde_connect::KdeDevice;
 use crate::hw::localsend::{LocalSendConfig, LocalSendPeer, ReceiverStatus, SendReport};
-use crate::hw::nfc_pairing::{NfcGuidance, NfcHandshake};
+use crate::hw::nfc_pairing::NfcGuidance;
 use crate::hw::scrcpy_bridge::ScrcpyStatus;
-use crate::hw::syncthing::{SyncthingConfig, SyncthingEvent, SyncthingFolder, SyncthingStatus};
+use crate::hw::syncthing::{SyncthingConfig, SyncthingStatus};
 use crate::hw::transcription::TranscriptionStatus;
 use std::time::Duration;
 
@@ -264,19 +264,6 @@ pub async fn kde_ping(device: KdeDevice) -> Result<bool, String> {
     crate::hw::kde_connect::send_ping(&device, Duration::from_secs(5)).await
 }
 
-/// Refresh the shared KDE Connect cache and return the current device list.
-#[tauri::command]
-pub async fn kde_status() -> Result<Vec<KdeDevice>, String> {
-    let devs = crate::hw::kde_connect::refresh_cache(Duration::from_millis(800)).await;
-    Ok(devs)
-}
-
-/// Build the local KDE Connect identity message (used by tests/debug UI).
-#[tauri::command]
-pub fn kde_identity() -> Result<KdeMessage, String> {
-    Ok(crate::hw::kde_connect::build_identity())
-}
-
 /// Build NFC pairing guidance for the UI (deep link + NDEF handshake text).
 #[tauri::command]
 pub fn nfc_guidance(
@@ -289,14 +276,6 @@ pub fn nfc_guidance(
         fingerprint.as_deref(),
         pair_uri.as_deref(),
     ))
-}
-
-/// Encode a custom pairing handshake as an NDEF record (base64 text field).
-#[tauri::command]
-pub fn nfc_encode_handshake(handshake: NfcHandshake) -> Result<String, String> {
-    let rec = crate::hw::nfc_pairing::build_handshake_record(&handshake)?;
-    use base64::Engine;
-    Ok(base64::engine::general_purpose::STANDARD.encode(rec.encode()))
 }
 
 /// Build a user-defined NFC tag payload (URI / text / internal action).
@@ -323,15 +302,6 @@ pub async fn syncthing_status(config: Option<SyncthingConfig>) -> Result<Syncthi
     Ok(crate::hw::syncthing::get_status(&cfg).await)
 }
 
-/// Syncthing: list configured folders.
-#[tauri::command]
-pub async fn syncthing_folders(
-    config: Option<SyncthingConfig>,
-) -> Result<Vec<SyncthingFolder>, String> {
-    let cfg = config.unwrap_or_default();
-    crate::hw::syncthing::fetch_folders(&cfg).await
-}
-
 /// Syncthing: pause/resume a folder (requires read+write API key).
 #[tauri::command]
 pub async fn syncthing_set_folder(
@@ -341,15 +311,4 @@ pub async fn syncthing_set_folder(
 ) -> Result<(), String> {
     let cfg = config.unwrap_or_default();
     crate::hw::syncthing::set_folder_paused(&cfg, &folder_id, paused).await
-}
-
-/// Syncthing: poll events since a cursor (bounded, returns immediately).
-#[tauri::command]
-pub async fn syncthing_events(
-    config: Option<SyncthingConfig>,
-    since: Option<u64>,
-    limit: Option<u32>,
-) -> Result<Vec<SyncthingEvent>, String> {
-    let cfg = config.unwrap_or_default();
-    Ok(crate::hw::syncthing::events_since(&cfg, since.unwrap_or(0), limit.unwrap_or(50)).await)
 }

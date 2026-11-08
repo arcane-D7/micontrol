@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
+import { debounceCommit, resolveVolumeIntent } from '../lib/audioVolume';
 import type { AudioVolumeResult } from '../types/hardware';
 
 interface AudioDevice {
@@ -26,6 +27,9 @@ interface AudioControlProps {
   onSetDefaultDevice?: (deviceId: string) => Promise<void>;
 }
 
+/** One IPC write per gesture instead of one per pixel (audit P3). */
+const VOLUME_COMMIT_DELAY_MS = 150;
+
 export default function AudioControl({
   audioState,
   loading,
@@ -35,12 +39,83 @@ export default function AudioControl({
 }: AudioControlProps) {
   const [devices, setDevices] = useState<AudioDeviceList | null>(null);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
+  // Value shown while the user drags. The parent only learns about the change
+  // after the debounced commit, so without this the thumb would snap back to
+  // the polled value mid-gesture.
+  const [dragVolume, setDragVolume] = useState<number | null>(null);
   const { addToast } = useToast();
 
   // Volume comes straight from the batched hardware poll (useHardware); the
-  // optimistic update in `setMasterVolume` keeps it in step while dragging.
+  // optimistic update in `setMasterVolume` keeps it in step after a commit.
   const volume = audioState?.volume ?? 50;
   const muted = audioState?.muted ?? false;
+  const shownVolume = dragVolume ?? volume;
+
+  // Latest props for the debounced commit, which outlives the render that
+  // created it.
+  const latest = useRef({ muted, onVolumeChange, onMuteToggle });
+  useEffect(() => {
+    latest.current = { muted, onVolumeChange, onMuteToggle };
+  }, [muted, onVolumeChange, onMuteToggle]);
+
+  // Set once we unmute during a gesture: the polled `muted` flag lags behind
+  // the endpoint, so without this a second commit in the same drag would
+  // unmute again and toast twice.
+  const unmutedByDrag = useRef(false);
+  useEffect(() => {
+    if (!muted) unmutedByDrag.current = false;
+  }, [muted]);
+
+  const mounted = useRef(true);
+  useEffect(() => {
+    // Re-armed on every mount: StrictMode mounts, unmounts and mounts again.
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  /**
+   * Apply a slider value: unmute first when the endpoint is muted (Windows
+   * behaviour — dragging the slider is an explicit "I want to hear this"),
+   * then write the volume.
+   */
+  const commitVolume = useMemo(
+    () =>
+      debounceCommit<number>(async (next) => {
+        const {
+          muted: isMuted,
+          onVolumeChange: applyVolume,
+          onMuteToggle: applyMute,
+        } = latest.current;
+        const intent = resolveVolumeIntent(next, isMuted && !unmutedByDrag.current);
+        try {
+          if (intent.unmute) {
+            await applyMute(false);
+            unmutedByDrag.current = true;
+            addToast({ message: t('audio.unmutedByVolume'), type: 'info' });
+          }
+          await applyVolume(intent.volume / 100);
+        } catch (e) {
+          if (mounted.current) setDragVolume(null);
+          addToast({ message: `${t('audio.volumeError')}: ${String(e)}`, type: 'error' });
+        }
+      }, VOLUME_COMMIT_DELAY_MS),
+    [addToast],
+  );
+
+  // Never lose a queued change when the tab unmounts mid-gesture.
+  useEffect(
+    () => () => {
+      void commitVolume.flush();
+    },
+    [commitVolume],
+  );
+
+  // Drop the local override once the polled state agrees with it.
+  useEffect(() => {
+    if (dragVolume !== null && volume === dragVolume) setDragVolume(null);
+  }, [volume, dragVolume]);
 
   const loadAudioDevices = async () => {
     try {
@@ -58,13 +133,13 @@ export default function AudioControl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleVolumeChange = async (newVolume: number) => {
-    try {
-      // onVolumeChange expects 0-1 fraction (setMasterVolume contract)
-      await onVolumeChange(newVolume / 100);
-    } catch (e) {
-      addToast(`Volume error: ${String(e)}`, 'error');
-    }
+  const handleSliderInput = (next: number) => {
+    setDragVolume(next);
+    commitVolume(next);
+  };
+
+  const flushVolume = () => {
+    void commitVolume.flush();
   };
 
   /**
@@ -128,13 +203,27 @@ export default function AudioControl({
           type="range"
           min={0}
           max={100}
-          value={muted ? 0 : volume}
-          onChange={(e) => handleVolumeChange(Number(e.target.value))}
+          // Always the real volume: forcing 0 while muted made the thumb
+          // unusable (audit P2-C).
+          value={shownVolume}
+          onChange={(e) => handleSliderInput(Number(e.target.value))}
+          onPointerUp={flushVolume}
+          onKeyUp={flushVolume}
+          onBlur={flushVolume}
           disabled={loading}
+          aria-label={t('audio.volume')}
+          aria-valuetext={muted ? `${shownVolume}% — ${t('audio.muted')}` : `${shownVolume}%`}
           style={{ flex: 1, accentColor: 'var(--accent)' }}
         />
-        <span style={{ minWidth: 40, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-          {muted ? t('audio.muted') : `${volume}%`}
+        <span
+          style={{
+            minWidth: 72,
+            textAlign: 'right',
+            fontVariantNumeric: 'tabular-nums',
+            fontSize: 13,
+          }}
+        >
+          {muted ? `${shownVolume}% · ${t('audio.muted')}` : `${shownVolume}%`}
         </span>
       </div>
 

@@ -1230,20 +1230,3 @@ pub fn get_status() -> HardwareResult<Vec<SysOptStatus>> {
             .collect())
     }
 }
-
-/// Re-apply every enabled tweak (used at app boot — feature updates and some
-/// Windows servicing actions reset HKLM policies; O&O ShutUp10 offers the
-/// same "re-apply after updates" feature).
-pub fn restore_all() {
-    #[cfg(windows)]
-    {
-        for t in TWEAKS {
-            if is_applied(t.id) {
-                match set_tweak(t.id, true) {
-                    Ok(()) => log::info!("[sys_opt] re-applied tweak {}", t.id),
-                    Err(e) => log::warn!("[sys_opt] re-apply {} failed: {e}", t.id),
-                }
-            }
-        }
-    }
-}

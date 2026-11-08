@@ -856,6 +856,8 @@
     "columnGpuPct": "GPU%",
     "disclaimer": "Le contenu généré par IA peut être inexact. Vérifiez les informations critiques.",
     "usage": {
+      "openSettings": "Ouvrir les Paramètres",
+      "noRequests": "Aucune requête IA enregistrée pour l'instant — l'usage apparaît après la première analyse.",
       "title": "Utilisation IA",
       "requests": "Total des Requêtes",
       "tokens": "Total des Tokens",
@@ -1140,6 +1142,9 @@
     "tabSwitch": "Alt+1 à Alt+9 pour changer d'onglet"
   },
   "audio": {
+    "volume": "Volume",
+    "unmutedByVolume": "Son réactivé — le volume a changé alors que le son était coupé",
+    "volumeError": "Impossible de modifier le volume",
     "loadingDevices": "Chargement des périphériques audio...",
     "noDevices": "Aucun périphérique audio trouvé",
     "loadDevicesError": "Échec du chargement des périphériques audio",
