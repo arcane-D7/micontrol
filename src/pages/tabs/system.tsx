@@ -6,6 +6,7 @@ import { useToast } from '../../contexts/ToastContext';
 import HardwareDiscovery from '../../components/HardwareDiscovery';
 import type { useHardware } from '../../hooks/useHardware';
 import IotModulePanel from '../../components/IotModulePanel';
+import { Icon } from '../../components/ui/icons';
 import type { Hardware } from './shared';
 
 type HardwareInstance = ReturnType<typeof useHardware>;
@@ -75,7 +76,7 @@ function SmartModelStatusCard({ hw }: { hw: HardwareInstance }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <h2 className="card-title" style={{ marginBottom: 6 }}>
-        🧠 {t('system.smartModelTitle')}
+        <Icon name="brain" size={16} /> {t('system.smartModelTitle')}
       </h2>
       {failed ? (
         <p className="page-subtitle" style={{ margin: 0 }}>
@@ -172,20 +173,36 @@ function SystemTab({ hw }: Props) {
             marginBottom: 12,
           }}
         >
-          <h3>🔧 {t('updates.driverDetails')}</h3>
+          <h3>
+            <Icon name="wrench" size={16} /> {t('updates.driverDetails')}
+          </h3>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-secondary" onClick={handleScan} disabled={scanning}>
-              {scanning ? `🔍 ${t('updates.scanning')}` : `🔍 ${t('updates.scanDrivers')}`}
+              {scanning ? (
+                <>
+                  <Icon name="search" size={16} /> {t('updates.scanning')}
+                </>
+              ) : (
+                <>
+                  <Icon name="search" size={16} /> {t('updates.scanDrivers')}
+                </>
+              )}
             </button>
             <button className="btn btn-secondary" onClick={fetchDrivers} disabled={loadingDrivers}>
-              {loadingDrivers ? t('common.loading') : `🔄 ${t('updates.refreshDrivers')}`}
+              {loadingDrivers ? (
+                t('common.loading')
+              ) : (
+                <>
+                  <Icon name="refresh" size={16} /> {t('updates.refreshDrivers')}
+                </>
+              )}
             </button>
           </div>
         </div>
 
         {errorMsg && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
-            ⚠ {errorMsg}
+            <Icon name="alert-triangle" size={16} /> {errorMsg}
           </div>
         )}
 

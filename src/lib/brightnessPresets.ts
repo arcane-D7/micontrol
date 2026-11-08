@@ -1,9 +1,10 @@
 import type { AiBrightnessConfig } from '../types/hardware';
+import type { IconName } from '../components/ui/icons';
 
 export interface BrightnessPreset {
   key: string;
   label: string;
-  icon: string;
+  icon: IconName;
   /** Description hint shown on hover */
   hint: string;
   config: Omit<AiBrightnessConfig, 'enabled'>;
@@ -13,7 +14,7 @@ export const BRIGHTNESS_PRESETS: BrightnessPreset[] = [
   {
     key: 'eco',
     label: 'Eco',
-    icon: '🌿',
+    icon: 'leaf',
     hint: 'Gentle transitions, capped brightness — saves battery',
     config: {
       min_brightness: 15,
@@ -26,7 +27,7 @@ export const BRIGHTNESS_PRESETS: BrightnessPreset[] = [
   {
     key: 'padrao',
     label: 'Standard',
-    icon: '🏙️',
+    icon: 'building',
     hint: 'Balanced reactivity and smooth transitions',
     config: {
       min_brightness: 10,
@@ -39,7 +40,7 @@ export const BRIGHTNESS_PRESETS: BrightnessPreset[] = [
   {
     key: 'vivido',
     label: 'Vivid',
-    icon: '⚡',
+    icon: 'bolt',
     hint: 'Fast, aggressive adaptation across full brightness range',
     config: {
       min_brightness: 5,

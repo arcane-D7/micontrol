@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
+import { Icon } from './ui/icons';
 
 interface PrivacyConsentSectionProps {
   consent: 'granted' | 'denied' | null;
@@ -94,11 +95,15 @@ export default function PrivacyConsentSection({
         </label>
         <div className="badge" style={{ alignSelf: 'flex-start' }}>
           <span className={`badge ${crashReports === 'granted' ? 'success' : 'info'}`}>
-            {crashReports === 'granted'
-              ? `✓ ${t('consent.dialog.settingsEnabledAt')}`
-              : crashReports === 'denied'
-                ? `⊘ ${t('consent.dialog.settingsDisabledAt')}`
-                : `? ${t('privacy.consentNotSet')}`}
+            {crashReports === 'granted' ? (
+              <>
+                <Icon name="check" size={16} /> {t('consent.dialog.settingsEnabledAt')}
+              </>
+            ) : crashReports === 'denied' ? (
+              `⊘ ${t('consent.dialog.settingsDisabledAt')}`
+            ) : (
+              `? ${t('privacy.consentNotSet')}`
+            )}
           </span>
         </div>
       </div>
@@ -127,7 +132,7 @@ export default function PrivacyConsentSection({
         </p>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button className="btn-ghost btn-sm" onClick={() => void onOpenPrivacyPolicy()}>
-            📄 {t('settings.privacyPolicy')}
+            <Icon name="file-text" size={16} /> {t('settings.privacyPolicy')}
           </button>
           {consent === 'granted' && (
             <button
@@ -138,12 +143,12 @@ export default function PrivacyConsentSection({
                 borderColor: 'var(--color-danger, #f87171)',
               }}
             >
-              🛑 {t('settings.revokeConsent')}
+              <Icon name="ban" size={16} /> {t('settings.revokeConsent')}
             </button>
           )}
           {consent === 'denied' && (
             <button className="btn-primary btn-sm" onClick={() => void onGrant()}>
-              ✅ {t('settings.grantConsent')}
+              <Icon name="check-circle" size={16} /> {t('settings.grantConsent')}
             </button>
           )}
         </div>
@@ -151,7 +156,7 @@ export default function PrivacyConsentSection({
           className="text-xs"
           style={{ color: 'var(--color-text-muted)', marginTop: 12, marginBottom: 0 }}
         >
-          🔒 {t('settings.consentStatus')}{' '}
+          <Icon name="lock" size={14} /> {t('settings.consentStatus')}{' '}
           {consent === 'granted'
             ? t('settings.consentGranted')
             : consent === 'denied'
@@ -177,7 +182,13 @@ export default function PrivacyConsentSection({
                 borderColor: 'var(--color-danger, #f87171)',
               }}
             >
-              {isDeleting ? t('settings.deleting') : `🗑 ${t('settings.deleteAllData')}`}
+              {isDeleting ? (
+                t('settings.deleting')
+              ) : (
+                <>
+                  <Icon name="trash" size={16} /> {t('settings.deleteAllData')}
+                </>
+              )}
             </button>
           </div>
           {deleteResult && (
@@ -197,9 +208,15 @@ export default function PrivacyConsentSection({
                 border: `1px solid ${deleteResult.errors.length > 0 ? 'rgba(248,113,113,0.3)' : 'rgba(74,222,128,0.3)'}`,
               }}
             >
-              {deleteResult.errors.length > 0
-                ? `✗ ${t('settings.deleteError')}`
-                : `✓ ${t('settings.deleteSuccess')}`}
+              {deleteResult.errors.length > 0 ? (
+                <>
+                  <Icon name="x" size={16} /> {t('settings.deleteError')}
+                </>
+              ) : (
+                <>
+                  <Icon name="check" size={16} /> {t('settings.deleteSuccess')}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -217,7 +234,13 @@ export default function PrivacyConsentSection({
             onClick={() => void handleExportData()}
             disabled={isExporting}
           >
-            {isExporting ? t('settings.exporting') : `📦 ${t('settings.downloadData')}`}
+            {isExporting ? (
+              t('settings.exporting')
+            ) : (
+              <>
+                <Icon name="package" size={16} /> {t('settings.downloadData')}
+              </>
+            )}
           </button>
         </div>
         {exportError && (
@@ -233,7 +256,7 @@ export default function PrivacyConsentSection({
               border: '1px solid rgba(248,113,113,0.3)',
             }}
           >
-            ✗ {exportError}
+            <Icon name="x" size={16} /> {exportError}
           </div>
         )}
       </div>

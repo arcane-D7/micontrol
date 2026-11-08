@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { IotDeviceInfo } from '../types/hardware';
+import { Icon } from './ui/icons';
 
 /** All 16 EC commands available via the EC command protocol. */
 const EC_COMMANDS: { id: string; name: string; desc: string }[] = [
@@ -109,7 +110,9 @@ export default function IotDeviceCard() {
   if (loading) {
     return (
       <div className="card">
-        <h2 className="card-title">🔌 IoT Device</h2>
+        <h2 className="card-title">
+          <Icon name="plug" size={16} /> IoT Device
+        </h2>
         <p className="page-subtitle">Loading device information...</p>
       </div>
     );
@@ -118,7 +121,9 @@ export default function IotDeviceCard() {
   if (!info?.pipe_available) {
     return (
       <div className="card">
-        <h2 className="card-title">🔌 IoT Device</h2>
+        <h2 className="card-title">
+          <Icon name="plug" size={16} /> IoT Device
+        </h2>
         <p className="page-subtitle" style={{ color: 'var(--text-dim)' }}>
           IoT Service not available. The Xiaomi IoT chip was not detected on this system.
         </p>
@@ -140,10 +145,10 @@ export default function IotDeviceCard() {
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button className="btn btn-secondary" style={{ flex: 1 }} onClick={retryNow}>
-            🔄 Try again
+            <Icon name="refresh" size={16} /> Try again
           </button>
           <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => void loadInfo()}>
-            ↻ Refresh
+            <Icon name="refresh" size={16} /> Refresh
           </button>
         </div>
       </div>
@@ -152,7 +157,9 @@ export default function IotDeviceCard() {
 
   return (
     <div className="card">
-      <h2 className="card-title">🔌 IoT Device</h2>
+      <h2 className="card-title">
+        <Icon name="plug" size={16} /> IoT Device
+      </h2>
       <p className="page-subtitle">Xiaomi IoT chip information</p>
 
       {/* ── Device Info ─────────────────────────────────────────── */}
@@ -188,7 +195,13 @@ export default function IotDeviceCard() {
               className="stat-value"
               style={{ color: info.bind_status.bound ? 'var(--success)' : 'var(--text-dim)' }}
             >
-              {info.bind_status.bound ? `✓ Bound (UID: ${info.bind_status.uid})` : 'Not bound'}
+              {info.bind_status.bound ? (
+                <>
+                  <Icon name="check" size={16} /> Bound (UID: {info.bind_status.uid})
+                </>
+              ) : (
+                'Not bound'
+              )}
             </span>
           </div>
         )}
@@ -220,7 +233,7 @@ export default function IotDeviceCard() {
         }}
       >
         <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text)' }}>
-          ℹ️ About this device
+          <Icon name="info" size={16} /> About this device
         </div>
         <p style={{ margin: '0 0 8px 0' }}>
           <strong>Cloud Binding</strong> — Indicates whether the IoT chip is registered with the
@@ -247,7 +260,8 @@ export default function IotDeviceCard() {
           onClick={() => setShowCommands((s) => !s)}
           style={{ width: '100%', fontSize: 12 }}
         >
-          {showCommands ? '▼' : '▶'} EC Command Protocol (16 commands)
+          {showCommands ? <Icon name="chevron-down" size={12} /> : <Icon name="play" size={12} />}{' '}
+          EC Command Protocol (16 commands)
         </button>
         {showCommands && (
           <div
@@ -322,7 +336,7 @@ export default function IotDeviceCard() {
         onClick={loadInfo}
         style={{ marginTop: 12, width: '100%' }}
       >
-        🔄 Refresh
+        <Icon name="refresh" size={16} /> Refresh
       </button>
     </div>
   );

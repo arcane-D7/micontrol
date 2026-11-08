@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { useI18n } from '../hooks/useI18n';
+import { Icon } from './ui/icons';
 
 /** Regex matching one or more hex digits (no whitespace, no 0x prefix). */
 const HEX_RE = /^[0-9A-Fa-f]+$/;
@@ -120,7 +121,9 @@ export default function EcrDebugPanel() {
 
   return (
     <div className="card">
-      <h2 className="card-title">{t('ecrDebug.title')}</h2>
+      <h2 className="card-title">
+        <Icon name="wrench" size={16} /> {t('ecrDebug.title')}
+      </h2>
       <p className="page-subtitle">{t('ecrDebug.subtitle')}</p>
 
       {/* Read */}
@@ -203,7 +206,7 @@ export default function EcrDebugPanel() {
         aria-label={t('ecrDebug.readMap')}
         style={{ marginTop: 12, width: '100%' }}
       >
-        {t('ecrDebug.readMap')}
+        <Icon name="clipboard" size={16} /> {t('ecrDebug.readMap')}
       </button>
 
       {/* Result */}

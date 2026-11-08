@@ -1,5 +1,6 @@
 import { t } from '../hooks/useI18n';
 import type { AppUpdateState, AppUpdateInfo } from '../hooks/useAutoUpdate';
+import { Icon } from './ui/icons';
 
 interface Props {
   state: AppUpdateState;
@@ -99,7 +100,8 @@ export default function AppUpdateBanner({
         >
           <div style={{ flex: 1, minWidth: 0 }}>
             <h2 className="card-title" style={{ margin: 0, marginBottom: 6 }}>
-              🎉 {t('updates.newVersionAvailable')} — v{updateInfo?.version}
+              <Icon name="sparkles" size={16} /> {t('updates.newVersionAvailable')} — v
+              {updateInfo?.version}
             </h2>
             {updateInfo?.body && (
               <div
@@ -182,7 +184,7 @@ export default function AppUpdateBanner({
               className="card-title"
               style={{ margin: 0, marginBottom: 4, color: 'var(--success)' }}
             >
-              ✓ {t('updates.downloadComplete')}
+              <Icon name="check" size={16} /> {t('updates.downloadComplete')}
             </h2>
             <div style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>
               {t('updates.restarting')}

@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { Icon, type IconName } from '../../components/ui/icons';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
 
@@ -30,13 +31,13 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
-const CATEGORY_ICONS: Record<string, string> = {
-  windows_temp: '🗂️',
-  windows_update_cache: '📦',
-  browser_cache: '🌐',
-  recycle_bin: '🗑️',
-  thumbnail_cache: '🖼️',
-  windows_logs: '📋',
+const CATEGORY_ICONS: Record<string, IconName> = {
+  windows_temp: 'archive',
+  windows_update_cache: 'package',
+  browser_cache: 'globe',
+  recycle_bin: 'trash',
+  thumbnail_cache: 'image',
+  windows_logs: 'clipboard',
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -119,7 +120,7 @@ export default function CleanupTab() {
 
       {errorMsg && (
         <div className="alert alert-error" style={{ marginBottom: 16 }}>
-          ⚠ {errorMsg}
+          <Icon name="alert-triangle" size={16} /> {errorMsg}
         </div>
       )}
 
@@ -129,17 +130,18 @@ export default function CleanupTab() {
           className={`alert ${results.some((r) => r.errors.length > 0) ? 'alert-warn' : 'alert-success'}`}
           style={{ marginBottom: 16 }}
         >
-          ✅ {t('cleanup.complete')}
+          <Icon name="check-circle" size={16} /> {t('cleanup.complete')}
           {results.some((r) => r.errors.length > 0) && ` — ${t('cleanup.partial')}`}
           <ul style={{ marginTop: 8, fontSize: 12 }}>
             {results.map((r) => (
               <li key={r.category}>
-                {CATEGORY_ICONS[r.category] || '📁'} {r.category}: {formatBytes(r.freed_bytes)}{' '}
-                {t('cleanup.freed')}, {r.files_removed} {t('cleanup.filesRemoved')}
+                <Icon name={CATEGORY_ICONS[r.category] ?? 'folder'} size={16} /> {r.category}:{' '}
+                {formatBytes(r.freed_bytes)} {t('cleanup.freed')}, {r.files_removed}{' '}
+                {t('cleanup.filesRemoved')}
                 {r.files_skipped > 0 && ` (${r.files_skipped} ${t('cleanup.skipped')})`}
                 {r.errors.length > 0 && (
                   <div style={{ color: 'var(--error, #e5484d)', marginTop: 2 }}>
-                    ⚠ {r.errors[0]}
+                    <Icon name="alert-triangle" size={16} /> {r.errors[0]}
                     {r.errors.length > 1 && ` (+${r.errors.length - 1})`}
                   </div>
                 )}
@@ -158,14 +160,30 @@ export default function CleanupTab() {
             onClick={fetchItems}
             disabled={scanning || cleaning}
           >
-            {scanning ? `🔍 ${t('cleanup.scanning')}` : `🔍 ${t('cleanup.rescan')}`}
+            {scanning ? (
+              <>
+                <Icon name="search" size={16} /> {t('cleanup.scanning')}
+              </>
+            ) : (
+              <>
+                <Icon name="search" size={16} /> {t('cleanup.rescan')}
+              </>
+            )}
           </button>
           <button
             className="btn btn-primary"
             onClick={handleClean}
             disabled={cleaning || selected.size === 0}
           >
-            {cleaning ? `🧹 ${t('cleanup.cleaning')}` : `🧹 ${t('cleanup.cleanNow')}`}
+            {cleaning ? (
+              <>
+                <Icon name="broom" size={16} /> {t('cleanup.cleaning')}
+              </>
+            ) : (
+              <>
+                <Icon name="broom" size={16} /> {t('cleanup.cleanNow')}
+              </>
+            )}
           </button>
           {selected.size > 0 && (
             <span className="text-muted" style={{ fontSize: 12 }}>
@@ -178,7 +196,9 @@ export default function CleanupTab() {
       {/* Category List */}
       {items.length === 0 ? (
         <div className="card">
-          <p className="text-muted">✅ {t('cleanup.nothingFound')}</p>
+          <p className="text-muted">
+            <Icon name="check-circle" size={16} /> {t('cleanup.nothingFound')}
+          </p>
         </div>
       ) : (
         items.map((item) => (
@@ -193,7 +213,9 @@ export default function CleanupTab() {
                 disabled={cleaning}
                 ariaLabel={item.description}
               />
-              <span style={{ fontSize: 24 }}>{CATEGORY_ICONS[item.category] || '📁'}</span>
+              <span>
+                <Icon name={CATEGORY_ICONS[item.category] ?? 'folder'} size={24} />
+              </span>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600 }}>{item.description}</div>
                 <span className="text-muted" style={{ fontSize: 12 }}>
@@ -207,7 +229,9 @@ export default function CleanupTab() {
 
       {/* Info Card */}
       <div className="card">
-        <h3>ℹ️ {t('cleanup.about')}</h3>
+        <h3>
+          <Icon name="info" size={16} /> {t('cleanup.about')}
+        </h3>
         <p className="text-muted" style={{ fontSize: 12 }}>
           {t('cleanup.aboutDesc')}
         </p>

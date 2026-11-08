@@ -12,6 +12,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary';
 import { MiControlIcon } from '../components/MiControlIcon';
 import OnboardingWizard from '../components/OnboardingWizard';
 import PrivacyPolicy from './PrivacyPolicy';
+import { Icon, type IconName } from '../components/ui/icons';
 
 // ── Lazy-loaded tab content ──────────────────────────────────────────────────
 const OverviewTab = lazy(() => import('./tabs/overview'));
@@ -53,7 +54,7 @@ type NavKey = Parameters<typeof t>[0];
 
 interface NavItem {
   id: string;
-  icon: string;
+  icon: IconName;
   label: NavKey;
 }
 
@@ -75,45 +76,45 @@ const NAV_GROUPS: NavGroup[] = [
     id: 'system',
     label: 'nav.groups.system',
     items: [
-      { id: 'overview', icon: '📊', label: 'nav.overview' },
-      { id: 'taskmgr', icon: '📈', label: 'nav.taskmgr' },
-      { id: 'system', icon: '🔧', label: 'nav.system' },
-      { id: 'startup', icon: '🚀', label: 'nav.startup' },
-      { id: 'security', icon: '🛡️', label: 'nav.security' },
-      { id: 'cleanup', icon: '🧹', label: 'nav.cleanup' },
-      { id: 'ai_analysis', icon: '🤖', label: 'nav.aiAnalysis' },
+      { id: 'overview', icon: 'chart-bar', label: 'nav.overview' },
+      { id: 'taskmgr', icon: 'chart-line', label: 'nav.taskmgr' },
+      { id: 'system', icon: 'wrench', label: 'nav.system' },
+      { id: 'startup', icon: 'rocket', label: 'nav.startup' },
+      { id: 'security', icon: 'shield', label: 'nav.security' },
+      { id: 'cleanup', icon: 'broom', label: 'nav.cleanup' },
+      { id: 'ai_analysis', icon: 'bot', label: 'nav.aiAnalysis' },
     ],
   },
   {
     id: 'energy',
     label: 'nav.groups.energy',
     items: [
-      { id: 'battery', icon: '🔋', label: 'nav.battery' },
-      { id: 'performance', icon: '⚡', label: 'nav.performance' },
-      { id: 'fan', icon: '💨', label: 'nav.fan' },
-      { id: 'sysopt', icon: '🚀', label: 'nav.sysOpt' },
+      { id: 'battery', icon: 'battery', label: 'nav.battery' },
+      { id: 'performance', icon: 'bolt', label: 'nav.performance' },
+      { id: 'fan', icon: 'wind', label: 'nav.fan' },
+      { id: 'sysopt', icon: 'rocket', label: 'nav.sysOpt' },
     ],
   },
   {
     id: 'screen',
     label: 'nav.groups.screen',
     items: [
-      { id: 'display', icon: '🖥️', label: 'nav.display' },
-      { id: 'color', icon: '🎨', label: 'nav.color' },
-      { id: 'audio', icon: '🎵', label: 'nav.audio' },
-      { id: 'cast', icon: '📺', label: 'nav.cast' },
+      { id: 'display', icon: 'monitor', label: 'nav.display' },
+      { id: 'color', icon: 'palette', label: 'nav.color' },
+      { id: 'audio', icon: 'music', label: 'nav.audio' },
+      { id: 'cast', icon: 'tv', label: 'nav.cast' },
     ],
   },
   {
     id: 'devices',
     label: 'nav.groups.devices',
     items: [
-      { id: 'crossDevice', icon: '📱', label: 'nav.crossDevice' },
-      { id: 'iot', icon: '🔌', label: 'nav.iot' },
-      { id: 'wifi', icon: '📶', label: 'nav.wifi' },
-      { id: 'keyboard', icon: '⌨️', label: 'nav.keyboard' },
-      { id: 'touchpad', icon: '🖱️', label: 'nav.touchpad' },
-      { id: 'faceUnlock', icon: '😀', label: 'nav.faceUnlock' },
+      { id: 'crossDevice', icon: 'smartphone', label: 'nav.crossDevice' },
+      { id: 'iot', icon: 'plug', label: 'nav.iot' },
+      { id: 'wifi', icon: 'wifi', label: 'nav.wifi' },
+      { id: 'keyboard', icon: 'keyboard', label: 'nav.keyboard' },
+      { id: 'touchpad', icon: 'mouse', label: 'nav.touchpad' },
+      { id: 'faceUnlock', icon: 'smile', label: 'nav.faceUnlock' },
     ],
   },
 ];
@@ -122,10 +123,10 @@ const PINNED_GROUP: NavGroup = {
   id: 'settings',
   label: 'nav.groups.settings',
   items: [
-    { id: 'settings', icon: '⚙️', label: 'nav.settings' },
-    { id: 'about', icon: 'ℹ️', label: 'nav.about' },
+    { id: 'settings', icon: 'gear', label: 'nav.settings' },
+    { id: 'about', icon: 'info', label: 'nav.about' },
     ...(import.meta.env.DEV
-      ? [{ id: 'ecrdebug', icon: '🔧', label: 'nav.ecrdebug' as NavKey }]
+      ? [{ id: 'ecrdebug', icon: 'wrench' as IconName, label: 'nav.ecrdebug' as NavKey }]
       : []),
   ],
 };
@@ -235,7 +236,7 @@ const Sidebar = memo(function Sidebar({
         title={t(item.label)}
       >
         <span className="sidebar-icon" aria-hidden="true">
-          {item.icon}
+          <Icon name={item.icon} size={18} />
         </span>
         <span className="sidebar-item-label">{t(item.label)}</span>
       </button>
@@ -325,7 +326,7 @@ const Sidebar = memo(function Sidebar({
               wordBreak: 'break-word',
             }}
           >
-            ⚠️ {hardware.error}
+            <Icon name="alert-triangle" size={16} /> {hardware.error}
           </div>
         )}
         {hardware.loading && (
@@ -643,7 +644,7 @@ export default function MainWindow({
               }}
               title="MiControl tray icon"
             >
-              🖥️
+              <Icon name="monitor" size={16} />
             </div>
           </div>
         </div>

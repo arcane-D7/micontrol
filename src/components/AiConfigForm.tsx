@@ -3,6 +3,7 @@ import { t } from '../hooks/useI18n';
 import type { StringKey } from '../hooks/useI18n';
 import type { AppSettings } from '../types/settings';
 import { DEFAULT_SETTINGS } from '../hooks/useSettings';
+import { Icon } from './ui/icons';
 
 interface AiConfigFormProps {
   settings: AppSettings;
@@ -136,7 +137,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             title={showKey ? t('settings.hideKey') : t('settings.showKey')}
             aria-label={showKey ? t('settings.hideKey') : t('settings.showKey')}
           >
-            {showKey ? '🙈' : '👁'}
+            {showKey ? <Icon name="eye-off" size={16} /> : <Icon name="eye" size={16} />}
           </button>
         </div>
         {draft.openai_api_key && (
@@ -150,7 +151,9 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
               gap: 4,
             }}
           >
-            <span>✓</span>
+            <span>
+              <Icon name="check" size={16} />
+            </span>
             <span>{t('settings.keyIsSet')}</span>
           </div>
         )}
@@ -249,7 +252,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             border: `1px solid ${testStatus === 'ok' ? 'rgba(74,222,128,0.3)' : 'rgba(248,113,113,0.3)'}`,
           }}
         >
-          {testStatus === 'ok' ? '✓ ' : '✗ '}
+          {testStatus === 'ok' ? <Icon name="check" size={16} /> : <Icon name="x" size={16} />}{' '}
           {testMsg}
         </div>
       )}
@@ -259,12 +262,12 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
         className="text-xs"
         style={{ color: 'var(--color-text-muted)', marginTop: 16, marginBottom: 0 }}
       >
-        🔒 {t('settings.storageNote')}
+        <Icon name="lock" size={14} /> {t('settings.storageNote')}
       </p>
 
       {/* Documentation link */}
       <p className="text-xs" style={{ marginTop: 8, marginBottom: 0 }}>
-        📖{' '}
+        <Icon name="book-open" size={16} />{' '}
         <a
           href="https://github.com/Freitas-MA/miPC/blob/master/micontrol/docs/ai-features.md"
           target="_blank"

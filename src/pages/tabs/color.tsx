@@ -4,6 +4,7 @@ import { PageHeader } from './PageHeader';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import { t } from '../../hooks/useI18n';
 import { useToast } from '../../contexts/ToastContext';
+import { Icon } from '../../components/ui/icons';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
 
@@ -200,7 +201,7 @@ export default function ColorTab() {
       {/* Error message */}
       {errorMsg && (
         <div className="alert alert-error" style={{ marginBottom: 16 }}>
-          ⚠ {errorMsg}
+          <Icon name="alert-triangle" size={16} /> {errorMsg}
         </div>
       )}
 
@@ -214,10 +215,10 @@ export default function ColorTab() {
             disabled={wizardBlock != null}
             title={wizardBlock ? wizardBlockReason(wizardBlock) : undefined}
           >
-            🎨 {t('color.launchWizard')}
+            <Icon name="palette" size={16} /> {t('color.launchWizard')}
           </button>
           <button className="btn btn-secondary" onClick={handleOpenSettings}>
-            ⚙️ {t('color.openSettings')}
+            <Icon name="gear" size={16} /> {t('color.openSettings')}
           </button>
         </div>
         <p className="text-muted" style={{ marginTop: 8, fontSize: 12 }}>
@@ -233,7 +234,9 @@ export default function ColorTab() {
 
       {/* Eye Protection Card */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>👁️ {t('color.eyeProtection')}</h3>
+        <h3>
+          <Icon name="eye" size={16} /> {t('color.eyeProtection')}
+        </h3>
         <p className="text-muted" style={{ fontSize: 12, marginBottom: 12 }}>
           {t('color.eyeProtectionDesc')}
         </p>

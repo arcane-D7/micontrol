@@ -8,6 +8,7 @@ import {
 } from '../lib/brightnessPresets';
 import { useToast } from '../contexts/ToastContext';
 import ToggleRow from './ToggleRow';
+import { Icon } from './ui/icons';
 interface Props {
   display: DisplayInfo | null;
   capabilities?: HardwareCapabilities;
@@ -79,7 +80,7 @@ export default function DisplaySettings({
       : t('display.hdrDisabled');
   const hdrSummary = hdrPaths
     .filter((d) => d.supported)
-    .map((d) => `${d.label || d.device}${d.enabled ? ' ✓' : ''}`)
+    .map((d) => d.label || d.device)
     .join(' · ');
 
   return (
@@ -157,7 +158,12 @@ export default function DisplaySettings({
             style={{ fontSize: 12, color: 'var(--color-text-dim)' }}
             onClick={() => setSensitivityOpen((o) => !o)}
           >
-            {sensitivityOpen ? '▲' : '▼'} {t('display.sensitivityConfigure')}
+            {sensitivityOpen ? (
+              <Icon name="chevron-up" size={12} />
+            ) : (
+              <Icon name="chevron-down" size={12} />
+            )}{' '}
+            {t('display.sensitivityConfigure')}
           </button>
 
           {sensitivityOpen && (
@@ -182,7 +188,7 @@ export default function DisplaySettings({
                 }}
               >
                 <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                  ☀ {t('display.luxSensor')}
+                  <Icon name="sun" size={16} /> {t('display.luxSensor')}
                 </span>
                 <span style={{ fontSize: 12, fontWeight: 600 }}>
                   {display.ambient_lux != null
@@ -201,13 +207,13 @@ export default function DisplaySettings({
                     className={`chip-btn${editCfg.mode === 'curve' ? ' active' : ''}`}
                     onClick={() => setLocalCfg({ ...editCfg, mode: 'curve' })}
                   >
-                    📈 {t('display.modeCurve')}
+                    <Icon name="chart-line" size={16} /> {t('display.modeCurve')}
                   </button>
                   <button
                     className={`chip-btn${editCfg.mode === 'smart' ? ' active' : ''}`}
                     onClick={() => setLocalCfg({ ...editCfg, mode: 'smart' })}
                   >
-                    🧠 {t('display.modeSmart')}
+                    <Icon name="brain" size={16} /> {t('display.modeSmart')}
                   </button>
                 </div>
                 <div
@@ -240,7 +246,7 @@ export default function DisplaySettings({
                         title={p.hint}
                         onClick={() => setLocalCfg({ ...editCfg, ...p.config, mode: editCfg.mode })}
                       >
-                        {p.icon} {p.label}
+                        <Icon name={p.icon} size={16} /> {p.label}
                       </button>
                     );
                   })}
@@ -249,7 +255,7 @@ export default function DisplaySettings({
                       className="chip-btn active"
                       style={{ pointerEvents: 'none', opacity: 0.7 }}
                     >
-                      ✏️ {t('display.presetCustom')}
+                      <Icon name="pencil" size={16} /> {t('display.presetCustom')}
                     </span>
                   )}
                 </div>
@@ -366,7 +372,7 @@ export default function DisplaySettings({
                 }}
               >
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  ℹ {t('display.sensitivityHowItWorks')}
+                  <Icon name="info" size={16} /> {t('display.sensitivityHowItWorks')}
                 </div>
                 <div style={{ marginBottom: 2 }}>· {t('display.sensitivityHelpMin')}</div>
                 <div style={{ marginBottom: 2 }}>
@@ -401,7 +407,7 @@ export default function DisplaySettings({
                     void onAiBrightnessConfigChange(newCfg).then(() => setLocalCfg(null));
                   }}
                 >
-                  ↺ {t('display.resetDefault')}
+                  <Icon name="rotate-ccw" size={16} /> {t('display.resetDefault')}
                 </button>
               </div>
             </div>
@@ -434,7 +440,8 @@ export default function DisplaySettings({
                   }}
                   style={{ minWidth: 52 }}
                 >
-                  {hz} Hz{isMax && display.dynamic_refresh_rate_capable && ' ★'}
+                  {hz} Hz
+                  {isMax && display.dynamic_refresh_rate_capable && <Icon name="star" size={12} />}
                 </button>
               );
             })}
@@ -452,8 +459,8 @@ export default function DisplaySettings({
         <div
           style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 4, lineHeight: 1.4 }}
         >
-          ★ Dynamic Refresh Rate active — Windows 11 automatically switches to lower Hz to save
-          power when high frame rate isn’t needed.
+          <Icon name="star" size={14} /> Dynamic Refresh Rate active — Windows 11 automatically
+          switches to lower Hz to save power when high frame rate isn’t needed.
         </div>
       )}
       {/* Intel PSR2 DRRS toggle */}
@@ -495,10 +502,10 @@ export default function DisplaySettings({
             paddingLeft: 2,
           }}
         >
-          💡 PSR2 DRRS ≠ Windows &ldquo;Dynamic Refresh Rate&rdquo;. Windows DRR requires a
-          VRR-capable display. PSR2 DRRS is an Intel driver feature that switches the panel refresh
-          rate internally — Windows always reports the max configured Hz (currently{' '}
-          {display.refresh_rate_hz} Hz), even when PSR2 is active.
+          <Icon name="lightbulb" size={16} /> PSR2 DRRS ≠ Windows &ldquo;Dynamic Refresh
+          Rate&rdquo;. Windows DRR requires a VRR-capable display. PSR2 DRRS is an Intel driver
+          feature that switches the panel refresh rate internally — Windows always reports the max
+          configured Hz (currently {display.refresh_rate_hz} Hz), even when PSR2 is active.
         </div>
       )}{' '}
     </div>
@@ -557,7 +564,9 @@ function SmartModelInfo() {
         lineHeight: 1.5,
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>🧠 {t('display.smartModelTitle')}</div>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>
+        <Icon name="brain" size={16} /> {t('display.smartModelTitle')}
+      </div>
       <div>
         {t('display.smartSamples', {
           count: stats?.total ?? 0,
@@ -570,7 +579,13 @@ function SmartModelInfo() {
         onClick={handleReset}
         disabled={resetting}
       >
-        {resetting ? '…' : `🗑 ${t('display.smartReset')}`}
+        {resetting ? (
+          '…'
+        ) : (
+          <>
+            <Icon name="trash" size={16} /> {t('display.smartReset')}
+          </>
+        )}
       </button>
     </div>
   );

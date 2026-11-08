@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from './ui';
+import { Icon } from './ui/icons';
 import { t } from '../hooks/useI18n';
 import type { useHardware } from '../hooks/useHardware';
 import type { EramMap, IotRegionName } from '../types/hardware';
@@ -663,7 +664,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               fontWeight: 400,
             }}
           >
-            ⚠ danger zone
+            <Icon name="alert-triangle" size={16} /> danger zone
           </span>
         </summary>
         <div className="card" style={{ marginTop: 8, marginBottom: 0 }}>
@@ -715,7 +716,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
 
                 if (
                   !window.confirm(
-                    '⚠️ WARNING: Writing to a raw physical address can brick your device. Are you sure?',
+                    'WARNING: Writing to a raw physical address can brick your device. Are you sure?',
                   )
                 ) {
                   return;

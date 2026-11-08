@@ -6,6 +6,7 @@ import { useToast } from '../../contexts/ToastContext';
 import UpdateManager from '../../components/UpdateManager';
 import type { Hardware } from './shared';
 import type { AppUpdateState, AppUpdateInfo } from '../../hooks/useAutoUpdate';
+import { Icon } from '../../components/ui/icons';
 
 // ── Driver detail types ──────────────────────────────────────────────────────
 
@@ -121,20 +122,36 @@ function UpdatesTab({
             marginBottom: 12,
           }}
         >
-          <h3>🔧 {t('updates.driverDetails')}</h3>
+          <h3>
+            <Icon name="wrench" size={16} /> {t('updates.driverDetails')}
+          </h3>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-secondary" onClick={handleScan} disabled={scanning}>
-              {scanning ? `🔍 ${t('updates.scanning')}` : `🔍 ${t('updates.scanDrivers')}`}
+              {scanning ? (
+                <>
+                  <Icon name="search" size={16} /> {t('updates.scanning')}
+                </>
+              ) : (
+                <>
+                  <Icon name="search" size={16} /> {t('updates.scanDrivers')}
+                </>
+              )}
             </button>
             <button className="btn btn-secondary" onClick={fetchDrivers} disabled={loadingDrivers}>
-              {loadingDrivers ? t('common.loading') : `🔄 ${t('updates.refreshDrivers')}`}
+              {loadingDrivers ? (
+                t('common.loading')
+              ) : (
+                <>
+                  <Icon name="refresh" size={16} /> {t('updates.refreshDrivers')}
+                </>
+              )}
             </button>
           </div>
         </div>
 
         {errorMsg && (
           <div className="alert alert-error" style={{ marginBottom: 12 }}>
-            ⚠ {errorMsg}
+            <Icon name="alert-triangle" size={16} /> {errorMsg}
           </div>
         )}
 

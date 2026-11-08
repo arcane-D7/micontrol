@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
 import { AUTO_UPDATE_CHANGED_EVENT } from '../hooks/useAutoUpdate';
 import ToggleSwitch from './ToggleSwitch';
+import { Icon } from './ui/icons';
 
 interface AutoUpdateConfig {
   enabled: boolean;
@@ -101,7 +102,7 @@ export default function AutoUpdateCard() {
       >
         <div style={{ flex: 1, minWidth: 0 }}>
           <h2 className="card-title" style={{ margin: 0, marginBottom: 6 }}>
-            🔄 {t('about.autoUpdateTitle')}
+            <Icon name="refresh" size={16} /> {t('about.autoUpdateTitle')}
           </h2>
           <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', margin: 0 }}>
             {t('about.autoUpdateDesc')}
@@ -118,7 +119,7 @@ export default function AutoUpdateCard() {
       {showDevFeed && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: 6 }}>
-            🧪 {t('about.feedLabel')}
+            <Icon name="flask" size={16} /> {t('about.feedLabel')}
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
@@ -182,13 +183,13 @@ export default function AutoUpdateCard() {
 
       {state === 'success' && (
         <div className="alert alert-success" style={{ marginTop: 10 }}>
-          ✓ {message}
+          <Icon name="check" size={16} /> {message}
         </div>
       )}
 
       {state === 'error' && (
         <div className="alert alert-error" style={{ marginTop: 10 }}>
-          ⚠ {message}
+          <Icon name="alert-triangle" size={16} /> {message}
         </div>
       )}
     </div>

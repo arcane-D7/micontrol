@@ -4,6 +4,7 @@ import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import { useToast } from '../../contexts/ToastContext';
 import { OsTurboMeasuredBlock, osTurboCounts } from '../../components/OsTurboMeasured';
+import { Icon } from '../../components/ui/icons';
 
 interface SysOptStatus {
   id: string;
@@ -117,7 +118,9 @@ function SystemOptimizationTab() {
 
       {/* OS Turbo card */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <h2 className="card-title">⚡ {t('sysOpt.osTurboTitle')}</h2>
+        <h2 className="card-title">
+          <Icon name="bolt" size={16} /> {t('sysOpt.osTurboTitle')}
+        </h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 14 }}>
           {t('sysOpt.osTurboDesc')}
         </p>
@@ -149,7 +152,7 @@ function SystemOptimizationTab() {
         </label>
         <details style={{ marginTop: 4 }}>
           <summary style={{ fontSize: '0.8rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
-            ℹ️ {t('sysOpt.osTurboHowTitle')}
+            <Icon name="info" size={16} /> {t('sysOpt.osTurboHowTitle')}
           </summary>
           <p
             style={{
@@ -168,7 +171,7 @@ function SystemOptimizationTab() {
             Performance tab so both views can never disagree. */}
         {osTurbo?.snapshot_stale && (
           <div className="alert alert-warn" style={{ marginTop: 12 }}>
-            ⚠ {t('performance.osTurboStaleSnapshot')}
+            <Icon name="alert-triangle" size={16} /> {t('performance.osTurboStaleSnapshot')}
           </div>
         )}
         <OsTurboMeasuredBlock measured={osTurbo?.measured} />
@@ -176,7 +179,9 @@ function SystemOptimizationTab() {
 
       {/* ── S55: Windows Debloater card ── */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <h2 className="card-title">🧹 {t('sysOpt.debloaterTitle')}</h2>
+        <h2 className="card-title">
+          <Icon name="broom" size={16} /> {t('sysOpt.debloaterTitle')}
+        </h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
           {t('sysOpt.debloaterDesc')}
         </p>
@@ -304,7 +309,9 @@ function DebloaterModal({
             marginBottom: 14,
           }}
         >
-          <div style={{ fontWeight: 600, fontSize: 15 }}>🧹 {t('sysOpt.debloaterTitle')}</div>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>
+            <Icon name="broom" size={16} /> {t('sysOpt.debloaterTitle')}
+          </div>
           <button
             onClick={onClose}
             aria-label={t('common.close')}
@@ -318,7 +325,7 @@ function DebloaterModal({
               padding: '0 4px',
             }}
           >
-            ✕
+            <Icon name="x" size={16} />
           </button>
         </div>
 
@@ -446,7 +453,9 @@ function Accordion({
           textAlign: 'left',
         }}
       >
-        <span style={{ color, fontSize: 14 }}>{open ? '▾' : '▸'}</span>
+        <span style={{ color, fontSize: 14 }}>
+          {open ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />}
+        </span>
         <span style={{ color, fontWeight: 600, fontSize: 13 }}>{title}</span>
         <span
           className="text-sm"

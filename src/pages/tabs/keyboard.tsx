@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import { useToast } from '../../contexts/ToastContext';
+import { Icon } from '../../components/ui/icons';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -269,7 +270,7 @@ function KeyBindingRow({
               lineHeight: 1.4,
             }}
           >
-            ✕
+            <Icon name="x" size={16} />
           </button>
         )}
       </div>
@@ -622,7 +623,9 @@ export default function KeyboardTab() {
 
       {/* Fn Key Lock Card */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3>⌨️ {t('keyboard.fnKeyTitle')}</h3>
+        <h3>
+          <Icon name="keyboard" size={16} /> {t('keyboard.fnKeyTitle')}
+        </h3>
         <p className="text-muted" style={{ fontSize: 12, marginBottom: 12 }}>
           {t('keyboard.fnKeyDesc')}
         </p>
@@ -645,7 +648,7 @@ export default function KeyboardTab() {
               }}
               disabled={fnKeyToggling}
             >
-              🎵 {t('keyboard.fnKeyMultimedia')}
+              <Icon name="music" size={16} /> {t('keyboard.fnKeyMultimedia')}
             </button>
             <button
               className={fnKeyMode === 'function_key' ? 'btn btn-primary' : 'btn btn-secondary'}
@@ -662,7 +665,7 @@ export default function KeyboardTab() {
               }}
               disabled={fnKeyToggling}
             >
-              ⌨️ {t('keyboard.fnKeyFunction')}
+              <Icon name="keyboard" size={16} /> {t('keyboard.fnKeyFunction')}
             </button>
           </div>
         )}

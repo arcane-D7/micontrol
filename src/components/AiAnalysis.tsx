@@ -26,6 +26,7 @@ import {
 import './AiAnalysis.css';
 import AiFeedback from './AiFeedback';
 import AiUsagePanel from './AiUsagePanel';
+import { Icon } from './ui/icons';
 
 type Hardware = ReturnType<typeof useHardware>;
 type AiSettings = ReturnType<typeof UseSettings>;
@@ -512,14 +513,14 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
             {/* Model hint */}
             {!ai.isConfigured ? (
               <div className="ai-settings-warning">
-                ⚠️ {t('ai.notConfigured')}{' '}
+                <Icon name="alert-triangle" size={16} /> {t('ai.notConfigured')}{' '}
                 <button onClick={onOpenSettings} className="ai-settings-link">
                   {t('settings.title')}
                 </button>
               </div>
             ) : (
               <div className="ai-settings-model-hint">
-                🤖{' '}
+                <Icon name="bot" size={16} />{' '}
                 {t('aiAnalysis.settings.modelHint', {
                   model: ai.settings.openai_model || 'gpt-4o-mini',
                 })}
@@ -549,7 +550,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
 
         {/* Documentation link */}
         <div className="ai-settings-docs-link">
-          📖{' '}
+          <Icon name="book-open" size={16} />{' '}
           <a
             href="https://github.com/arcane-D7/micontrol/blob/main/docs/ai-features.md"
             target="_blank"
@@ -658,7 +659,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         ) : (
           <div className="ai-charts-empty">
             <span className="ai-charts-empty__icon" aria-hidden="true">
-              📊
+              <Icon name="chart-bar" size={16} />
             </span>
             <span className="ai-charts-empty__title">{t('aiAnalysis.charts.waitingForData')}</span>
             <span className="ai-charts-empty__hint">{t('aiAnalysis.charts.enableHint')}</span>
@@ -717,7 +718,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         {!lastAnalysis && !analyzing && !analyzeError && (
           <div className="ai-analysis-empty">
             <span className="ai-analysis-empty__icon" aria-hidden="true">
-              🤖
+              <Icon name="bot" size={16} />
             </span>
             <span className="ai-analysis-empty__text">{t('aiAnalysis.analysis.noResultYet')}</span>
           </div>
@@ -725,7 +726,9 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
       </div>
 
       {/* ── AI disclaimer ──────────────────────────────────────────────────── */}
-      <div className="ai-disclaimer">⚠️ {t('ai.disclaimer')}</div>
+      <div className="ai-disclaimer">
+        <Icon name="alert-triangle" size={16} /> {t('ai.disclaimer')}
+      </div>
 
       {/* ── AI Usage Panel ─────────────────────────────────────────────────── */}
       <AiUsagePanel configured={ai.isConfigured} onOpenSettings={onOpenSettings} />
@@ -766,7 +769,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
                         <th className="ai-log-table__cell ai-log-table__cell--num">TDP W</th>
                         <th className="ai-log-table__cell ai-log-table__cell--num">CPU%</th>
                         <th className="ai-log-table__cell ai-log-table__cell--num">GPU%</th>
-                        <th className="ai-log-table__cell ai-log-table__cell--num">🔋%</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">Batt%</th>
                         <th className="ai-log-table__cell ai-log-table__cell--action"></th>
                       </tr>
                     </thead>

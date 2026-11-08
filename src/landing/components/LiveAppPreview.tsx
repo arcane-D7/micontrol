@@ -23,7 +23,6 @@ try {
 
 export interface PreviewTab {
   id: string;
-  icon: string;
   label: string;
   title: string;
   description: string;
@@ -32,7 +31,6 @@ export interface PreviewTab {
 export const PREVIEW_TABS: PreviewTab[] = [
   {
     id: 'overview',
-    icon: '📊',
     label: 'Overview',
     title: 'Full System Overview',
     description:
@@ -40,7 +38,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'taskmgr',
-    icon: '📈',
     label: 'Task Manager',
     title: 'Task Manager',
     description:
@@ -48,7 +45,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'performance',
-    icon: '⚡',
     label: 'Performance',
     title: 'Performance Monitoring',
     description:
@@ -56,7 +52,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'sysopt',
-    icon: '🚀',
     label: 'System Optimization',
     title: 'System Optimization',
     description:
@@ -64,7 +59,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'battery',
-    icon: '🔋',
     label: 'Battery',
     title: 'Battery Health & Stats',
     description:
@@ -72,7 +66,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'display',
-    icon: '🖥️',
     label: 'Display',
     title: 'Display Calibration',
     description:
@@ -80,7 +73,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'fan',
-    icon: '💨',
     label: 'Fan Control',
     title: 'Custom Fan Curves',
     description:
@@ -88,7 +80,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'faceUnlock',
-    icon: '😀',
     label: 'Face Unlock',
     title: 'Face Unlock',
     description:
@@ -96,7 +87,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'audio',
-    icon: '🎵',
     label: 'Audio',
     title: 'Audio Enhancement',
     description:
@@ -104,7 +94,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'cast',
-    icon: '📺',
     label: 'Cast',
     title: 'Screen Casting',
     description:
@@ -112,7 +101,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'touchpad',
-    icon: '🖱️',
     label: 'Touchpad',
     title: 'Touchpad Settings',
     description:
@@ -120,7 +108,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'iot',
-    icon: '🔌',
     label: 'IoT',
     title: 'IoT Device Hub',
     description:
@@ -128,7 +115,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'wifi',
-    icon: '📶',
     label: 'WiFi',
     title: 'WiFi Management',
     description:
@@ -136,7 +122,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'startup',
-    icon: '🚀',
     label: 'Startup',
     title: 'Startup Manager',
     description:
@@ -144,7 +129,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'system',
-    icon: '🔧',
     label: 'System',
     title: 'System & Drivers',
     description:
@@ -152,7 +136,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'keyboard',
-    icon: '⌨️',
     label: 'Keyboard',
     title: 'Keyboard Customization',
     description:
@@ -160,7 +143,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'ai_analysis',
-    icon: '🤖',
     label: 'AI Analysis',
     title: 'AI-Powered Diagnostics',
     description:
@@ -168,7 +150,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'security',
-    icon: '🛡️',
     label: 'Security',
     title: 'Security Tools',
     description:
@@ -176,7 +157,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'crossDevice',
-    icon: '📱',
     label: 'Cross Device',
     title: 'Cross Device',
     description:
@@ -184,7 +164,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'color',
-    icon: '🎨',
     label: 'Color',
     title: 'Color Controls',
     description:
@@ -192,7 +171,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'cleanup',
-    icon: '🧹',
     label: 'Cleanup',
     title: 'System Cleanup',
     description:
@@ -200,7 +178,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'settings',
-    icon: '⚙️',
     label: 'Settings',
     title: 'App Settings',
     description:
@@ -208,7 +185,6 @@ export const PREVIEW_TABS: PreviewTab[] = [
   },
   {
     id: 'about',
-    icon: 'ℹ️',
     label: 'About',
     title: 'About miControl',
     description:

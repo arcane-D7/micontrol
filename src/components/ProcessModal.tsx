@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ProcessInfo } from '../types/hardware';
+import { Icon } from './ui/icons';
 
 interface Props {
   open: boolean;
@@ -104,7 +105,7 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
               padding: '0 4px',
             }}
           >
-            ✕
+            <Icon name="x" size={16} />
           </button>
         </div>
 
