@@ -9,7 +9,6 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
 import { getLanguage } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
@@ -26,6 +25,7 @@ import {
 } from '../hooks/useAnalysisLogger';
 import './AiAnalysis.css';
 import AiFeedback from './AiFeedback';
+import AiUsagePanel from './AiUsagePanel';
 
 type Hardware = ReturnType<typeof useHardware>;
 type AiSettings = ReturnType<typeof UseSettings>;
@@ -275,56 +275,6 @@ function nextAnalysisIn(dailyAnalyses: number): string {
   } catch {
     return '—';
   }
-}
-
-// ── AI Usage Panel ───────────────────────────────────────────────────────────
-
-interface AiUsageStats {
-  total_requests: number;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  estimated_cost_usd: number;
-}
-
-function AiUsagePanel() {
-  const [usage, setUsage] = useState<AiUsageStats | null>(null);
-
-  useEffect(() => {
-    invoke<AiUsageStats>('get_ai_usage')
-      .then(setUsage)
-      .catch(() => {
-        /* ignore */
-      });
-  }, []);
-
-  const handleReset = async () => {
-    await invoke('reset_ai_usage');
-    const updated = await invoke<AiUsageStats>('get_ai_usage');
-    setUsage(updated);
-  };
-
-  if (!usage) return null;
-
-  return (
-    <div className="card ai-usage-panel">
-      <div className="ai-usage-panel__header">
-        <div>
-          <div className="card-title ai-usage-panel__title">{t('ai.usage.title')}</div>
-          <div className="ai-usage-panel__stats">
-            {t('ai.usage.requests')}: <strong>{usage.total_requests}</strong>
-            {' · '}
-            {t('ai.usage.tokens')}:{' '}
-            <strong>{usage.total_input_tokens + usage.total_output_tokens}</strong>
-            {' · '}
-            {t('ai.usage.estimatedCost')}: <strong>${usage.estimated_cost_usd.toFixed(4)}</strong>
-          </div>
-        </div>
-        <button onClick={handleReset} className="ai-usage-panel__reset">
-          {t('ai.usage.reset')}
-        </button>
-      </div>
-    </div>
-  );
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -778,7 +728,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
       <div className="ai-disclaimer">⚠️ {t('ai.disclaimer')}</div>
 
       {/* ── AI Usage Panel ─────────────────────────────────────────────────── */}
-      <AiUsagePanel />
+      <AiUsagePanel configured={ai.isConfigured} onOpenSettings={onOpenSettings} />
 
       {/* ── Log table card ────────────────────────────────────────────────── */}
       <div className="card">

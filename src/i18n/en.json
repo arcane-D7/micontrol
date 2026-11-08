@@ -838,6 +838,8 @@
     "columnGpuPct": "GPU%",
     "disclaimer": "AI-generated content may be inaccurate. Verify critical information.",
     "usage": {
+      "openSettings": "Open Settings",
+      "noRequests": "No AI requests recorded yet — usage appears after the first analysis.",
       "title": "AI Usage",
       "requests": "Total Requests",
       "tokens": "Total Tokens",

@@ -803,6 +803,8 @@
     "columnGpuPct": "GPU%",
     "disclaimer": "O conteúdo gerado por IA pode ser impreciso. Verifique informações críticas.",
     "usage": {
+      "openSettings": "Abrir Definições",
+      "noRequests": "Ainda não há pedidos de IA registados — o uso aparece após a primeira análise.",
       "title": "Uso de IA",
       "requests": "Total de Pedidos",
       "tokens": "Total de Tokens",
