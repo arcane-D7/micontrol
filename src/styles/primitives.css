@@ -1010,6 +1010,65 @@
 }
 
 .mc-infohint__btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.mc-infohint__panel {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 6px);
+  left: 0;
+  width: max-content;
+  max-width: min(280px, 70vw);
+  padding: 8px 10px;
+  border: var(--hair, 1px) solid var(--hairline-2);
+  border-radius: var(--r-control, 8px);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--t-meta);
+  font-weight: var(--w-body);
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: normal;
+  box-shadow: none;
+}
+
+.mc-infohint__panel[data-side='top'] {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.mc-infohint__panel[data-side='right'] {
+  top: auto;
+  bottom: -6px;
+  left: calc(100% + 8px);
+}
+
+.mc-infohint__panel[data-side='left'] {
+  top: auto;
+  right: calc(100% + 8px);
+  bottom: -6px;
+  left: auto;
+}
+
+/* Ecrã estreito: um painel à direita sairia da janela, por isso volta a cair
+   por baixo do gatilho. 700 px fica abaixo da largura mínima cómoda da janela
+   (o `minWidth` da app é 600). */
+@media (max-width: 700px) {
+  .mc-infohint__panel[data-side='right'],
+  .mc-infohint__panel[data-side='left'] {
+    top: calc(100% + 6px);
+    right: auto;
+    bottom: auto;
+    left: 0;
+  }
+}
+
+.mc-infohint__panel[data-open='false'] {
+  display: none;
+}
+
 /* ═══ Overview — resumo da aplicação ═══════════════════════════════════════
    Um cartão = um bloco do resumo. Os grupos dentro do cartão (Processador,
    Gráficos, NPU…) separam-se por hairline, nunca por sombra nem por caixa.
@@ -1099,62 +1158,6 @@
 .mc-jump__btn:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
-}
-
-.mc-infohint__panel {
-  position: absolute;
-  z-index: 60;
-  top: calc(100% + 6px);
-  left: 0;
-  width: max-content;
-  max-width: min(280px, 70vw);
-  padding: 8px 10px;
-  border: var(--hair, 1px) solid var(--hairline-2);
-  border-radius: var(--r-control, 8px);
-  background: var(--surface);
-  color: var(--ink-muted);
-  font-size: var(--t-meta);
-  font-weight: var(--w-body);
-  line-height: 1.5;
-  letter-spacing: 0;
-  text-align: left;
-  white-space: normal;
-  box-shadow: none;
-}
-
-.mc-infohint__panel[data-side='top'] {
-  top: auto;
-  bottom: calc(100% + 6px);
-}
-
-.mc-infohint__panel[data-side='right'] {
-  top: auto;
-  bottom: -6px;
-  left: calc(100% + 8px);
-}
-
-.mc-infohint__panel[data-side='left'] {
-  top: auto;
-  right: calc(100% + 8px);
-  bottom: -6px;
-  left: auto;
-}
-
-/* Ecrã estreito: um painel à direita sairia da janela, por isso volta a cair
-   por baixo do gatilho. 700 px fica abaixo da largura mínima cómoda da janela
-   (o `minWidth` da app é 600). */
-@media (max-width: 700px) {
-  .mc-infohint__panel[data-side='right'],
-  .mc-infohint__panel[data-side='left'] {
-    top: calc(100% + 6px);
-    right: auto;
-    bottom: auto;
-    left: 0;
-  }
-}
-
-.mc-infohint__panel[data-open='false'] {
-  display: none;
 }
 
 /* ═══ Tooltip (hover-first, 411 `title=""` substituídos) ══════════════════
