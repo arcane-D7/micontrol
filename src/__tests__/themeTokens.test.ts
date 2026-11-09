@@ -300,3 +300,29 @@ describe('contrato de variáveis', () => {
     expect(missing).toEqual([]);
   });
 });
+
+/* ── 6. Sem ciclos de alias entre tokens (regressão: popup transparente) ── */
+
+describe('grafo de aliases', () => {
+  it('nenhum token é alias de si mesmo por interposição (ciclo torna o fundo transparente)', () => {
+    // Extrai todos os pares "--a: var(--b)" de globals.css (sem comentários) e procura ciclos.
+    const css = globals.replace(/\/\*[\s\S]*?\*\//g, '');
+    const edges = new Map<string, string[]>();
+    for (const m of css.matchAll(/--([a-z0-9-]+)\s*:\s*var\(--([a-z0-9-]+)\)/gi)) {
+      const [, from, to] = m;
+      if (!edges.has(from)) edges.set(from, []);
+      edges.get(from)!.push(to);
+    }
+    const cycles: string[] = [];
+    const visit = (node: string, path: string[]) => {
+      if (path.includes(node)) {
+        cycles.push([...path.slice(path.indexOf(node)), node].join(' → '));
+        return;
+      }
+      if (path.length > 24) return; // guarda contra cadeias patológicas
+      for (const nxt of edges.get(node) ?? []) visit(nxt, [...path, node]);
+    };
+    for (const start of edges.keys()) visit(start, []);
+    expect([...new Set(cycles)]).toEqual([]);
+  });
+});

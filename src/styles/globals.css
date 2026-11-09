@@ -288,10 +288,13 @@ html:root.tray-window:not([data-theme='light']) #root {
      uses a plain opaque surface rather than a glass/blur effect.            */
   --blur: none;
   --blur-sm: none;
-  /* Use fully-opaque surface tokens: semi-transparent surfaces (alpha 0.68)
-     composited over a transparent backdrop can also appear invisible.        */
-  --surface: var(--surface-solid);
-  --surface-2: var(--surface-solid);
+  /* NOTE: do NOT re-alias --surface here. The theme bridge defines
+     `--surface-solid: var(--surface)`; aliasing back (`--surface: var(--surface-solid)`)
+     builds a reference CYCLE — both tokens become invalid at computed-value time,
+     `.tray-popup { background: var(--surface-solid) }` falls back to transparent and
+     the popup renders see-through over whatever is behind it (regression seen live).
+     The hairline tokens are fully opaque anyway, so the base values are exactly
+     what an opaque popup needs. */
 }
 
 body {
