@@ -129,7 +129,9 @@
     "fnKeyMultimedia": "Modo Multimídia",
     "fnKeyFunction": "Modo Tecla de Função",
     "fnKeyMultimediaDesc": "F1-F12 controlam brilho, volume e mídia por padrão. Pressione Fn+F-key para comportamento padrão.",
-    "fnKeyFunctionDesc": "F1-F12 agem como teclas de função padrão. Pressione Fn+F-key para controles multimídia."
+    "fnKeyFunctionDesc": "F1-F12 agem como teclas de função padrão. Pressione Fn+F-key para controles multimídia.",
+    "detectKeyTitle": "Prima a tecla física para detetar o respetivo código VK (até 10 s)",
+    "clearBindingTitle": "Limpar esta associação de tecla"
   },
   "overview": {
     "title": "Visão Geral do Sistema",
@@ -224,7 +226,7 @@
       "gpuLoad": "Carga GPU",
       "tdpRealLabel": "TDP Real",
       "tdpEstLabel": "TDP Est.",
-      "tdpCapLine": "cap ~{value} W",
+      "tdpCapLine": "limite ~{value} W",
       "tdpEstimated": "Estimado",
       "tdpMeasured": "Medido",
       "noWmiSensor": "sem sensor WMI",
@@ -430,19 +432,10 @@
     "title": "Controlo de Carga",
     "subtitle": "Limite a carga máxima para prolongar a vida útil da bateria",
     "threshold": "Limite de Carga",
-    "protectMode": "Modo de Proteção da Bateria",
-    "protectModeDesc": "Limita a carga a 80% para prolongar a vida útil da bateria",
     "recommended": "Recomendado",
     "applying": "A aplicar...",
     "applied": "Definição aplicada",
     "error": "Falha ao definir limite de carga",
-    "levels": {
-      "40": "40% — Proteção máxima",
-      "50": "50%",
-      "60": "60%",
-      "70": "70%",
-      "80": "80% — Recomendado"
-    },
     "enableToggle": "Limite de Carga",
     "limitEnabled": "Limite de carga ativado",
     "limitDisabled": "Limite de carga desativado",
@@ -482,9 +475,6 @@
     "hdrNotSupported": "Nenhum ecrã ligado reporta suporte HDR (cor avançada) — o interruptor está desativado.",
     "hdrUnknown": "Estado HDR indisponível — o Windows não devolveu a topologia de ecrãs. Tente novamente após uma alteração de ecrã.",
     "hdrPerDisplay": "Ecrãs com HDR: {list}",
-    "drrsEnabled": "Ativado no registo do controlador Intel. O Windows reporta sempre {hz} Hz — o PSR2 comuta abaixo do SO, pelo que o software não o consegue verificar.",
-    "drrsPendingReboot": "Aplicado — produz efeito após o próximo reinício. O controlador Intel lê este valor no arranque; o Windows continua a reportar {hz} Hz e a comutação não é observável por software.",
-    "drrsDisabled": "Desativado — o valor no registo do controlador é 0. O Windows reporta sempre {hz} Hz; o PSR2 é distinto do Dynamic Refresh Rate do Windows e não é observável por software.",
     "igclNotAvailable": "Requer Intel IGCL — não encontrado neste dispositivo",
     "brightnessSourceWmi": "O brilho é controlado por WMI — este controlador Intel não expõe dispositivos IGCL",
     "refreshRate": "Taxa de Atualização",
@@ -521,7 +511,16 @@
     "resetDefaultDesc": "Restaurar definições de sensibilidade padrão (predefinição Standard)",
     "applying": "A aplicar...",
     "applied": "Definição guardada",
-    "error": "Falha ao aplicar definição de ecrã"
+    "error": "Falha ao aplicar definição de ecrã",
+    "drrActive": "Taxa de atualização dinâmica ativa — o Windows 11 comuta automaticamente para Hz mais baixos para poupar energia quando não é precisa uma taxa de fotogramas elevada.",
+    "psr2Pending": "Aplicado — entra em vigor no próximo reinício. O driver Intel lê Psr2DrrsEnable no arranque; o Windows continua a indicar {hz} Hz e a comutação não é observável por software.",
+    "psr2Enabled": "Ativado no registo do driver Intel. O Windows indica sempre {hz} Hz — o PSR2 comuta abaixo do sistema operativo, pelo que o software não o consegue verificar.",
+    "psr2Disabled": "Desativado — o valor no registo do driver é 0. O Windows indica sempre {hz} Hz; o PSR2 é independente da Taxa de atualização dinâmica do Windows e não é observável por software.",
+    "psr2ToastOn": "PSR2 DRRS aplicado no registo do driver — efetivo após reinício. O Windows continuará a indicar os Hz configurados.",
+    "psr2ToastOff": "PSR2 DRRS desativado no registo do driver — efetivo após reinício.",
+    "psr2ToastError": "Taxa de atualização adaptativa: {error}",
+    "psr2Note": "PSR2 DRRS ≠ «Taxa de atualização dinâmica» do Windows. O DRR do Windows exige um ecrã compatível com VRR. O PSR2 DRRS é uma funcionalidade do driver Intel que comuta a taxa de atualização do painel internamente — o Windows indica sempre o máximo configurado (atualmente {hz} Hz), mesmo com o PSR2 ativo.",
+    "presetResetError": "Repor modelo inteligente: {error}"
   },
   "fan": {
     "title": "Ventoinha",
@@ -579,8 +578,6 @@
   },
   "startup": {
     "title": "Arranque",
-    "autoStart": "Iniciar com o Windows",
-    "autoStartDesc": "Iniciar o MiControl automaticamente quando o Windows arrancar",
     "runAtStartup": "Executar no Arranque",
     "description": "Iniciar automaticamente o MiControl na bandeja do sistema quando o Windows arrancar",
     "enabled": "Ativado",
@@ -609,16 +606,6 @@
       "star": "Estrela no GitHub",
       "note": "As doações são 100% opcionais e não desbloqueiam nada extra — todas as funcionalidades são gratuitas para todos. Uma estrela no GitHub também é muito apreciada!"
     },
-    "bridgeTitle": "Ponte Elevada — Atualização Silenciosa",
-    "bridgeDesc": "Instale uma atualização do MiControl em segundo plano usando o serviço bridge privilegiado — sem pedido de UAC, funciona mesmo enquanto estiver ausente.",
-    "bridgePathPlaceholder": "Caminho para MiControl_*-setup.exe",
-    "bridgeInstall": "Instalar via Ponte",
-    "bridgeInstalling": "A instalar via ponte…",
-    "bridgeSuccess": "Instalador iniciado. O MiControl vai reiniciar com a nova versão em breve.",
-    "bridgePathMissing": "Indique o caminho para o setup .exe",
-    "bridgeBridgeDown": "Serviço bridge indisponível — o instalador vai pedir permissão de administrador.",
-    "bridgeHowTitle": "Como funciona",
-    "bridgeHow": "Como funciona: o caminho é validado e o serviço MiControlBridge (corre como SYSTEM) lança o instalador NSIS em silêncio (/S /UPDATE /R). O instalador substitui o app, recria o serviço bridge e reinicia o MiControl.",
     "autoUpdateTitle": "Atualização automática",
     "autoUpdateDesc": "Deixe versões futuras se instalarem silenciosamente via a bridge privilegiada — sem prompt de UAC. Desativado por padrão.",
     "feedLabel": "URL do feed beta (somente desenvolvimento)",
@@ -630,7 +617,9 @@
     "feedHint": "Opção escondida para desenvolvimento: aponte o MiControl para uma URL de instalador beta e ele se atualiza sozinho. Também disponível via CLI: micontrol_bridge auto-update <url>.",
     "updateNow": "Atualizar agora",
     "updateNowInstalling": "Atualizando…",
-    "updateNowSuccess": "Instalador iniciado. O MiControl reiniciará com a nova versão em instantes."
+    "updateNowSuccess": "Instalador iniciado. O MiControl reiniciará com a nova versão em instantes.",
+    "contributors": "Colaboradores do MiControl",
+    "githubRepo": "Repositório GitHub"
   },
   "errors": {
     "hardwareNotAvailable": "Interface de hardware não disponível",
@@ -685,7 +674,8 @@
     "minutes_one": "{count} minuto",
     "minutes_other": "{count} minutos",
     "technicalTerm": "Termo técnico",
-    "why": "Porquê?"
+    "why": "Porquê?",
+    "dismiss": "Fechar"
   },
   "system": {
     "title": "Sistema e Drivers",
@@ -714,7 +704,8 @@
     "display_brightness": "Brilho da tela",
     "kb_backlight": "Retroiluminação do teclado",
     "ec_unavailable_title": "EC RAM indisponível",
-    "ec_unavailable_hint": "O driver IoT deste modelo bloqueia a leitura da EC RAM, pelo que estes valores não podem ser medidos. São mostrados como — em vez de zeros que parecem leituras."
+    "ec_unavailable_hint": "O driver IoT deste modelo bloqueia a leitura da EC RAM, pelo que estes valores não podem ser medidos. São mostrados como — em vez de zeros que parecem leituras.",
+    "gpuUsage": "Utilização da GPU"
   },
   "updates": {
     "title": "Drivers & BIOS",
@@ -733,14 +724,9 @@
     "driverInstalled": "Instalado",
     "lastScan": "Última Análise XPM",
     "never": "Nunca",
-    "xpmStatus": "XiaomiPCManager",
-    "xpmInstalled": "Instalado ({version})",
-    "xpmNotInstalled": "Não instalado — análise limitada a drivers locais",
-    "triggerScan": "Iniciar Análise de Drivers",
     "scanning": "A analisar…",
     "scanSuccess": "Análise iniciada via núcleo XPM",
     "scanError": "Erro de verificação",
-    "nucleusNote": "Invoca o motor de análise do XiaomiPCManager para encontrar atualizações oficiais de drivers e BIOS, evitando que drivers genéricos do Windows Update substituam versões específicas do hardware Xiaomi.",
     "appVersion": "Versão do App",
     "checkingForUpdates": "Verificando atualizações…",
     "upToDate": "Seu app está atualizado",
@@ -761,7 +747,9 @@
     "driverManufacturer": "Fabricante",
     "driverStatus": "Status",
     "noDrivers": "Nenhum detalhe de driver disponível",
-    "scanComplete": "Verificação de drivers concluída"
+    "scanComplete": "Verificação de drivers concluída",
+    "path": "Caminho",
+    "downloadErrorMissing": "O instalador transferido não foi encontrado após a transferência da atualização — não é possível instalar através da ponte."
   },
   "discovery": {
     "title": "Configuração do Dispositivo",
@@ -897,7 +885,8 @@
     "step": "Passo {current} de {total}",
     "next": "Seguinte",
     "back": "Anterior",
-    "skip": "Saltar"
+    "skip": "Saltar",
+    "progress": "Progresso da configuração inicial"
   },
   "ai": {
     "title": "Conselheiro de Sistema por IA",
@@ -952,7 +941,13 @@
     "connected": "Ligado",
     "hiddenNetwork": "Rede oculta — conecte pelas definições de WiFi do Windows",
     "passwordRequired": "Introduza a palavra-passe da rede",
-    "enterpriseUnsupported": "Esta rede exige credenciais 802.1X/Empresa — ligue-a uma vez nas Definições do Windows (o MiControl não fornece inícios de sessão EAP)."
+    "enterpriseUnsupported": "Esta rede exige credenciais 802.1X/Empresa — ligue-a uma vez nas Definições do Windows (o MiControl não fornece inícios de sessão EAP).",
+    "toast": {
+      "connected": "Ligado a \"{ssid}\"",
+      "connectError": "Erro ao ligar: {error}",
+      "disconnected": "Desligado",
+      "disconnectError": "Erro ao desligar: {error}"
+    }
   },
   "cast": {
     "title": "Transmitir para outro ecrã",
@@ -967,8 +962,6 @@
     "stop": "Fechar painel",
     "scan": "Atualizar ecrãs emparelhados",
     "availableDevices": "Ecrãs emparelhados com este PC",
-    "tip": "Dica",
-    "tipText": "Também pode premir Win + K para abrir o painel Conexão do Windows diretamente.",
     "knownOnly": "Só aparecem ecrãs já emparelhados com este PC. O Windows descobre os novos no painel de projeção (Win + K).",
     "panelNoteTitle": "A projeção é gerida pelo Windows",
     "panelNote": "O MiControl abre o painel de projeção do Windows; a sessão em si (iniciar/parar) é gerida pelo Windows. Fechar o painel não interrompe uma projeção em curso."
@@ -1253,10 +1246,8 @@
     "volume": "Volume",
     "unmutedByVolume": "Som reativado — o volume mudou com o áudio silenciado",
     "volumeError": "Não foi possível alterar o volume",
-    "loadingDevices": "Carregando dispositivos de áudio...",
     "noDevices": "Nenhum dispositivo de áudio encontrado",
     "loadDevicesError": "Falha ao carregar dispositivos de áudio",
-    "initError": "Falha ao inicializar controlo de áudio",
     "title": "Controlo de Áudio",
     "pageTitle": "Controlo de Áudio",
     "subtitle": "Volume mestre e gestão de dispositivos",
@@ -1560,7 +1551,6 @@
     "displays": "Ecrãs",
     "currentProfile": "Perfil Atual",
     "noProfile": "Nenhum perfil ICC carregado",
-    "installedProfiles": "Perfis ICC Instalados",
     "noProfiles": "Nenhum perfil ICC encontrado no diretório de cor do sistema",
     "hardwareCalibration": "Calibração por Hardware",
     "advancedColor": "Cor Avançada (HDR)",
@@ -1580,10 +1570,7 @@
     "openSettingsDesc": "Abrir definições de Gestão de Cor do Windows",
     "loadProfile": "Carregar Perfil",
     "unloadProfile": "Reverter para sRGB",
-    "loadSuccess": "Perfil ICC carregado",
     "loadError": "Falha ao carregar perfil ICC",
-    "unloadSuccess": "Revertido para sRGB",
-    "unloadError": "Falha ao descarregar perfil ICC",
     "eyeProtection": "Proteção Ocular",
     "eyeProtectionDesc": "Filtro de luz azul usando ajuste de rampa gamma para reduzir cansaço visual",
     "eyeProtectionActive": "Filtro de luz azul ativo",
@@ -1612,14 +1599,335 @@
     "aboutDesc": "Remove com segurança arquivos temporários, caches de atualização, caches de navegador e outros arquivos desnecessários. Arquivos bloqueados são ignorados automaticamente. Caches de navegador requerem que os navegadores estejam fechados para remoção completa."
   },
   "face": {
-    "single_rgb_camera": "câmera RGB única",
-    "diagnostics": "Diagnóstico",
     "diagnostics_error": "Erro do diagnóstico",
     "unsaved_changes": "Alterações não salvas",
     "similarity_threshold": "Limiar de similaridade",
     "show_tile_at_sign_in": "Mostrar bloco na tela de login",
     "re_enrollment_reminder": "Lembrete de recadastramento",
     "anti_spoof_threshold": "Limiar antifalsificação",
-    "face_unlock_power": "Ligar/desligar Face Unlock"
+    "face_unlock_power": "Ligar/desligar Face Unlock",
+    "title": "Desbloqueio facial",
+    "subtitle": "Desbloqueie este PC com um olhar para a sua webcam. Todo o processo corre localmente, offline.",
+    "enroll": {
+      "title": "Registar rosto — {step}",
+      "step": {
+        "user": "1 · Conta Windows",
+        "hello": "2 · Verificar com PIN / impressão digital",
+        "passwordSaved": "3 · Credencial de desbloqueio guardada",
+        "passwordOptional": "3 · Credencial de desbloqueio (opcional)",
+        "camera": "4 · Captura pela câmara"
+      },
+      "pill": {
+        "user": "conta",
+        "hello": "Hello",
+        "credential": "credencial",
+        "capture": "captura"
+      },
+      "accountQuestion": "Para que conta Windows deve funcionar o desbloqueio facial? O assistente só precisa da sua autorização de início de sessão.",
+      "account": "Conta",
+      "loadingUsers": "A carregar utilizadores…",
+      "usersLoadFailed": "— não foi possível carregar os utilizadores —",
+      "label": "Etiqueta",
+      "labelPlaceholder": "ex.: frente, óculos",
+      "photos": "Fotografias",
+      "helloNote": "De seguida, o Windows vai pedir-lhe que prove que é realmente você, com o PIN ou a impressão digital que já configurou. Aqui não se escreve nenhuma palavra-passe.",
+      "continue": "Continuar →",
+      "back": "← Voltar",
+      "helloIntro": "Este é o seu início de sessão do dia a dia — a primeira coisa de que precisamos é a prova de que é realmente você. Vai aparecer uma janela do Windows. Use o mesmo PIN ou a mesma impressão digital que usa para desbloquear este PC.",
+      "waiting": "A aguardar…",
+      "verify": "Verificar com PIN / impressão digital",
+      "storedFor": "A credencial de desbloqueio de {name} já está guardada — não há mais nada a fazer aqui. Vai continuar a iniciar sessão com o seu PIN, como habitualmente.",
+      "changeHint": "Quer alterá-la? Volte ao passo anterior, apague a credencial guardada e introduza novamente a palavra-passe no próximo registo.",
+      "optionalNote": "Opcional. Para a câmara poder desbloquear o ecrã de bloqueio, o Windows precisa da própria credencial da conta — o PIN está protegido pelo Windows e não é entregue a software de terceiros. Guardamos essa credencial selada no LSA do Windows, lemo-la apenas no ecrã de bloqueio e nunca sai deste PC.",
+      "passwordPlaceholder": "Palavra-passe da conta Windows de {name} (usada uma vez, guardada selada)",
+      "pinReminder": "Vai continuar a iniciar sessão com o seu PIN. A câmara só precisa disto uma vez para desbloquear o ecrã — pode saltar e adicionar mais tarde.",
+      "skipPinOnly": "Saltar — só PIN",
+      "storing": "A guardar…",
+      "saveCredential": "Guardar credencial e continuar",
+      "enterPassword": "Introduza a palavra-passe de início de sessão do Windows.",
+      "passwordStored": "Palavra-passe guardada para \"{name}\" (segredo LSA).",
+      "pickAccountFirst": "Escolha primeiro uma conta Windows.",
+      "enrolled": "Rosto de \"{name}\" registado ({frames} imagens, etiqueta \"{label}\").",
+      "cameraPreviewAlt": "pré-visualização da câmara",
+      "startingCamera": "A iniciar a câmara…",
+      "cameraError": "Erro da câmara: {error}",
+      "livePreview": "Pré-visualização em direto — olhe diretamente para a câmara",
+      "cameraBusy": "{error} — verifique se a câmara não está a ser usada por outra aplicação e, em seguida, feche e reabra esta janela.",
+      "captureNote": "Captura {frames} imagem(ns) para {name} e guarda um vetor de características de referência — não são guardadas fotografias, apenas cálculos.",
+      "capturing": "A capturar…",
+      "capture": "Capturar {frames} imagem(ns)"
+    },
+    "phase": {
+      "off": {
+        "title": "O desbloqueio facial está desligado",
+        "subtitle": "Ligue-o para desbloquear este PC com a sua webcam."
+      },
+      "models": {
+        "title": "Passo 1 de 3 · Transferir os modelos de IA",
+        "subtitle": "Os modelos de reconhecimento (~250 MB) são transferidos uma vez e correm totalmente nesta máquina."
+      },
+      "service": {
+        "title": "Passo 2 de 3 · Iniciar o serviço de autenticação",
+        "subtitle": "Um serviço local vigia o ecrã de bloqueio e compara o seu rosto. Nenhum dado sai do PC."
+      },
+      "enroll": {
+        "title": "Passo 3 de 3 · Registar o seu rosto",
+        "subtitle": "Adicione um rosto de referência. Só é guardado um vetor de características matemático, nunca uma fotografia."
+      },
+      "ready": {
+        "title_one": "O desbloqueio facial está pronto · {count} rosto registado",
+        "title_other": "O desbloqueio facial está pronto · {count} rostos registados",
+        "subtitle": "Está tudo a funcionar. Bloqueie o PC (Win+L) e olhe para a câmara para iniciar sessão.",
+        "title": "O desbloqueio facial está pronto · {count} rostos registados"
+      }
+    },
+    "badge": {
+      "models": "Modelos de IA",
+      "service": "Serviço de autenticação",
+      "enrolled": "Rosto registado"
+    },
+    "off": {
+      "enableNote": "Ao ativar, o bloco de desbloqueio facial aparece no ecrã de início de sessão. Pode configurá-lo passo a passo logo a seguir.",
+      "enable": "Ativar desbloqueio facial"
+    },
+    "downloading": "A transferir {percent}…",
+    "downloadingNoPct": "A transferir…",
+    "download": "Transferir modelos de IA (~250 MB)",
+    "service": {
+      "restart": "Reiniciar o serviço de autenticação",
+      "install": "Instalar o serviço de autenticação"
+    },
+    "addMyFace": "Adicionar o meu rosto",
+    "checklist": {
+      "modelsDone": "Transferidos uma vez, correm no dispositivo",
+      "modelsNote": "Transferência de ~250 MB",
+      "serviceRunning": "Em execução com reinício automático",
+      "serviceInstalled": "Instalado, precisa de arranque",
+      "serviceNote": "Serviço local em segundo plano",
+      "faceCount_one": "{count} rosto",
+      "faceCount_other": "{count} rostos",
+      "faceNote": "É preciso um rosto de referência",
+      "faceCount": "{count} rostos"
+    },
+    "risk": "O desbloqueio facial aqui usa uma única câmara RGB, que é muito menos segura do que o sensor infravermelho do Windows Hello. Uma fotografia ou um vídeo de alta qualidade podem contorná-la, por isso evite ativá-la em máquinas com dados sensíveis. Recomenda-se um ponto de restauro antes de usar o fornecedor do ecrã de bloqueio.",
+    "settings": {
+      "subtitle": "Ajuste o rigor com que a câmara compara o seu rosto. Os valores predefinidos funcionam bem para a maioria das pessoas.",
+      "saving": "A guardar…",
+      "saved": "Definições guardadas.",
+      "error": "erro nas definições: {error}",
+      "group": {
+        "matching": "Rigor da correspondência",
+        "signIn": "Ecrãs de início de sessão"
+      },
+      "thresholdLoose": "Permissivo — o desbloqueio funciona quase sempre",
+      "thresholdStrict": "Rigoroso — apenas correspondências seguras",
+      "thresholdBalanced": "Equilibrado",
+      "multiFace": "Rejeitar se houver 2 ou mais rostos na imagem",
+      "liveness": "Exigir prova de vida (piscar / virar)",
+      "livenessAria": "Exigir prova de vida",
+      "antispoof": "Rejeitar fotografias / vídeos (antifalsificação)",
+      "antispoofAria": "Rejeitar fotografias e vídeos",
+      "showTileLock": "Mostrar bloco no bloqueio (Win+L)",
+      "showTileLockAria": "Mostrar bloco no desbloqueio da estação de trabalho",
+      "renewOff": "Desligado — nunca lembrar",
+      "renewEvery_one": "A cada {count} dia",
+      "renewEvery_other": "A cada {count} dias",
+      "lockout": "Tentativas falhadas antes do bloqueio",
+      "lockoutNote_one": "{count} tentativa e depois volta à palavra-passe",
+      "lockoutNote_other": "{count} tentativas e depois volta à palavra-passe",
+      "advanced": "Opções avançadas",
+      "advancedHide": "Ocultar opções avançadas",
+      "matchMargin": "Margem de correspondência (anti-confusão)",
+      "advancedHint": "Os valores avançados afinam o funcionamento interno do reconhecimento. Não os altere sem saber o que fazem.",
+      "renewEvery": "A cada {count} dias",
+      "lockoutNote": "{count} tentativas e depois volta à palavra-passe"
+    },
+    "powerOffNote": "Ligue-o e siga a lista de verificação acima. Os rostos registados, as definições e a palavra-passe guardada mantêm-se enquanto estiver desligado.",
+    "enrolledFaces": "Rostos registados",
+    "addAnother": "Adicionar outro rosto",
+    "modelsFirstTitle": "Transfira primeiro os modelos de IA — não há modelos de reconhecimento presentes.",
+    "signInPassword": "Palavra-passe de início de sessão",
+    "signInPasswordNote": "Guardada num segredo LSA do Windows e lida apenas pelo fornecedor de credenciais no ecrã de bloqueio. Nunca sai deste PC. Defina-a ou atualize-a no fluxo de registo.",
+    "managePassword": "Gerir palavra-passe",
+    "maintenance": "Manutenção",
+    "maintenanceHide": "Ocultar manutenção",
+    "maint": {
+      "reinstallTitle": "Reinstala ou recupera o serviço de autenticação se ele falhou. Sem pedido de UAC.",
+      "reinstall": "Reinstalar / reiniciar o serviço de autenticação",
+      "rescanTitle": "Voltar a procurar modelos transferidos ou instalados",
+      "rescan": "Voltar a procurar modelos",
+      "diagnostics": "Executar diagnóstico",
+      "removeTitle": "Apagar modelos transferidos (liberta ~250 MB)",
+      "remove": "Remover todos os modelos",
+      "removeNote": "Remover os modelos liberta ~250 MB, mas desativa o registo até os transferir novamente.",
+      "confirmRemove": "Remover todos os modelos de desbloqueio facial transferidos/instalados?\n\nIsto liberta espaço em disco (~250 MB) e desativa o registo/desbloqueio facial até os modelos serem transferidos novamente.",
+      "removed": "{count} ficheiro(s) removido(s).",
+      "warnings": "Avisos: {warnings}",
+      "nothingRemoved": "Não foram encontrados ficheiros de modelos — nada a remover.",
+      "removeError": "erro ao remover: {error}",
+      "modelsPresent": "Modelos presentes — o botão de transferência continua desativado.",
+      "modelsMissing": "Não foram encontrados modelos — a transferência está novamente ativa.",
+      "rescanError": "erro ao procurar novamente: {error}",
+      "serviceInstalled": "Serviço instalado e iniciado.",
+      "installFailed": "falha na instalação: {error}",
+      "serviceRunning": "O serviço de autenticação já está em execução.",
+      "serviceStarted": "Serviço iniciado.",
+      "serviceStartSent": "Pedido de arranque do serviço enviado.",
+      "serviceError": "erro do serviço: {error}"
+    },
+    "toggle": {
+      "enabled": "Desbloqueio facial ativado.",
+      "disabled": "Desbloqueio facial desativado (bloco oculto).",
+      "error": "erro ao alternar: {error}"
+    },
+    "downloadReady": "Os modelos de IA estão prontos.",
+    "downloadError": "erro na transferência: {error}",
+    "loadError": "carregamento: {error}",
+    "templates": {
+      "empty": "Ainda não há rostos registados.",
+      "count_one": "({count} modelo)",
+      "count_other": "({count} modelos)",
+      "delete": "Apagar",
+      "count": "({count} modelos)"
+    },
+    "diag": {
+      "modelsDir": "Pasta dos modelos:",
+      "dataDir": "Pasta de dados:",
+      "ok": "OK",
+      "failed": "Falhou"
+    },
+    "diagnostics": "Diagnóstico"
+  },
+  "iot": {
+    "device": {
+      "title": "Dispositivo IoT",
+      "loading": "A carregar informações do dispositivo...",
+      "unavailable": "Serviço IoT indisponível. O chip IoT da Xiaomi não foi detetado neste sistema.",
+      "expectedPipe": "Pipe esperado:",
+      "statusNotFound": "Estado: não encontrado",
+      "retryCounter": "(tentativa {count}/{max})",
+      "startingService": "A iniciar o serviço de ponte IoT...",
+      "unreachable": "Não foi possível contactar a ponte IoT após várias tentativas. O serviço pode não estar instalado ou o hardware pode não ter o chip IoT. Pode tentar novamente manualmente.",
+      "notRunning": "O serviço de ponte IoT não está em execução. Será iniciado automaticamente (até algumas tentativas).",
+      "tryAgain": "Tentar novamente",
+      "subtitle": "Informações do chip IoT Xiaomi",
+      "model": "Modelo",
+      "firmware": "Firmware",
+      "deviceId": "ID do dispositivo",
+      "status": "Estado",
+      "cloudBinding": "Vinculação à cloud",
+      "bound": "Vinculado (UID: {uid})",
+      "notBound": "Não vinculado",
+      "iotWifi": "WiFi IoT",
+      "notConnected": "Não ligado",
+      "savedNetworks": "Redes guardadas",
+      "about": "Acerca deste dispositivo",
+      "noteCloud": "Vinculação à cloud — Indica se o chip IoT está registado no serviço de cloud IoT da Xiaomi. Isto não está relacionado com o Mi Home nem com qualquer aplicação de telemóvel. Quando está vinculado, o chip pode receber comandos remotos (por exemplo, wake-on-LAN, consultas de estado) enquanto o portátil está desligado ou em suspensão.",
+      "noteWifi": "WiFi IoT — Este é o módulo WiFi próprio do chip IoT, completamente separado do WiFi do Windows. O chip usa este WiFi para manter uma ligação à cloud para gestão remota quando o portátil está suspenso ou desligado. Se o chip não estiver vinculado à cloud, o WiFi IoT mostra \"Não ligado\" — o que é normal.",
+      "noteStatus": "Estado do dispositivo — Consultado via WMI (não por comandos EC). Reflete o estado de energia ACPI do dispositivo IoT, tal como reportado pelo Windows.",
+      "protocol": "Protocolo de comandos EC (16 comandos)",
+      "colId": "ID",
+      "colCommand": "Comando",
+      "colDescription": "Descrição",
+      "protocolNote": "Os comandos são enviados através de uma máquina de estados de 4 fases sobre a EC RAM (registo de estado 0xFE0B0F00, registo de comando 0xFE0B0F01, buffer de dados de sensores 0xFE0B0F08). Consulte docs/EC_COMMAND_PROTOCOL_RE.md para todos os detalhes do protocolo."
+    },
+    "module": {
+      "title": "Módulo IoT",
+      "subtitle": "Acesso total à ECRAM através do IoTDriver.",
+      "reading": "A ler…",
+      "systemState": "Estado do sistema",
+      "modeLimits": "Modo / Limites (descodificado)",
+      "writeControls": "Controlos de escrita (registos seguros conhecidos)",
+      "rawRead": "Leitura direta — endereço arbitrário",
+      "rawWrite": "Escrita direta — endereço arbitrário",
+      "address": "Endereço físico (hex)",
+      "bytes": "Bytes (1–256)",
+      "hexData": "Dados hex",
+      "dangerZone": "zona de perigo",
+      "write": "Escrever",
+      "rawWriteConfirm": "ATENÇÃO: escrever num endereço físico direto pode inutilizar o dispositivo. Tem a certeza?",
+      "read": "Ler",
+      "writeOk": "Escrita efetuada",
+      "writeFailed": "Falha na escrita: {error}",
+      "invalidAddress": "Falha na escrita: formato de endereço inválido (tem de ser hexadecimal)",
+      "invalidHex": "Falha na escrita: dados hex inválidos (têm de ser 0-9, A-F)"
+    },
+    "cmd": {
+      "bindStatus": "Verifica se o chip IoT está vinculado à cloud Xiaomi",
+      "setBindStatus": "Define o estado de vinculação à cloud no chip",
+      "resetDevice": "Repõe o chip IoT de fábrica (limpa a vinculação e o WiFi)",
+      "writeWifiItem": "Configura uma rede WiFi no chip",
+      "emptyWifiItems": "Remove todas as redes WiFi guardadas do chip",
+      "deleteWifiItem": "Remove uma rede WiFi guardada específica",
+      "readWifiStatus": "Consulta o estado da ligação WiFi do chip e o SSID",
+      "readWifiCount": "Número de redes WiFi guardadas no chip",
+      "getWifiByIndex": "Obtém uma rede WiFi guardada por índice",
+      "getFwVersion": "Lê a versão de firmware do chip IoT",
+      "getModel": "Lê o identificador de modelo do chip IoT",
+      "connectWifi": "Faz o chip ligar-se a uma rede WiFi guardada",
+      "getDeviceId": "Lê o identificador único do dispositivo (DID)",
+      "sendLaptopStatusSuspend": "Notifica o chip de que o portátil vai entrar em suspensão",
+      "sendLaptopStatusShutdown": "Notifica o chip de que o portátil vai encerrar",
+      "sendLaptopStatusWinReady": "Notifica o chip de que o Windows arrancou"
+    },
+    "profile": {
+      "balance": "Equilibrado",
+      "performance": "Desempenho",
+      "silence": "Silencioso"
+    },
+    "write": {
+      "profile": "Perfil de desempenho",
+      "balanced": "Equilibrado",
+      "performance": "Desempenho",
+      "silent": "Silencioso",
+      "aiLimit": "Limite de IA (AILM)",
+      "enableAiLimit": "Ativar limite de IA",
+      "disableAiLimit": "Desativar limite de IA",
+      "lblm": "Limite de bateria longa (LBLM)",
+      "enableLblm": "Ativar limite de bateria longa",
+      "disableLblm": "Desativar limite de bateria longa"
+    }
+  },
+  "process": {
+    "title": "Processos principais",
+    "aria": "Processos principais — {resource}",
+    "column": "Processo",
+    "pid": "PID",
+    "cpu": "CPU %",
+    "ram": "RAM MB",
+    "empty": "Nenhum processo encontrado",
+    "refreshNote": "Atualiza a cada 3 s · Top 20 por {resource}",
+    "resourceCpu": "uso de CPU",
+    "resourceRam": "memória",
+    "showTop": "Mostrar processos principais"
+  },
+  "main": {
+    "tray": "Bandeja",
+    "themeTitle": "Tema: {theme}",
+    "previewTray": "Pré-visualizar popup da bandeja",
+    "by": "Por: {name}",
+    "previewHint": "Pré-visualização — clique fora para fechar",
+    "trayIconTitle": "Ícone do MiControl na bandeja",
+    "wifiManager": "→ Gestor de WiFi",
+    "audio": "Áudio"
+  },
+  "brightness": {
+    "presets": {
+      "eco": {
+        "label": "Eco",
+        "hint": "Transições suaves, brilho limitado — poupa bateria"
+      },
+      "standard": {
+        "label": "Padrão",
+        "hint": "Reatividade equilibrada e transições suaves"
+      },
+      "vivid": {
+        "label": "Vívido",
+        "hint": "Adaptação rápida e agressiva em toda a gama de brilho"
+      }
+    }
+  },
+  "aiConfig": {
+    "modelPlaceholder": "ex.: llama3, mistral, gpt-4-vision-preview"
   }
 }

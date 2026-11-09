@@ -243,10 +243,10 @@ export default function DisplaySettings({
                       <button
                         key={p.key}
                         className={`chip-btn${isActive ? ' active' : ''}`}
-                        title={p.hint}
+                        title={t(p.hintKey)}
                         onClick={() => setLocalCfg({ ...editCfg, ...p.config, mode: editCfg.mode })}
                       >
-                        <Icon name={p.icon} size={16} /> {p.label}
+                        <Icon name={p.icon} size={16} /> {t(p.labelKey)}
                       </button>
                     );
                   })}
@@ -459,8 +459,7 @@ export default function DisplaySettings({
         <div
           style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 4, lineHeight: 1.4 }}
         >
-          <Icon name="star" size={14} /> Dynamic Refresh Rate active — Windows 11 automatically
-          switches to lower Hz to save power when high frame rate isn’t needed.
+          <Icon name="star" size={14} /> {t('display.drrActive')}
         </div>
       )}
       {/* Intel PSR2 DRRS toggle */}
@@ -469,10 +468,10 @@ export default function DisplaySettings({
           label="Intel Adaptive Refresh Rate (PSR2 DRRS)"
           desc={
             display.adaptive_refresh_rate_pending_reboot
-              ? `Applied — takes effect after the next reboot. The Intel driver reads Psr2DrrsEnable at start-up; Windows still reports ${display.refresh_rate_hz} Hz and the switching is not observable by software.`
+              ? t('display.psr2Pending', { hz: display.refresh_rate_hz })
               : display.adaptive_refresh_rate
-                ? `Enabled in the Intel driver registry. Windows always reports ${display.refresh_rate_hz} Hz — PSR2 switches below the OS, so software cannot verify it.`
-                : `Disabled — the driver registry value is 0. Windows always reports ${display.refresh_rate_hz} Hz; PSR2 is separate from Windows Dynamic Refresh Rate and is not observable by software.`
+                ? t('display.psr2Enabled', { hz: display.refresh_rate_hz })
+                : t('display.psr2Disabled', { hz: display.refresh_rate_hz })
           }
           checked={display.adaptive_refresh_rate}
           onChange={(v) => {
@@ -480,13 +479,14 @@ export default function DisplaySettings({
               try {
                 await onAdaptiveRefreshRateChange(v);
                 addToast({
-                  message: v
-                    ? 'PSR2 DRRS applied in the driver registry — effective after reboot. Windows will still report the configured Hz.'
-                    : 'PSR2 DRRS disabled in the driver registry — effective after reboot.',
+                  message: v ? t('display.psr2ToastOn') : t('display.psr2ToastOff'),
                   type: 'info',
                 });
               } catch (e) {
-                addToast({ message: `Adaptive refresh rate: ${String(e)}`, type: 'error' });
+                addToast({
+                  message: t('display.psr2ToastError', { error: String(e) }),
+                  type: 'error',
+                });
               }
             })();
           }}
@@ -502,10 +502,8 @@ export default function DisplaySettings({
             paddingLeft: 2,
           }}
         >
-          <Icon name="lightbulb" size={16} /> PSR2 DRRS ≠ Windows &ldquo;Dynamic Refresh
-          Rate&rdquo;. Windows DRR requires a VRR-capable display. PSR2 DRRS is an Intel driver
-          feature that switches the panel refresh rate internally — Windows always reports the max
-          configured Hz (currently {display.refresh_rate_hz} Hz), even when PSR2 is active.
+          <Icon name="lightbulb" size={16} />{' '}
+          {t('display.psr2Note', { hz: display.refresh_rate_hz })}
         </div>
       )}{' '}
     </div>
@@ -546,7 +544,10 @@ function SmartModelInfo() {
       setStats({ total: 0, buckets: 0 });
       addToast({ message: t('display.smartResetDone'), type: 'success' });
     } catch (e) {
-      addToast({ message: `Reset smart model: ${String(e)}`, type: 'error' });
+      addToast({
+        message: t('display.presetResetError', { error: String(e) }),
+        type: 'error',
+      });
     } finally {
       setResetting(false);
     }

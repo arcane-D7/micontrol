@@ -1217,7 +1217,7 @@ export default function CrossDeviceTab() {
               <button
                 onClick={() => setScanModalOpen(false)}
                 disabled={scanning}
-                aria-label="Close"
+                aria-label={t('common.close')}
                 style={{
                   background: 'none',
                   border: 'none',

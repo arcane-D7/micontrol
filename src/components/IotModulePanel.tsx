@@ -20,7 +20,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge } from './ui';
 import { Icon } from './ui/icons';
-import { t } from '../hooks/useI18n';
+import { t, type StringKey } from '../hooks/useI18n';
 import type { useHardware } from '../hooks/useHardware';
 import type { EramMap, IotRegionName } from '../types/hardware';
 import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
@@ -54,44 +54,44 @@ const ERAM_BASE = 0xfe0b0300;
 function formatPerfProfile(value: number): string {
   switch (value) {
     case 0:
-      return 'Balance';
+      return t('iot.profile.balance');
     case 1:
-      return 'Performance';
+      return t('iot.profile.performance');
     case 2:
-      return 'Silence';
+      return t('iot.profile.silence');
     default:
       return `0x${value.toString(16).toUpperCase().padStart(2, '0')}`;
   }
 }
 
 const ERAM_KNOWN_WRITES: {
-  label: string;
+  labelKey: StringKey;
   offset: number;
-  values: { label: string; byte: number }[];
+  values: { labelKey: StringKey; byte: number }[];
 }[] = [
   {
-    label: 'Performance Profile',
+    labelKey: 'iot.write.profile',
     offset: 0x40,
     values: [
-      { label: 'Balanced', byte: 0x00 },
-      { label: 'Performance', byte: 0x01 },
-      { label: 'Silent', byte: 0x02 },
+      { labelKey: 'iot.write.balanced', byte: 0x00 },
+      { labelKey: 'iot.write.performance', byte: 0x01 },
+      { labelKey: 'iot.write.silent', byte: 0x02 },
     ],
   },
   {
-    label: 'AI Limit (AILM)',
+    labelKey: 'iot.write.aiLimit',
     offset: 0x1b,
     values: [
-      { label: 'Enable AI Limit', byte: 0x04 },
-      { label: 'Disable AI Limit', byte: 0x00 },
+      { labelKey: 'iot.write.enableAiLimit', byte: 0x04 },
+      { labelKey: 'iot.write.disableAiLimit', byte: 0x00 },
     ],
   },
   {
-    label: 'Long Battery Limit (LBLM)',
+    labelKey: 'iot.write.lblm',
     offset: 0x1b,
     values: [
-      { label: 'Enable Long Battery Limit', byte: 0x08 },
-      { label: 'Disable Long Battery Limit', byte: 0x00 },
+      { labelKey: 'iot.write.enableLblm', byte: 0x08 },
+      { labelKey: 'iot.write.disableLblm', byte: 0x00 },
     ],
   },
 ];
@@ -256,12 +256,12 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
       >
         <div>
           <h2 className="card-title" style={{ marginBottom: 2 }}>
-            IoT Module
+            {t('iot.module.title')}
           </h2>
-          <div style={{ fontSize: 12, color: MUTED }}>Full ECRAM access via IoTDriver.</div>
+          <div style={{ fontSize: 12, color: MUTED }}>{t('iot.module.subtitle')}</div>
         </div>
         <button className="btn-secondary" onClick={() => void refreshIot()} disabled={loading}>
-          {loading ? 'Reading…' : 'Refresh'}
+          {loading ? t('iot.module.reading') : t('common.refresh')}
         </button>
       </div>
 
@@ -340,12 +340,12 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
           <div className="grid-2" style={{ marginBottom: 14 }}>
             <div className="card" style={{ marginBottom: 0 }}>
               <h2 className="card-title" style={{ fontSize: 13 }}>
-                System State
+                {t('iot.module.systemState')}
               </h2>
               <div className="stat-row">
                 <span className="stat-label">{t('system.ac_connected')}</span>
                 <span className="stat-value">
-                  {ecAvailable ? (ecramMap.ac_connected ? 'Yes' : 'No') : '—'}
+                  {ecAvailable ? (ecramMap.ac_connected ? t('common.yes') : t('common.no')) : '—'}
                 </span>
               </div>
               <div className="stat-row">
@@ -398,7 +398,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
             </div>
             <div className="card" style={{ marginBottom: 0 }}>
               <h2 className="card-title" style={{ fontSize: 13 }}>
-                Mode / Limits (decoded)
+                {t('iot.module.modeLimits')}
               </h2>
               <div className="stat-row">
                 <span className="stat-label">{t('system.performance_profile')}</span>
@@ -450,7 +450,11 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               <div className="stat-row">
                 <span className="stat-label">{t('system.ai_limit_ailm')}</span>
                 <span className="stat-value">
-                  {ecAvailable ? (ecramMap.ai_limit_enabled ? 'Enabled' : 'Disabled') : '—'}
+                  {ecAvailable
+                    ? ecramMap.ai_limit_enabled
+                      ? t('common.enabled')
+                      : t('common.disabled')
+                    : '—'}
                 </span>
               </div>
               <div className="stat-row">
@@ -458,8 +462,8 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
                 <span className="stat-value">
                   {ecAvailable
                     ? ecramMap.long_battery_limit_enabled
-                      ? 'Enabled'
-                      : 'Disabled'
+                      ? t('common.enabled')
+                      : t('common.disabled')
                     : '—'}
                 </span>
               </div>
@@ -484,7 +488,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
 
           <div className="card" style={{ marginBottom: 14 }}>
             <h2 className="card-title" style={{ fontSize: 13 }}>
-              Write Controls (known-safe registers)
+              {t('iot.module.writeControls')}
             </h2>
             {driverBlocked && (
               <p style={{ margin: '0 0 10px', fontSize: 12, color: MUTED }}>
@@ -494,11 +498,11 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
             <div style={{ display: 'grid', gap: 12 }}>
               {ERAM_KNOWN_WRITES.map((reg) => (
                 <div
-                  key={reg.label}
+                  key={reg.labelKey}
                   style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}
                 >
                   <span style={{ fontSize: 12, fontWeight: 600, minWidth: 180 }}>
-                    {reg.label}
+                    {t(reg.labelKey)}
                     <span
                       style={{
                         fontFamily: 'var(--font-mono)',
@@ -512,13 +516,13 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
                   </span>
                   {reg.values.map((v) => (
                     <button
-                      key={v.label}
+                      key={v.labelKey}
                       className="btn-secondary"
                       style={{ fontSize: 11, padding: '4px 10px' }}
                       disabled={!ecAvailable}
                       onClick={() => void handleKnownWrite(reg.offset, v.byte)}
                     >
-                      {v.label}
+                      {t(v.labelKey)}
                     </button>
                   ))}
                 </div>
@@ -595,7 +599,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
 
       <details style={{ marginBottom: 10 }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 13, padding: '8px 0' }}>
-          Raw Read — arbitrary address
+          {t('iot.module.rawRead')}
         </summary>
         <div className="card" style={{ marginTop: 8, marginBottom: 0 }}>
           <div
@@ -609,7 +613,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
           >
             <div>
               <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>
-                Physical address (hex)
+                {t('iot.module.address')}
               </div>
               <input
                 className="text-input"
@@ -619,7 +623,9 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               />
             </div>
             <div>
-              <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Bytes (1–256)</div>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>
+                {t('iot.module.bytes')}
+              </div>
               <input
                 className="text-input"
                 value={rawReadCount}
@@ -633,7 +639,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               disabled={rawReadLoading}
               onClick={() => void handleRawRead()}
             >
-              {rawReadLoading ? 'Reading…' : 'Read'}
+              {rawReadLoading ? t('iot.module.reading') : t('iot.module.read')}
             </button>
           </div>
           {rawReadResult && (
@@ -655,7 +661,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
 
       <details>
         <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 13, padding: '8px 0' }}>
-          Raw Write — arbitrary address
+          {t('iot.module.rawWrite')}
           <span
             style={{
               fontSize: 11,
@@ -664,7 +670,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               fontWeight: 400,
             }}
           >
-            <Icon name="alert-triangle" size={16} /> danger zone
+            <Icon name="alert-triangle" size={16} /> {t('iot.module.dangerZone')}
           </span>
         </summary>
         <div className="card" style={{ marginTop: 8, marginBottom: 0 }}>
@@ -678,7 +684,7 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
           >
             <div>
               <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>
-                Physical address (hex)
+                {t('iot.module.address')}
               </div>
               <input
                 className="text-input"
@@ -688,7 +694,9 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
               />
             </div>
             <div>
-              <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Hex data</div>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>
+                {t('iot.module.hexData')}
+              </div>
               <input
                 className="text-input"
                 value={writeHex}
@@ -704,41 +712,38 @@ export default function IotModulePanel({ hw }: { hw: HardwareInstance }) {
 
                 const addrClean = writeAddress.trim().replace(/^0[xX]/, '');
                 if (!/^[0-9A-Fa-f]+$/.test(addrClean)) {
-                  setWriteStatus('Write failed: invalid address format (must be hex)');
+                  setWriteStatus(t('iot.module.invalidAddress'));
                   return;
                 }
 
                 const hexClean = writeHex.replace(/\s+/g, '');
                 if (!/^[0-9A-Fa-f]+$/.test(hexClean)) {
-                  setWriteStatus('Write failed: invalid hex data (must be 0-9, A-F)');
+                  setWriteStatus(t('iot.module.invalidHex'));
                   return;
                 }
 
-                if (
-                  !window.confirm(
-                    'WARNING: Writing to a raw physical address can brick your device. Are you sure?',
-                  )
-                ) {
+                if (!window.confirm(t('iot.module.rawWriteConfirm'))) {
                   return;
                 }
 
                 try {
                   await hw.writeIotHex(writeAddress, writeHex);
-                  setWriteStatus('Write OK');
+                  setWriteStatus(t('iot.module.writeOk'));
                   const refreshTimeout = window.setTimeout(() => void refreshIot(), 200);
                   timeoutRefs.current.push(refreshTimeout);
                 } catch (e) {
-                  setWriteStatus(`Write failed: ${errToString(e)}`);
+                  setWriteStatus(t('iot.module.writeFailed', { error: errToString(e) }));
                 }
               }}
             >
-              Write
+              {t('iot.module.write')}
             </button>
             {writeStatus && (
               <span
                 style={{
                   fontSize: 12,
-                  color: writeStatus.startsWith('Write failed') ? 'var(--error)' : 'var(--success)',
+                  color:
+                    writeStatus === t('iot.module.writeOk') ? 'var(--success)' : 'var(--error)',
                 }}
               >
                 {writeStatus}

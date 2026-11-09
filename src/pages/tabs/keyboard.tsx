@@ -245,7 +245,7 @@ function KeyBindingRow({
           onClick={handleDetect}
           disabled={detecting}
           style={{ fontSize: 11, padding: '3px 10px', flexShrink: 0 }}
-          title="Press the physical key to detect its VK code (up to 10 s)"
+          title={t('keyboard.detectKeyTitle')}
         >
           {detecting
             ? detectedVk === '…'
@@ -256,7 +256,7 @@ function KeyBindingRow({
         {hasAction && (
           <button
             onClick={handleClear}
-            title="Clear this key binding"
+            title={t('keyboard.clearBindingTitle')}
             style={{
               flexShrink: 0,
               background: 'none',

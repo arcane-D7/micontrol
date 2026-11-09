@@ -63,15 +63,15 @@ export default function AboutTab({
           <div>
             <div className="stat-row">
               <span className="stat-label">{t('about.author')}</span>
-              <span className="stat-value">MiControl Contributors</span>
+              <span className="stat-value">{t('about.contributors')}</span>
             </div>
             <div className="stat-row">
               <span className="stat-label">{t('about.license')}</span>
-              <span className="stat-value">MIT License</span>
+              <span className="stat-value">{t('about.license')}</span>
             </div>
             <div className="stat-row">
               <span className="stat-label">{t('about.github')}</span>
-              <span className="stat-value">GitHub Repository</span>
+              <span className="stat-value">{t('about.githubRepo')}</span>
             </div>
           </div>
         </div>

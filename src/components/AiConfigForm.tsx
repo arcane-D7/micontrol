@@ -213,7 +213,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             type="text"
             value={customModel}
             onChange={(e) => handleCustomModelChange(e.target.value)}
-            placeholder="e.g. llama3, mistral, gpt-4-vision-preview"
+            placeholder={t('aiConfig.modelPlaceholder')}
           />
         )}
       </FieldRow>

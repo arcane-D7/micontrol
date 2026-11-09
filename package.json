@@ -31,7 +31,8 @@
     "release": "node scripts/release.cjs",
     "commitlint": "commitlint --from=HEAD~1 --to=HEAD",
     "commitlint:check": "commitlint --edit",
-    "prepare": "husky"
+    "prepare": "husky",
+    "i18n:check": "node scripts/check-i18n.mjs"
   },
   "lint-staged": {
     "src/**/*.{ts,tsx}": [

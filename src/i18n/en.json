@@ -129,7 +129,9 @@
     "fnKeyMultimedia": "Multimedia Mode",
     "fnKeyFunction": "Function Key Mode",
     "fnKeyMultimediaDesc": "F1-F12 control brightness, volume, and media by default. Press Fn+F-key for standard F-key behavior.",
-    "fnKeyFunctionDesc": "F1-F12 act as standard function keys by default. Press Fn+F-key for multimedia controls."
+    "fnKeyFunctionDesc": "F1-F12 act as standard function keys by default. Press Fn+F-key for multimedia controls.",
+    "detectKeyTitle": "Press the physical key to detect its VK code (up to 10 s)",
+    "clearBindingTitle": "Clear this key binding"
   },
   "overview": {
     "title": "System Overview",
@@ -434,19 +436,10 @@
     "limitDisabled": "Charge limit disabled",
     "noLimit": "Charges to 100%",
     "threshold": "Charge Limit",
-    "protectMode": "Battery Protection Mode",
-    "protectModeDesc": "Limits charging to 80% to extend battery lifespan",
     "recommended": "Recommended",
     "applying": "Applying...",
     "applied": "Setting applied",
     "error": "Failed to set charging threshold",
-    "levels": {
-      "40": "40% — Maximum protection",
-      "50": "50%",
-      "60": "60%",
-      "70": "70%",
-      "80": "80% — Recommended"
-    },
     "infoModal": {
       "title": "How Charging Control Works",
       "functionLabel": "What it does",
@@ -482,9 +475,6 @@
     "hdrNotSupported": "No connected display reports HDR (advanced color) support — the toggle is disabled.",
     "hdrUnknown": "HDR state unavailable — Windows did not report the display topology. Try again after a display change.",
     "hdrPerDisplay": "HDR-capable displays: {list}",
-    "drrsEnabled": "Enabled in the Intel driver registry. Windows always reports {hz} Hz — PSR2 switches below the OS, so software cannot verify it.",
-    "drrsPendingReboot": "Applied — takes effect after the next reboot. The Intel driver reads this value at start-up; Windows still reports {hz} Hz and the switching is not observable by software.",
-    "drrsDisabled": "Disabled — the driver registry value is 0. Windows always reports {hz} Hz; PSR2 is separate from Windows Dynamic Refresh Rate and is not observable by software.",
     "igclNotAvailable": "Requires Intel IGCL — not found on this device",
     "brightnessSourceWmi": "Brightness is controlled by WMI — this Intel driver does not expose IGCL devices",
     "refreshRate": "Refresh Rate",
@@ -521,7 +511,16 @@
     "resetDefaultDesc": "Restore standard sensitivity settings (Standard preset)",
     "applying": "Applying...",
     "applied": "Setting saved",
-    "error": "Failed to apply display setting"
+    "error": "Failed to apply display setting",
+    "drrActive": "Dynamic Refresh Rate active — Windows 11 automatically switches to lower Hz to save power when high frame rate isn’t needed.",
+    "psr2Pending": "Applied — takes effect after the next reboot. The Intel driver reads Psr2DrrsEnable at start-up; Windows still reports {hz} Hz and the switching is not observable by software.",
+    "psr2Enabled": "Enabled in the Intel driver registry. Windows always reports {hz} Hz — PSR2 switches below the OS, so software cannot verify it.",
+    "psr2Disabled": "Disabled — the driver registry value is 0. Windows always reports {hz} Hz; PSR2 is separate from Windows Dynamic Refresh Rate and is not observable by software.",
+    "psr2ToastOn": "PSR2 DRRS applied in the driver registry — effective after reboot. Windows will still report the configured Hz.",
+    "psr2ToastOff": "PSR2 DRRS disabled in the driver registry — effective after reboot.",
+    "psr2ToastError": "Adaptive refresh rate: {error}",
+    "psr2Note": "PSR2 DRRS ≠ Windows “Dynamic Refresh Rate”. Windows DRR requires a VRR-capable display. PSR2 DRRS is an Intel driver feature that switches the panel refresh rate internally — Windows always reports the max configured Hz (currently {hz} Hz), even when PSR2 is active.",
+    "presetResetError": "Reset smart model: {error}"
   },
   "fan": {
     "title": "Fan",
@@ -579,8 +578,6 @@
   },
   "startup": {
     "title": "Startup",
-    "autoStart": "Start with Windows",
-    "autoStartDesc": "Launch MiControl automatically when Windows starts",
     "runAtStartup": "Run at Startup",
     "description": "Automatically launch MiControl in the system tray when Windows starts",
     "enabled": "Enabled",
@@ -609,16 +606,6 @@
       "star": "Star on GitHub",
       "note": "Donations are 100% optional and unlock nothing extra — all features are free for everyone. Star on GitHub is equally appreciated!"
     },
-    "bridgeTitle": "High Bridge — Silent Update",
-    "bridgeDesc": "Install a MiControl update in the background using the privileged bridge service — no UAC prompt, works while you're away.",
-    "bridgePathPlaceholder": "Path to MiControl_*-setup.exe",
-    "bridgeInstall": "Install via Bridge",
-    "bridgeInstalling": "Installing via bridge…",
-    "bridgeSuccess": "Installer launched. MiControl will restart with the new version shortly.",
-    "bridgePathMissing": "Please enter the path to the setup .exe",
-    "bridgeBridgeDown": "Bridge service unavailable — the installer will ask for administrator permission.",
-    "bridgeHowTitle": "How it works",
-    "bridgeHow": "How it works: the path is validated, then the MiControlBridge service (runs as SYSTEM) launches the NSIS installer silently (/S /UPDATE /R). The installer replaces the app, re-creates the bridge service and relaunches MiControl.",
     "autoUpdateTitle": "Auto-update",
     "autoUpdateDesc": "Let future releases install themselves silently via the privileged bridge — no UAC prompt. Off by default.",
     "feedLabel": "Beta feed URL (development only)",
@@ -630,7 +617,9 @@
     "feedHint": "Hidden option for development: point MiControl at a beta installer URL and it updates itself. Also usable via CLI: micontrol_bridge auto-update <url>.",
     "updateNow": "Update now",
     "updateNowInstalling": "Updating…",
-    "updateNowSuccess": "Installer launched. MiControl will restart with the new version shortly."
+    "updateNowSuccess": "Installer launched. MiControl will restart with the new version shortly.",
+    "contributors": "MiControl Contributors",
+    "githubRepo": "GitHub Repository"
   },
   "errors": {
     "hardwareNotAvailable": "Hardware interface not available",
@@ -685,7 +674,8 @@
     "minutes_one": "{count} minute",
     "minutes_other": "{count} minutes",
     "technicalTerm": "Technical term",
-    "why": "Why?"
+    "why": "Why?",
+    "dismiss": "Dismiss"
   },
   "wifi": {
     "title": "Wi-Fi",
@@ -702,7 +692,13 @@
     "connected": "Connected",
     "hiddenNetwork": "Hidden network — connect via Windows WiFi settings",
     "passwordRequired": "Enter the network password",
-    "enterpriseUnsupported": "This network needs 802.1X/Enterprise credentials — connect it once through Windows Settings (MiControl cannot supply EAP logins)."
+    "enterpriseUnsupported": "This network needs 802.1X/Enterprise credentials — connect it once through Windows Settings (MiControl cannot supply EAP logins).",
+    "toast": {
+      "connected": "Connected to \"{ssid}\"",
+      "connectError": "Connect error: {error}",
+      "disconnected": "Disconnected",
+      "disconnectError": "Disconnect error: {error}"
+    }
   },
   "cast": {
     "title": "Cast to another screen",
@@ -717,8 +713,6 @@
     "stop": "Close panel",
     "scan": "Refresh paired displays",
     "availableDevices": "Displays paired with this PC",
-    "tip": "Tip",
-    "tipText": "You can also press Win + K to open the Windows Connect panel directly.",
     "knownOnly": "Only displays already paired with this PC can be listed here. Windows discovers new ones from the projection panel (Win + K).",
     "panelNoteTitle": "Windows owns the projection",
     "panelNote": "MiControl opens the Windows projection panel; the session itself (start/stop) is handled by Windows. Closing the panel does not end a running projection."
@@ -750,7 +744,8 @@
     "display_brightness": "Display brightness",
     "kb_backlight": "KB backlight",
     "ec_unavailable_title": "EC RAM unavailable",
-    "ec_unavailable_hint": "This model's IoT driver denies EC RAM reads, so these values cannot be measured. They are shown as — instead of zeros that look like readings."
+    "ec_unavailable_hint": "This model's IoT driver denies EC RAM reads, so these values cannot be measured. They are shown as — instead of zeros that look like readings.",
+    "gpuUsage": "GPU Usage"
   },
   "updates": {
     "title": "Drivers & BIOS",
@@ -769,14 +764,9 @@
     "driverInstalled": "Installed",
     "lastScan": "Last XPM Scan",
     "never": "Never",
-    "xpmStatus": "XiaomiPCManager",
-    "xpmInstalled": "Installed ({version})",
-    "xpmNotInstalled": "Not installed — scan limited to local drivers",
-    "triggerScan": "Trigger Driver Scan",
     "scanning": "Scanning…",
     "scanSuccess": "Scan triggered via XPM nucleus",
     "scanError": "Scan error",
-    "nucleusNote": "Invokes XiaomiPCManager's scan engine to find official driver and BIOS updates, preventing generic Windows Update drivers from overriding Xiaomi hardware-specific versions.",
     "appVersion": "App Version",
     "checkingForUpdates": "Checking for updates…",
     "upToDate": "Your app is up to date",
@@ -797,7 +787,9 @@
     "driverManufacturer": "Manufacturer",
     "driverStatus": "Status",
     "noDrivers": "No driver details available",
-    "scanComplete": "Driver scan complete"
+    "scanComplete": "Driver scan complete",
+    "path": "Path",
+    "downloadErrorMissing": "Downloaded installer not found after update download — cannot install via bridge."
   },
   "discovery": {
     "title": "Device Setup",
@@ -933,7 +925,8 @@
     "step": "Step {current} of {total}",
     "next": "Next",
     "back": "Back",
-    "skip": "Skip"
+    "skip": "Skip",
+    "progress": "Onboarding progress"
   },
   "ai": {
     "title": "AI System Advisor",
@@ -1253,10 +1246,8 @@
     "volume": "Volume",
     "unmutedByVolume": "Sound re-enabled — the volume changed while muted",
     "volumeError": "Could not change the volume",
-    "loadingDevices": "Loading audio devices...",
     "noDevices": "No audio devices found",
     "loadDevicesError": "Failed to load audio devices",
-    "initError": "Failed to initialize audio control",
     "title": "Audio Control",
     "pageTitle": "Audio Control",
     "subtitle": "Master volume and device management",
@@ -1560,7 +1551,6 @@
     "displays": "Displays",
     "currentProfile": "Current Profile",
     "noProfile": "No ICC profile loaded",
-    "installedProfiles": "Installed ICC Profiles",
     "noProfiles": "No ICC profiles found in system color directory",
     "hardwareCalibration": "Hardware Calibration",
     "advancedColor": "Advanced Color (HDR)",
@@ -1580,10 +1570,7 @@
     "openSettingsDesc": "Open Windows Color Management settings",
     "loadProfile": "Load Profile",
     "unloadProfile": "Reset to sRGB",
-    "loadSuccess": "ICC profile loaded",
     "loadError": "Failed to load ICC profile",
-    "unloadSuccess": "Reverted to sRGB",
-    "unloadError": "Failed to unload ICC profile",
     "eyeProtection": "Eye Protection",
     "eyeProtectionDesc": "Blue light filter using gamma ramp adjustment to reduce eye strain",
     "eyeProtectionActive": "Blue light filter is active",
@@ -1612,14 +1599,335 @@
     "aboutDesc": "Safely removes temporary files, update caches, browser caches, and other unnecessary files. Locked files are skipped automatically. Browser caches require browsers to be closed for complete removal."
   },
   "face": {
-    "single_rgb_camera": "single RGB camera",
-    "diagnostics": "Diagnostics",
     "diagnostics_error": "Diagnostics error",
     "unsaved_changes": "Unsaved changes",
     "similarity_threshold": "Similarity threshold",
     "show_tile_at_sign_in": "Show tile at sign-in",
     "re_enrollment_reminder": "Re-enrollment reminder",
     "anti_spoof_threshold": "Anti-spoof threshold",
-    "face_unlock_power": "Face Unlock power"
+    "face_unlock_power": "Face Unlock power",
+    "title": "Face Unlock",
+    "subtitle": "Unlock this PC with a look at your webcam. The whole pipeline runs locally, offline.",
+    "enroll": {
+      "title": "Enroll face — {step}",
+      "step": {
+        "user": "1 · Windows account",
+        "hello": "2 · Verify with PIN / fingerprint",
+        "passwordSaved": "3 · Unlock credential saved",
+        "passwordOptional": "3 · Unlock credential (optional)",
+        "camera": "4 · Camera capture"
+      },
+      "pill": {
+        "user": "account",
+        "hello": "Hello",
+        "credential": "credential",
+        "capture": "capture"
+      },
+      "accountQuestion": "Which Windows account should face unlock work for? The wizard only needs your sign-in permission.",
+      "account": "Account",
+      "loadingUsers": "Loading users…",
+      "usersLoadFailed": "— could not load users —",
+      "label": "Label",
+      "labelPlaceholder": "e.g. front, glasses",
+      "photos": "Photos",
+      "helloNote": "Next, Windows will ask you to prove it's really you with the PIN or fingerprint you already configured. No password is typed here.",
+      "continue": "Continue →",
+      "back": "← Back",
+      "helloIntro": "This is your everyday sign-in — the very first thing we need is proof that it's really you. A Windows dialog will appear. Use the same PIN or fingerprint you use to unlock this PC.",
+      "waiting": "Waiting…",
+      "verify": "Verify with PIN / fingerprint",
+      "storedFor": "The unlock credential for {name} is already stored — nothing else to do here. You'll keep signing in with your PIN as usual.",
+      "changeHint": "Want to change it? Go back to the previous step, clear the saved credential, and re-enter the password when you next enroll.",
+      "optionalNote": "Optional. To let the camera unlock the lock screen, Windows needs the account credential itself — the PIN is protected by Windows and it will not hand it over to third-party software. We store that credential sealed in the Windows LSA, read it only at the lock screen, and it never leaves this PC.",
+      "passwordPlaceholder": "Windows account password for {name} (used once, stored sealed)",
+      "pinReminder": "You will keep signing in with your PIN. The camera just needs this once to unlock the screen — you can skip and add it later.",
+      "skipPinOnly": "Skip — PIN only",
+      "storing": "Storing…",
+      "saveCredential": "Save credential & continue",
+      "enterPassword": "Enter the Windows sign-in password.",
+      "passwordStored": "Password stored for \"{name}\" (LSA Secret).",
+      "pickAccountFirst": "Pick a Windows account first.",
+      "enrolled": "Enrolled \"{name}\" ({frames} frames, label \"{label}\").",
+      "cameraPreviewAlt": "camera preview",
+      "startingCamera": "Starting camera…",
+      "cameraError": "Camera error: {error}",
+      "livePreview": "Live preview — look directly at the camera",
+      "cameraBusy": "{error} — check that the camera is not in use by another app, then close and reopen this dialog.",
+      "captureNote": "Captures {frames} frame(s) for {name} and stores a reference feature vector — no photos are saved, only math.",
+      "capturing": "Capturing…",
+      "capture": "Capture {frames} frame(s)"
+    },
+    "phase": {
+      "off": {
+        "title": "Face Unlock is off",
+        "subtitle": "Turn it on to unlock this PC with your webcam."
+      },
+      "models": {
+        "title": "Step 1 of 3 · Download the AI models",
+        "subtitle": "The recognition models (~250 MB) download once and run fully on this machine."
+      },
+      "service": {
+        "title": "Step 2 of 3 · Start the auth service",
+        "subtitle": "A local service watches the lock screen and matches your face. No data leaves the PC."
+      },
+      "enroll": {
+        "title": "Step 3 of 3 · Enroll your face",
+        "subtitle": "Add a reference face. Only a mathematical feature vector is stored, never a photo."
+      },
+      "ready": {
+        "title_one": "Face Unlock is ready · {count} face enrolled",
+        "title_other": "Face Unlock is ready · {count} faces enrolled",
+        "subtitle": "Everything is healthy. Lock the PC (Win+L) and look at the camera to sign in.",
+        "title": "Face Unlock is ready · {count} faces enrolled"
+      }
+    },
+    "badge": {
+      "models": "AI models",
+      "service": "Auth service",
+      "enrolled": "Face enrolled"
+    },
+    "off": {
+      "enableNote": "Enabling shows the Face Unlock tile at the sign-in screen. You can set it up step by step right after.",
+      "enable": "Enable Face Unlock"
+    },
+    "downloading": "Downloading {percent}…",
+    "downloadingNoPct": "Downloading…",
+    "download": "Download AI models (~250 MB)",
+    "service": {
+      "restart": "Restart the auth service",
+      "install": "Install the auth service"
+    },
+    "addMyFace": "Add my face",
+    "checklist": {
+      "modelsDone": "Downloaded once, run on-device",
+      "modelsNote": "~250 MB download",
+      "serviceRunning": "Running with auto-restart",
+      "serviceInstalled": "Installed, needs start",
+      "serviceNote": "Local background service",
+      "faceCount_one": "{count} face",
+      "faceCount_other": "{count} faces",
+      "faceNote": "Reference face required",
+      "faceCount": "{count} faces"
+    },
+    "risk": "Face Unlock here uses a single RGB camera, which is far less secure than the infrared sensor of Windows Hello. A high-quality photo or video may bypass it, so avoid enabling it on machines storing sensitive data. A restore point is recommended before using the lock-screen provider.",
+    "settings": {
+      "subtitle": "Tune how strictly the camera matches your face. Defaults work well for most people.",
+      "saving": "Saving…",
+      "saved": "Settings saved.",
+      "error": "settings error: {error}",
+      "group": {
+        "matching": "Matching strictness",
+        "signIn": "Sign-in screens"
+      },
+      "thresholdLoose": "Loose — unlock nearly always works",
+      "thresholdStrict": "Strict — only confident matches",
+      "thresholdBalanced": "Balanced",
+      "multiFace": "Reject if 2+ faces in frame",
+      "liveness": "Require liveness (blink / turn)",
+      "livenessAria": "Require liveness",
+      "antispoof": "Reject photos / videos (anti-spoof)",
+      "antispoofAria": "Reject photos and videos",
+      "showTileLock": "Show tile at lock (Win+L)",
+      "showTileLockAria": "Show tile at workstation unlock",
+      "renewOff": "Off — never remind",
+      "renewEvery_one": "Every {count} day",
+      "renewEvery_other": "Every {count} days",
+      "lockout": "Failed attempts before lockout",
+      "lockoutNote_one": "{count} attempt, then fall back to password",
+      "lockoutNote_other": "{count} attempts, then fall back to password",
+      "advanced": "Advanced options",
+      "advancedHide": "Hide advanced options",
+      "matchMargin": "Match margin (anti-misrouting)",
+      "advancedHint": "Advanced values tune the recognition internals. Leave them alone unless you know what they do.",
+      "renewEvery": "Every {count} days",
+      "lockoutNote": "{count} attempts, then fall back to password"
+    },
+    "powerOffNote": "Turn it on and follow the checklist above. Your enrolled faces, settings and stored password are kept while it is off.",
+    "enrolledFaces": "Enrolled faces",
+    "addAnother": "Add another face",
+    "modelsFirstTitle": "Download the AI models first — no recognition models are present.",
+    "signInPassword": "Sign-in password",
+    "signInPasswordNote": "Stored in a Windows LSA secret and read only by the credential provider at the lock screen. It never leaves this PC. Set or update it inside the enroll flow.",
+    "managePassword": "Manage password",
+    "maintenance": "Maintenance",
+    "maintenanceHide": "Hide maintenance",
+    "maint": {
+      "reinstallTitle": "Reinstall or self-heal the auth service if it crashed. No UAC prompt.",
+      "reinstall": "Reinstall / restart auth service",
+      "rescanTitle": "Re-scan for downloaded or installed models",
+      "rescan": "Re-scan models",
+      "diagnostics": "Run diagnostics",
+      "removeTitle": "Delete downloaded models (frees ~250 MB)",
+      "remove": "Remove all models",
+      "removeNote": "Removing models frees ~250 MB but disables enrollment until you download them again.",
+      "confirmRemove": "Remove all downloaded/installed Face Unlock models?\n\nThis frees disk space (~250 MB) and disables face enrollment/unlock until the models are downloaded again.",
+      "removed": "Removed {count} file(s).",
+      "warnings": "Warnings: {warnings}",
+      "nothingRemoved": "No model files found — nothing to remove.",
+      "removeError": "remove error: {error}",
+      "modelsPresent": "Models present — download button stays disabled.",
+      "modelsMissing": "No models found — download is enabled again.",
+      "rescanError": "rescan error: {error}",
+      "serviceInstalled": "Service installed & started.",
+      "installFailed": "install failed: {error}",
+      "serviceRunning": "The auth service is already running.",
+      "serviceStarted": "Service started.",
+      "serviceStartSent": "Service start request sent.",
+      "serviceError": "service error: {error}"
+    },
+    "toggle": {
+      "enabled": "Face Unlock enabled.",
+      "disabled": "Face Unlock disabled (tile hidden).",
+      "error": "toggle error: {error}"
+    },
+    "downloadReady": "AI models are ready.",
+    "downloadError": "download error: {error}",
+    "loadError": "load: {error}",
+    "templates": {
+      "empty": "No faces enrolled yet.",
+      "count_one": "({count} template)",
+      "count_other": "({count} templates)",
+      "delete": "Delete",
+      "count": "({count} templates)"
+    },
+    "diag": {
+      "modelsDir": "Models dir:",
+      "dataDir": "Data dir:",
+      "ok": "OK",
+      "failed": "Failed"
+    },
+    "diagnostics": "Diagnostics"
+  },
+  "iot": {
+    "device": {
+      "title": "IoT Device",
+      "loading": "Loading device information...",
+      "unavailable": "IoT Service not available. The Xiaomi IoT chip was not detected on this system.",
+      "expectedPipe": "Expected pipe:",
+      "statusNotFound": "Status: Not found",
+      "retryCounter": "(retry {count}/{max})",
+      "startingService": "Starting IoT bridge service...",
+      "unreachable": "Could not reach the IoT bridge after several attempts. The service may not be installed or your hardware may not have the IoT chip. You can try again manually.",
+      "notRunning": "The IoT bridge service is not running. It will be started automatically (up to a few attempts).",
+      "tryAgain": "Try again",
+      "subtitle": "Xiaomi IoT chip information",
+      "model": "Model",
+      "firmware": "Firmware",
+      "deviceId": "Device ID",
+      "status": "Status",
+      "cloudBinding": "Cloud Binding",
+      "bound": "Bound (UID: {uid})",
+      "notBound": "Not bound",
+      "iotWifi": "IoT WiFi",
+      "notConnected": "Not connected",
+      "savedNetworks": "Saved Networks",
+      "about": "About this device",
+      "noteCloud": "Cloud Binding — Indicates whether the IoT chip is registered with the Xiaomi IoT cloud service. This is not related to Mi Home or any phone app. When bound, the chip can receive remote commands (e.g. wake-on-LAN, status queries) while the laptop is powered off or in sleep mode.",
+      "noteWifi": "IoT WiFi — This is the IoT chip's own WiFi module, which is completely separate from your Windows WiFi. The chip uses this WiFi to maintain a cloud connection for remote management when the laptop is asleep or powered off. If the chip is not bound to the cloud, IoT WiFi will show \"Not connected\" — this is expected.",
+      "noteStatus": "Device Status — Queried via WMI (not EC commands). Reflects the ACPI power state of the IoT device as reported by Windows.",
+      "protocol": "EC Command Protocol (16 commands)",
+      "colId": "ID",
+      "colCommand": "Command",
+      "colDescription": "Description",
+      "protocolNote": "Commands are sent via a 4-phase state machine over EC RAM (status register 0xFE0B0F00, command register 0xFE0B0F01, sensor data buffer 0xFE0B0F08). See docs/EC_COMMAND_PROTOCOL_RE.md for full protocol details."
+    },
+    "module": {
+      "title": "IoT Module",
+      "subtitle": "Full ECRAM access via IoTDriver.",
+      "reading": "Reading…",
+      "systemState": "System State",
+      "modeLimits": "Mode / Limits (decoded)",
+      "writeControls": "Write Controls (known-safe registers)",
+      "rawRead": "Raw Read — arbitrary address",
+      "rawWrite": "Raw Write — arbitrary address",
+      "address": "Physical address (hex)",
+      "bytes": "Bytes (1–256)",
+      "hexData": "Hex data",
+      "dangerZone": "danger zone",
+      "write": "Write",
+      "rawWriteConfirm": "WARNING: Writing to a raw physical address can brick your device. Are you sure?",
+      "read": "Read",
+      "writeOk": "Write OK",
+      "writeFailed": "Write failed: {error}",
+      "invalidAddress": "Write failed: invalid address format (must be hex)",
+      "invalidHex": "Write failed: invalid hex data (must be 0-9, A-F)"
+    },
+    "cmd": {
+      "bindStatus": "Check if the IoT chip is bound to Xiaomi cloud",
+      "setBindStatus": "Set the cloud binding state on the chip",
+      "resetDevice": "Factory-reset the IoT chip (clears binding & WiFi)",
+      "writeWifiItem": "Provision a WiFi network onto the chip",
+      "emptyWifiItems": "Remove all saved WiFi networks from the chip",
+      "deleteWifiItem": "Remove a specific saved WiFi network",
+      "readWifiStatus": "Query the chip's WiFi connection status & SSID",
+      "readWifiCount": "Count of WiFi networks saved on the chip",
+      "getWifiByIndex": "Retrieve a saved WiFi network by index",
+      "getFwVersion": "Read the IoT chip firmware version",
+      "getModel": "Read the IoT chip model identifier",
+      "connectWifi": "Trigger the chip to connect to a saved WiFi network",
+      "getDeviceId": "Read the unique device identifier (DID)",
+      "sendLaptopStatusSuspend": "Notify chip that the laptop is suspending",
+      "sendLaptopStatusShutdown": "Notify chip that the laptop is shutting down",
+      "sendLaptopStatusWinReady": "Notify chip that Windows has booted"
+    },
+    "profile": {
+      "balance": "Balance",
+      "performance": "Performance",
+      "silence": "Silence"
+    },
+    "write": {
+      "profile": "Performance Profile",
+      "balanced": "Balanced",
+      "performance": "Performance",
+      "silent": "Silent",
+      "aiLimit": "AI Limit (AILM)",
+      "enableAiLimit": "Enable AI Limit",
+      "disableAiLimit": "Disable AI Limit",
+      "lblm": "Long Battery Limit (LBLM)",
+      "enableLblm": "Enable Long Battery Limit",
+      "disableLblm": "Disable Long Battery Limit"
+    }
+  },
+  "process": {
+    "title": "Top Processes",
+    "aria": "Top Processes — {resource}",
+    "column": "Process",
+    "pid": "PID",
+    "cpu": "CPU %",
+    "ram": "RAM MB",
+    "empty": "No processes found",
+    "refreshNote": "Refreshes every 3 s · Top 20 by {resource}",
+    "resourceCpu": "CPU usage",
+    "resourceRam": "memory",
+    "showTop": "Show top processes"
+  },
+  "main": {
+    "tray": "Tray",
+    "themeTitle": "Theme: {theme}",
+    "previewTray": "Preview tray popup",
+    "by": "By: {name}",
+    "previewHint": "Preview — click outside to close",
+    "trayIconTitle": "MiControl tray icon",
+    "wifiManager": "→ WiFi Manager",
+    "audio": "Audio"
+  },
+  "brightness": {
+    "presets": {
+      "eco": {
+        "label": "Eco",
+        "hint": "Gentle transitions, capped brightness — saves battery"
+      },
+      "standard": {
+        "label": "Standard",
+        "hint": "Balanced reactivity and smooth transitions"
+      },
+      "vivid": {
+        "label": "Vivid",
+        "hint": "Fast, aggressive adaptation across full brightness range"
+      }
+    }
+  },
+  "aiConfig": {
+    "modelPlaceholder": "e.g. llama3, mistral, gpt-4-vision-preview"
   }
 }
