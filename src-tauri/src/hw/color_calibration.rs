@@ -7,7 +7,11 @@
 //! - Launching Windows Color Calibration tool
 //!
 //! Uses raw FFI to `mscms.dll` since the `windows` crate 0.58 does not
-//! expose `Win32_Graphics_ICM`.
+//! expose `Win32_Graphics_ICM`. Current Windows 11 builds no longer export the
+//! legacy HDC pair (`SetICMProfileW` / `GetICMProfileW`), so association goes
+//! through `AssociateColorProfileWithDeviceW` /
+//! `DisassociateColorProfileFromDeviceW` and the active profile is read with
+//! `WcsGetDefaultColorProfile` — see the `wcs` module.
 
 use crate::hw::display::AttachedDisplayDevice;
 #[cfg(windows)]
@@ -165,10 +169,10 @@ pub fn get_color_status() -> HardwareResult<ColorCalibrationStatus> {
     ))
 }
 
-/// Load an ICC profile for a specific display via mscms.dll FFI.
+/// Load an ICC profile for a specific display.
 ///
-/// Uses `CreateDCW` to obtain a device context (HDC) for the display,
-/// then calls `SetICMProfileW` with that HDC.
+/// Associates the profile with the display device — the supported equivalent of
+/// the old `SetICMProfile(HDC, ...)`, whose export this Windows build dropped.
 pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()> {
     #[cfg(windows)]
     {
@@ -202,7 +206,7 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
         // profiles dir does not — comparing one against the other always failed
         // even for a legitimate profile in the right folder. Canonicalize BOTH
         // sides for the containment check (symlink-safe), then hand mscms the
-        // simplified form (SetICMProfileW does not accept `\\?\` paths).
+        // simplified form (mscms does not accept `\\?\` paths).
         let profiles_dir_canonical =
             std::fs::canonicalize(&profiles_dir).unwrap_or_else(|_| profiles_dir.clone());
         if !canonical.starts_with(&profiles_dir_canonical) {
@@ -214,60 +218,10 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
         }
         let canonical = simplify_extended_path(&canonical);
 
-        let device_w: Vec<u16> = display.encode_utf16().chain(std::iter::once(0)).collect();
-        use std::os::windows::ffi::OsStrExt;
-        let profile_w: Vec<u16> = canonical
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let result = unsafe {
-            let mscms =
-                windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::s!("mscms.dll"))
-                    .map_err(|e| HardwareError::Other(format!("Failed to load mscms.dll: {e}")))?;
-
-            let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
-                mscms,
-                windows::core::s!("SetICMProfileW"),
-            )
-            .ok_or_else(|| HardwareError::Other("SetICMProfileW not found".to_string()))?;
-
-            // Create a DC for the display device
-            let hdc = windows::Win32::Graphics::Gdi::CreateDCW(
-                windows::core::PCWSTR(device_w.as_ptr()),
-                windows::core::PCWSTR::null(),
-                windows::core::PCWSTR::null(),
-                None,
-            );
-
-            if hdc.is_invalid() {
-                let _ = windows::Win32::Foundation::FreeLibrary(mscms);
-                return Err(HardwareError::Other(format!(
-                    "Failed to create DC for display: {display}"
-                )));
-            }
-
-            // SetICMProfileW(HDC, LPCWSTR) -> BOOL
-            let set_icm_profile: unsafe extern "system" fn(usize, *const u16) -> i32 =
-                std::mem::transmute(proc);
-            let r = set_icm_profile(hdc.0 as usize, profile_w.as_ptr());
-
-            // Clean up
-            let _ = windows::Win32::Graphics::Gdi::DeleteDC(hdc);
-            let _ = windows::Win32::Foundation::FreeLibrary(mscms);
-            r
-        };
-
-        if result != 0 {
-            log::info!("Loaded ICC profile {} for {}", canonical.display(), display);
-            Ok(())
-        } else {
-            Err(HardwareError::Other(format!(
-                "Failed to load ICC profile (error code: {})",
-                std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-            )))
-        }
+        wcs::associate_profile(display, &canonical)
+            .map_err(|e| HardwareError::Other(format!("Failed to load ICC profile: {e}")))?;
+        log::info!("Loaded ICC profile {} for {}", canonical.display(), display);
+        Ok(())
     }
     #[cfg(not(windows))]
     Err(HardwareError::NotSupported(
@@ -284,10 +238,25 @@ fn get_color_profiles_dir() -> std::path::PathBuf {
 }
 
 /// Unload (remove) the ICC profile for a display, reverting to sRGB.
+///
+/// The device's profile list is per user (`ICM\ProfileAssociations\Display`), and
+/// associating a profile only moves it to the front of that list. Dropping the
+/// association MiControl made keeps the list from growing a stale entry behind
+/// the sRGB profile on every reset.
 pub fn unload_icc_profile(display: &str) -> HardwareResult<()> {
     #[cfg(windows)]
     {
         let srgb_path = get_srgb_profile_path()?;
+        if let Some(current) = get_icm_profile_gdi(display) {
+            if !current.eq_ignore_ascii_case(&srgb_path) {
+                match wcs::disassociate_profile(display, std::path::Path::new(&current)) {
+                    Ok(()) => log::info!("Removed ICC profile {current} from {display}"),
+                    // Not fatal: associating sRGB below still takes over as the
+                    // default; the stale entry is only untidy.
+                    Err(e) => log::warn!("Could not disassociate {current} from {display}: {e}"),
+                }
+            }
+        }
         load_icc_profile(display, &srgb_path)
     }
     #[cfg(not(windows))]
@@ -479,6 +448,279 @@ fn get_srgb_profile_path() -> HardwareResult<String> {
     }
 }
 
+// ── mscms.dll FFI ────────────────────────────────────────────────────────────
+
+/// Colour-management entry points this Windows build actually exports.
+///
+/// `SetICMProfileW`, `SetICMProfileA`, `GetICMProfileW` and `GetICMProfile` were
+/// removed from `mscms.dll` (GetProcAddress returns NULL for all four on build
+/// 26200), which is why the old HDC-based FFI failed with "SetICMProfileW not
+/// found" and the UI always showed "No ICC profile loaded". The calls below are
+/// exported and are the supported replacement — signatures and constant values
+/// come from the Windows SDK 10.0.26100 `um/Icm.h`:
+///
+/// ```c
+/// BOOL WINAPI AssociateColorProfileWithDeviceW(
+///     _In_opt_ PCWSTR pMachineName, _In_ PCWSTR pProfileName, _In_ PCWSTR pDeviceName);
+/// BOOL WINAPI DisassociateColorProfileFromDeviceW(
+///     _In_opt_ PCWSTR pMachineName, _In_ PCWSTR pProfileName, _In_ PCWSTR pDeviceName);
+/// BOOL WINAPI WcsGetDefaultColorProfileSize(
+///     _In_ WCS_PROFILE_MANAGEMENT_SCOPE scope, _In_opt_ PCWSTR pDeviceName,
+///     _In_ COLORPROFILETYPE cptColorProfileType,
+///     _In_ COLORPROFILESUBTYPE cpstColorProfileSubType,
+///     _In_ DWORD dwProfileID, _Out_ PDWORD pcbProfileName);
+/// BOOL WINAPI WcsGetDefaultColorProfile(
+///     _In_ WCS_PROFILE_MANAGEMENT_SCOPE scope, _In_opt_ PCWSTR pDeviceName,
+///     _In_ COLORPROFILETYPE cptColorProfileType,
+///     _In_ COLORPROFILESUBTYPE cpstColorProfileSubType,
+///     _In_ DWORD dwProfileID, _In_ DWORD cbProfileName,
+///     _Out_writes_bytes_(cbProfileName) LPWSTR pProfileName);
+/// ```
+#[cfg(windows)]
+mod wcs {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+    use windows::core::s;
+    use windows::Win32::Foundation::{FreeLibrary, HMODULE};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+
+    /// `WCS_PROFILE_MANAGEMENT_SCOPE` (Icm.h): `SYSTEM_WIDE` = 0, `CURRENT_USER` = 1.
+    const SCOPE_SYSTEM_WIDE: u32 = 0;
+    const SCOPE_CURRENT_USER: u32 = 1;
+
+    /// `COLORPROFILETYPE.CPT_ICC` — first enumerator of the enum, i.e. 0
+    /// (`CPT_DMP` is 1, `CPT_CAMP` 2, `CPT_GMMP` 3).
+    const CPT_ICC: u32 = 0;
+
+    /// `COLORPROFILESUBTYPE.CPST_NONE` — the four `CPST_*` intent values take
+    /// 0..=3, so "the device's own profile, no particular intent" is 4.
+    const CPST_NONE: u32 = 4;
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide_os(text: &OsStr) -> Vec<u16> {
+        text.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    /// `mscms.dll` with its exports resolved lazily; freed on drop.
+    struct Mscms(HMODULE);
+
+    impl Mscms {
+        fn load() -> Result<Self, String> {
+            unsafe {
+                LoadLibraryA(s!("mscms.dll"))
+                    .map(Self)
+                    .map_err(|e| format!("cannot load mscms.dll: {e}"))
+            }
+        }
+
+        fn export(
+            &self,
+            name: &str,
+            symbol: windows::core::PCSTR,
+        ) -> Result<unsafe extern "system" fn() -> isize, String> {
+            unsafe {
+                // `windows-rs` returns the bare function pointer; NULL is what
+                // "this build does not export it" looks like.
+                GetProcAddress(self.0, symbol)
+                    .ok_or_else(|| format!("mscms.dll does not export {name}"))
+            }
+        }
+    }
+
+    impl Drop for Mscms {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = FreeLibrary(self.0);
+            }
+        }
+    }
+
+    /// Candidate device names, most specific first.
+    ///
+    /// `mscms` resolves a display by its GDI name **without** the Win32 `\\.\`
+    /// prefix (verified on build 26200: `DISPLAY1` succeeds while
+    /// `\\.\DISPLAY1` returns FALSE). The prefixed form is kept as a fallback so
+    /// the call keeps working if a future build expects it.
+    fn device_names(device: &str) -> Vec<&str> {
+        let bare = device.strip_prefix(r"\\.\").unwrap_or(device);
+        if bare == device {
+            vec![device]
+        } else {
+            vec![bare, device]
+        }
+    }
+
+    /// `AssociateColorProfileWithDeviceW(NULL, profile, device)` — makes
+    /// `profile` the default ICC profile of a display (the modern equivalent of
+    /// `SetICMProfile`). Writes the current user's association list, so it needs
+    /// no elevation for a display the user owns.
+    pub fn associate_profile(device: &str, profile: &Path) -> Result<(), String> {
+        let profile = wide_os(profile.as_os_str());
+        let mut last_error = String::new();
+        for name in device_names(device) {
+            let device_w = wide(name);
+            let result = (|| -> Result<(), String> {
+                let mscms = Mscms::load()?;
+                let proc = mscms.export(
+                    "AssociateColorProfileWithDeviceW",
+                    s!("AssociateColorProfileWithDeviceW"),
+                )?;
+                // BOOL WINAPI AssociateColorProfileWithDeviceW(PCWSTR, PCWSTR, PCWSTR)
+                let associate: unsafe extern "system" fn(
+                    *const u16,
+                    *const u16,
+                    *const u16,
+                ) -> i32 = unsafe { std::mem::transmute(proc) };
+                let ok =
+                    unsafe { associate(std::ptr::null(), profile.as_ptr(), device_w.as_ptr()) };
+                if ok != 0 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "AssociateColorProfileWithDeviceW failed for {name} (error {})",
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+                    ))
+                }
+            })();
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => last_error = e,
+            }
+        }
+        Err(last_error)
+    }
+
+    /// `DisassociateColorProfileFromDeviceW(NULL, profile, device)` — removes one
+    /// profile from the display's association list.
+    pub fn disassociate_profile(device: &str, profile: &Path) -> Result<(), String> {
+        let profile = wide_os(profile.as_os_str());
+        let mut last_error = String::new();
+        for name in device_names(device) {
+            let device_w = wide(name);
+            let result = (|| -> Result<(), String> {
+                let mscms = Mscms::load()?;
+                let proc = mscms.export(
+                    "DisassociateColorProfileFromDeviceW",
+                    s!("DisassociateColorProfileFromDeviceW"),
+                )?;
+                // BOOL WINAPI DisassociateColorProfileFromDeviceW(PCWSTR, PCWSTR, PCWSTR)
+                let disassociate: unsafe extern "system" fn(
+                    *const u16,
+                    *const u16,
+                    *const u16,
+                ) -> i32 = unsafe { std::mem::transmute(proc) };
+                let ok =
+                    unsafe { disassociate(std::ptr::null(), profile.as_ptr(), device_w.as_ptr()) };
+                if ok != 0 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "DisassociateColorProfileFromDeviceW failed for {name} (error {})",
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+                    ))
+                }
+            })();
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => last_error = e,
+            }
+        }
+        Err(last_error)
+    }
+
+    /// Default ICC profile of `device`, as reported by
+    /// `WcsGetDefaultColorProfile` — the profile name only, no directory.
+    ///
+    /// The user's association wins over the machine-wide one, which is where
+    /// `AssociateColorProfileWithDeviceW` writes.
+    pub fn default_profile_name(device: &str) -> Option<String> {
+        for name in device_names(device) {
+            for scope in [SCOPE_CURRENT_USER, SCOPE_SYSTEM_WIDE] {
+                if let Some(found) = default_profile_name_in_scope(scope, name) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    fn default_profile_name_in_scope(scope: u32, device: &str) -> Option<String> {
+        let device_w = wide(device);
+        // SIZE in bytes of the profile name, terminator included.
+        let mut bytes = 0u32;
+        let mut buffer: Vec<u16>;
+
+        unsafe {
+            let mscms = Mscms::load().ok()?;
+            let get_proc = mscms
+                .export("WcsGetDefaultColorProfile", s!("WcsGetDefaultColorProfile"))
+                .ok()?;
+            // BOOL WcsGetDefaultColorProfile(scope, device, cpt, cpst, id, cb, name)
+            let get_profile: unsafe extern "system" fn(
+                u32,
+                *const u16,
+                u32,
+                u32,
+                u32,
+                u32,
+                *mut u16,
+            ) -> i32 = std::mem::transmute(get_proc);
+
+            match mscms.export(
+                "WcsGetDefaultColorProfileSize",
+                s!("WcsGetDefaultColorProfileSize"),
+            ) {
+                Ok(size_proc) => {
+                    // BOOL WcsGetDefaultColorProfileSize(scope, device, cpt, cpst, id, &bytes)
+                    let get_size: unsafe extern "system" fn(
+                        u32,
+                        *const u16,
+                        u32,
+                        u32,
+                        u32,
+                        *mut u32,
+                    ) -> i32 = std::mem::transmute(size_proc);
+                    let sized =
+                        get_size(scope, device_w.as_ptr(), CPT_ICC, CPST_NONE, 0, &mut bytes);
+                    // FALSE + ERROR_FILE_NOT_FOUND means "this device has no
+                    // default profile", i.e. the ordinary uncalibrated state.
+                    if sized == 0 || bytes == 0 {
+                        return None;
+                    }
+                    buffer = vec![0; (bytes as usize) / 2 + 1];
+                }
+                // Present on every Vista+ build; a fixed buffer keeps the reader
+                // working anyway if it ever disappears.
+                Err(_) => {
+                    buffer = vec![0; 512];
+                }
+            }
+
+            let cb = (buffer.len() * std::mem::size_of::<u16>()) as u32;
+            let ok = get_profile(
+                scope,
+                device_w.as_ptr(),
+                CPT_ICC,
+                CPST_NONE,
+                0,
+                cb,
+                buffer.as_mut_ptr(),
+            );
+            if ok == 0 {
+                return None;
+            }
+
+            let name = String::from_utf16_lossy(&buffer);
+            let name = name.trim_end_matches('\0').trim().to_string();
+            (!name.is_empty()).then_some(name)
+        }
+    }
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 #[cfg(windows)]
@@ -526,7 +768,7 @@ fn profiles_for_devices(
                     .map(|h| h.label.clone())
                     .filter(|label| !label.is_empty())
                     .unwrap_or_default(),
-                current_profile: get_display_icc_profile(&dev.device),
+                current_profile: get_icm_profile_gdi(&dev.device),
                 installed_profiles: get_installed_profiles_for_display(&dev.device),
                 advanced_color_supported: hdr_state.is_some_and(|h| h.supported),
                 hdr_enabled: hdr_state.is_some_and(|h| h.enabled),
@@ -538,156 +780,29 @@ fn profiles_for_devices(
 }
 
 #[cfg(windows)]
-fn get_display_icc_profile(device_name: &str) -> Option<String> {
-    // Try the legacy GDI path first (works on some systems).
-    if let Some(path) = get_icm_profile_gdi(device_name) {
-        return Some(path);
-    }
-    // Fallback: WCS (Windows Color System) default profile for the display.
-    // This is the API that Windows Settings actually uses for per-display
-    // profile association on modern Windows 10/11.
-    get_wcs_default_profile(device_name)
-}
-
-#[cfg(windows)]
 fn get_icm_profile_gdi(device_name: &str) -> Option<String> {
-    let device_w: Vec<u16> = device_name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let mut profile_path = [0u16; 512];
-    let mut size = profile_path.len() as u32;
-
-    let result = unsafe {
-        let mscms =
-            windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::s!("mscms.dll"))
-                .ok()?;
-
-        let proc = windows::Win32::System::LibraryLoader::GetProcAddress(
-            mscms,
-            windows::core::s!("GetICMProfileW"),
-        )?;
-
-        let hdc = windows::Win32::Graphics::Gdi::CreateDCW(
-            windows::core::PCWSTR(device_w.as_ptr()),
-            windows::core::PCWSTR::null(),
-            windows::core::PCWSTR::null(),
-            None,
-        );
-
-        if hdc.is_invalid() {
-            let _ = windows::Win32::Foundation::FreeLibrary(mscms);
-            return None;
-        }
-
-        let get_icm_profile: unsafe extern "system" fn(usize, *mut u32, *mut u16) -> i32 =
-            std::mem::transmute(proc);
-        let r = get_icm_profile(hdc.0 as usize, &mut size, profile_path.as_mut_ptr());
-
-        let _ = windows::Win32::Graphics::Gdi::DeleteDC(hdc);
-        let _ = windows::Win32::Foundation::FreeLibrary(mscms);
-        r
-    };
-
-    if result != 0 {
-        let len = std::cmp::min(size as usize, profile_path.len());
-        let path = String::from_utf16_lossy(&profile_path[..len]);
-        let path = path.trim_end_matches('\0').to_string();
-        if !path.is_empty() {
-            return Some(path);
-        }
-    }
-
-    None
+    // `GetICMProfileW` — the HDC twin of `SetICMProfileW` — is gone from
+    // mscms.dll on this Windows build too, so the active profile comes from
+    // WCS. That is the same value Windows Settings shows: the first entry of
+    // the device's `ICM\ProfileAssociations\Display` list.
+    let profile = wcs::default_profile_name(device_name)?;
+    Some(resolve_profile_path(&profile))
 }
 
+/// WCS reports a bare profile file name (`xiaomi_D65P3_base.icc`), while the
+/// rest of the app talks in full paths (`GetICMProfileW` used to return one).
+/// Resolve through the system colour directory so `current_profile` keeps
+/// pointing at a real file the UI can name.
 #[cfg(windows)]
-fn get_wcs_default_profile(device_name: &str) -> Option<String> {
-    // WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER = 1
-    const WCS_SCOPE_CURRENT_USER: u32 = 1;
-    // COLORPROFILETYPE values from mscms.h
-    const CPT_ICC: u32 = 1;
-    // COLORPROFILESUBTYPE values from mscms.h; CPST_NONE asks for the device profile.
-    const CPST_NONE: u32 = 0;
-
-    // WCS uses the bare display name (e.g. "DISPLAY1") without the \\.\ prefix.
-    let wcs_device = device_name
-        .strip_prefix(r"\\.\")
-        .unwrap_or(device_name)
-        .to_ascii_uppercase();
-    let device_w: Vec<u16> = wcs_device
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-
-    unsafe {
-        let mscms =
-            windows::Win32::System::LibraryLoader::LoadLibraryA(windows::core::s!("mscms.dll"))
-                .ok()?;
-
-        let size_proc = windows::Win32::System::LibraryLoader::GetProcAddress(
-            mscms,
-            windows::core::s!("WcsGetDefaultColorProfileSize"),
-        )?;
-        let get_proc = windows::Win32::System::LibraryLoader::GetProcAddress(
-            mscms,
-            windows::core::s!("WcsGetDefaultColorProfile"),
-        )?;
-
-        let wcs_get_size: unsafe extern "system" fn(
-            u32,
-            *const u16,
-            u32,
-            u32,
-            u32,
-            *mut u32,
-        ) -> i32 = std::mem::transmute(size_proc);
-        let wcs_get_profile: unsafe extern "system" fn(
-            u32,
-            *const u16,
-            u32,
-            u32,
-            u32,
-            u32,
-            *mut u16,
-        ) -> i32 = std::mem::transmute(get_proc);
-
-        let mut size = 0u32;
-        let r_size = wcs_get_size(
-            WCS_SCOPE_CURRENT_USER,
-            device_w.as_ptr(),
-            CPT_ICC,
-            CPST_NONE,
-            0,
-            &mut size,
-        );
-        if r_size == 0 || size == 0 || size > 4096 {
-            let _ = windows::Win32::Foundation::FreeLibrary(mscms);
-            return None;
-        }
-
-        let mut profile_name: Vec<u16> = vec![0; size as usize];
-        let r = wcs_get_profile(
-            WCS_SCOPE_CURRENT_USER,
-            device_w.as_ptr(),
-            CPT_ICC,
-            CPST_NONE,
-            0,
-            size * std::mem::size_of::<u16>() as u32,
-            profile_name.as_mut_ptr(),
-        );
-        let _ = windows::Win32::Foundation::FreeLibrary(mscms);
-
-        if r != 0 {
-            let name = String::from_utf16_lossy(&profile_name);
-            let name = name.trim_end_matches('\0').to_string();
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-        None
+fn resolve_profile_path(name: &str) -> String {
+    let path = std::path::Path::new(name);
+    if path.is_absolute() {
+        return name.to_string();
     }
+    get_color_profiles_dir()
+        .join(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(windows)]
@@ -742,7 +857,7 @@ fn read_gamma_intensity() -> u32 {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 /// Strip the Windows extended-length prefix (`\\?\`) so the path can be
-/// handed to Win32 APIs that reject it (mscms' `SetICMProfileW` among them).
+/// handed to Win32 APIs that reject it (mscms among them).
 /// `\\?\UNC\server\share` collapses to `\\server\share`.
 fn simplify_extended_path(path: &std::path::Path) -> std::path::PathBuf {
     let s = path.as_os_str().to_string_lossy();
@@ -1000,5 +1115,106 @@ mod tests {
     #[test]
     fn test_get_srgb_profile_path() {
         let _ = get_srgb_profile_path();
+    }
+}
+
+/// Live tests that change the machine's colour-management state.
+///
+/// Ignored by default because they rewrite the default ICC association of
+/// `\\.\DISPLAY1`. Run them explicitly:
+/// `cargo test --lib live_profile -- --ignored --nocapture`.
+#[cfg(all(test, windows))]
+mod live_profile_tests {
+    use super::*;
+    use std::path::Path;
+
+    const DISPLAY: &str = r"\\.\DISPLAY1";
+    const XIAOMI: &str = r"C:\WINDOWS\System32\spool\drivers\color\xiaomi_D65P3_base.icc";
+    const SRGB: &str = r"C:\WINDOWS\System32\spool\drivers\color\sRGB Color Space Profile.icm";
+
+    fn file_name_of(path: &str) -> String {
+        Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Puts the display's default profile back the way the test found it, even
+    /// when an assertion panics: a live test must never leave the panel on a
+    /// profile the user did not choose.
+    struct RestoreOnDrop {
+        previous: Option<String>,
+    }
+
+    impl Drop for RestoreOnDrop {
+        fn drop(&mut self) {
+            match self.previous.clone() {
+                Some(previous) => {
+                    if let Err(e) = load_icc_profile(DISPLAY, &previous) {
+                        eprintln!("live test: could not restore {previous}: {e:?}");
+                    }
+                }
+                None => {
+                    // Found with nothing associated — hand the display back to
+                    // Windows' default instead of leaving sRGB pinned to it.
+                    if let Some(current) = get_icm_profile_gdi(DISPLAY) {
+                        if let Err(e) = wcs::disassociate_profile(DISPLAY, Path::new(&current)) {
+                            eprintln!("live test: could not clear {current}: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The whole point of this change: the Xiaomi profile really associates
+    /// with a display, WCS really reports it back, and a reset really restores
+    /// sRGB. Everything else in this module is unit-tested; this one talks to
+    /// the live Windows colour stack.
+    #[test]
+    #[ignore = "live: rewrites the default ICC association of \\\\.\\DISPLAY1"]
+    fn live_xiaomi_profile_round_trips_through_wcs() {
+        assert!(Path::new(XIAOMI).is_file(), "{XIAOMI} is not installed");
+        assert!(
+            attached_display_devices()
+                .iter()
+                .any(|d| d.device == DISPLAY),
+            "{DISPLAY} is not attached"
+        );
+
+        let previous = get_icm_profile_gdi(DISPLAY);
+        println!("previous default profile of {DISPLAY}: {previous:?}");
+        let _restore = RestoreOnDrop {
+            previous: previous.clone(),
+        };
+
+        load_icc_profile(DISPLAY, XIAOMI).expect("AssociateColorProfileWithDeviceW must accept it");
+        let read_back = get_icm_profile_gdi(DISPLAY)
+            .expect("WcsGetDefaultColorProfile must report the profile just associated");
+        println!("read back after load: {read_back}");
+        assert_eq!(file_name_of(&read_back), file_name_of(XIAOMI));
+        assert!(
+            read_back.eq_ignore_ascii_case(XIAOMI),
+            "expected the full path {XIAOMI}, got {read_back}"
+        );
+
+        // The UI reads the same value through `get_color_status`: it must agree.
+        let status = get_color_status().expect("colour status");
+        let listed = status
+            .displays
+            .iter()
+            .find(|d| d.device_name == DISPLAY)
+            .and_then(|d| d.current_profile.clone())
+            .expect("get_color_status must report the profile the UI shows");
+        println!("get_color_status reports: {listed}");
+        assert_eq!(file_name_of(&listed), file_name_of(XIAOMI));
+
+        unload_icc_profile(DISPLAY).expect("the reset to sRGB must succeed");
+        let after_reset =
+            get_icm_profile_gdi(DISPLAY).expect("a reset display must report the sRGB profile");
+        println!("read back after reset: {after_reset}");
+        assert_eq!(file_name_of(&after_reset), file_name_of(SRGB));
+
+        // `_restore` puts back whatever was there before this test ran.
     }
 }

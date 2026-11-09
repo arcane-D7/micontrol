@@ -1851,7 +1851,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
         // profile by dropping one into staging. The bytes are re-validated and
         // the pinned sha256 re-checked here, and the result is verified by
         // reading the destination back. Installation is separate from applying:
-        // the unelevated app calls `SetICMProfileW` afterwards.
+        // the unelevated app associates it with the display afterwards.
         "install_icc_profile" => {
             let file_name = cmd.args["file_name"].as_str().unwrap_or_default();
             if file_name.is_empty() {
