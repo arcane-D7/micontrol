@@ -825,6 +825,111 @@ pub async fn launch_color_calibration_wizard() -> Result<(), ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
+// ── ICC catalogue (curated profiles) ────────────────────────────────────────
+
+/// Download a catalogue profile into the staging directory, validating the ICC
+/// header and the pinned sha256/size. Nothing is applied here.
+#[tauri::command]
+pub async fn download_color_profile(
+    entry_id: String,
+) -> Result<crate::hw::icc_catalog::DownloadResult, ErrorResponse> {
+    crate::hw::icc_catalog::download_entry(&entry_id)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppliedColorProfile {
+    pub entry_id: String,
+    pub installed_path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    /// `local` — the file was already in the system directory;
+    /// `installed` — copied there by the elevated helper just now.
+    pub source: String,
+}
+
+/// Install (when needed) and apply a catalogue profile to one display.
+///
+/// Downloads are copied into the system colour directory by the authenticated
+/// bridge service (`install_icc_profile`) — never through a UAC prompt — and
+/// then applied by the unprivileged process via `SetICMProfileW`.
+#[tauri::command]
+pub async fn apply_color_profile(
+    display: String,
+    entry_id: String,
+) -> Result<AppliedColorProfile, ErrorResponse> {
+    use crate::hw::icc_catalog::{self, IccKind};
+
+    let entry = icc_catalog::find_entry(&entry_id).map_err(ErrorResponse::from)?;
+    let (path, sha256, bytes, source) = match entry.kind {
+        IccKind::Local => {
+            let path = icc_catalog::system_profiles_dir().join(entry.file_name());
+            let info = icc_catalog::validate_local_profile(&path).map_err(ErrorResponse::from)?;
+            (path, info.sha256, info.bytes, "local".to_string())
+        }
+        IccKind::Download => {
+            let value = elev_bridge::run_elevated_bridge_only(
+                "install_icc_profile",
+                serde_json::json!({ "file_name": entry.file_name() }),
+            )
+            .await
+            .map_err(|e| {
+                ErrorResponse::from(format!(
+                    "installing a profile needs the MiControl Bridge service, and no UAC prompt \
+                     is used: {e}"
+                ))
+            })?;
+            let result: icc_catalog::InstallResult = serde_json::from_value(value)
+                .map_err(|e| ErrorResponse::from(format!("unexpected install result: {e}")))?;
+            if let Some(expected) = entry.sha256.as_deref() {
+                if !result.sha256.eq_ignore_ascii_case(expected) {
+                    return Err(ErrorResponse::from(format!(
+                        "installed profile does not match the catalogue hash ({} != {expected})",
+                        result.sha256
+                    )));
+                }
+            }
+            (
+                std::path::PathBuf::from(&result.installed_path),
+                result.sha256,
+                result.bytes,
+                "installed".to_string(),
+            )
+        }
+    };
+
+    let profile_path = path.display().to_string();
+    let display_for_load = display;
+    run_blocking(move || {
+        crate::hw::color_calibration::load_icc_profile(&display_for_load, &profile_path)
+    })
+    .await
+    .map_err(ErrorResponse::from)?;
+
+    Ok(AppliedColorProfile {
+        entry_id,
+        installed_path: path.display().to_string(),
+        sha256,
+        bytes,
+        source,
+    })
+}
+
+/// Open a real panel-research search in the default browser.
+///
+/// `kind` is `notebookcheck` or `panelook`; the URL is built backend-side from a
+/// fixed template (the query is validated, never interpolated into a shell).
+#[tauri::command]
+pub async fn open_color_profile_search(kind: String, query: String) -> Result<(), ErrorResponse> {
+    run_blocking(move || {
+        crate::hw::icc_catalog::open_profile_search(&kind, &query)
+            .map_err(crate::hw::errors::HardwareError::Other)
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
 // ── AI Noise Cancellation ────────────────────────────────────────────────────
 
 #[tauri::command]
