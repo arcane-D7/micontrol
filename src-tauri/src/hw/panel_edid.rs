@@ -245,7 +245,7 @@ mod tests {
     use super::*;
 
     fn ascii_variant(text: &str) -> wmi::Variant {
-        wmi::Variant::Array(text.encode_utf16().map(|c| wmi::Variant::UI2(c)).collect())
+        wmi::Variant::Array(text.encode_utf16().map(wmi::Variant::UI2).collect())
     }
 
     fn row(instance: &str, mfg: &str, code: &str, name: &str) -> HashMap<String, wmi::Variant> {

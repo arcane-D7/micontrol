@@ -1002,20 +1002,20 @@ mod tests {
         let edo = monitor("EDO", "4503", "");
         let lg = monitor("GSM", "774A", "LG ULTRAGEAR");
         assert_eq!(
-            match_quality(&find_entry("oem-edo4503-d65p3").unwrap(), Some(&edo)),
+            match_quality(find_entry("oem-edo4503-d65p3").unwrap(), Some(&edo)),
             Some(MatchQuality::Exact)
         );
         assert_eq!(
-            match_quality(&find_entry("oem-edo4503-d65p3").unwrap(), Some(&lg)),
+            match_quality(find_entry("oem-edo4503-d65p3").unwrap(), Some(&lg)),
             None,
             "a panel profile must never be offered for a different panel"
         );
         assert_eq!(
-            match_quality(&find_entry("windows-srgb-iec61966-2-1").unwrap(), Some(&lg)),
+            match_quality(find_entry("windows-srgb-iec61966-2-1").unwrap(), Some(&lg)),
             Some(MatchQuality::Generic)
         );
         assert_eq!(
-            match_quality(&find_entry("windows-srgb-iec61966-2-1").unwrap(), None),
+            match_quality(find_entry("windows-srgb-iec61966-2-1").unwrap(), None),
             Some(MatchQuality::Generic)
         );
     }
