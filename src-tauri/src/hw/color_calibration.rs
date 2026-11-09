@@ -682,7 +682,6 @@ fn read_gamma_intensity() -> u32 {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-
 /// Strip the Windows extended-length prefix (`\\?\`) so the path can be
 /// handed to Win32 APIs that reject it (mscms' `SetICMProfileW` among them).
 /// `\\?\UNC\server\share` collapses to `\\server\share`.
@@ -704,7 +703,9 @@ mod simplify_tests {
     #[test]
     fn strips_the_extended_prefix_from_drive_paths() {
         assert_eq!(
-            simplify_extended_path(std::path::Path::new(r"\\?\C:\WINDOWS\System32\spool\drivers\color\a.icc")),
+            simplify_extended_path(std::path::Path::new(
+                r"\\?\C:\WINDOWS\System32\spool\drivers\color\a.icc"
+            )),
             std::path::PathBuf::from(r"C:\WINDOWS\System32\spool\drivers\color\a.icc")
         );
     }
