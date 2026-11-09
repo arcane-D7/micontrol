@@ -42,6 +42,7 @@ export default function SettingsTab({ ai, onTabChange }: Props) {
         onGrantConsent={handleGrantConsent}
         onOpenPrivacyPolicy={() => onTabChange('privacy')}
         onReplayOnboarding={handleReplayOnboarding}
+        onOpenStartup={() => onTabChange('startup')}
       />
     </>
   );

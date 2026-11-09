@@ -18,6 +18,11 @@ use crate::hw::overview::{get_overview_snapshot as hw_get_overview, OverviewSnap
 use crate::hw::performance::get_performance_mode as hw_get_perf;
 use crate::hw::processes::{get_process_list as hw_get_processes, ProcessInfo};
 use crate::hw::startup::{get_autostart as hw_get_autostart, set_autostart as hw_set_autostart};
+use crate::hw::startup_manager::{
+    apply_local_toggle as hw_apply_startup_toggle, elevated_args as startup_toggle_args,
+    get_startup_items as hw_get_startup_items, invalidate_cache as invalidate_startup_cache,
+    plan_toggle as hw_plan_startup_toggle, StartupSnapshot, TogglePlan,
+};
 use crate::hw::system_info::{get_system_info as hw_get_sysinfo, SystemInfo};
 use crate::hw::taskmgr::{
     get_network_interfaces as hw_get_network, get_task_manager as hw_get_task_manager,
@@ -422,6 +427,71 @@ pub async fn set_autostart(enabled: bool) -> Result<(), ErrorResponse> {
     // S26-005b: Keep the SYSTEM bridge watchdog in sync with the user's
     // autostart preference — no autostart ⇒ no watchdog auto-relaunch.
     crate::hw::crash_recovery::set_watchdog_enabled(enabled);
+    Ok(())
+}
+
+// ── Windows startup manager ─────────────────────────────────────────────────
+
+/// Enumerate every startup entry Windows knows about.
+///
+/// `refresh` bypasses the 5-second cache (manual refresh button). The snapshot
+/// carries the task-scan status so the UI can say when scheduled tasks could
+/// not be read instead of silently showing a shorter list.
+#[tauri::command]
+pub async fn get_startup_items(refresh: Option<bool>) -> Result<StartupSnapshot, ErrorResponse> {
+    run_blocking(move || hw_get_startup_items(refresh.unwrap_or(false)))
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Enable/disable one startup entry.
+///
+/// Run keys and Startup-folder shortcuts are switched through the same
+/// `StartupApproved` blob Task Manager writes; scheduled tasks through the
+/// Task Scheduler API. Machine-wide entries go through the elevated bridge
+/// (`startup_toggle`) with an enum-only payload — no arbitrary paths.
+#[tauri::command]
+pub async fn set_startup_item(id: String, enabled: bool) -> Result<(), ErrorResponse> {
+    let plan = run_blocking(move || hw_plan_startup_toggle(&id))
+        .await
+        .map_err(ErrorResponse::from)?;
+
+    match &plan {
+        TogglePlan::ElevatedApproved { .. } => {
+            elev_bridge::run_elevated("startup_toggle", startup_toggle_args(&plan, enabled))
+                .await
+                .map_err(ErrorResponse::from)?;
+        }
+        TogglePlan::LocalApproved { .. } => {
+            let plan = plan.clone();
+            run_blocking(move || hw_apply_startup_toggle(&plan, enabled))
+                .await
+                .map_err(ErrorResponse::from)?;
+        }
+        TogglePlan::Task { .. } => {
+            let local_plan = plan.clone();
+            let local = run_blocking(move || hw_apply_startup_toggle(&local_plan, enabled)).await;
+            if let Err(local_err) = local {
+                // A rejection that is not a permissions problem (e.g. the task
+                // has no logon trigger) will not be fixed by elevation.
+                if matches!(&local_err, HardwareError::NotSupported(_)) {
+                    return Err(ErrorResponse::from(local_err));
+                }
+                // A user task normally flips in-process; protected folders
+                // only expose SetEnabled to an administrator. Escalate once
+                // and keep both failures in the message if that also fails.
+                elev_bridge::run_elevated("startup_toggle", startup_toggle_args(&plan, enabled))
+                    .await
+                    .map_err(|e| {
+                        ErrorResponse::from(anyhow::anyhow!(
+                            "{local_err}; elevated retry failed: {e}"
+                        ))
+                    })?;
+            }
+        }
+    }
+
+    invalidate_startup_cache();
     Ok(())
 }
 
