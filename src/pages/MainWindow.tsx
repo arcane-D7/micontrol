@@ -452,6 +452,7 @@ export default function MainWindow({
             hw={hardware}
             ai={aiSettings}
             onOpenSettings={() => onTabChange('settings')}
+            onNavigate={onTabChange}
           />
         );
       case 'taskmgr':
@@ -531,6 +532,7 @@ export default function MainWindow({
             hw={hardware}
             ai={aiSettings}
             onOpenSettings={() => onTabChange('settings')}
+            onNavigate={onTabChange}
           />
         );
     }

@@ -9,6 +9,7 @@ import type {
   BiosInfo,
   HardwareCapabilities,
   HardwareProfile,
+  OverviewSnapshot,
   PerformanceMode,
   SystemInfo,
   UpdateStatus,
@@ -125,8 +126,63 @@ const BATTERY_INFO: BatteryInfo = {
   time_remaining_minutes: 187,
   time_to_full_minutes: null,
   charge_rate_mw: 0,
-  ac_input_power_mw: null,
+  ac_input_power_mw: 65000,
   voltage_mv: 15600,
+};
+
+/**
+ * Overview snapshot — mirrors the real `get_overview_snapshot` shape so
+ * `pnpm dev:mock` exercises the summary the same way production does.
+ */
+const OVERVIEW_SNAPSHOT: OverviewSnapshot = {
+  device: {
+    manufacturer: 'XIAOMI',
+    model: 'Xiaomi Book Pro 14',
+    family: 'Mi Laptop',
+    sku: 'TM2424-77079',
+    bios_version: 'XMAPT4B0P0A0A',
+  },
+  cpu: {
+    name: 'Intel(R) Core(TM) Ultra X7 358H',
+    cores: 16,
+    threads: 16,
+    base_clock_mhz: 1900,
+    l3_cache_mb: 18,
+    socket: 'U3E1',
+  },
+  gpu: { name: 'Intel(R) Arc(TM) B390 GPU', driver_version: '32.0.101.8991' },
+  npu: {
+    name: 'Intel(R) NPU',
+    vendor: 'Intel Corporation',
+    driver_version: '32.0.100.4841',
+    driver_date: '2026-07-24',
+    status: 'ok',
+    device_id: 'PCI\\VEN_8086&DEV_B03E',
+  },
+  memory: {
+    total_gb: 32,
+    module_count: 8,
+    speed_mt_s: 9600,
+    memory_type: 'LPDDR5',
+    manufacturer: 'SK Hynix',
+  },
+  storage: {
+    model: 'BIWIN CE942V8890M-1TB',
+    capacity_gb: 952.98,
+    free_gb: 83.7,
+    system_drive: 'C:',
+    bus: 'NVMe',
+    media: 'SSD',
+    health: 'Healthy',
+  },
+  display: { width: 3120, height: 2080, refresh_hz: 120, name: 'Xiaomi HDR Monitor' },
+  os: {
+    caption: 'Microsoft Windows 11 Pro',
+    build: '26200',
+    arch: '64-bit',
+    uptime_secs: 90_061,
+  },
+  captured_at_ms: 1_794_182_052_094,
 };
 
 const HARDWARE_CAPABILITIES: HardwareCapabilities = {
@@ -221,6 +277,31 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         ram_used_gb: Math.round(drift(8.3, 0.8) * 10) / 10,
       } as T;
 
+    case 'get_overview_snapshot':
+      return {
+        ...OVERVIEW_SNAPSHOT,
+        storage: {
+          ...OVERVIEW_SNAPSHOT.storage,
+          free_gb: Math.round(drift(83.7, 0.4) * 10) / 10,
+        },
+      } as T;
+
+    case 'get_os_turbo':
+      return {
+        enabled: true,
+        throttled_processes: 14,
+        power_plan: 'Best Performance',
+        snapshot_stale: false,
+      } as T;
+
+    case 'get_health_status':
+      return {
+        bridge: { state: 'healthy', consecutive_failures: 0 },
+        iot: { state: 'healthy', consecutive_failures: 0 },
+        face: { state: 'healthy', consecutive_failures: 0 },
+        ambient_sensor: { state: 'healthy', consecutive_failures: 0 },
+      } as T;
+
     // ── Battery ────────────────────────────────────────────────────────────
     case 'get_battery_info':
       return {
@@ -233,13 +314,24 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return {
         brightness: _brightness,
         hdr_enabled: _hdr,
+        hdr_supported: true,
+        hdr_displays: [
+          {
+            device: '\\\\.\\DISPLAY1',
+            label: 'Xiaomi HDR Monitor',
+            supported: true,
+            enabled: _hdr,
+          },
+        ],
         refresh_rate_hz: 120,
         available_refresh_rates: [60, 120],
         dynamic_refresh_rate_capable: true,
         adaptive_refresh_rate: _adaptiveRefreshRate,
+        adaptive_refresh_rate_pending_reboot: false,
         ai_brightness: _aiBrightness,
         ai_brightness_config: { ..._aiBrightnessConfig },
         ambient_lux: 342.0,
+        brightness_source: 'igcl',
       } as T;
 
     case 'set_brightness':
@@ -513,7 +605,16 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       } as T;
 
     case 'get_iot_device_info':
-      return { device_name: 'Mock IoT Device', is_connected: true } as T;
+      return {
+        pipe_available: true,
+        model: 'xiaomi.laptop.p52',
+        fw_version: '1.0.3_0010',
+        bind_status: { bound: false, uid: 0 },
+        device_id: 2175217920,
+        device_status: 'online (0x00)',
+        wifi_status: { wifi_status: 3, ssid: null },
+        wifi_network_count: null,
+      } as T;
 
     case 'get_iot_wifi_list':
       return { networks: [], connected_ssid: 'MockWiFi' } as T;
@@ -737,7 +838,12 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       ] as T;
 
     case 'wifi_status':
-      return { wifi_status: 1, ssid: 'MiHome-2.4G' } as T;
+      return {
+        connected: true,
+        ssid: 'Ramtula & Freitas',
+        signal: 91,
+        interface: 'Intel(R) Wi-Fi 6E AX211 160MHz',
+      } as T;
 
     case 'wifi_connect':
       return undefined as T;

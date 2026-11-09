@@ -256,16 +256,6 @@ body,
   }
 }
 
-/* grid-2 and grid-3 collapse to 1 column below 600px */
-@media (max-width: 600px) {
-  .grid-2 {
-    grid-template-columns: 1fr;
-  }
-  .grid-3 {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* Compact spacing for small windows */
 @media (max-width: 600px) {
   .content-area {
@@ -704,6 +694,17 @@ body {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 12px;
+}
+
+/* Responsivo: uma coluna abaixo de 600px. Fica DEPOIS das regras base de
+   propósito — a cópia que vivia no topo do ficheiro perdia para `.grid-2`
+   definido mais abaixo (mesma especificidade, ordem de origem posterior), por
+   isso o resumo continuava a duas colunas numa janela estreita. */
+@media (max-width: 600px) {
+  .grid-2,
+  .grid-3 {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Performance mode buttons ────────────────────────────────────────────── */
