@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import { Icon } from '../../components/ui/icons';
+import { InfoHint } from '../../components/ui/info-hint';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
 
@@ -232,7 +233,13 @@ export default function SecurityTab() {
 
       {/* Scan Actions Card */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>{t('security.scanActions')}</h3>
+        <h3 className="mc-label-with-hint">
+          <span>{t('security.scanActions')}</span>
+          <InfoHint
+            label={t('hint.securityScan')}
+            buttonLabel={t('hint.about', { name: t('security.scanActions') })}
+          />
+        </h3>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
           <button className="btn btn-primary" onClick={handleQuickScan} disabled={scanning}>
             {scanning ? (

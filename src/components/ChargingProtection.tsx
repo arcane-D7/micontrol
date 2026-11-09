@@ -190,6 +190,8 @@ export default function ChargingProtection({
       <Switch
         label={t('battery.careSwitch')}
         desc={t('battery.careDesc', { limit: display < 100 ? display : RECOMMENDED })}
+        hint={t('hint.chargeCare')}
+        hintLabel={t('hint.about', { name: t('battery.careSwitch') })}
         checked={careEnabled}
         pending={carePending}
         disabled={care === null}
@@ -200,6 +202,8 @@ export default function ChargingProtection({
       <div className="mc-seg-wrap">
         <Segmented
           label={t('battery.limitLabel')}
+          hint={t('hint.chargeLimit')}
+          hintLabel={t('hint.about', { name: t('battery.limitLabel') })}
           options={options}
           value={display}
           pending={applying}

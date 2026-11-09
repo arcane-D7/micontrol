@@ -3,6 +3,7 @@ import { t } from '../hooks/useI18n';
 import type { FanInfo, FanModeResult } from '../types/hardware';
 import { useToast } from '../contexts/ToastContext';
 import { Icon } from './ui/icons';
+import { InfoHint } from './ui/info-hint';
 
 interface Props {
   fan: FanInfo | null;
@@ -73,7 +74,13 @@ export default function FanControl({ fan, onModeChange }: Props) {
 
   return (
     <div className="card">
-      <h2 className="card-title">{t('fan.title')}</h2>
+      <h2 className="card-title mc-label-with-hint">
+        <span>{t('fan.title')}</span>
+        <InfoHint
+          label={t('hint.fanModes')}
+          buttonLabel={t('hint.about', { name: t('fan.title') })}
+        />
+      </h2>
 
       <div className="grid-3" style={{ marginBottom: 20 }}>
         {(['auto', 'fixed', 'off'] as const).map((m) => (
