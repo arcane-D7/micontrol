@@ -10,5 +10,7 @@ export { NavItem, NavGroup, type NavItemProps, type NavGroupProps } from './nav-
 export { Skeleton, SkeletonSwap, type SkeletonProps, type SkeletonShape } from './skeleton';
 export { Tooltip, type TooltipProps } from './tooltip';
 export { Segmented, type SegmentedProps, type SegmentedOption } from './segmented';
+export { Accordion, type AccordionProps } from './accordion';
+export { InfoHint, type InfoHintProps } from './info-hint';
 export { Icon, type IconName, type IconProps } from './icons';
 export { cx } from './cx';

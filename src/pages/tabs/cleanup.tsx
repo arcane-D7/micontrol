@@ -4,6 +4,7 @@ import ToggleSwitch from '../../components/ToggleSwitch';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import { Icon, type IconName } from '../../components/ui/icons';
+import { InfoHint } from '../../components/ui/info-hint';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
 
@@ -38,6 +39,16 @@ const CATEGORY_ICONS: Record<string, IconName> = {
   recycle_bin: 'trash',
   thumbnail_cache: 'image',
   windows_logs: 'clipboard',
+};
+
+/**
+ * Só as categorias cujo custo não se lê no nome. "Cache do browser" diz tudo;
+ * "Recycle Bin" não diz que é a única que não volta atrás, e "Windows Update
+ * cache" não diz que o Windows a volta a descarregar.
+ */
+const CATEGORY_HINTS: Record<string, string> = {
+  recycle_bin: 'hint.cleanupRecycleBin',
+  windows_update_cache: 'hint.cleanupUpdateCache',
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -203,10 +214,7 @@ export default function CleanupTab() {
       ) : (
         items.map((item) => (
           <div className="card" key={item.category} style={{ marginBottom: 12 }}>
-            <label
-              className="toggle-row"
-              style={{ display: 'flex', alignItems: 'center', gap: 12 }}
-            >
+            <div className="toggle-row" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <ToggleSwitch
                 checked={selected.has(item.category)}
                 onChange={() => toggleCategory(item.category)}
@@ -217,12 +225,20 @@ export default function CleanupTab() {
                 <Icon name={CATEGORY_ICONS[item.category] ?? 'folder'} size={24} />
               </span>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600 }}>{item.description}</div>
+                <div className="mc-label-with-hint">
+                  <span style={{ fontWeight: 600 }}>{item.description}</span>
+                  {CATEGORY_HINTS[item.category] && (
+                    <InfoHint
+                      label={t(CATEGORY_HINTS[item.category] as Parameters<typeof t>[0])}
+                      buttonLabel={t('hint.about', { name: item.description })}
+                    />
+                  )}
+                </div>
                 <span className="text-muted" style={{ fontSize: 12 }}>
                   {formatBytes(item.size_bytes)} · {item.file_count} {t('cleanup.files')}
                 </span>
               </div>
-            </label>
+            </div>
           </div>
         ))
       )}

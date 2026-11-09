@@ -12,6 +12,7 @@
  */
 
 import { useId, useRef } from 'react';
+import { InfoHint } from './info-hint';
 
 export interface SegmentedOption {
   value: number;
@@ -22,6 +23,9 @@ export interface SegmentedOption {
 
 export interface SegmentedProps {
   label?: string;
+  /** Semântica que o rótulo não diz — vira um "i" ao lado do nome. */
+  hint?: string;
+  hintLabel?: string;
   options: SegmentedOption[];
   value: number;
   onChange: (value: number) => void;
@@ -41,6 +45,8 @@ export interface SegmentedProps {
 
 export function Segmented({
   label,
+  hint,
+  hintLabel,
   options,
   value,
   onChange,
@@ -85,8 +91,11 @@ export function Segmented({
   return (
     <div className={`mc-seg${disabled ? ' mc-seg--disabled' : ''}`}>
       {label && (
-        <div className="mc-seg__label" id={labelId}>
-          {label}
+        <div className="mc-seg__label mc-label-with-hint">
+          {/* O `id` vive no texto, não no contentor: se ficasse no div, o nome
+              acessível do radiogroup passava a incluir o botão do InfoHint. */}
+          <span id={labelId}>{label}</span>
+          {hint && <InfoHint label={hint} buttonLabel={hintLabel} />}
         </div>
       )}
       <div

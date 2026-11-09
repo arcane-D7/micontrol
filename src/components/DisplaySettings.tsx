@@ -9,6 +9,7 @@ import {
 import { useToast } from '../contexts/ToastContext';
 import ToggleRow from './ToggleRow';
 import { Icon } from './ui/icons';
+import { InfoHint } from './ui/info-hint';
 interface Props {
   display: DisplayInfo | null;
   capabilities?: HardwareCapabilities;
@@ -126,6 +127,8 @@ export default function DisplaySettings({
       <ToggleRow
         label={t('display.hdr')}
         desc={hdrDesc}
+        hint={hdrSupported ? t('hint.displayHdr') : undefined}
+        hintLabel={t('hint.about', { name: t('display.hdr') })}
         checked={display.hdr_enabled}
         disabled={!hdrSupported}
         onChange={(v) => void handleAsync('HDR', () => onHdrChange(v))}
@@ -148,6 +151,12 @@ export default function DisplaySettings({
         desc={
           capabilities != null && !capabilities.has_igcl ? t('display.igclNotAvailable') : undefined
         }
+        hint={
+          capabilities == null || capabilities.has_igcl
+            ? t('hint.displayAdaptiveBrightness')
+            : undefined
+        }
+        hintLabel={t('hint.about', { name: t('display.aiAdaptiveBrightness') })}
         checked={display.ai_brightness}
         onChange={(v) => void handleAsync('Adaptive brightness', () => onAiBrightnessChange(v))}
       />
@@ -417,7 +426,14 @@ export default function DisplaySettings({
       {/* Refresh rate selector */}
       {display.available_refresh_rates && display.available_refresh_rates.length > 1 ? (
         <div className="stat-row" style={{ marginTop: 8, alignItems: 'center' }}>
-          <span className="stat-label">{t('display.refreshRate')}</span>
+          <span className="stat-label mc-label-with-hint">
+            <span>{t('display.refreshRate')}</span>
+            <InfoHint
+              label={t('hint.displayRefreshRate')}
+              buttonLabel={t('hint.about', { name: t('display.refreshRate') })}
+              side="bottom"
+            />
+          </span>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             {display.available_refresh_rates.map((hz) => {
               const isActive = hz === display.refresh_rate_hz;

@@ -526,9 +526,22 @@
   min-width: 0;
 }
 
+.mc-switchrow__labelrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .mc-switchrow__label {
   font-size: var(--t-body);
   color: var(--ink);
+}
+
+/* Rótulo de um grupo de botões (`.stat-label`) com um InfoHint ao lado. */
+.mc-label-with-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .mc-switchrow__desc {
@@ -883,4 +896,305 @@
   .mc-hairline .mc-switch {
     border: 1px solid CanvasText;
   }
+}
+
+/* ═══ Accordion (details/summary) ═════════════════════════════════════════
+   A ajuda que se abre. Gramática hairline: 1 px de separação, zero sombra,
+   nenhum plano novo — o corpo vive na mesma `--surface` do cartão. */
+.mc-accordion {
+  border: var(--hair, 1px) solid var(--hairline);
+  border-radius: var(--r-control, 8px);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.mc-accordion + .mc-accordion {
+  margin-top: var(--s-2);
+}
+
+.mc-accordion__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 24px;
+  padding: 10px var(--s-3);
+  cursor: pointer;
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+  list-style: none;
+}
+
+/* O marcador nativo do <details> é o único glifo que a casa não desenha. */
+.mc-accordion__summary::-webkit-details-marker {
+  display: none;
+}
+
+.mc-accordion__summary::marker {
+  content: '';
+}
+
+.mc-accordion__summary:hover {
+  color: var(--ink);
+  background: var(--surface-hover);
+}
+
+.mc-accordion__summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+  border-radius: var(--r-control, 8px);
+}
+
+.mc-accordion__chev {
+  flex: none;
+  color: var(--ink-dim);
+  transition: rotate var(--d-base) var(--ease-out);
+}
+
+.mc-accordion[open] > .mc-accordion__summary {
+  color: var(--ink);
+}
+
+.mc-accordion[open] .mc-accordion__chev {
+  rotate: 90deg;
+}
+
+.mc-accordion__body {
+  padding: var(--s-3);
+  border-top: var(--hair, 1px) solid var(--hairline);
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+  line-height: 1.6;
+}
+
+.mc-accordion__body > p {
+  margin: 0 0 var(--s-2);
+}
+
+.mc-accordion__body > p:last-child {
+  margin-bottom: 0;
+}
+
+/* ═══ InfoHint ════════════════════════════════════════════════════════════
+   O "i" ao lado de um controlo cuja semântica não cabe no rótulo. Abre por
+   clique OU por foco de teclado — nunca só por hover (o Tooltip é que é
+   hover-first; este é o par acessível para texto longo). */
+.mc-infohint {
+  position: relative;
+  display: inline-flex;
+  vertical-align: -0.3em;
+}
+
+.mc-infohint__btn {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill, 999px);
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition:
+    color var(--d-fast) var(--ease-out),
+    background-color var(--d-fast) var(--ease-out);
+}
+
+.mc-infohint__btn:hover {
+  color: var(--ink);
+}
+
+.mc-infohint__btn[aria-expanded='true'] {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.mc-infohint__btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.mc-infohint__panel {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 6px);
+  left: 0;
+  width: max-content;
+  max-width: min(280px, 70vw);
+  padding: 8px 10px;
+  border: var(--hair, 1px) solid var(--hairline-2);
+  border-radius: var(--r-control, 8px);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: var(--t-meta);
+  font-weight: var(--w-body);
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: normal;
+  box-shadow: none;
+}
+
+.mc-infohint__panel[data-side='top'] {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.mc-infohint__panel[data-side='right'] {
+  top: auto;
+  bottom: -6px;
+  left: calc(100% + 8px);
+}
+
+.mc-infohint__panel[data-side='left'] {
+  top: auto;
+  right: calc(100% + 8px);
+  bottom: -6px;
+  left: auto;
+}
+
+/* Ecrã estreito: um painel à direita sairia da janela, por isso volta a cair
+   por baixo do gatilho. 700 px fica abaixo da largura mínima cómoda da janela
+   (o `minWidth` da app é 600). */
+@media (max-width: 700px) {
+  .mc-infohint__panel[data-side='right'],
+  .mc-infohint__panel[data-side='left'] {
+    top: calc(100% + 6px);
+    right: auto;
+    bottom: auto;
+    left: 0;
+  }
+}
+
+.mc-infohint__panel[data-open='false'] {
+  display: none;
+}
+
+/* ═══ Tooltip (hover-first, 411 `title=""` substituídos) ══════════════════
+   Sem sombra: o plano separa-se por cor invertida (`--ink` sobre `--surface`). */
+.mc-tooltip {
+  position: relative;
+  display: inline-flex;
+}
+
+.mc-tooltip__bubble {
+  position: absolute;
+  z-index: 60;
+  bottom: calc(100% + 6px);
+  left: 0;
+  width: max-content;
+  max-width: min(260px, 70vw);
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--surface);
+  font-size: var(--t-meta);
+  line-height: 1.45;
+  text-align: left;
+  box-shadow: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mc-tooltip__bubble[data-side='bottom'] {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+
+.mc-tooltip__bubble[data-open='true'] {
+  opacity: 1;
+}
+
+/* ═══ Diagrama do Edge Slide ══════════════════════════════════════════════
+   O desenho do touchpad: banda de arranque + setas. Só `currentColor` e
+   tokens — nada de cores literais, nada de sombras. */
+.mc-touchdiagram {
+  display: block;
+  width: 100%;
+  max-width: 380px;
+  height: auto;
+  margin: var(--s-3) auto var(--s-2);
+  color: var(--ink-dim);
+}
+
+.mc-touchdiagram__pad {
+  fill: var(--surface-2);
+  stroke: var(--hairline-2);
+  stroke-width: 1;
+}
+
+.mc-touchdiagram__band {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+.mc-touchdiagram__arrow {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mc-touchdiagram__cap {
+  fill: var(--ink-muted);
+  font-size: 10px;
+  font-weight: var(--w-medium);
+  letter-spacing: 0.02em;
+}
+
+.mc-touchdiagram__note {
+  fill: var(--ink-dim);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+/* Listas e subtítulos dentro de um accordion: o corpo é texto de ajuda, não
+   prosa — por isso o espaço é curto e o número é tabular. */
+.mc-accordion__body ol,
+.mc-accordion__body ul {
+  margin: 0 0 var(--s-2);
+  padding-left: 18px;
+}
+
+.mc-accordion__body li {
+  margin-bottom: 3px;
+}
+
+.mc-accordion__body li:last-child {
+  margin-bottom: 0;
+}
+
+.mc-accordion__body h4 {
+  margin: var(--s-3) 0 var(--s-1);
+  font-size: var(--t-label);
+  font-weight: var(--w-strong);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.mc-accordion__body h4:first-child {
+  margin-top: 0;
+}
+
+.mc-accordion__body code {
+  padding: 1px 4px;
+  border: var(--hair, 1px) solid var(--hairline);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 0.95em;
+}
+
+/* Nota final de um accordion (o "learn more" do FunctionExplain). */
+.mc-accordion__note {
+  margin: var(--s-2) 0 0;
+  font-size: var(--t-label);
+  color: var(--ink-dim);
+}
+
+.mc-function-explain {
+  margin-top: var(--s-2);
 }

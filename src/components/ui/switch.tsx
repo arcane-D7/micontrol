@@ -11,10 +11,15 @@
  */
 
 import { useId } from 'react';
+import { InfoHint } from './info-hint';
 
 export interface SwitchProps {
   label?: string;
   desc?: string;
+  /** Semântica que o rótulo não diz — vira um "i" ao lado do nome. */
+  hint?: string;
+  /** Texto do `aria-label` do "i" quando o rótulo visível não chega. */
+  hintLabel?: string;
   checked: boolean;
   onChange: (next: boolean) => void;
   /** A gravar no hardware — o controlo aceita o clique mas não o repete. */
@@ -33,6 +38,8 @@ export interface SwitchProps {
 export function Switch({
   label,
   desc,
+  hint,
+  hintLabel,
   checked,
   onChange,
   pending,
@@ -67,8 +74,11 @@ export function Switch({
   return (
     <div className="mc-switchrow">
       <div className="mc-switchrow__text">
-        <div className="mc-switchrow__label" id={controlId}>
-          {label}
+        <div className="mc-switchrow__labelrow">
+          <span className="mc-switchrow__label" id={controlId}>
+            {label}
+          </span>
+          {hint && <InfoHint label={hint} buttonLabel={hintLabel} />}
         </div>
         {desc && <div className="mc-switchrow__desc">{desc}</div>}
         {isDisabled && disabledReason && (
