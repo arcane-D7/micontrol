@@ -883,10 +883,21 @@ pub async fn apply_color_profile(
                 )
                 .await
                 .map_err(|e| {
-                    ErrorResponse::from(format!(
-                        "installing a profile needs the MiControl Bridge service, and no UAC \
-                         prompt is used: {e}"
-                    ))
+                    if e.contains("Unknown elevated command") {
+                        // The bridge is a separate SYSTEM binary installed with
+                        // the app; a dev/older build will not know this command.
+                        ErrorResponse::from(
+                            "the installed MiControl Bridge predates this build and does not \
+                             know install_icc_profile — update MiControl so the bridge matches \
+                             the app"
+                                .to_string(),
+                        )
+                    } else {
+                        ErrorResponse::from(format!(
+                            "installing a profile needs the MiControl Bridge service, and no UAC \
+                             prompt is used: {e}"
+                        ))
+                    }
                 })?;
                 let result: icc_catalog::InstallResult = serde_json::from_value(value)
                     .map_err(|e| ErrorResponse::from(format!("unexpected install result: {e}")))?;
