@@ -1010,6 +1010,93 @@
 }
 
 .mc-infohint__btn:focus-visible {
+/* ═══ Overview — resumo da aplicação ═══════════════════════════════════════
+   Um cartão = um bloco do resumo. Os grupos dentro do cartão (Processador,
+   Gráficos, NPU…) separam-se por hairline, nunca por sombra nem por caixa.
+   `.mc-lead` é o nome completo do componente (CPU/GPU/NPU): vai em linha
+   própria porque um nome de 34 caracteres alinhado à direita parte a coluna. */
+.mc-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mc-group {
+  margin-top: var(--s-4);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--hairline);
+}
+
+.mc-group:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.mc-group__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-label);
+  font-weight: var(--w-strong);
+  color: var(--ink-dim);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.mc-group__note {
+  margin: var(--s-2) 0 0;
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+}
+
+.mc-lead {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-body-lg);
+  font-weight: var(--w-medium);
+  color: var(--ink);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.mc-lead__sub {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-meta);
+  font-weight: var(--w-body);
+  color: var(--ink-dim);
+}
+
+/* Atalhos "Ir para…" — pílulas hairline, sem sombra, accent só no foco. */
+.mc-jump {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.mc-jump__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-meta);
+  font-weight: var(--w-medium);
+  cursor: pointer;
+  transition:
+    background var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out);
+}
+
+.mc-jump__btn:hover {
+  background: var(--surface-2);
+  border-color: var(--hairline-2);
+}
+
+.mc-jump__btn:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
@@ -1197,4 +1284,13 @@
 
 .mc-function-explain {
   margin-top: var(--s-2);
+}
+.mc-jump__btn .mc-icon {
+  color: var(--ink-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-hairline .mc-jump__btn {
+    transition: none;
+  }
 }

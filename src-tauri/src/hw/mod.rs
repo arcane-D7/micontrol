@@ -41,6 +41,7 @@ pub mod os_turbo_stats;
 pub mod os_turbo_suggest;
 #[cfg(windows)]
 pub mod osd;
+pub mod overview;
 pub mod performance;
 pub mod phone_link;
 #[cfg(windows)]

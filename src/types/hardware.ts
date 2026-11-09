@@ -512,3 +512,93 @@ export interface ThermalZoneInfo {
   /** Whether this thermal zone is active. */
   active: boolean;
 }
+
+// ── Overview snapshot (identity + specs) ───────────────────────────────────
+//
+// Mirrors `src-tauri/src/hw/overview.rs`. Every optional field is `null` when
+// the platform does not expose it — the UI renders "—" with a hint and never a
+// substituted zero. `null` on `npu` means *no neural accelerator detected*.
+
+export interface OverviewDeviceSpec {
+  manufacturer: string;
+  model: string;
+  family: string | null;
+  /** ODM SKU (e.g. `TM2424-77079`). */
+  sku: string | null;
+  bios_version: string | null;
+}
+
+export interface OverviewCpuSpec {
+  name: string;
+  cores: number;
+  threads: number;
+  /** Rated clock from SMBIOS — not a live frequency. */
+  base_clock_mhz: number | null;
+  l3_cache_mb: number | null;
+  socket: string | null;
+}
+
+export interface OverviewGpuSpec {
+  name: string;
+  driver_version: string | null;
+}
+
+export interface OverviewNpuSpec {
+  name: string;
+  vendor: string | null;
+  driver_version: string | null;
+  /** `YYYY-MM-DD`. */
+  driver_date: string | null;
+  /** `ok` | `error`. */
+  status: string;
+  device_id: string | null;
+}
+
+export interface OverviewMemorySpec {
+  total_gb: number;
+  module_count: number;
+  speed_mt_s: number | null;
+  /** SMBIOS label: `DDR5`, `LPDDR5`, … */
+  memory_type: string | null;
+  manufacturer: string | null;
+}
+
+export interface OverviewStorageSpec {
+  model: string;
+  capacity_gb: number;
+  free_gb: number;
+  /** `C:` */
+  system_drive: string;
+  /** `NVMe` | `SATA` | … */
+  bus: string | null;
+  /** `SSD` | `HDD` | `SCM` */
+  media: string | null;
+  /** `Healthy` | `Warning` | `Unhealthy` */
+  health: string | null;
+}
+
+export interface OverviewDisplaySpec {
+  width: number;
+  height: number;
+  refresh_hz: number;
+  name: string | null;
+}
+
+export interface OverviewOsSpec {
+  caption: string;
+  build: string;
+  arch: string;
+  uptime_secs: number;
+}
+
+export interface OverviewSnapshot {
+  device: OverviewDeviceSpec;
+  cpu: OverviewCpuSpec;
+  gpu: OverviewGpuSpec;
+  npu: OverviewNpuSpec | null;
+  memory: OverviewMemorySpec;
+  storage: OverviewStorageSpec;
+  display: OverviewDisplaySpec;
+  os: OverviewOsSpec;
+  captured_at_ms: number;
+}

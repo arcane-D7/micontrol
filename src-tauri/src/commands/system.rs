@@ -14,6 +14,7 @@ use crate::hw::display::{
 };
 use crate::hw::errors::{ErrorResponse, HardwareError};
 use crate::hw::fan::{get_fan_info as hw_get_fan, FanInfo, FanMode, FanModeResult};
+use crate::hw::overview::{get_overview_snapshot as hw_get_overview, OverviewSnapshot};
 use crate::hw::performance::get_performance_mode as hw_get_perf;
 use crate::hw::processes::{get_process_list as hw_get_processes, ProcessInfo};
 use crate::hw::startup::{get_autostart as hw_get_autostart, set_autostart as hw_set_autostart};
@@ -329,6 +330,17 @@ pub async fn set_touchpad_edge_slide(enabled: bool) -> Result<(), ErrorResponse>
 #[tauri::command]
 pub async fn get_system_info() -> Result<SystemInfo, ErrorResponse> {
     run_blocking(hw_get_sysinfo)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Hardware identity + specs for the Overview tab.
+///
+/// Static fields are read once per process and cached; the per-call work is a
+/// free-space query and the tick counter. See `hw::overview` for the costs.
+#[tauri::command]
+pub async fn get_overview_snapshot() -> Result<OverviewSnapshot, ErrorResponse> {
+    run_blocking(hw_get_overview)
         .await
         .map_err(ErrorResponse::from)
 }
