@@ -13,9 +13,37 @@ use crate::hw::display::AttachedDisplayDevice;
 #[cfg(windows)]
 use crate::hw::display::{attached_display_devices, HdrDisplayState};
 use crate::hw::errors::{HardwareError, HardwareResult};
+#[cfg(windows)]
+use crate::hw::icc_catalog;
+use crate::hw::icc_catalog::CatalogEntryView;
+#[cfg(windows)]
+use crate::hw::panel_edid::{self, MonitorIdentity};
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::collections::HashMap;
 
 // ── Data structures ──────────────────────────────────────────────────────────
+
+/// EDID identity of the panel behind a GDI display.
+///
+/// Present only when the CCD monitor path joined to a `WmiMonitorID` row on a
+/// machine where that join is unambiguous; otherwise the field is absent and
+/// the UI shows “—”. Guessing here would make the catalogue match profiles to
+/// the wrong panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelInfo {
+    /// `EDO 0x4503`
+    pub panel_id: String,
+    /// Three-letter EDID vendor (`EDO`, `SDC`, `GSM`).
+    pub manufacturer: String,
+    /// EDID product code as hex text (`4503`).
+    pub product_code: String,
+    /// Windows monitor name when EDID carries one, else the panel id.
+    pub name: String,
+    /// `EDO4503` — what Panelook / NotebookCheck index.
+    pub model_token: String,
+    pub year: Option<u16>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColorProfileInfo {
@@ -40,6 +68,12 @@ pub struct ColorProfileInfo {
     /// HDR is currently on for this display (calibration gammas are ignored).
     #[serde(default)]
     pub hdr_enabled: bool,
+    /// EDID panel identity, when the display could be joined to one monitor.
+    #[serde(default)]
+    pub panel: Option<PanelInfo>,
+    /// Curated profiles applicable to this panel (panel-specific first).
+    #[serde(default)]
+    pub catalog: Vec<CatalogEntryView>,
 }
 
 /// Why the calibration wizard cannot be used right now.
@@ -85,6 +119,9 @@ pub struct ColorCalibrationStatus {
     /// Set when the wizard must stay disabled, with a translatable reason code.
     #[serde(default)]
     pub wizard_block: Option<WizardBlock>,
+    /// Date the bundled ICC catalogue was last verified against its sources.
+    #[serde(default)]
+    pub catalog_updated: String,
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -98,7 +135,11 @@ pub fn get_color_status() -> HardwareResult<ColorCalibrationStatus> {
         // Windows ignores the calibration gamma ramp while HDR is on.
         let devices = attached_display_devices();
         let hdr = crate::hw::display::hdr_displays();
-        let displays = profiles_for_devices(&devices, &hdr);
+        // One CCD pass for the monitor device paths (EDID join) — the GDI
+        // display name alone cannot identify a panel.
+        let monitor_paths = crate::hw::display::monitor_device_paths();
+        let monitors = panel_edid::read_monitors();
+        let displays = profiles_for_devices(&devices, &hdr, &monitors, &monitor_paths);
         let eye_protection_active = check_eye_protection();
         let gamma_intensity = read_gamma_intensity();
         let hdr_on = hdr.iter().any(|d| d.enabled);
@@ -113,6 +154,9 @@ pub fn get_color_status() -> HardwareResult<ColorCalibrationStatus> {
                 hdr_on,
                 crate::hw::display::is_calibration_in_progress(),
             ),
+            catalog_updated: icc_catalog::catalog()
+                .map(|c| c.updated.clone())
+                .unwrap_or_default(),
         })
     }
     #[cfg(not(windows))]
@@ -236,12 +280,7 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
 /// `load_icc_profile` paths.
 #[cfg(windows)]
 fn get_color_profiles_dir() -> std::path::PathBuf {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-    std::path::PathBuf::from(&system_root)
-        .join("System32")
-        .join("spool")
-        .join("drivers")
-        .join("color")
+    icc_catalog::system_profiles_dir()
 }
 
 /// Unload (remove) the ICC profile for a display, reverting to sRGB.
@@ -449,16 +488,34 @@ use std::os::windows::process::CommandExt;
 fn profiles_for_devices(
     devices: &[AttachedDisplayDevice],
     hdr: &[HdrDisplayState],
+    monitors: &[MonitorIdentity],
+    monitor_paths: &HashMap<String, String>,
 ) -> Vec<ColorProfileInfo> {
     if devices.is_empty() {
         log::warn!("[color] no display attached to the desktop — colour profile list is empty");
         return Vec::new();
     }
 
+    let profiles_dir = icc_catalog::system_profiles_dir();
     devices
         .iter()
         .map(|dev| {
             let hdr_state = hdr.iter().find(|h| h.device == dev.device);
+            // EDID panel: CCD monitor path → WmiMonitorID instance. `None` on
+            // any ambiguity, and the UI then shows "—" instead of a guess.
+            let monitor = panel_edid::monitor_for_display(
+                monitor_paths.get(&dev.device).map(String::as_str),
+                monitors,
+                devices.len(),
+            );
+            let panel = monitor.map(|m| PanelInfo {
+                panel_id: m.panel_id(),
+                manufacturer: m.manufacturer.clone(),
+                product_code: m.product_code.clone(),
+                name: m.display_name(),
+                model_token: m.model_token(),
+                year: m.year,
+            });
             ColorProfileInfo {
                 device_name: dev.device.clone(),
                 // Only the CCD monitor name is a *monitor* name; the GDI
@@ -473,6 +530,8 @@ fn profiles_for_devices(
                 installed_profiles: get_installed_profiles_for_display(&dev.device),
                 advanced_color_supported: hdr_state.is_some_and(|h| h.supported),
                 hdr_enabled: hdr_state.is_some_and(|h| h.enabled),
+                panel,
+                catalog: icc_catalog::entries_for(monitor, &profiles_dir),
             }
         })
         .collect()
@@ -856,7 +915,7 @@ mod tests {
                 enabled: false,
             },
         ];
-        let profiles = profiles_for_devices(&devices, &hdr);
+        let profiles = profiles_for_devices(&devices, &hdr, &[], &HashMap::new());
         assert_eq!(
             profiles.len(),
             devices.len(),
@@ -876,7 +935,7 @@ mod tests {
         // The adapter string must not leak into the card title: three displays
         // on one GPU would all read "Intel(R) Arc(TM) B390 GPU".
         let devices = [device("MICONTROL_TEST_DISPLAYC", true, false)];
-        let profiles = profiles_for_devices(&devices, &[]);
+        let profiles = profiles_for_devices(&devices, &[], &[], &HashMap::new());
         assert_eq!(profiles.len(), 1);
         assert!(
             profiles[0].label.is_empty(),
@@ -888,7 +947,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn no_attached_display_yields_no_phantom_cards() {
-        assert!(profiles_for_devices(&[], &[]).is_empty());
+        assert!(profiles_for_devices(&[], &[], &[], &HashMap::new()).is_empty());
     }
 
     /// Read-only smoke test against the live machine: the colour tab must list
@@ -907,13 +966,25 @@ mod tests {
         );
         for d in &status.displays {
             println!(
-                "  {} '{}' profile={:?} advanced_color={} hdr={}",
+                "  {} '{}' profile={:?} advanced_color={} hdr={} panel={:?} catalog={}",
                 d.device_name,
                 d.label,
                 d.current_profile,
                 d.advanced_color_supported,
-                d.hdr_enabled
+                d.hdr_enabled,
+                d.panel.as_ref().map(|p| p.panel_id.clone()),
+                d.catalog.len()
             );
+            for entry in &d.catalog {
+                println!(
+                    "    catalog: {} [{}] kind={:?} compatible={} local={}",
+                    entry.display_name,
+                    entry.file_name,
+                    entry.kind,
+                    entry.compatible,
+                    entry.available_locally
+                );
+            }
         }
         assert_eq!(
             status.displays.len(),

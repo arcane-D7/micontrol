@@ -1842,6 +1842,27 @@ fn dispatch(cmd: ElevCmd) -> Value {
             make_ok(serde_json::json!({ "configured": configured, "unknown": false }))
         }
 
+        // ICC catalogue install: copy a validated profile from the fixed
+        // staging directory (`%PROGRAMDATA%\MiControl\icc\downloads`) into
+        // `%SystemRoot%\System32\spool\drivers\color`.
+        //
+        // The file name is matched against the *bundled catalogue* — not merely
+        // sanitised — so a compromised webview cannot install an arbitrary ICC
+        // profile by dropping one into staging. The bytes are re-validated and
+        // the pinned sha256 re-checked here, and the result is verified by
+        // reading the destination back. Installation is separate from applying:
+        // the unelevated app calls `SetICMProfileW` afterwards.
+        "install_icc_profile" => {
+            let file_name = cmd.args["file_name"].as_str().unwrap_or_default();
+            if file_name.is_empty() {
+                return make_err("install_icc_profile: missing file_name".to_string());
+            }
+            match crate::hw::icc_catalog::install_staged_profile(file_name) {
+                Ok(result) => make_ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+                Err(e) => make_err(e),
+            }
+        }
+
         unknown => make_err(format!("Unknown elevated command: {unknown}")),
     }
 }

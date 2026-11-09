@@ -27,6 +27,7 @@ pub mod fan;
 pub mod fn_key;
 pub mod hotkeys;
 pub mod hq_wmi;
+pub mod icc_catalog;
 pub mod iot_events;
 pub mod iot_watchdog;
 pub mod iotservice;
@@ -42,6 +43,7 @@ pub mod os_turbo_suggest;
 #[cfg(windows)]
 pub mod osd;
 pub mod overview;
+pub mod panel_edid;
 pub mod performance;
 pub mod phone_link;
 #[cfg(windows)]

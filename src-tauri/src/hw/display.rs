@@ -2536,6 +2536,9 @@ struct CcdPath {
     label: String,
     /// The target is an embedded output (laptop panel).
     is_embedded: bool,
+    /// `monitorDevicePath` (`\\?\DISPLAY#EDO4503#4&…`) for the monitor on this
+    /// target. Joins CCD to `WmiMonitorID.InstanceName` (EDID panel identity).
+    monitor_device_path: String,
 }
 
 /// Active display paths with their GDI source name and monitor name.
@@ -2572,14 +2575,15 @@ fn ccd_paths() -> HardwareResult<Vec<CcdPath>> {
             },
             ..Default::default()
         };
-        let (label, is_embedded) =
+        let (label, is_embedded, monitor_device_path) =
             if unsafe { DisplayConfigGetDeviceInfo(&mut target.header as *mut _) } == 0 {
                 (
                     wide_to_string(&target.monitorFriendlyDeviceName),
                     is_embedded_output_technology(target.outputTechnology),
+                    wide_to_string(&target.monitorDevicePath),
                 )
             } else {
-                (String::new(), false)
+                (String::new(), false, String::new())
             };
         out.push(CcdPath {
             adapter_id: path.targetInfo.adapterId,
@@ -2587,9 +2591,36 @@ fn ccd_paths() -> HardwareResult<Vec<CcdPath>> {
             gdi_device: wide_to_string(&source.viewGdiDeviceName),
             label,
             is_embedded,
+            monitor_device_path,
         });
     }
     Ok(out)
+}
+
+/// Monitor device instance path (`\\?\DISPLAY#EDO4503#4&…`) per GDI display.
+///
+/// One CCD pass for every consumer: the colour tab needs it to join a display
+/// to its EDID panel (`WmiMonitorID`), and doing that per display would run
+/// `QueryDisplayConfig` N times.
+pub fn monitor_device_paths() -> std::collections::HashMap<String, String> {
+    #[cfg(windows)]
+    {
+        match ccd_paths() {
+            Ok(paths) => paths
+                .into_iter()
+                .filter(|p| !p.monitor_device_path.is_empty())
+                .map(|p| (p.gdi_device, p.monitor_device_path))
+                .collect(),
+            Err(e) => {
+                log::debug!("[edid] CCD monitor device paths unavailable: {e}");
+                std::collections::HashMap::new()
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::collections::HashMap::new()
+    }
 }
 
 /// Per-display Windows advanced-color (HDR / wide colour gamut) state.
