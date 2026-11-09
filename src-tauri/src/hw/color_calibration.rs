@@ -154,13 +154,21 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
         let canonical = std::fs::canonicalize(path)
             .map_err(|e| HardwareError::Other(format!("Cannot resolve ICC path: {e}")))?;
         let profiles_dir = get_color_profiles_dir();
-        if !canonical.starts_with(profiles_dir.as_path()) {
+        // `canonicalize` yields the extended-length form (`\\?\C:\...`), the
+        // profiles dir does not — comparing one against the other always failed
+        // even for a legitimate profile in the right folder. Canonicalize BOTH
+        // sides for the containment check (symlink-safe), then hand mscms the
+        // simplified form (SetICMProfileW does not accept `\\?\` paths).
+        let profiles_dir_canonical =
+            std::fs::canonicalize(&profiles_dir).unwrap_or_else(|_| profiles_dir.clone());
+        if !canonical.starts_with(&profiles_dir_canonical) {
             return Err(HardwareError::Other(format!(
                 "ICC profile must be inside the system color profiles directory ({}), got {}",
                 profiles_dir.display(),
                 canonical.display()
             )));
         }
+        let canonical = simplify_extended_path(&canonical);
 
         let device_w: Vec<u16> = display.encode_utf16().chain(std::iter::once(0)).collect();
         use std::os::windows::ffi::OsStrExt;
@@ -673,6 +681,48 @@ fn read_gamma_intensity() -> u32 {
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+
+/// Strip the Windows extended-length prefix (`\\?\`) so the path can be
+/// handed to Win32 APIs that reject it (mscms' `SetICMProfileW` among them).
+/// `\\?\UNC\server\share` collapses to `\\server\share`.
+fn simplify_extended_path(path: &std::path::Path) -> std::path::PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return std::path::PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+#[cfg(test)]
+mod simplify_tests {
+    use super::*;
+
+    #[test]
+    fn strips_the_extended_prefix_from_drive_paths() {
+        assert_eq!(
+            simplify_extended_path(std::path::Path::new(r"\\?\C:\WINDOWS\System32\spool\drivers\color\a.icc")),
+            std::path::PathBuf::from(r"C:\WINDOWS\System32\spool\drivers\color\a.icc")
+        );
+    }
+
+    #[test]
+    fn collapses_unc_extended_paths() {
+        assert_eq!(
+            simplify_extended_path(std::path::Path::new(r"\\?\UNC\server\share\p.icc")),
+            std::path::PathBuf::from(r"\\server\share\p.icc")
+        );
+    }
+
+    #[test]
+    fn leaves_plain_paths_untouched() {
+        let p = std::path::Path::new(r"C:\tmp\p.icc");
+        assert_eq!(simplify_extended_path(p), p.to_path_buf());
+    }
+}
 
 #[cfg(test)]
 mod tests {
