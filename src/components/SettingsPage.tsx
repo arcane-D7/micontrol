@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import AiConfigForm from './AiConfigForm';
 import PrivacyConsentSection from './PrivacyConsentSection';
 import { Icon } from './ui/icons';
+import { Button, Switch } from './ui';
 
 interface DeleteDataReport {
   logs_deleted: boolean;
@@ -23,6 +24,7 @@ interface Props {
   onGrantConsent: () => Promise<void>;
   onOpenPrivacyPolicy: () => void;
   onReplayOnboarding: () => void;
+  onOpenStartup: () => void;
 }
 
 export default function SettingsPage({
@@ -34,6 +36,7 @@ export default function SettingsPage({
   onGrantConsent,
   onOpenPrivacyPolicy,
   onReplayOnboarding,
+  onOpenStartup,
 }: Props) {
   const { locale, setLanguage, supported } = useLanguage();
   const [isDeleting, setIsDeleting] = useState(false);
@@ -44,6 +47,22 @@ export default function SettingsPage({
   const [errorLogContent, setErrorLogContent] = useState('');
   const [mcpEnabled, setMcpEnabled] = useState(false);
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
+  const [autostart, setAutostart] = useState(false);
+  const [autostartPending, setAutostartPending] = useState(false);
+  const [autostartError, setAutostartError] = useState<string | null>(null);
+
+  const handleToggleAutostart = useCallback(async (enabled: boolean) => {
+    setAutostartPending(true);
+    setAutostartError(null);
+    try {
+      await invoke('set_autostart', { enabled });
+      setAutostart(enabled);
+    } catch (e) {
+      setAutostartError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutostartPending(false);
+    }
+  }, []);
 
   // Fetch error log config on mount
   useEffect(() => {
@@ -58,6 +77,11 @@ export default function SettingsPage({
     // Fetch persisted MCP integration flag
     void invoke<boolean>('mcp_get_enabled')
       .then(setMcpEnabled)
+      .catch(() => {});
+    // MiControl's own autostart entry — the only startup switch that belongs
+    // to Settings; everything else is on the Startup tab.
+    void invoke<boolean>('get_autostart')
+      .then(setAutostart)
       .catch(() => {});
   }, []);
 
@@ -146,6 +170,28 @@ export default function SettingsPage({
               {loc.nativeLabel}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* General — MiControl's own behaviour */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h2 className="card-title">{t('settings.general')}</h2>
+        <Switch
+          label={t('settings.miControlAutostart')}
+          desc={t('settings.miControlAutostartDesc')}
+          checked={autostart}
+          pending={autostartPending}
+          onChange={(next) => void handleToggleAutostart(next)}
+        />
+        {autostartError && (
+          <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--color-error, #e53935)' }}>
+            {t('settings.startupError')} {autostartError}
+          </p>
+        )}
+        <div style={{ marginTop: 12 }}>
+          <Button variant="secondary" size="sm" icon="rocket" onClick={onOpenStartup}>
+            {t('settings.openStartupManager')}
+          </Button>
         </div>
       </div>
 

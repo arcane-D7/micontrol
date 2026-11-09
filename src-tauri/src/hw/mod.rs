@@ -52,6 +52,7 @@ pub mod scrcpy_bridge;
 pub mod screen_cast;
 pub mod security_scan;
 pub mod startup;
+pub mod startup_manager;
 pub mod syncthing;
 pub mod sys_opt;
 pub mod system_info;

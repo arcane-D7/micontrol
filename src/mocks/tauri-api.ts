@@ -95,6 +95,88 @@ let _touchpadRepress = false;
 let _touchpadEdgeSlide = false;
 let _autostart = false;
 
+/** Deterministic startup-manager rows for `dev:mock` (no Windows APIs). */
+const MOCK_STARTUP_ITEMS = [
+  {
+    id: 'hkcu_run|MiControl',
+    name: 'MiControl',
+    command: '"C:\\Program Files\\MiControl\\micontrol.exe" --minimized',
+    executable: 'C:\\Program Files\\MiControl\\micontrol.exe',
+    publisher: 'micontrol',
+    version: '0.2.20.0',
+    file_exists: true,
+    enabled: true,
+    source: 'hkcu_run',
+    location: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+    requires_admin: false,
+    link_key: 'c:\\program files\\micontrol\\micontrol.exe',
+    linked_count: 2,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: null,
+  },
+  {
+    id: 'hklm_run|MiControl',
+    name: 'MiControl',
+    command: '"C:\\Program Files\\MiControl\\micontrol.exe" --minimized',
+    executable: 'C:\\Program Files\\MiControl\\micontrol.exe',
+    publisher: 'micontrol',
+    version: '0.2.20.0',
+    file_exists: true,
+    enabled: true,
+    source: 'hklm_run',
+    location: 'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+    requires_admin: true,
+    link_key: 'c:\\program files\\micontrol\\micontrol.exe',
+    linked_count: 2,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: null,
+  },
+  {
+    id: 'hkcu_run|Discord',
+    name: 'Discord',
+    command: '"C:\\Users\\mafsc\\AppData\\Local\\Discord\\Update.exe" --processStart Discord.exe',
+    executable: 'C:\\Users\\mafsc\\AppData\\Local\\Discord\\Update.exe',
+    publisher: 'GitHub',
+    version: '1.0.9173.0',
+    file_exists: true,
+    enabled: false,
+    source: 'hkcu_run',
+    location: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+    requires_admin: false,
+    link_key: 'c:\\users\\mafsc\\appdata\\local\\discord\\update.exe',
+    linked_count: 1,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: null,
+  },
+  {
+    id: 'user_logon_task|\\Demo Old App',
+    name: 'Demo Old App',
+    command: '"C:\\Program Files\\OldApp\\old.exe" /background',
+    executable: 'C:\\Program Files\\OldApp\\old.exe',
+    publisher: null,
+    version: null,
+    file_exists: false,
+    enabled: true,
+    source: 'user_logon_task',
+    location: '\\Demo Old App',
+    requires_admin: false,
+    link_key: 'c:\\program files\\oldapp\\old.exe',
+    linked_count: 1,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: 'mafsc',
+  },
+];
+
+let _startupItems = MOCK_STARTUP_ITEMS;
+
 // ── Mock data ────────────────────────────────────────────────────────────────
 
 const SYSTEM_INFO: SystemInfo = {
@@ -499,6 +581,23 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     case 'set_autostart':
       _autostart = (args?.enabled as boolean) ?? _autostart;
       return undefined as T;
+
+    // ── Windows startup manager ───────────────────────────────────────────
+    case 'get_startup_items':
+      return {
+        items: _startupItems,
+        tasks_available: true,
+        task_scan_error: null,
+        tasks_skipped: 0,
+        cached: false,
+      } as T;
+
+    case 'set_startup_item': {
+      const id = args?.id as string;
+      const enabled = Boolean(args?.enabled);
+      _startupItems = _startupItems.map((item) => (item.id === id ? { ...item, enabled } : item));
+      return undefined as T;
+    }
 
     // ── Updates ────────────────────────────────────────────────────────────
     case 'get_update_status':

@@ -1776,6 +1776,16 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
+        // Startup manager: flip one machine-wide `StartupApproved` blob or one
+        // scheduled task. The payload is enum-only (`kind`, `hive`, `key`) plus
+        // a bounded value/task path; `startup_manager::validate_toggle_args`
+        // rejects everything else, so this arm cannot be turned into an
+        // arbitrary registry-write primitive by a compromised webview.
+        "startup_toggle" => match crate::hw::startup_manager::apply_elevated_toggle(&cmd.args) {
+            Ok(()) => make_ok(Value::Null),
+            Err(e) => make_err(e),
+        },
+
         // S42-020: Install + start the MiControlFace auth service (LocalSystem).
         // Called from the Face Unlock tab when `service_installed` is false.
         // Uses the bundled micontrol_face_svc.exe `install` command. Runs via
