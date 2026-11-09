@@ -345,7 +345,11 @@ const Sidebar = memo(function Sidebar({
         >
           {t('shortcuts.tabSwitch')}
         </div>
-        <button className="theme-toggle" onClick={toggleTheme} title={`Theme: ${themeMode}`}>
+        <button
+          className="theme-toggle"
+          onClick={toggleTheme}
+          title={t('main.themeTitle', { theme: themeMode })}
+        >
           <ThemeIcon mode={themeMode} />
           <span>{getThemeLabel(themeMode)}</span>
         </button>
@@ -353,7 +357,7 @@ const Sidebar = memo(function Sidebar({
           <button
             className="theme-toggle"
             onClick={() => setShowTrayPreview(true)}
-            title="Preview tray popup"
+            title={t('main.previewTray')}
           >
             <svg
               width="14"
@@ -370,7 +374,7 @@ const Sidebar = memo(function Sidebar({
               <line x1="4" y1="12.5" x2="4" y2="12.5" strokeWidth="2" />
               <line x1="7" y1="12.5" x2="7" y2="12.5" strokeWidth="2" />
             </svg>
-            <span>Tray</span>
+            <span>{t('main.tray')}</span>
           </button>
         )}
       </div>
@@ -579,7 +583,7 @@ export default function MainWindow({
             fontFamily: 'var(--font-mono, monospace)',
           }}
         >
-          <span>By: Marcos Freitas</span>
+          <span>{t('main.by', { name: 'Marcos Freitas' })}</span>
           <a
             href="https://github.com/Freitas-MA"
             target="_blank"
@@ -625,7 +629,7 @@ export default function MainWindow({
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ fontSize: 10, color: 'oklch(90% 0 0 / 0.6)' }}>
-              Preview — click outside to close
+              {t('main.previewHint')}
             </div>
             <TrayPopup hardware={hardware} />
             <div
@@ -642,7 +646,7 @@ export default function MainWindow({
                 fontSize: 18,
                 alignSelf: 'flex-end',
               }}
-              title="MiControl tray icon"
+              title={t('main.trayIconTitle')}
             >
               <Icon name="monitor" size={16} />
             </div>

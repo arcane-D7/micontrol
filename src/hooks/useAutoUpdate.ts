@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { check } from '@tauri-apps/plugin-updater';
 import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { t } from './useI18n';
 
 export type AppUpdateState =
   'idle' | 'checking' | 'available' | 'downloading' | 'installing' | 'ready' | 'error';
@@ -133,9 +134,7 @@ export function useAutoUpdate() {
       // "<app>-<version>-installer.exe".
       const installerPath = await invoke<string | null>('find_latest_downloaded_installer');
       if (!installerPath) {
-        throw new Error(
-          'Downloaded installer not found after update download — cannot install via bridge.',
-        );
+        throw new Error(t('updates.downloadErrorMissing'));
       }
 
       await invoke('install_update', { installerPath });

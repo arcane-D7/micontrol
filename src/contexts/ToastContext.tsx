@@ -96,7 +96,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 {i18n('common.retry')}
               </button>
             )}
-            <button className="toast__close" onClick={() => dismiss(t.id)} aria-label="Dismiss">
+            <button
+              className="toast__close"
+              onClick={() => dismiss(t.id)}
+              aria-label={i18n('common.dismiss')}
+            >
               ×
             </button>
           </div>

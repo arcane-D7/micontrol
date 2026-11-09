@@ -593,7 +593,7 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
                 <div
                   style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
                 >
-                  <span style={{ color: 'var(--text-muted)' }}>Path</span>
+                  <span style={{ color: 'var(--text-muted)' }}>{t('updates.path')}</span>
                   <code
                     style={{
                       color: 'var(--text-dim)',

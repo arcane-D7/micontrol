@@ -241,7 +241,7 @@ export default function TrayPopup({ hardware }: Props) {
             <div className="tray-quick-card">
               <div className="tray-quick-head">
                 <span className="tray-quick-title" aria-hidden="true">
-                  <Icon name="volume-high" size={16} /> Audio
+                  <Icon name="volume-high" size={16} /> {t('nav.audio')}
                 </span>
                 <button
                   className="tray-chip-btn"
@@ -272,10 +272,12 @@ export default function TrayPopup({ hardware }: Props) {
             <div className="tray-quick-card">
               <div className="tray-quick-head">
                 <span className="tray-quick-title" aria-hidden="true">
-                  <Icon name="wifi" size={16} /> WiFi
+                  <Icon name="wifi" size={16} /> {t('nav.wifi')}
                 </span>
               </div>
-              <div className="tray-quick-meta">{t('tray.openApp')} → WiFi Manager</div>
+              <div className="tray-quick-meta">
+                {t('tray.openApp')} {t('main.wifiManager')}
+              </div>
             </div>
           </div>
         </div>
@@ -377,7 +379,7 @@ export default function TrayPopup({ hardware }: Props) {
                           <button
                             key={p.key}
                             className={`tray-mode-btn${isActive ? ' active' : ''}`}
-                            title={p.hint}
+                            title={t(p.hintKey)}
                             onClick={() =>
                               void setAiBrightnessConfig({
                                 enabled: true,
@@ -385,7 +387,7 @@ export default function TrayPopup({ hardware }: Props) {
                               })
                             }
                           >
-                            <Icon name={p.icon} size={16} /> {p.label}
+                            <Icon name={p.icon} size={16} /> {t(p.labelKey)}
                           </button>
                         );
                       })}

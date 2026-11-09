@@ -2,33 +2,26 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { IotDeviceInfo } from '../types/hardware';
 import { Icon } from './ui/icons';
+import { t, type StringKey } from '../hooks/useI18n';
 
 /** All 16 EC commands available via the EC command protocol. */
-const EC_COMMANDS: { id: string; name: string; desc: string }[] = [
-  { id: '0x01', name: 'GetBindStatus', desc: 'Check if the IoT chip is bound to Xiaomi cloud' },
-  { id: '0x02', name: 'SetBindStatus', desc: 'Set the cloud binding state on the chip' },
-  { id: '0x03', name: 'ResetDevice', desc: 'Factory-reset the IoT chip (clears binding & WiFi)' },
-  { id: '0x04', name: 'WriteWiFiItem', desc: 'Provision a WiFi network onto the chip' },
-  { id: '0x05', name: 'EmptyWiFiItems', desc: 'Remove all saved WiFi networks from the chip' },
-  { id: '0x06', name: 'DeleteWiFiItem', desc: 'Remove a specific saved WiFi network' },
-  { id: '0x07', name: 'ReadWiFiStatus', desc: "Query the chip's WiFi connection status & SSID" },
-  { id: '0x08', name: 'ReadWiFiCount', desc: 'Count of WiFi networks saved on the chip' },
-  { id: '0x09', name: 'GetWiFiByIndex', desc: 'Retrieve a saved WiFi network by index' },
-  { id: '0x0A', name: 'GetFwVersion', desc: 'Read the IoT chip firmware version' },
-  { id: '0x0B', name: 'GetModel', desc: 'Read the IoT chip model identifier' },
-  { id: '0x0C', name: 'ConnectWiFi', desc: 'Trigger the chip to connect to a saved WiFi network' },
-  { id: '0x0D', name: 'GetDeviceID', desc: 'Read the unique device identifier (DID)' },
-  {
-    id: '0x0E',
-    name: 'SendLaptopStatus (SUSPEND)',
-    desc: 'Notify chip that the laptop is suspending',
-  },
-  {
-    id: '0x0F',
-    name: 'SendLaptopStatus (SHUTDOWN)',
-    desc: 'Notify chip that the laptop is shutting down',
-  },
-  { id: '0x10', name: 'SendLaptopStatus (WIN_READY)', desc: 'Notify chip that Windows has booted' },
+const EC_COMMANDS: { id: string; name: string; descKey: StringKey }[] = [
+  { id: '0x01', name: 'GetBindStatus', descKey: 'iot.cmd.bindStatus' },
+  { id: '0x02', name: 'SetBindStatus', descKey: 'iot.cmd.setBindStatus' },
+  { id: '0x03', name: 'ResetDevice', descKey: 'iot.cmd.resetDevice' },
+  { id: '0x04', name: 'WriteWiFiItem', descKey: 'iot.cmd.writeWifiItem' },
+  { id: '0x05', name: 'EmptyWiFiItems', descKey: 'iot.cmd.emptyWifiItems' },
+  { id: '0x06', name: 'DeleteWiFiItem', descKey: 'iot.cmd.deleteWifiItem' },
+  { id: '0x07', name: 'ReadWiFiStatus', descKey: 'iot.cmd.readWifiStatus' },
+  { id: '0x08', name: 'ReadWiFiCount', descKey: 'iot.cmd.readWifiCount' },
+  { id: '0x09', name: 'GetWiFiByIndex', descKey: 'iot.cmd.getWifiByIndex' },
+  { id: '0x0A', name: 'GetFwVersion', descKey: 'iot.cmd.getFwVersion' },
+  { id: '0x0B', name: 'GetModel', descKey: 'iot.cmd.getModel' },
+  { id: '0x0C', name: 'ConnectWiFi', descKey: 'iot.cmd.connectWifi' },
+  { id: '0x0D', name: 'GetDeviceID', descKey: 'iot.cmd.getDeviceId' },
+  { id: '0x0E', name: 'SendLaptopStatus (SUSPEND)', descKey: 'iot.cmd.sendLaptopStatusSuspend' },
+  { id: '0x0F', name: 'SendLaptopStatus (SHUTDOWN)', descKey: 'iot.cmd.sendLaptopStatusShutdown' },
+  { id: '0x10', name: 'SendLaptopStatus (WIN_READY)', descKey: 'iot.cmd.sendLaptopStatusWinReady' },
 ];
 
 export default function IotDeviceCard() {
@@ -111,9 +104,9 @@ export default function IotDeviceCard() {
     return (
       <div className="card">
         <h2 className="card-title">
-          <Icon name="plug" size={16} /> IoT Device
+          <Icon name="plug" size={16} /> {t('iot.device.title')}
         </h2>
-        <p className="page-subtitle">Loading device information...</p>
+        <p className="page-subtitle">{t('iot.device.loading')}</p>
       </div>
     );
   }
@@ -122,33 +115,35 @@ export default function IotDeviceCard() {
     return (
       <div className="card">
         <h2 className="card-title">
-          <Icon name="plug" size={16} /> IoT Device
+          <Icon name="plug" size={16} /> {t('iot.device.title')}
         </h2>
         <p className="page-subtitle" style={{ color: 'var(--text-dim)' }}>
-          IoT Service not available. The Xiaomi IoT chip was not detected on this system.
+          {t('iot.device.unavailable')}
         </p>
         <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
           <div>
-            Expected pipe: <code>{'\\\\.\\pipe\\LOCAL\\IoTService_IPC_Broker'}</code>
+            {t('iot.device.expectedPipe')}{' '}
+            <code>{'\\\\.\\pipe\\LOCAL\\IoTService_IPC_Broker'}</code>
           </div>
           <div style={{ marginTop: 4 }}>
-            Status: Not found
-            {retryCount > 0 && ` (retry ${retryCount}/${MAX_RETRIES})`}
+            {t('iot.device.statusNotFound')}
+            {retryCount > 0 &&
+              ` ${t('iot.device.retryCounter', { count: retryCount, max: MAX_RETRIES })}`}
           </div>
           <div style={{ marginTop: 8, lineHeight: 1.5 }}>
             {ensuringService
-              ? 'Starting IoT bridge service...'
+              ? t('iot.device.startingService')
               : retryCount >= MAX_RETRIES
-                ? 'Could not reach the IoT bridge after several attempts. The service may not be installed or your hardware may not have the IoT chip. You can try again manually.'
-                : 'The IoT bridge service is not running. It will be started automatically (up to a few attempts).'}
+                ? t('iot.device.unreachable')
+                : t('iot.device.notRunning')}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button className="btn btn-secondary" style={{ flex: 1 }} onClick={retryNow}>
-            <Icon name="refresh" size={16} /> Try again
+            <Icon name="refresh" size={16} /> {t('iot.device.tryAgain')}
           </button>
           <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => void loadInfo()}>
-            <Icon name="refresh" size={16} /> Refresh
+            <Icon name="refresh" size={16} /> {t('common.refresh')}
           </button>
         </div>
       </div>
@@ -158,62 +153,65 @@ export default function IotDeviceCard() {
   return (
     <div className="card">
       <h2 className="card-title">
-        <Icon name="plug" size={16} /> IoT Device
+        <Icon name="plug" size={16} /> {t('iot.device.title')}
       </h2>
-      <p className="page-subtitle">Xiaomi IoT chip information</p>
+      <p className="page-subtitle">{t('iot.device.subtitle')}</p>
 
       {/* ── Device Info ─────────────────────────────────────────── */}
       <div style={{ marginTop: 12 }}>
         {info.model && (
           <div className="stat-row">
-            <span className="stat-label">Model</span>
+            <span className="stat-label">{t('iot.device.model')}</span>
             <span className="stat-value">{info.model}</span>
           </div>
         )}
         {info.fw_version && (
           <div className="stat-row">
-            <span className="stat-label">Firmware</span>
+            <span className="stat-label">{t('iot.device.firmware')}</span>
             <span className="stat-value">{info.fw_version}</span>
           </div>
         )}
         {info.device_id !== null && (
           <div className="stat-row">
-            <span className="stat-label">Device ID</span>
+            <span className="stat-label">{t('iot.device.deviceId')}</span>
             <span className="stat-value">{info.device_id}</span>
           </div>
         )}
         {info.device_status && (
           <div className="stat-row">
-            <span className="stat-label">Status</span>
+            <span className="stat-label">{t('iot.device.status')}</span>
             <span className="stat-value">{info.device_status}</span>
           </div>
         )}
         {info.bind_status && (
           <div className="stat-row">
-            <span className="stat-label">Cloud Binding</span>
+            <span className="stat-label">{t('iot.device.cloudBinding')}</span>
             <span
               className="stat-value"
               style={{ color: info.bind_status.bound ? 'var(--success)' : 'var(--text-dim)' }}
             >
               {info.bind_status.bound ? (
                 <>
-                  <Icon name="check" size={16} /> Bound (UID: {info.bind_status.uid})
+                  <Icon name="check" size={16} />{' '}
+                  {t('iot.device.bound', { uid: info.bind_status.uid ?? '' })}
                 </>
               ) : (
-                'Not bound'
+                t('iot.device.notBound')
               )}
             </span>
           </div>
         )}
         {info.wifi_status && (
           <div className="stat-row">
-            <span className="stat-label">IoT WiFi</span>
-            <span className="stat-value">{info.wifi_status.ssid || 'Not connected'}</span>
+            <span className="stat-label">{t('iot.device.iotWifi')}</span>
+            <span className="stat-value">
+              {info.wifi_status.ssid || t('iot.device.notConnected')}
+            </span>
           </div>
         )}
         {info.wifi_network_count !== null && (
           <div className="stat-row">
-            <span className="stat-label">Saved Networks</span>
+            <span className="stat-label">{t('iot.device.savedNetworks')}</span>
             <span className="stat-value">{info.wifi_network_count}</span>
           </div>
         )}
@@ -233,24 +231,11 @@ export default function IotDeviceCard() {
         }}
       >
         <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text)' }}>
-          <Icon name="info" size={16} /> About this device
+          <Icon name="info" size={16} /> {t('iot.device.about')}
         </div>
-        <p style={{ margin: '0 0 8px 0' }}>
-          <strong>Cloud Binding</strong> — Indicates whether the IoT chip is registered with the
-          Xiaomi IoT cloud service. This is <em>not</em> related to Mi Home or any phone app. When
-          bound, the chip can receive remote commands (e.g. wake-on-LAN, status queries) while the
-          laptop is powered off or in sleep mode.
-        </p>
-        <p style={{ margin: '0 0 8px 0' }}>
-          <strong>IoT WiFi</strong> — This is the IoT chip&apos;s own WiFi module, which is
-          completely separate from your Windows WiFi. The chip uses this WiFi to maintain a cloud
-          connection for remote management when the laptop is asleep or powered off. If the chip is
-          not bound to the cloud, IoT WiFi will show &quot;Not connected&quot; — this is expected.
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Device Status</strong> — Queried via WMI (not EC commands). Reflects the ACPI
-          power state of the IoT device as reported by Windows.
-        </p>
+        <p style={{ margin: '0 0 8px 0' }}>{t('iot.device.noteCloud')}</p>
+        <p style={{ margin: '0 0 8px 0' }}>{t('iot.device.noteWifi')}</p>
+        <p style={{ margin: 0 }}>{t('iot.device.noteStatus')}</p>
       </div>
 
       {/* ── EC Command Protocol ─────────────────────────────────── */}
@@ -261,7 +246,7 @@ export default function IotDeviceCard() {
           style={{ width: '100%', fontSize: 12 }}
         >
           {showCommands ? <Icon name="chevron-down" size={12} /> : <Icon name="play" size={12} />}{' '}
-          EC Command Protocol (16 commands)
+          {t('iot.device.protocol')}
         </button>
         {showCommands && (
           <div
@@ -286,9 +271,9 @@ export default function IotDeviceCard() {
                     textAlign: 'left',
                   }}
                 >
-                  <th style={{ padding: '6px 8px', width: 48 }}>ID</th>
-                  <th style={{ padding: '6px 8px' }}>Command</th>
-                  <th style={{ padding: '6px 8px' }}>Description</th>
+                  <th style={{ padding: '6px 8px', width: 48 }}>{t('iot.device.colId')}</th>
+                  <th style={{ padding: '6px 8px' }}>{t('iot.device.colCommand')}</th>
+                  <th style={{ padding: '6px 8px' }}>{t('iot.device.colDescription')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -309,7 +294,9 @@ export default function IotDeviceCard() {
                       {cmd.id}
                     </td>
                     <td style={{ padding: '4px 8px', fontWeight: 500 }}>{cmd.name}</td>
-                    <td style={{ padding: '4px 8px', color: 'var(--text-muted)' }}>{cmd.desc}</td>
+                    <td style={{ padding: '4px 8px', color: 'var(--text-muted)' }}>
+                      {t(cmd.descKey)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -324,10 +311,7 @@ export default function IotDeviceCard() {
             lineHeight: 1.5,
           }}
         >
-          Commands are sent via a 4-phase state machine over EC RAM (status register{' '}
-          <code>0xFE0B0F00</code>, command register <code>0xFE0B0F01</code>, sensor data buffer{' '}
-          <code>0xFE0B0F08</code>). See <code>docs/EC_COMMAND_PROTOCOL_RE.md</code> for full
-          protocol details.
+          {t('iot.device.protocolNote')}
         </p>
       </div>
 
@@ -336,7 +320,7 @@ export default function IotDeviceCard() {
         onClick={loadInfo}
         style={{ marginTop: 12, width: '100%' }}
       >
-        <Icon name="refresh" size={16} /> Refresh
+        <Icon name="refresh" size={16} /> {t('common.refresh')}
       </button>
     </div>
   );
