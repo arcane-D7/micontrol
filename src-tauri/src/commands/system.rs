@@ -923,7 +923,8 @@ pub struct AppliedColorProfile {
 ///
 /// Downloads are copied into the system colour directory by the authenticated
 /// bridge service (`install_icc_profile`) — never through a UAC prompt — and
-/// then applied by the unprivileged process via `SetICMProfileW`.
+/// then applied by the unprivileged process via
+/// `AssociateColorProfileWithDeviceW` (`hw::color_calibration::load_icc_profile`).
 #[tauri::command]
 pub async fn apply_color_profile(
     display: String,
