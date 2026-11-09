@@ -773,6 +773,26 @@ pub fn install_staged_profile(file_name: &str) -> Result<InstallResult, String> 
     })
 }
 
+/// True when the profile is already installed in `system_dir` and its bytes
+/// still match the catalogue pin. Lets the UI offer *Apply* instead of forcing a
+/// re-download every session.
+pub fn installed_profile_matches(entry: &IccCatalogEntry, system_dir: &Path) -> bool {
+    let Some(expected) = entry.sha256.as_deref() else {
+        return false;
+    };
+    if expected.len() != 64 {
+        return false;
+    }
+    let path = system_dir.join(entry.file_name());
+    match validate_local_profile(&path) {
+        Ok(info) => {
+            info.sha256.eq_ignore_ascii_case(expected)
+                && entry.bytes.is_none_or(|bytes| bytes == info.bytes)
+        }
+        Err(_) => false,
+    }
+}
+
 // ── Online research links ───────────────────────────────────────────────────
 //
 // There is no public database of per-unit OLED calibrations, so the honest
@@ -1085,6 +1105,31 @@ mod tests {
         );
         assert!(std::path::Path::new(&result.staging_path).is_file());
         let _ = std::fs::remove_file(&result.staging_path);
+    }
+
+    #[test]
+    fn recognises_an_already_installed_profile_by_hash() {
+        let dir = std::env::temp_dir().join(format!("micontrol-icc-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let bytes = icc_fixture(b"mntr", b"RGB ");
+        let name = "MiControl-test.icc";
+        std::fs::write(dir.join(name), &bytes).expect("fixture");
+        let hash = sha256_hex(&bytes);
+
+        let mut entry = find_entry("icc-srgb2014").expect("entry").clone();
+        entry.install_name = name.to_string();
+        entry.sha256 = Some(hash.clone());
+        entry.bytes = Some(bytes.len() as u64);
+        assert!(installed_profile_matches(&entry, &dir));
+
+        entry.sha256 = Some("0".repeat(64));
+        assert!(
+            !installed_profile_matches(&entry, &dir),
+            "a different hash must not count as installed"
+        );
+        assert!(!installed_profile_matches(&entry, &dir.join("missing")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── online research links ───────────────────────────────────────────────

@@ -476,17 +476,15 @@ export default function ColorTab() {
                         {shortHash(entry.sha256 || entry.sha256_reference)}
                       </span>
                       <span>{formatBytes(entry.bytes)}</span>
-                      {entry.kind === 'local' && (
-                        <span className={entry.available_locally ? '' : 'color-warn'}>
-                          {entry.available_locally
-                            ? t('color.presentLocally')
-                            : t('color.notPresent')}
-                        </span>
-                      )}
+                      <span className={entry.available_locally ? '' : 'color-warn'}>
+                        {entry.available_locally
+                          ? t('color.presentLocally')
+                          : t('color.notPresent')}
+                      </span>
                     </div>
 
                     <div className="color-entry__actions">
-                      {entry.kind === 'local' ? (
+                      {entry.kind === 'local' || entry.available_locally ? (
                         <Button
                           variant="secondary"
                           onClick={() => handleApply(display.device_name, entry)}

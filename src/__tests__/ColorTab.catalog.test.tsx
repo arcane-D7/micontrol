@@ -181,6 +181,26 @@ describe('ColorTab — monitor profile catalogue', () => {
     );
   });
 
+  it('applies a download that is already installed instead of re-downloading', async () => {
+    await renderTab(statusWith({ catalog: [{ ...ICC_DOWNLOAD_ENTRY, available_locally: true }] }));
+    const entry = entryCard('sRGB v4 (ICC, 2014)');
+    expect(
+      within(entry).queryByRole('button', { name: 'Download and validate' }),
+    ).not.toBeInTheDocument();
+    const apply = within(entry).getByRole('button', { name: 'Apply' });
+    expect(apply).toBeEnabled();
+
+    await act(async () => {
+      apply.click();
+    });
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('apply_color_profile', {
+        display: '\\\\.\\DISPLAY1',
+        entryId: 'icc-srgb2014',
+      }),
+    );
+  });
+
   it('opens real searches with the panel token', async () => {
     await renderTab(statusWith());
     await act(async () => {

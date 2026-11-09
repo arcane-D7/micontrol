@@ -869,33 +869,42 @@ pub async fn apply_color_profile(
             (path, info.sha256, info.bytes, "local".to_string())
         }
         IccKind::Download => {
-            let value = elev_bridge::run_elevated_bridge_only(
-                "install_icc_profile",
-                serde_json::json!({ "file_name": entry.file_name() }),
-            )
-            .await
-            .map_err(|e| {
-                ErrorResponse::from(format!(
-                    "installing a profile needs the MiControl Bridge service, and no UAC prompt \
-                     is used: {e}"
-                ))
-            })?;
-            let result: icc_catalog::InstallResult = serde_json::from_value(value)
-                .map_err(|e| ErrorResponse::from(format!("unexpected install result: {e}")))?;
-            if let Some(expected) = entry.sha256.as_deref() {
-                if !result.sha256.eq_ignore_ascii_case(expected) {
-                    return Err(ErrorResponse::from(format!(
-                        "installed profile does not match the catalogue hash ({} != {expected})",
-                        result.sha256
-                    )));
+            // Already installed by a previous session? Re-use it when the bytes
+            // still match the pin — no pointless re-download.
+            let installed_path = icc_catalog::system_profiles_dir().join(entry.file_name());
+            if icc_catalog::installed_profile_matches(entry, &icc_catalog::system_profiles_dir()) {
+                let info = icc_catalog::validate_local_profile(&installed_path)
+                    .map_err(ErrorResponse::from)?;
+                (installed_path, info.sha256, info.bytes, "local".to_string())
+            } else {
+                let value = elev_bridge::run_elevated_bridge_only(
+                    "install_icc_profile",
+                    serde_json::json!({ "file_name": entry.file_name() }),
+                )
+                .await
+                .map_err(|e| {
+                    ErrorResponse::from(format!(
+                        "installing a profile needs the MiControl Bridge service, and no UAC \
+                         prompt is used: {e}"
+                    ))
+                })?;
+                let result: icc_catalog::InstallResult = serde_json::from_value(value)
+                    .map_err(|e| ErrorResponse::from(format!("unexpected install result: {e}")))?;
+                if let Some(expected) = entry.sha256.as_deref() {
+                    if !result.sha256.eq_ignore_ascii_case(expected) {
+                        return Err(ErrorResponse::from(format!(
+                            "installed profile does not match the catalogue hash ({} != {expected})",
+                            result.sha256
+                        )));
+                    }
                 }
+                (
+                    std::path::PathBuf::from(&result.installed_path),
+                    result.sha256,
+                    result.bytes,
+                    "installed".to_string(),
+                )
             }
-            (
-                std::path::PathBuf::from(&result.installed_path),
-                result.sha256,
-                result.bytes,
-                "installed".to_string(),
-            )
         }
     };
 
