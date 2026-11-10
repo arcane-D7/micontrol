@@ -213,6 +213,12 @@ pub async fn get_fan_info() -> Result<FanInfo, ErrorResponse> {
     // temperatures come back empty AND the elevated bridge is available,
     // re-run with readings fetched from the bridge service (SYSTEM process,
     // which CAN read those WMI classes).
+    //
+    // The EC's active performance mode has the same restriction
+    // (`MICommonInterface` → "Access denied" for user-mode CIM), so it is read
+    // through the elevated bridge as well. It is the *only* honest source for
+    // "which mode is the machine in": the registry holds the user's preference
+    // and can disagree with the EC indefinitely.
     let local = run_blocking(crate::hw::fan::get_fan_info)
         .await
         .map_err(ErrorResponse::from)?;
@@ -221,13 +227,26 @@ pub async fn get_fan_info() -> Result<FanInfo, ErrorResponse> {
         let elevated = crate::hw::fan::get_elevated_thermal_readings().await;
         let has_thermal = elevated.cpu_temp.is_some() || elevated.gpu_temp.is_some();
         if has_thermal {
-            return run_blocking(move || crate::hw::fan::get_fan_info_seeded(elevated))
+            // The elevated round-trip just succeeded, so the same path can
+            // answer for the EC mode without risking a second stall.
+            let ec = crate::hw::fan::get_ec_active_mode().await;
+            return run_blocking(move || crate::hw::fan::get_fan_info_seeded(elevated, ec))
                 .await
                 .map_err(ErrorResponse::from);
         }
     }
 
-    Ok(local)
+    let mut info = local;
+    if info.ec_active.is_none() {
+        // No elevated thermal reading: only ask for the EC mode when the bridge
+        // is known to be running, so a missing service costs nothing per poll.
+        if crate::elev_bridge::is_bridge_service_available() {
+            let ec = crate::hw::fan::get_ec_active_mode().await;
+            info.ec_active = ec.map(|(_, mode)| mode);
+            info.ec_active_raw = ec.map(|(raw, _)| raw);
+        }
+    }
+    Ok(info)
 }
 
 /// Apply a fan mode and return what actually happened.

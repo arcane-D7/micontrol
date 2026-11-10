@@ -666,7 +666,19 @@
     "noSensor": "N/A — pas de capteur de tr/min sur cette plateforme",
     "noSensorHint": "Ce portable n'expose pas le régime du ventilateur au logiciel (Win32_Fan.DesiredSpeed est vide et l'EC RAM est refusé). Le ventilateur est géré par l'EC.",
     "fixedProfileNote": "Ce portable n'expose aucune lecture de régime : le curseur choisit une bande de profil EC (Quiet / Balanced / Performance), il ne fixe pas un régime exact.",
-    "ambient": "Ambiante"
+    "ambient": "Ambiante",
+    "ecActive": "Mode actif sur l'EC",
+    "ecActiveHint": "Lu dans le firmware de l'EC. Le sélecteur ci-dessus est la préférence enregistrée ; ceci est le mode réellement utilisé.",
+    "ecUnreported": "non identifiable (raw 0)",
+    "ecUnreportedHint": "La lecture ACPI du firmware ne nomme que cinq modes ; tous les autres renvoient 0 : c'est un mode réel que la lecture ne peut pas identifier — pas « silence ».",
+    "ecTurbo": "Turbo",
+    "ecDecepticon": "Decepticon",
+    "ecOverdrive": "Overdrive",
+    "ecSmartAdaptive": "Smart Adaptatif",
+    "ecSmart": "Smart",
+    "ecUnavailable": "indisponible",
+    "ecMismatch": "Le réglage enregistré et l'EC divergent — l'EC fait foi.",
+    "ecVerified": "Lecture du registre EC : {before} → {after}"
   },
   "touchpad": {
     "title": "Pavé tactile",

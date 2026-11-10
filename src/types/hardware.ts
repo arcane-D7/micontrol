@@ -169,7 +169,30 @@ export interface FanInfo {
   tdp_watts: number | null;
   /** Which source produced `cpu_temp_celsius`. */
   temp_source: 'esif' | 'acpi' | 'ecram' | 'unavailable';
+  /**
+   * The EC's **active** performance mode, read back from the firmware. This is
+   * the machine's real mode — never confuse it with `mode`, which is the stored
+   * preference. `null` when the elevated read failed.
+   *
+   * Only five values can be named: the ACPI read path collapses every other EC
+   * mode to `unreported` (raw 0), which does NOT mean "silence".
+   */
+  ec_active?: EcActiveMode | null;
+  /** Raw mode byte behind `ec_active`. `0` = "not nameable through this channel". */
+  ec_active_raw?: number | null;
 }
+
+/**
+ * Modes the firmware's WMAA read can name. Anything else arrives as
+ * `unreported` with `ec_active_raw === 0`.
+ */
+export type EcActiveMode =
+  | 'turbo'
+  | 'decepticon'
+  | 'overdrive'
+  | 'smart_adaptive'
+  | 'smart'
+  | 'unreported';
 
 /**
  * What `set_fan_mode` actually did. `applied` does not mean the fan speed
@@ -183,6 +206,12 @@ export interface FanModeResult {
   /** True only when an IGCL fan handle was programmed with a fixed speed. */
   rpm_control: boolean;
   warning: string | null;
+  /** EC mode register read back before the write (`null` = read failed). */
+  ec_mode_before?: number | null;
+  /** EC mode register read back after the write. */
+  ec_mode_after?: number | null;
+  /** The write was proven to latch the EC register. */
+  ec_verified?: boolean;
 }
 
 export interface AiPerfLogEntry {

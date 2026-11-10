@@ -666,7 +666,19 @@
     "noSensor": "N/A — sin sensor de RPM en esta plataforma",
     "noSensorHint": "Este portátil no expone las RPM del ventilador al software (Win32_Fan.DesiredSpeed está vacío y el EC RAM está denegado). El ventilador lo gestiona el EC.",
     "fixedProfileNote": "Este portátil no expone lectura de RPM: el control selecciona una banda de perfil del EC (Quiet / Balanced / Performance), no fija una RPM exacta.",
-    "ambient": "Ambiente"
+    "ambient": "Ambiente",
+    "ecActive": "Modo activo en la EC",
+    "ecActiveHint": "Leído del firmware de la EC. El selector de arriba es la preferencia guardada; este es el modo que la máquina está usando realmente.",
+    "ecUnreported": "no identificable (raw 0)",
+    "ecUnreportedHint": "La lectura ACPI del firmware solo nombra cinco modos; todos los demás devuelven 0, así que este es un modo real que la lectura no puede identificar — no es “silencio”.",
+    "ecTurbo": "Turbo",
+    "ecDecepticon": "Decepticon",
+    "ecOverdrive": "Overdrive",
+    "ecSmartAdaptive": "Smart Adaptativo",
+    "ecSmart": "Smart",
+    "ecUnavailable": "no disponible",
+    "ecMismatch": "El ajuste guardado y la EC no coinciden — manda la EC.",
+    "ecVerified": "Lectura del registro de la EC: {before} → {after}"
   },
   "touchpad": {
     "title": "Touchpad",
