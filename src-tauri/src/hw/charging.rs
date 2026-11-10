@@ -1,274 +1,324 @@
-//! Charging threshold control via IoTService IPC and registry fallback.
+//! Charging limit ("Battery Care") — firmware-authoritative path.
 //!
-//! Reads and sets the battery charging limit through the Xiaomi IoT
-//! service named pipe, with a Windows Registry fallback path.
+//! # What actually controls the limit on this platform
+//!
+//! The limit lives in two EC registers: `ERAM 0xA4` (`LONL`, bit0 = care on)
+//! and `ERAM 0xA7` (`HBDA`, the limit in percent). Both sit inside the
+//! `SystemMemory 0xFE0B0300` region that `IoTDriver.sys` **refuses** to expose
+//! through its ECRAM IOCTLs (`STATUS_ACCESS_DENIED` / `0x80070005`, verified
+//! live even for the SYSTEM `IoTService.exe`). Every ERAM write path this file
+//! used to attempt failed and silently fell back to the registry, so the UI
+//! showed a limit the hardware never received.
+//!
+//! The firmware exposes the same two registers through the ACPI `WMAA` method
+//! (`MICommonInterface.MiInterface`, `\_SB.PC00.WMID`, `_HID` `PNP0C14`,
+//! `_UID` `"MIFS"`). Decoded from `ssdt24.dsl`, Method `WMAA`, `FUN1=0xFB00`,
+//! `FUN2=0x1000`, `FUN3=0x02`:
+//!
+//! | FUN4 | effect                                        |
+//! |------|-----------------------------------------------|
+//! | 0    | `LONL &= ~1`, `HBDA = 0x64` → care OFF (100%) |
+//! | 1    | `LONL |= 1`,  `HBDA = 0x50` → 80%             |
+//! | 4    | `LONL |= 1`,  `HBDA = 0x5A` → 90%             |
+//! | 5    | `LONL |= 1`,  `HBDA = 0x46` → 70%             |
+//! | 6    | `LONL |= 1`,  `HBDA = 0x3C` → 60%             |
+//! | 7    | `LONL |= 1`,  `HBDA = 0x32` → 50%             |
+//! | 8    | `LONL |= 1`,  `HBDA = 0x28` → 40%             |
+//!
+//! The read branch (`FUN1=0xFA00`, same FUN2/FUN3) returns the same code in
+//! `FRD1`: 0 = care off, otherwise the active level. The code set is the OEM
+//! enum the original PC Manager UI sends (`gp.One=1 … gp.Eight=8`), i.e. the
+//! payload is a **level code, not a percentage**.
+//!
+//! This module therefore writes and verifies through WMAA and never claims
+//! success without a read-back. The registry (`HKLM\SOFTWARE\MI\IoTDriver`
+//! `ChargingThreshold`) is only the user's *requested* value and for
+//! re-assertion; it is never reported as applied hardware state.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-/// Registry fallback for charging threshold.
+/// Registry key shared with the original Xiaomi IoT software.
 #[cfg(windows)]
 const CHARGE_REG_KEY: &str = r"SOFTWARE\MI\IoTDriver";
 #[cfg(windows)]
 const CHARGE_REG_VALUE: &str = "ChargingThreshold";
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// WMAA sub-command group used by the charging-protection method.
+pub const FUN2_CHARGE: u16 = 0x1000;
+/// WMAA action id inside `FUN2_CHARGE` (read and write share it).
+pub const FUN3_CHARGE: u16 = 0x02;
+/// `SGER` value the ACPI method returns on success.
+pub const SGER_SUCCESS: u16 = 0x8000;
+
+/// Percentages the firmware can express. 100 means "no limit" (care off).
+pub const VALID_THRESHOLDS: [u8; 7] = [40, 50, 60, 70, 80, 90, 100];
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ChargingResult {
+    /// True only when the firmware accepted **and** read back the new value.
     pub success: bool,
+    /// `wmi_wmaa` when the value is on the hardware, `unverified` otherwise.
     pub method: String,
+    /// The value the caller asked for.
     pub threshold: u8,
+    /// The value the firmware reported after the write (`None` = unreadable).
+    pub hardware_threshold: Option<u8>,
+    /// Human-readable reason when `success` is false.
+    pub detail: Option<String>,
 }
 
-/// Valid charging threshold levels (percent). 100 = no limit (charge to full).
-const VALID_THRESHOLDS: [u8; 6] = [40, 50, 60, 70, 80, 100];
+/// The truth about the charging limit: what the user asked for, what the
+/// firmware actually holds, and whether they agree.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ChargeLimitState {
+    /// Last requested value (registry). 100 = no limit.
+    pub requested_threshold: u8,
+    /// Value read back from the firmware; `None` when the read failed.
+    pub hardware_threshold: Option<u8>,
+    /// Raw firmware level code (0,1,4,5,6,7,8); `None` when unreadable.
+    pub hardware_code: Option<u8>,
+    /// True only when the firmware read succeeded and equals the request.
+    pub applied: bool,
+    /// `firmware` | `registry` (read failed) — how much of this is real.
+    pub source: String,
+    /// Why the hardware value is unknown, when it is.
+    pub detail: Option<String>,
+}
 
-pub fn set_charging_threshold(threshold: u8) -> HardwareResult<ChargingResult> {
-    if !VALID_THRESHOLDS.contains(&threshold) {
-        return Err(HardwareError::InvalidConfig(format!(
-            "Invalid threshold {threshold}. Must be one of: 40,50,60,70,80,100"
-        )));
+/// Map a user-facing percentage to the firmware level code.
+///
+/// Returns `None` for values the firmware cannot express.
+pub fn percent_to_code(percent: u8) -> Option<u8> {
+    match percent {
+        40 => Some(8),
+        50 => Some(7),
+        60 => Some(6),
+        70 => Some(5),
+        80 => Some(1),
+        90 => Some(4),
+        100 => Some(0),
+        _ => None,
     }
+}
 
-    // Try the ecram_service pipe first (our IoTService.exe replacement).
-    // It writes the threshold directly to the EC ERAM registers (0xA4/0xA7).
-    if crate::hw::ecram::is_pipe_broker_available() {
-        let request = format!(r#"{{"op":"iot_set_charging_threshold","threshold":{threshold}}}"#);
-        match crate::hw::ecram::send_pipe_request(&request) {
-            Ok(response) => {
-                let parsed: serde_json::Value = match serde_json::from_str(&response) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::warn!("Charging pipe response not JSON: {e}");
-                        serde_json::Value::Null
-                    }
-                };
-                if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    persist_threshold_registry(threshold).ok();
-                    return Ok(ChargingResult {
-                        success: true,
-                        method: "ecram_pipe".to_string(),
-                        threshold,
-                    });
-                }
-                let err = parsed
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown ecram charging error");
-                log::warn!("ecram charging threshold failed: {err}, falling back to registry");
-            }
-            Err(e) => log::warn!("ecram charging pipe unavailable: {e}, falling back to registry"),
-        }
-        persist_threshold_registry(threshold)
-            .context("Registry fallback for charging threshold")?;
-        return Ok(ChargingResult {
-            success: true,
-            method: "registry".to_string(),
-            threshold,
-        });
+/// Map a firmware level code back to a percentage.
+pub fn code_to_percent(code: u8) -> Option<u8> {
+    match code {
+        8 => Some(40),
+        7 => Some(50),
+        6 => Some(60),
+        5 => Some(70),
+        1 => Some(80),
+        4 => Some(90),
+        0 => Some(100),
+        _ => None,
     }
+}
 
-    // Try named pipe first
-    match send_via_pipe(threshold) {
-        Ok(()) => {
-            persist_threshold_registry(threshold).ok();
-            return Ok(ChargingResult {
-                success: true,
-                method: "iot_pipe".to_string(),
-                threshold,
-            });
-        }
-        Err(e) => log::warn!("IoT pipe send failed: {e}, falling back to registry"),
-    }
+/// Parse the `FRD1` value of a `FUN2=0x1000 / FUN3=0x02` read into a code.
+///
+/// `FRD1` is a DWORD; anything outside the OEM code set is a firmware
+/// surprise and is rejected instead of being coerced into a percentage.
+pub fn parse_level_code(frd1: u32) -> Option<u8> {
+    let code = u8::try_from(frd1).ok()?;
+    code_to_percent(code).map(|_| code)
+}
 
-    // Registry fallback
-    persist_threshold_registry(threshold).context("Registry fallback for charging threshold")?;
-    Ok(ChargingResult {
-        success: true,
-        method: "registry".to_string(),
-        threshold,
+fn validate(threshold: u8) -> HardwareResult<u8> {
+    percent_to_code(threshold).ok_or_else(|| {
+        HardwareError::InvalidConfig(format!(
+            "Invalid threshold {threshold}. Must be one of: 40,50,60,70,80,90,100"
+        ))
     })
 }
 
-pub fn get_charging_threshold() -> HardwareResult<u8> {
+/// Read the limit straight from the firmware.
+///
+/// Returns `Err` when the WMAA read fails (no admin, provider stall, WMI
+/// blocked). Callers must not translate that error into a value.
+pub fn read_hardware_threshold() -> HardwareResult<u8> {
     #[cfg(windows)]
     {
-        // When the ecram_service pipe is active, read the live EC register
-        // (0xA7) so the UI reflects the actual hardware value.
-        if crate::hw::ecram::is_pipe_broker_available() {
-            if let Ok(response) =
-                crate::hw::ecram::send_pipe_request(r#"{"op":"iot_get_charging_threshold"}"#)
-            {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response) {
-                    if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        if let Some(t) = parsed.get("threshold").and_then(|v| v.as_u64()) {
-                            return Ok(t.clamp(40, 100) as u8);
-                        }
-                    }
-                }
+        let resp = crate::hw::wmi_ec::wmi_read(FUN2_CHARGE, FUN3_CHARGE)?;
+        if resp.sger != SGER_SUCCESS {
+            return Err(HardwareError::Wmi(format!(
+                "WMAA 0x1000/0x02 read rejected: SGER=0x{:04X}",
+                resp.sger
+            )));
+        }
+        let code = parse_level_code(resp.frd1).ok_or_else(|| {
+            HardwareError::Wmi(format!(
+                "WMAA 0x1000/0x02 returned unknown level code {:#X}",
+                resp.frd1
+            ))
+        })?;
+        Ok(code_to_percent(code).expect("parse_level_code validated the code"))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(HardwareError::NotSupported(
+            "WMI only available on Windows".into(),
+        ))
+    }
+}
+
+/// Set the charging limit in the firmware and verify it by reading back.
+///
+/// There is deliberately **no silent fallback**: a failed write is an error,
+/// because reporting success while the EC still charges to 100% is exactly
+/// the bug this function exists to fix.
+pub fn set_charging_threshold(threshold: u8) -> HardwareResult<ChargingResult> {
+    let code = validate(threshold)?;
+
+    #[cfg(windows)]
+    {
+        let resp = crate::hw::wmi_ec::wmi_write(FUN2_CHARGE, FUN3_CHARGE, code as u32)?;
+        if resp.sger != SGER_SUCCESS {
+            return Err(HardwareError::Wmi(format!(
+                "WMAA 0x1000/0x02 write rejected: SGER=0x{:04X}",
+                resp.sger
+            )));
+        }
+
+        // The ACPI method sets SGER before touching the EC and never reports
+        // a failure of the ECWT itself, so SGER alone is not proof. Read back.
+        match read_hardware_threshold() {
+            Ok(actual) if actual == threshold => {
+                persist_threshold_registry(threshold).ok();
+                log::info!(
+                    target: "hw::charging",
+                    "charging limit {threshold}% applied on firmware (WMAA 0x1000/0x02, code {code})"
+                );
+                Ok(ChargingResult {
+                    success: true,
+                    method: "wmi_wmaa".to_string(),
+                    threshold,
+                    hardware_threshold: Some(actual),
+                    detail: None,
+                })
             }
-            log::debug!("ecram charging threshold read failed — falling back to registry");
+            Ok(actual) => {
+                log::warn!(
+                    target: "hw::charging",
+                    "charging limit write acknowledged but firmware reads {actual}% (wanted {threshold}%)"
+                );
+                Err(HardwareError::Wmi(format!(
+                    "firmware accepted the write but still reports {actual}% (wanted {threshold}%)"
+                )))
+            }
+            Err(e) => {
+                log::warn!(
+                    target: "hw::charging",
+                    "charging limit written but read-back failed: {e}"
+                );
+                Err(HardwareError::Wmi(format!(
+                    "limit written to firmware but the read-back failed: {e}"
+                )))
+            }
         }
-        read_threshold_registry().unwrap_or(Ok(80))
     }
     #[cfg(not(windows))]
     {
-        Ok(80)
+        let _ = code;
+        Err(HardwareError::NotSupported(
+            "WMI only available on Windows".into(),
+        ))
     }
 }
 
-// ── Private helpers ──────────────────────────────────────────────────────────
-
-/// IPC message layout discovered from IoTService.exe binary analysis (v25.0.0.9).
+/// Combined view: requested value (registry) + firmware value.
 ///
-/// The IoTService validates the first 4 bytes against the magic "MCPI"
-/// (0x4950434D in little-endian) and rejects messages without it.
-///
-/// Header layout (16 bytes, from Ghidra decompilation of FUN_140043ac0):
-///   - magic: u32 (offset 0)  — MCPI magic (0x4950434D)
-///   - src_id: u16 (offset 4)
-///   - dst_id: u16 (offset 6)
-///   - type_lo: u16 (offset 8)  — low 16 bits of msg_type
-///   - routing: i16 (offset 10) — 0=normal unicast
-///   - field: u16 (offset 12)  — sub-type, 0 for normal
-///   - payload_len: u16 (offset 14) — total message size (header + payload)
-///
-/// src_id=1 (MiControl), dst_id=2 (IoTDriver), type_lo=0x1003 (set charging limit)
-///
-/// # Safety
-///
-/// This struct maps to the binary wire format used for IoTService IPC.
-/// The fields are naturally aligned with no padding.
-#[repr(C)]
-struct IotIpcMsg {
-    magic: u32,
-    src_id: u16,
-    dst_id: u16,
-    type_lo: u16,
-    routing: i16,
-    field: u16,
-    payload_len: u16,
+/// Never fails: an unreadable firmware is reported as
+/// `hardware_threshold: None, applied: false, detail: Some(..)` so the UI can
+/// say "not confirmed on the hardware" instead of inventing a value.
+pub fn get_charge_limit_state() -> ChargeLimitState {
+    let requested = get_requested_threshold();
+    match read_hardware_threshold() {
+        Ok(hardware) => ChargeLimitState {
+            requested_threshold: requested,
+            hardware_threshold: Some(hardware),
+            hardware_code: percent_to_code(hardware),
+            applied: hardware == requested,
+            source: "firmware".to_string(),
+            detail: None,
+        },
+        Err(e) => ChargeLimitState {
+            requested_threshold: requested,
+            hardware_threshold: None,
+            hardware_code: None,
+            applied: false,
+            source: "registry".to_string(),
+            detail: Some(e.to_string()),
+        },
+    }
 }
 
-/// MCPI magic value: bytes `4D 43 50 49` = "MCPI" in ASCII.
-const MCPI_MAGIC: u32 = 0x4950434D;
-
-/// Compile-time assertion: IotIpcMsg must be exactly 16 bytes.
-const _: () = assert!(std::mem::size_of::<IotIpcMsg>() == 16);
-
-/// Send a charging threshold command to the IoTService IPC pipe.
+/// The user's requested limit (registry), 100 when unset.
 ///
-/// This is intentionally fire-and-forget: the IoTService pipe protocol
-/// does not return a response for charging threshold commands (msg_type
-/// `0x1003`). The command is validated before sending, and the registry
-/// is updated separately. If the pipe send fails, the registry value
-/// still reflects the user's intent and will be applied on the next
-/// IoTService restart.
-fn send_via_pipe(threshold: u8) -> HardwareResult<()> {
+/// This is **not** hardware state — call it what it is.
+pub fn get_requested_threshold() -> u8 {
     #[cfg(windows)]
     {
-        use std::io::Write;
-        use std::os::windows::ffi::OsStrExt;
-        use std::os::windows::io::FromRawHandle;
-        use windows::Win32::Foundation::{
-            GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-        };
-        use windows::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        };
-        use windows::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_READMODE_MESSAGE};
-
-        // Use the MCPI pipe path discovered at startup; the ecram_service JSON
-        // pipe is filtered out by resolve_pipe_path (different protocol).
-        let pipe_path = crate::hw::iotservice::resolve_pipe_path();
-
-        // Open the pipe using CreateFileW so we can set MESSAGE mode.
-        let path_w: Vec<u16> = std::ffi::OsStr::new(&pipe_path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        // SAFETY: CreateFileW with a valid null-terminated wide string path.
-        let raw_handle = unsafe {
-            CreateFileW(
-                windows::core::PCWSTR(path_w.as_ptr()),
-                (GENERIC_READ | GENERIC_WRITE).0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                HANDLE::default(),
-            )
-        };
-
-        let raw_handle = raw_handle.context("Open IoT IPC pipe")?;
-
-        if raw_handle == INVALID_HANDLE_VALUE {
-            return Err(anyhow::anyhow!(
-                "Open IoT IPC pipe returned INVALID_HANDLE_VALUE: {}",
-                pipe_path
-            )
-            .into());
-        }
-
-        // Set pipe to MESSAGE read mode (required by IoTService pipe server)
-        let mode = PIPE_READMODE_MESSAGE;
-        // SAFETY: raw_handle is a valid pipe handle from CreateFileW.
-        let _ = unsafe { SetNamedPipeHandleState(raw_handle, Some(&mode as *const _), None, None) };
-
-        // Wrap the raw handle in a std::fs::File for Write trait
-        // SAFETY: raw_handle is a valid file handle owned by us; std::fs::File will close it on drop.
-        let mut pipe = unsafe {
-            std::fs::File::from_raw_handle(raw_handle.0 as std::os::windows::io::RawHandle)
-        };
-
-        // Build the 16-byte MCPI header with 1-byte payload (threshold)
-        // payload_len = header(16) + payload(1) = 17
-        let msg = IotIpcMsg {
-            magic: MCPI_MAGIC,
-            src_id: 1,
-            dst_id: 2,
-            type_lo: 0x1003,
-            routing: 0,
-            field: 0,
-            payload_len: 17,
-        };
-
-        let bytes: &[u8] = unsafe {
-            // SAFETY: IotIpcMsg is #[repr(C)] with no padding and known size (16 bytes);
-            // casting its address to a byte slice yields a valid, sized buffer for write_all.
-            std::slice::from_raw_parts(
-                &msg as *const IotIpcMsg as *const u8,
-                std::mem::size_of::<IotIpcMsg>(),
-            )
-        };
-        pipe.write_all(bytes)
-            .context("Write MCPI header to IoT pipe")?;
-        // Write the 1-byte payload (threshold value)
-        pipe.write_all(&[threshold])
-            .context("Write threshold payload to IoT pipe")?;
-
-        // Do NOT block on a read here — IoTService does not send an
-        // acknowledgment for 0x1003 (set-charging-limit) messages.
-        // This is a fire-and-forget command per the IoT protocol:
-        // the service accepts the threshold and applies it internally
-        // without returning a response payload. A blocking pipe.read()
-        // would hang the elevated helper indefinitely.
+        read_threshold_registry()
+            .and_then(|r| r.ok())
+            .unwrap_or(100)
     }
     #[cfg(not(windows))]
     {
-        let _ = threshold;
+        100
     }
-    Ok(())
 }
+
+/// Backwards-compatible accessor: the requested limit.
+///
+/// Prefer [`get_charge_limit_state`] when the UI needs to tell the truth about
+/// whether the hardware accepted it.
+pub fn get_charging_threshold() -> HardwareResult<u8> {
+    Ok(get_requested_threshold())
+}
+
+// ── Battery Care toggle ─────────────────────────────────────────────────────
+//
+// "Care" and "limit" are the same firmware field: code 0 means care off
+// (charges to 100%), any other code means care on at that level. The toggle is
+// therefore expressed through the same WMAA write.
+
+/// Is charging protection currently active on the firmware?
+pub fn get_battery_care() -> HardwareResult<bool> {
+    match read_hardware_threshold() {
+        Ok(percent) => Ok(percent != 100),
+        Err(e) => {
+            log::warn!(
+                target: "hw::charging",
+                "battery care state unreadable from firmware: {e}"
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Turn charging protection on (at `limit`) or off (charges to 100%).
+pub fn set_battery_care(enabled: bool, limit: u8) -> HardwareResult<ChargingResult> {
+    let target = if enabled {
+        if limit >= 100 || percent_to_code(limit).is_none() {
+            80
+        } else {
+            limit
+        }
+    } else {
+        100
+    };
+    set_charging_threshold(target)
+}
+
+// ── Registry persistence (requested value only) ─────────────────────────────
 
 fn persist_threshold_registry(threshold: u8) -> HardwareResult<()> {
     #[cfg(windows)]
     {
         use crate::util::registry::RegKeyGuard;
         use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-        // S25-006: Use RegKeyGuard instead of raw RegOpenKeyExW/RegCloseKey.
-        // create_write opens with KEY_ALL_ACCESS which includes KEY_WRITE.
         match RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY) {
             Ok(key) => {
                 key.write_u32(CHARGE_REG_VALUE, threshold as u32)
@@ -279,9 +329,7 @@ fn persist_threshold_registry(threshold: u8) -> HardwareResult<()> {
                     })?;
             }
             Err(e) => {
-                // Key doesn't exist or can't be opened — IoT driver may be absent
                 log::debug!("Cannot open charging registry key for write: {e}");
-                return Ok(());
             }
         }
     }
@@ -292,7 +340,6 @@ fn persist_threshold_registry(threshold: u8) -> HardwareResult<()> {
 fn read_threshold_registry() -> Option<HardwareResult<u8>> {
     use crate::util::registry::RegKeyGuard;
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-    // S25-006: Use RegKeyGuard instead of raw RegOpenKeyExW/RegCloseKey.
     let key = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY).ok()??;
     match key.read_u32(CHARGE_REG_VALUE) {
         Ok(Some(data)) => Some(Ok(data.clamp(40, 100) as u8)),
@@ -303,194 +350,89 @@ fn read_threshold_registry() -> Option<HardwareResult<u8>> {
     }
 }
 
-// ── Battery Care Toggle (EC register 0xA4) ───────────────────────────────────
-//
-// EC register 0xA4 is the master enable/disable for the charging-threshold
-// logic. When 0xA4 = 0x00, the EC ignores the threshold register (0xA7) and
-// charges to 100%. When 0xA4 = 0x01, the threshold at 0xA7 is respected.
-//
-// XPM calls this "Battery Care" / "Charging Protect" and exposes it via
-// SvrCModule methods: get_charging_protect, resume_charging_protect.
-//
-// On the TM2424, register 0xA4 is in the ACPI ERAM region (0xFE0B0300 + 0xA4)
-// and is accessible via the IoTDriver IOCTL write path (write_ecram).
-// It has been added to the safe-write allowlist (ecram-safe-writes.json).
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// ERAM offset of the Battery Care enable register.
-const BATTERY_CARE_ERAM_OFFSET: usize = 0xA4;
-
-/// Registry value for persisting Battery Care state across reboots.
-#[cfg(windows)]
-const BATTERY_CARE_REG_VALUE: &str = "BatteryCareEnabled";
-
-/// Read the Battery Care toggle state from EC register 0xA4.
-///
-/// Returns `true` if battery care (charging protection) is enabled,
-/// `false` if disabled. Falls back to registry if EC read fails.
-pub fn get_battery_care() -> HardwareResult<bool> {
-    // Try EC read first (via ERAM pipe)
-    let eram_base = crate::hw::ecram::get_eram_base();
-    match crate::hw::ecram::read_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, 1) {
-        Ok(data) if !data.is_empty() => {
-            let enabled = data[0] != 0;
-            log::debug!(target: "hw::charging", "Battery Care (EC 0xA4) = {:#04X} → enabled={}", data[0], enabled);
-            Ok(enabled)
-        }
-        Ok(_) => {
-            log::warn!(target: "hw::charging", "EC read of 0xA4 returned empty data, falling back to registry");
-            get_battery_care_registry().unwrap_or(Ok(false))
-        }
-        Err(e) => {
-            log::warn!(target: "hw::charging", "EC read of 0xA4 failed: {e}, falling back to registry");
-            get_battery_care_registry().unwrap_or(Ok(false))
-        }
+    #[test]
+    fn percent_to_code_matches_oem_enum_and_ssdt() {
+        // OEM PC Manager enum gp: One=1 (80%), Four=4 (90%), Five=5 (70%),
+        // Six=6 (60%), Seven=7 (50%), Eight=8 (40%); 0 = care off.
+        assert_eq!(percent_to_code(80), Some(1));
+        assert_eq!(percent_to_code(90), Some(4));
+        assert_eq!(percent_to_code(70), Some(5));
+        assert_eq!(percent_to_code(60), Some(6));
+        assert_eq!(percent_to_code(50), Some(7));
+        assert_eq!(percent_to_code(40), Some(8));
+        assert_eq!(percent_to_code(100), Some(0));
     }
-}
 
-/// Set the Battery Care toggle state by writing to EC register 0xA4.
-///
-/// When enabled (true), the EC respects the charging threshold (0xA7).
-/// When disabled (false), the EC charges to 100% regardless of threshold.
-///
-/// This also persists the state to registry for re-assertion after S3/S4 resume.
-pub fn set_battery_care(enabled: bool) -> HardwareResult<()> {
-    let value: u8 = if enabled { 0x01 } else { 0x00 };
-    let eram_base = crate::hw::ecram::get_eram_base();
-
-    // S39-001: Try the ecram_service pipe broker FIRST (same as
-    // `set_charging_threshold`). When the custom IoTService.exe broker is
-    // running, it performs the EC write in-process (its binary lives in the
-    // DriverStore, satisfying the IoTDriver process-name check) — no IOCTL
-    // from this process is required. This makes the toggle work immediately
-    // without needing an elevated scheduled-task helper.
-    if crate::hw::ecram::is_pipe_broker_available() {
-        let request = serde_json::json!({
-            "op": "write",
-            "addr": format!("0x{:08X}", eram_base + BATTERY_CARE_ERAM_OFFSET as u64),
-            "data": format!("{value:02X}")
-        })
-        .to_string();
-        match crate::hw::ecram::send_pipe_request(&request) {
-            Ok(response) => {
-                let parsed: serde_json::Value = match serde_json::from_str(&response) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::warn!("Battery Care pipe response not JSON: {e}");
-                        serde_json::Value::Null
-                    }
-                };
-                if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    log::info!(
-                        target: "hw::charging",
-                        "Battery Care set to {} via ecram pipe (EC 0xA4 = {:#04X})",
-                        if enabled { "enabled" } else { "disabled" },
-                        value
-                    );
-                    persist_battery_care_registry(enabled).ok();
-                    return Ok(());
-                }
-                let err = parsed
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown ecram battery care error");
-                log::warn!("ecram battery care pipe write failed: {err}, falling back to IOCTL");
-            }
-            Err(e) => {
-                log::warn!("ecram battery care pipe write unavailable: {e}, falling back to IOCTL")
-            }
+    #[test]
+    fn percent_to_code_rejects_values_the_firmware_cannot_express() {
+        for bad in [0u8, 1, 79, 81, 95, 99, 101, 255] {
+            assert_eq!(percent_to_code(bad), None, "{bad} must not be writable");
         }
     }
 
-    // S38-001: Best-effort EC write. The IoTDriver security check requires the
-    // calling process to live under the DriverStore directory of IoTDriver.sys —
-    // the scheduled-task helper (`C:\Program Files\miControl\micontrol.exe
-    // --elevated`) does NOT satisfy that, so the IOCTL fails with
-    // STATUS_ACCESS_DENIED even when elevated. This is expected on this
-    // platform. We therefore persist the requested state to the registry
-    // (which drives re-assertion + what the UI reports) and only surface an
-    // error when the registry write itself fails. When running from the
-    // DriverStore (e.g. the old IoTService.exe), the EC write succeeds.
-    match crate::hw::ecram::write_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, &[value]) {
-        Ok(()) => {
-            // Read back to confirm
-            match crate::hw::ecram::read_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, 1) {
-                Ok(data) if !data.is_empty() => {
-                    if data[0] != value {
-                        log::warn!(
-                            target: "hw::charging",
-                            "Battery Care write verification failed: wrote {:#04X}, read back {:#04X}",
-                            value, data[0]
-                        );
-                    } else {
-                        log::info!(
-                            target: "hw::charging",
-                            "Battery Care set to {} (EC 0xA4 = {:#04X})",
-                            if enabled { "enabled" } else { "disabled" },
-                            value
-                        );
-                    }
-                }
-                Err(e) => {
-                    log::warn!(target: "hw::charging", "Battery Care read-back failed: {e}");
-                }
-                _ => {}
-            }
+    #[test]
+    fn code_roundtrip_is_identity() {
+        for p in VALID_THRESHOLDS {
+            let c = percent_to_code(p).expect("valid");
+            assert_eq!(code_to_percent(c), Some(p), "roundtrip for {p}%");
         }
-        Err(e) => {
-            // Expected when running as the scheduled-task helper (not in
-            // DriverStore). Persist the state anyway so the UI stays
-            // consistent and re-assertion can happen from a privileged path.
-            log::warn!(
-                target: "hw::charging",
-                "Battery Care EC write unavailable ({e}) — persisting registry state"
+    }
+
+    #[test]
+    fn parse_level_code_accepts_only_the_oem_code_set() {
+        for code in [0u32, 1, 4, 5, 6, 7, 8] {
+            assert_eq!(parse_level_code(code), Some(code as u8));
+        }
+        for bad in [2u32, 3, 9, 80, 0x50, 0xFFFF_FFFF] {
+            assert_eq!(
+                parse_level_code(bad),
+                None,
+                "{bad:#X} is not a firmware level code"
             );
         }
     }
 
-    // Persist to registry for re-assertion after sleep/resume
-    persist_battery_care_registry(enabled)?;
-
-    Ok(())
-}
-
-/// Persist Battery Care state to registry.
-fn persist_battery_care_registry(enabled: bool) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-        match RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY) {
-            Ok(key) => {
-                key.write_u32(BATTERY_CARE_REG_VALUE, if enabled { 1 } else { 0 })
-                    .map_err(|e| {
-                        HardwareError::Registry(format!("Write Battery Care to registry: {e}"))
-                    })?;
-            }
-            Err(e) => {
-                log::debug!("Cannot open charging registry key for Battery Care write: {e}");
-                return Ok(());
-            }
-        }
+    #[test]
+    fn threshold_is_a_code_not_a_percentage() {
+        // The historical bug: the MCPI 0x1003 payload carried the percentage
+        // (80) where the firmware expects the level code (1). Pin the
+        // distinction so it cannot regress silently.
+        assert_ne!(percent_to_code(80).unwrap(), 80);
+        assert_eq!(parse_level_code(80), None);
     }
-    Ok(())
-}
 
-/// Read Battery Care state from registry fallback.
-#[cfg(windows)]
-fn get_battery_care_registry() -> Option<HardwareResult<bool>> {
-    use crate::util::registry::RegKeyGuard;
-    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-    let key = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY).ok()??;
-    match key.read_u32(BATTERY_CARE_REG_VALUE) {
-        Ok(Some(data)) => Some(Ok(data != 0)),
-        Ok(None) => Some(Ok(false)),
-        Err(e) => Some(Err(HardwareError::Registry(format!(
-            "Read Battery Care: {e}"
-        )))),
+    #[test]
+    fn charging_result_serializes_the_honesty_fields() {
+        let r = ChargingResult {
+            success: false,
+            method: "unverified".into(),
+            threshold: 80,
+            hardware_threshold: None,
+            detail: Some("access denied".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["success"], serde_json::json!(false));
+        assert_eq!(v["threshold"], serde_json::json!(80));
+        assert_eq!(v["hardware_threshold"], serde_json::Value::Null);
+        assert_eq!(v["detail"], serde_json::json!("access denied"));
     }
-}
 
-#[cfg(not(windows))]
-fn get_battery_care_registry() -> Option<HardwareResult<bool>> {
-    Some(Ok(false))
+    #[test]
+    fn state_never_claims_applied_without_hardware() {
+        let s = ChargeLimitState {
+            requested_threshold: 80,
+            hardware_threshold: None,
+            hardware_code: None,
+            applied: false,
+            source: "registry".into(),
+            detail: Some("ECRAM blocked".into()),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(false));
+        assert_eq!(v["source"], serde_json::json!("registry"));
+    }
 }

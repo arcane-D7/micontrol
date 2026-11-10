@@ -42,6 +42,7 @@ export type ChargePhase =
   | { kind: 'discharging'; level: number; minutes: number | null }
   | { kind: 'charging'; target: number }
   | { kind: 'holding'; level: number; limit: number }
+  | { kind: 'limitNotApplied'; level: number; limit: number }
   | { kind: 'resuming'; limit: number }
   | { kind: 'full' };
 
@@ -51,6 +52,13 @@ export interface ChargePhaseInput {
   isPlugged: boolean;
   /** Limite de carga em percentagem; 100 (ou mais) significa "sem limite". */
   limit: number;
+  /**
+   * O firmware confirmou o limite? `false` = pedido ≠ hardware (ou não foi
+   * possível relê-lo). Sem esta prova a fase não pode dizer "em pausa ao
+   * limite": 94% com limite de 80% que o EC nunca recebeu **não** é pausa.
+   * `undefined`/`null` = desconhecido (chamadores sem estado do firmware).
+   */
+  limitApplied?: boolean | null;
   /** Minutos de autonomia restantes — só usado a descarregar. */
   minutesRemaining?: number | null;
 }
@@ -60,6 +68,7 @@ export function chargePhase({
   isCharging,
   isPlugged,
   limit,
+  limitApplied = null,
   minutesRemaining = null,
 }: ChargePhaseInput): ChargePhase {
   if (!isPlugged) return { kind: 'discharging', level, minutes: minutesRemaining ?? null };
@@ -71,7 +80,13 @@ export function chargePhase({
   // `level` inteiro, `level < limit` implica `level <= limit-1`, logo o ramo
   // `resuming` seria inalcançável. Usa-se `level >= limit` — pausa = está no
   // limite ou acima; retoma = está abaixo — e ambos os estados ficam vivos.
-  if (capped < 100 && level >= capped) return { kind: 'holding', level, limit: capped };
+  if (capped < 100 && level >= capped) {
+    // Só é "pausa ao limite" quando o firmware confirmou o limite. Com
+    // `applied:false` isto é uma bateria acima de um limite que não existe no
+    // hardware — dizer "em pausa" foi o bug de 94% vs 80%.
+    if (limitApplied === false) return { kind: 'limitNotApplied', level, limit: capped };
+    return { kind: 'holding', level, limit: capped };
+  }
   if (capped < 100 && level < capped) return { kind: 'resuming', limit: capped };
   if (level >= 99) return { kind: 'full' };
   return { kind: 'charging', target: 100 };

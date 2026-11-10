@@ -562,7 +562,23 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
 
     case 'set_battery_care':
       _batteryCare = (args?.enabled as boolean) ?? _batteryCare;
-      return undefined as T;
+      return {
+        success: true,
+        method: 'wmi_wmaa',
+        threshold: _batteryCare ? _chargingThreshold : 100,
+        hardware_threshold: _batteryCare ? _chargingThreshold : 100,
+        detail: null,
+      } as unknown as T;
+
+    case 'get_charge_limit_state':
+      return {
+        requested_threshold: _chargingThreshold,
+        hardware_threshold: _chargingThreshold,
+        hardware_code: null,
+        applied: true,
+        source: 'firmware',
+        detail: null,
+      } as unknown as T;
 
     // ── Task manager ───────────────────────────────────────────────────────
     case 'get_task_manager':
@@ -852,7 +868,6 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     // ── EC / WMI set commands (all no-ops in mock) ─────────────────────────
     case 'wmi_ec_set_performance_mode':
     case 'wmi_ec_set_auto_illumination':
-    case 'wmi_ec_set_brightness_data':
     case 'wmi_ec_set_epof_flag':
     case 'wmi_ec_set_label_mode':
     case 'wmi_ec_set_lid_open_type':

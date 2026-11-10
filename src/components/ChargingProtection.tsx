@@ -22,6 +22,7 @@ import { useState } from 'react';
 import { t } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
 import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
+import type { ChargeLimitState } from '../types/charge';
 import InfoModal, { InfoRow, InfoSection } from './InfoModal';
 import { Card } from './ui/card';
 import { Icon } from './ui/icons';
@@ -61,6 +62,15 @@ export interface ChargingProtectionProps {
    * permite nomear o estado "fora da corrente" que `level` sozinho não diz.
    */
   battery?: { level: number; is_charging: boolean; is_plugged: boolean } | null;
+  /**
+   * Verdade do firmware sobre o limite (`get_charge_limit_state`).
+   *
+   * `null`/`undefined` = ainda não lido. Sem este estado o cartão **não**
+   * afirma que a carga está em pausa: a versão anterior inferia "pausa" de
+   * `level > limite`, o que transformava um limite que nunca chegou ao EC
+   * (94% com limite de 80%) numa mensagem falsa.
+   */
+  limitState?: ChargeLimitState | null;
 }
 
 export default function ChargingProtection({
@@ -72,6 +82,7 @@ export default function ChargingProtection({
   onEnableCare,
   onDisableCare,
   battery = null,
+  limitState = null,
 }: ChargingProtectionProps) {
   const [optimistic, setOptimistic] = useState<number | null>(null);
   const [applying, setApplying] = useState(false);
@@ -152,6 +163,15 @@ export default function ChargingProtection({
     }
   };
 
+  // Estado real do firmware. `applied` só é true quando o read-back do WMAA
+  // devolveu o mesmo nível que o registry pede — sem isso não há prova de que
+  // o EC recebeu o limite, e o cartão não pode dizer "pausa".
+  const applied = limitState ? limitState.applied : null;
+  const hardwareKnown = limitState?.hardware_threshold != null;
+  const paused = careEnabled && display < 100 && currentLevel > display && applied === true;
+  // Pedido ≠ hardware: ou o firmware respondeu outra coisa, ou não respondeu.
+  const notApplied = careEnabled && display < 100 && applied === false;
+
   const derived = (() => {
     if (failure) return null;
     if (applying)
@@ -160,13 +180,12 @@ export default function ChargingProtection({
     if (!careEnabled) return { text: t('battery.phase.careOff'), tone: 'muted' as const };
     if (display >= 100) return { text: t('battery.phase.noLimit'), tone: 'muted' as const };
     if (currentLevel > display)
-      return { text: t('battery.limitAboveLevel'), tone: 'warn' as const };
+      return applied === false
+        ? { text: t('battery.limitNotApplied'), tone: 'warn' as const }
+        : { text: t('battery.limitAboveLevel'), tone: 'warn' as const };
     return { text: t('battery.limitDerived', { limit: display }), tone: 'neutral' as const };
   })();
 
-  // Nomear o estado que o hardware está *agora* (96% com limite de 80% não é
-  // "a carregar até aos 80%"). Só quando a linha derivada não o diz sozinha.
-  const paused = careEnabled && display < 100 && currentLevel > display;
   const stateText =
     care === null || failure || applying || !careEnabled || display >= 100
       ? null
@@ -223,6 +242,20 @@ export default function ChargingProtection({
       {stateText && (
         <div className="charge-state" role="status" aria-live="polite">
           {stateText}
+        </div>
+      )}
+
+      {notApplied && (
+        <div className="mc-note mc-note--warning" role="status" data-testid="limit-not-applied">
+          <Icon name="info" size={16} />
+          <span>
+            {hardwareKnown
+              ? t('charging.state.notApplied', {
+                  hardware: limitState?.hardware_threshold ?? 100,
+                  limit: display,
+                })
+              : t('charging.state.unconfirmed')}
+          </span>
         </div>
       )}
 

@@ -44,12 +44,20 @@ describe('ChargingProtection feedback', () => {
     expect(await screen.findByText(/\d{2}:\d{2}/)).toBeInTheDocument();
   });
 
-  it('names the paused state when the battery is above the limit', () => {
+  it('names the paused state when the battery is above the limit AND the firmware confirms it', () => {
     setup({
       threshold: 80,
       level: 96,
       care: true,
       battery: { level: 96, is_charging: false, is_plugged: true },
+      limitState: {
+        requested_threshold: 80,
+        hardware_threshold: 80,
+        hardware_code: 1,
+        applied: true,
+        source: 'firmware',
+        detail: null,
+      },
     });
 
     // 96% com limite de 80% lia-se como "AC ligado · 96%" e ficava por aí.
@@ -58,6 +66,54 @@ describe('ChargingProtection feedback', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(t('common.why'))).toBeInTheDocument();
     expect(screen.getByTestId('limit-derived')).toHaveTextContent(t('battery.limitAboveLevel'));
+  });
+
+  it('never claims "paused" when the firmware did not take the limit (the 94% bug)', () => {
+    setup({
+      threshold: 80,
+      level: 94,
+      care: true,
+      battery: { level: 94, is_charging: false, is_plugged: true },
+      limitState: {
+        requested_threshold: 80,
+        hardware_threshold: 100,
+        hardware_code: 0,
+        applied: false,
+        source: 'firmware',
+        detail: null,
+      },
+    });
+
+    // O bug do dono: 94% com limite de 80% mostrava "Paused at 94%". A carga
+    // nunca foi travada — o EC nunca recebeu os 80%.
+    expect(
+      screen.queryByText(t('charging.state.paused', { level: 94, limit: 80 })),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId('limit-not-applied')).toHaveTextContent(
+      t('charging.state.notApplied', { hardware: 100, limit: 80 }),
+    );
+    expect(screen.getByTestId('limit-derived')).toHaveTextContent(t('battery.limitNotApplied'));
+  });
+
+  it('says it could not confirm the limit when the firmware is unreadable', () => {
+    setup({
+      threshold: 80,
+      level: 94,
+      care: true,
+      battery: { level: 94, is_charging: false, is_plugged: true },
+      limitState: {
+        requested_threshold: 80,
+        hardware_threshold: null,
+        hardware_code: null,
+        applied: false,
+        source: 'registry',
+        detail: 'WMAA read failed: Access is denied. (0x80070005)',
+      },
+    });
+
+    expect(screen.getByTestId('limit-not-applied')).toHaveTextContent(
+      t('charging.state.unconfirmed'),
+    );
   });
 
   it('reports charging up to the limit when the level is below it', () => {

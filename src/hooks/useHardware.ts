@@ -1058,10 +1058,6 @@ export function useHardware() {
     return invoke<EcSensorData>('wmi_ec_read_sensor_data');
   }, []);
 
-  const wmiEcSetBrightnessData = useCallback(async (level: number) => {
-    await invoke('wmi_ec_set_brightness_data', { level });
-  }, []);
-
   const wmiEcSetSagvMode = useCallback(async (mode: number) => {
     await invoke('wmi_ec_set_sagv_mode', { mode });
   }, []);
@@ -1282,7 +1278,6 @@ export function useHardware() {
       wmiEcReadBatteryHealth,
       wmiEcReadAdapterPower,
       wmiEcReadSensorData,
-      wmiEcSetBrightnessData,
       wmiEcSetSagvMode,
       wmiEcSetPl1Flag,
       wmiEcSetEpofFlag,

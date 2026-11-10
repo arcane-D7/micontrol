@@ -330,6 +330,7 @@ fn is_allowed_wmi_read(fun2: u16, fun3: u16) -> bool {
         (fun2, fun3),
         (0x0800, 0x00) // current performance mode
             | (0x1000, 0x01) // battery health
+            | (0x1000, 0x02) // charging limit (firmware level code, FRD1)
             | (0x1000, 0x06) // adapter power
             | (0x0A00, 0x05) // mi usage type
             | (0x0A00, 0x07) // wmid type
@@ -349,7 +350,7 @@ fn is_allowed_wmi_write(fun2: u16, fun3: u16) -> bool {
             | (0x0800, 8) // set performance mode (SuperQuiet)
             | (0x0800, 9) // set performance mode (UltraPerformance)
             | (0x0800, 10) // set performance mode (Extreme)
-            | (0x1000, 0x02) // set brightness data
+            | (0x1000, 0x02) // set charging limit (firmware level code, not brightness)
             | (0x0C00, 0x06) // set sagv mode
             | (0x0C00, 0x04) // set pl1 flag
             | (0x0C00, 0x05) // set epof flag
@@ -392,10 +393,26 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 Ok(v) => v,
                 Err(e) => return make_err(format!("Bad enabled arg: {e}")),
             };
-            match crate::hw::charging::set_battery_care(enabled) {
-                Ok(()) => make_ok(Value::Null),
+            // Care and limit are one firmware field: enable at the user's
+            // requested level (registry), disable → 100%.
+            let limit = crate::hw::charging::get_requested_threshold();
+            match crate::hw::charging::set_battery_care(enabled, limit) {
+                Ok(r) => make_ok(serde_json::to_value(r).unwrap_or(Value::Null)),
                 Err(e) => make_err(e.to_string()),
             }
+        }
+
+        // Real firmware state (read + readback) for the battery UI. Runs in
+        // the elevated helper because the MICommonInterface instance query is
+        // denied to non-admin callers (0x80041003).
+        "get_battery_care" => match crate::hw::charging::get_battery_care() {
+            Ok(v) => make_ok(serde_json::json!(v)),
+            Err(e) => make_err(e.to_string()),
+        },
+
+        "get_charge_limit_state" => {
+            let state = crate::hw::charging::get_charge_limit_state();
+            make_ok(serde_json::to_value(state).unwrap_or(Value::Null))
         }
 
         "set_eye_protection" => {
@@ -1549,14 +1566,11 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
-        "wmi_ec_set_brightness_data" => {
-            let level = cmd.args["level"].as_u64().unwrap_or(0) as u32;
-            match crate::hw::wmi_ec::set_brightness_data(level) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
+        // `wmi_ec_set_brightness_data` was REMOVED: the pair it wrote
+        // (WMAA 0x1000/0x02, FUN4=level) is the charging-protection setter,
+        // not display brightness (see hw::charging and ssdt24.dsl WMAA).
+        // Writing a brightness level there silently rewrote the battery limit
+        // (FUN4=1 → 80%, 5 → 70%, 6 → 60%, 7 → 50%, 8 → 40%, 0 → no limit).
         "wmi_ec_set_sagv_mode" => {
             let mode = cmd.args["mode"].as_u64().unwrap_or(0) as u32;
             match crate::hw::wmi_ec::set_sagv_mode(mode) {

@@ -54,7 +54,7 @@ function useBatteryFreshness(hasBattery: boolean) {
 }
 
 function BatteryTab({ hw }: Props) {
-  const { care, pending: carePending, setCare } = useBatteryCare();
+  const { care, limitState, pending: carePending, setCare, reload: reloadCare } = useBatteryCare();
   const { updatedAgoSec, lastReadClock } = useBatteryFreshness(hw.battery != null);
   const { setChargingThreshold, refreshBattery } = hw;
 
@@ -69,19 +69,30 @@ function BatteryTab({ hw }: Props) {
       await setCare(true);
       try {
         await setChargingThreshold(limit);
+        await reloadCare();
       } catch (e) {
         await setCare(false).catch(() => {});
         throw e;
       }
     },
-    [setCare, setChargingThreshold],
+    [setCare, setChargingThreshold, reloadCare],
   );
 
   /** Desligar a proteção implica "sem limite" (100) — é o que o EC faz. */
   const disableCare = useCallback(async () => {
     await setCare(false);
     await setChargingThreshold(100);
-  }, [setCare, setChargingThreshold]);
+    await reloadCare();
+  }, [setCare, setChargingThreshold, reloadCare]);
+
+  /** Aplicar um nível com a proteção já ligada — relê a verdade do firmware. */
+  const applyThreshold = useCallback(
+    async (limit: number) => {
+      await setChargingThreshold(limit);
+      await reloadCare();
+    },
+    [setChargingThreshold, reloadCare],
+  );
 
   const retry = useCallback(() => {
     void refreshBattery();
@@ -96,6 +107,7 @@ function BatteryTab({ hw }: Props) {
           battery={hw.battery}
           threshold={hw.chargingThreshold}
           care={care}
+          limitApplied={limitState?.applied ?? null}
           updatedAgoSec={updatedAgoSec}
           staleSince={staleSince}
           unavailable={unavailable}
@@ -108,9 +120,10 @@ function BatteryTab({ hw }: Props) {
             level={hw.battery.level}
             care={care}
             carePending={carePending}
-            onThresholdChange={hw.setChargingThreshold}
+            onThresholdChange={applyThreshold}
             onEnableCare={enableCare}
             onDisableCare={disableCare}
+            limitState={limitState}
           />
         )}
 
