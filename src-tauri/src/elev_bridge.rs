@@ -425,6 +425,8 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "wmi_ec_get_performance_mode"
         | "diag_wmi_query"
         | "set_battery_care"
+        | "get_battery_care"
+        | "get_charge_limit_state"
         | "set_eye_protection"
         | "set_os_turbo"
         | "refresh_os_turbo"

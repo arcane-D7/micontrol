@@ -527,6 +527,7 @@
     "phase": {
       "charging": "Charge jusqu'à {target} %",
       "holding": "En pause à {level} % — la limite est {limit} %",
+      "limitNotApplied": "Au-dessus de {level} % — la limite de {limit} % n’est pas sur le matériel",
       "holdingBadge": "En pause",
       "resuming": "Reprend sous {limit} %",
       "full": "Entièrement chargée",
@@ -542,6 +543,7 @@
     "enableToChoose": "Activez la protection pour choisir la limite",
     "limitDerived": "Charge jusqu'à {limit} % — arrête de charger à {limit} %",
     "limitAboveLevel": "S'appliquera au prochain cycle — vous êtes au-dessus de la limite",
+    "limitNotApplied": "Au-dessus de la limite — la limite n’est pas sur le matériel",
     "applying": "Application de {limit} %…",
     "applyFailed": "Impossible d'appliquer.",
     "toast": {
@@ -567,13 +569,13 @@
     "infoModal": {
       "title": "Fonctionnement du Contrôle de Charge",
       "functionLabel": "Ce que ça fait",
-      "functionDesc": "Envoie une commande de seuil via named pipe au service Xiaomi IoTService, qui la transmet au pilote noyau IoTDriver.sys. Le pilote demande au contrôleur embarqué (EC) d’arrêter de charger quand la batterie atteint le pourcentage configuré.",
+      "functionDesc": "Envoie la limite à la méthode ACPI du firmware qui possède les registres de charge (WMAA 0x1000/0x02), puis la relit. Une limite n’est déclarée appliquée que si le firmware renvoie le même niveau.",
       "requiresLabel": "Prérequis",
-      "requiresDesc": "Nécessite que IoTDriver.sys (Xiaomi) soit installé et que IoTService soit en cours d’exécution. Si la connexion au pipe échoue, la valeur est enregistrée dans le registre et ne prend effet qu’au redémarrage du service.",
+      "requiresDesc": "Nécessite l’interface ACPI/WMI Xiaomi (PNP0C14, UID MIFS) et le helper élevé. Quand le firmware ne peut pas être relu, l’application le dit au lieu d’afficher une limite qu’elle ne peut pas prouver.",
       "behaviorLabel": "Comportement",
       "behaviorDesc": "Il s’agit d’un plafond de charge — cela ne décharge pas la batterie. Si vous êtes déjà au-dessus du seuil, il s’applique au prochain cycle de charge.",
       "warningLabel": "Note :",
-      "warningDesc": "Cette fonctionnalité a été obtenue par rétro-ingénierie du binaire Xiaomi IoTService (type de message 0x1003). Les valeurs 40–80 sont interprétées comme des pourcentages de limite de charge, mais sur certaines variantes de firmware la même commande peut contrôler le taux de courant de charge. Si la batterie se charge systématiquement au-delà de la limite configurée, l’IoTDriver peut ne pas être actif sur votre appareil."
+      "warningDesc": "Les registres ERAM derrière ce réglage sont bloqués pour les IOCTL d’IoTDriver (0x80070005) : l’ancien chemin ERAM/registre ne pouvait donc jamais appliquer de limite. Si la carte indique « non appliqué », le firmware a refusé l’écriture ou n’a pas pu être atteint."
     },
     "state": {
       "heading": "État de la charge",
@@ -581,14 +583,16 @@
       "paused": "En pause à {level} % — reprend sous {limit} %",
       "aboveLimit": "Déjà au-dessus de {limit} % — la limite s’applique au prochain cycle",
       "unplugged": "Sur batterie",
-      "why": "La batterie est à {level} %, au-dessus de la limite de {limit} %, la charge reste donc en pause. Elle reprend quand le niveau descend sous {limit} %."
+      "why": "La batterie est à {level} %, au-dessus de la limite de {limit} %, la charge reste donc en pause. Elle reprend quand le niveau descend sous {limit} %.",
+      "notApplied": "Non appliqué : le firmware indique {hardware} % et vous avez demandé {limit} %. Le contrôleur embarqué n’a pas accepté la nouvelle limite.",
+      "unconfirmed": "Impossible de relire la limite depuis le firmware — elle n’est peut-être pas appliquée."
     },
     "appliedLimit": "Limite de {level} % appliquée à {time} — la charge s’arrête à {level} %",
     "appliedCareOn": "Protection de la batterie activée à {time} — la charge s’arrête à {limit} %",
     "appliedCareOff": "Protection de la batterie désactivée à {time} — charge désormais jusqu’à 100 %",
     "enableHint": "La protection de la batterie est désactivée. Choisissez un niveau pour l’activer et l’appliquer en une seule étape.",
     "pending": "Application…",
-    "technicalTerm": "La limite est écrite dans le contrôleur embarqué (EC), registre 0xA7. La protection utilise le registre 0xA4."
+    "technicalTerm": "La limite est appliquée par la méthode ACPI du firmware WMAA (MICommonInterface.MiInterface, 0x1000/0x02), qui écrit le registre EC 0xA7 (limite) et 0xA4 (activation de la protection). La valeur est relue et n’est déclarée appliquée que si elle correspond."
   },
   "display": {
     "title": "Affichage",

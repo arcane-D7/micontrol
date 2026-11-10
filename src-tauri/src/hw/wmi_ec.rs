@@ -771,24 +771,13 @@ pub fn read_adapter_power_status() -> HardwareResult<AdapterPowerReading> {
     }
 }
 
-/// Set the hotkey brightness data (HBDA).
-pub fn set_brightness_data(level: u32) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        let resp = wmi_write(FUN2_SENSOR, 0x02, level)?;
-        if !resp.is_success() {
-            return Err(HardwareError::Wmi(format!(
-                "WMAA write failed: SGER=0x{:04X}",
-                resp.sger
-            )));
-        }
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    Err(HardwareError::NotSupported(
-        "WMI only available on Windows".into(),
-    ))
-}
+// REMOVED — this pair is the charging-protection setter.
+//
+// WMAA `FUN2=0x1000, FUN3=0x02` writes `LONL`/`HBDA` (the battery limit), not
+// display brightness (`DBLL` lives at ERAM 0xAE and is not reachable through
+// WMAA). Any caller of this function would silently rewrite the charge limit:
+// FUN4=1 → 80%, 4 → 90%, 5 → 70%, 6 → 60%, 7 → 50%, 8 → 40%, 0 → no limit.
+// Use `crate::hw::charging::set_charging_threshold` instead.
 
 /// Set the SAGV (System Agent Geyserville) mode.
 pub fn set_sagv_mode(mode: u32) -> HardwareResult<()> {

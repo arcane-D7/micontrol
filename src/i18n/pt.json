@@ -527,6 +527,7 @@
     "phase": {
       "charging": "A carregar até aos {target}%",
       "holding": "Em pausa aos {level}% — o limite é {limit}%",
+      "limitNotApplied": "Acima dos {level}% — o limite de {limit}% não está no hardware",
       "holdingBadge": "Em pausa",
       "resuming": "Retoma abaixo dos {limit}%",
       "full": "Totalmente carregada",
@@ -542,6 +543,7 @@
     "enableToChoose": "Ligue a proteção para escolher o limite",
     "limitDerived": "Carrega até aos {limit}% — deixa de carregar aos {limit}%",
     "limitAboveLevel": "Vai aplicar-se no próximo ciclo — está acima do limite",
+    "limitNotApplied": "Acima do limite — o limite não está no hardware",
     "applying": "A aplicar {limit}%…",
     "applyFailed": "Não foi possível aplicar.",
     "toast": {
@@ -567,13 +569,13 @@
     "infoModal": {
       "title": "Como Funciona o Controlo de Carga",
       "functionLabel": "O que faz",
-      "functionDesc": "Envia um comando de limite via named pipe para o Xiaomi IoTService, que o reencaminha para o driver de kernel IoTDriver.sys. O driver instrui o controlador embutido (EC) a parar de carregar quando a bateria atingir a percentagem configurada.",
+      "functionDesc": "Envia o limite ao método ACPI do firmware que é dono dos registos de carga (WMAA 0x1000/0x02) e relê-o de seguida. Um limite só é apresentado como aplicado quando o firmware devolve o mesmo nível.",
       "requiresLabel": "Requisitos",
-      "requiresDesc": "Requer que o IoTDriver.sys (Xiaomi) esteja instalado e que o IoTService esteja em execução. Se a ligação do pipe falhar, o valor é armazenado no registo e só tem efeito quando o serviço reiniciar.",
+      "requiresDesc": "Requer a interface ACPI/WMI da Xiaomi (PNP0C14, UID MIFS) e o helper elevado. Quando o firmware não pode ser relido, a app di-lo em vez de mostrar um limite que não consegue provar.",
       "behaviorLabel": "Comportamento",
       "behaviorDesc": "Isto é um limite máximo de carga — não descarrega a bateria. Se já estiver acima do limite configurado, o limite aplica-se no próximo ciclo de carga (descarregue abaixo do limite e depois ligue o carregador).",
       "warningLabel": "Nota:",
-      "warningDesc": "Esta funcionalidade foi obtida por engenharia reversa do binário Xiaomi IoTService (tipo de mensagem 0x1003). Os valores 40–80 são interpretados como percentagens de limite de carga, mas em algumas variantes de firmware o mesmo comando pode controlar a taxa de corrente de carga. Se a bateria carregar consistentemente para além do limite configurado, o IoTDriver pode não estar ativo no seu dispositivo."
+      "warningDesc": "Os registos ERAM por trás desta definição estão bloqueados aos IOCTLs do IoTDriver (0x80070005), pelo que o antigo caminho ERAM/registry nunca podia aplicar um limite. Se o cartão disser \"não aplicado\", o firmware recusou a escrita ou não foi possível alcançá-lo."
     },
     "state": {
       "heading": "Estado do carregamento",
@@ -581,14 +583,16 @@
       "paused": "Em pausa aos {level}% — retoma abaixo de {limit}%",
       "aboveLimit": "Já acima dos {limit}% — o limite aplica-se no próximo ciclo",
       "unplugged": "A usar a bateria",
-      "why": "A bateria está nos {level}%, acima do limite de {limit}%, por isso a carga fica em pausa. Retoma quando o nível descer abaixo dos {limit}%."
+      "why": "A bateria está nos {level}%, acima do limite de {limit}%, por isso a carga fica em pausa. Retoma quando o nível descer abaixo dos {limit}%.",
+      "notApplied": "Não aplicado: o firmware reporta {hardware}% e pediu {limit}%. O controlador embutido não aceitou o novo limite.",
+      "unconfirmed": "Não foi possível reler o limite do firmware — pode não estar aplicado."
     },
     "appliedLimit": "Limite de {level}% aplicado às {time} — deixa de carregar aos {level}%",
     "appliedCareOn": "Proteção da bateria ligada às {time} — a carga para aos {limit}%",
     "appliedCareOff": "Proteção da bateria desligada às {time} — passa a carregar até 100%",
     "enableHint": "A proteção da bateria está desligada. Escolha um nível para a ligar e aplicar de uma vez.",
     "pending": "A aplicar…",
-    "technicalTerm": "O limite é escrito no controlador embutido (EC), registo 0xA7. A proteção usa o registo 0xA4."
+    "technicalTerm": "O limite é aplicado pelo método ACPI do firmware WMAA (MICommonInterface.MiInterface, 0x1000/0x02), que escreve o registo 0xA7 do EC (limite) e o 0xA4 (ativação da proteção). O valor é relido e só é dado como aplicado quando coincide."
   },
   "display": {
     "title": "Ecrã",

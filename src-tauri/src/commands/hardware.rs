@@ -7,10 +7,7 @@ use crate::hw::audio::{
     list_audio_devices as hw_list_audio, set_playback_mute as hw_set_mute,
     set_playback_volume as hw_set_volume, AudioDeviceList, AudioVolumeResult,
 };
-use crate::hw::charging::{
-    get_battery_care as hw_get_battery_care, get_charging_threshold as hw_get_charge,
-    ChargingResult,
-};
+use crate::hw::charging::{get_charging_threshold as hw_get_charge, ChargingResult};
 use crate::hw::errors::{ErrorResponse, HardwareError};
 use crate::hw::iotservice;
 use crate::hw::iotservice::{IotDeviceInfo, IotEvent, IotWifiList, WiFiItem};
@@ -63,10 +60,21 @@ pub async fn set_performance_mode(
 
 #[tauri::command]
 pub async fn get_charging_threshold(_state: State<'_, AppState>) -> Result<u8, ErrorResponse> {
-    // S24-013: Wrap in run_blocking — hw_get_charge() does sync WMI/registry I/O.
+    // Cheap, non-elevated: the *requested* limit from the registry. It is the
+    // value the segmented control edits — NOT proof the firmware took it.
+    // `get_charge_limit_state` carries the firmware truth.
     run_blocking(hw_get_charge)
         .await
         .map_err(ErrorResponse::from)
+}
+
+/// Firmware truth: requested vs applied-on-hardware, plus why not.
+#[tauri::command]
+pub async fn get_charge_limit_state() -> Result<crate::hw::charging::ChargeLimitState, ErrorResponse>
+{
+    let raw = elev_bridge::run_elevated("get_charge_limit_state", serde_json::json!({})).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 #[tauri::command]
@@ -85,23 +93,28 @@ pub async fn set_charging_threshold(
     Ok(result)
 }
 
-// ── Battery Care Toggle (EC register 0xA4) ─────────────────────────────────
+// ── Battery Care toggle (firmware field, same as the limit) ────────────────
 
 #[tauri::command]
 pub async fn get_battery_care() -> Result<bool, ErrorResponse> {
-    run_blocking(hw_get_battery_care)
-        .await
-        .map_err(ErrorResponse::from)
+    // The MICommonInterface instance query is denied to non-admin callers
+    // (0x80041003), so the read runs in the elevated helper — never in-process.
+    let raw = elev_bridge::run_elevated("get_battery_care", serde_json::json!({})).await?;
+    Ok(raw.as_bool().unwrap_or(false))
 }
 
 #[tauri::command]
-pub async fn set_battery_care(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
+pub async fn set_battery_care(enabled: bool) -> Result<ChargingResult, ErrorResponse> {
+    let raw = elev_bridge::run_elevated(
         "set_battery_care",
         serde_json::json!({ "enabled": enabled }),
     )
     .await?;
-    Ok(())
+    serde_json::from_value(raw).map_err(|e| {
+        ErrorResponse::from(HardwareError::Other(format!(
+            "Unexpected elevated result: {e}"
+        )))
+    })
 }
 
 /// Returns diagnostic information about the performance mode control channel:
@@ -743,16 +756,9 @@ pub async fn wmi_ec_read_sensor_data() -> Result<crate::hw::wmi_ec::EcSensorData
         .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
-/// Set hotkey brightness data via WMAA (elevated).
-#[tauri::command]
-pub async fn wmi_ec_set_brightness_data(level: u32) -> Result<(), ErrorResponse> {
-    let _ = elev_bridge::run_elevated(
-        "wmi_ec_set_brightness_data",
-        serde_json::json!({ "level": level }),
-    )
-    .await?;
-    Ok(())
-}
+// `wmi_ec_set_brightness_data` was removed: WMAA (0x1000, 0x02, FUN4) is the
+// charging-protection setter, not display brightness. Writing a brightness
+// level there rewrote the battery limit (see hw::charging module docs).
 
 /// Set SAGV (System Agent Geyserville) mode via WMAA (elevated).
 #[tauri::command]

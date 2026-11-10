@@ -915,109 +915,33 @@ mod ec_command {
         Ok((ssid, connected, connected))
     }
 
-    // ── Charging threshold (EC ERAM registers) ──────────────────────────────
+    // ── Charging threshold (ERAM 0xA4/0xA7 — NOT WRITABLE HERE) ────────────────
     //
-    // The original IoTService.exe applies the charging threshold via WMI
-    // (SetChargingLimit, msg_type 0x1003 → Worker_WMI). Our ecram_service
-    // replaces IoTService.exe, so the MCPI pipe does not exist. Instead we
-    // write the threshold directly to the EC ERAM registers:
-    //   - 0xA4 (Battery Care master enable): 0x01 = respect threshold
-    //   - 0xA7 (charging threshold): value in percent (40..=100)
-    // These registers live in the ACPI ERAM region (get_eram_base() + offset).
-    // The ecram_service runs as SYSTEM named "IoTService.exe" in the
-    // DriverStore, so it passes the IoTDriver security check and can access
-    // ERAM via the IOCTL path.
+    // The limit is stored in ERAM 0xA4 (LONL bit0) and 0xA7 (HBDA, percent),
+    // both inside the SystemMemory region 0xFE0B0300. IoTDriver.sys does NOT
+    // allow that region through its ECRAM IOCTLs (STATUS_ACCESS_DENIED /
+    // 0x80070005) even for this SYSTEM service — the driver only permits
+    // 0xFE0B0F00+0x80, 0xFE0B0AB8+8 and 0xFE0B0E00+0x100.
+    //
+    // These ops therefore CANNOT apply the limit. They used to attempt the
+    // write, swallow the failure and answer with the registry value, which is
+    // how the UI came to show "80%" while the EC charged to 94%. They now
+    // answer with the truth: the real path is the ACPI WMAA method
+    // (MICommonInterface.MiInterface, FUN2=0x1000 / FUN3=0x02), implemented in
+    // the app (`hw::charging`), not here.
 
-    const CHARGE_CARE_OFFSET: u64 = 0xA4;
-    const CHARGE_THRESHOLD_OFFSET: u64 = 0xA7;
+    const CHARGE_UNAVAILABLE: &str = "ERAM 0xFE0B03A4/0xFE0B03A7 is blocked by IoTDriver \
+         (0x80070005); the charging limit is applied through ACPI WMAA 0x1000/0x02 \
+         (MICommonInterface.MiInterface), not through this service";
 
-    fn eram_base() -> u64 {
-        // Hardcoded fallback (matches ecram::get_eram_base() on the TM2424).
-        // The service cannot import the crate's discovery, so use the same
-        // DSDT-derived address; the fallback is correct for this platform.
-        0xFE0B0300
+    /// Reject: this service cannot apply the charging limit.
+    pub fn set_charging_threshold(_threshold: u8) -> Result<u8, String> {
+        Err(CHARGE_UNAVAILABLE.to_string())
     }
 
-    /// Set the charging threshold on the EC.
-    ///
-    /// Enables Battery Care (0xA4 = 0x01) and writes the threshold
-    /// (0xA7 = threshold). Valid thresholds are 40, 50, 60, 70, 80, 100.
-    /// Returns the effective threshold.
-    pub fn set_charging_threshold(threshold: u8) -> Result<u8, String> {
-        const VALID: [u8; 6] = [40, 50, 60, 70, 80, 100];
-        if !VALID.contains(&threshold) {
-            return Err(format!("invalid charging threshold: {threshold}"));
-        }
-        let base = eram_base();
-        let _ = ecram::send_handshake();
-        ecram::write_ecram(base + CHARGE_CARE_OFFSET, &[0x01])?;
-        ecram::write_ecram(base + CHARGE_THRESHOLD_OFFSET, &[threshold])?;
-        Ok(threshold)
-    }
-
-    /// Read the charging threshold from the EC.
-    ///
-    /// Returns (battery_care_enabled, threshold). If the EC read fails,
-    /// falls back to the registry value `HKLM\SOFTWARE\MI\IoTDriver\ChargingThreshold`.
+    /// Reject: reading ERAM 0xA4/0xA7 here would only return an invented value.
     pub fn get_charging_threshold() -> Result<(bool, u8), String> {
-        let base = eram_base();
-        let _ = ecram::send_handshake();
-
-        let care = match ecram::read_ecram(base + CHARGE_CARE_OFFSET, 1) {
-            Ok(data) if !data.is_empty() => data[0] != 0,
-            _ => false,
-        };
-        let threshold = match ecram::read_ecram(base + CHARGE_THRESHOLD_OFFSET, 1) {
-            Ok(data) if !data.is_empty() => data[0].clamp(40, 100),
-            _ => {
-                // Fallback to registry (same key the app persists).
-                read_charge_threshold_registry().unwrap_or(100)
-            }
-        };
-        Ok((care, threshold))
-    }
-
-    fn read_charge_threshold_registry() -> Option<u8> {
-        use windows::Win32::System::Registry::{
-            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
-        };
-
-        let subkey: Vec<u16> = "SOFTWARE\\MI\\IoTDriver\0".encode_utf16().collect();
-        let mut hkey = windows::Win32::System::Registry::HKEY::default();
-        let result = unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                windows::core::PCWSTR(subkey.as_ptr()),
-                0,
-                KEY_READ,
-                &mut hkey,
-            )
-        };
-        if result.is_err() {
-            return None;
-        }
-
-        let value_name: Vec<u16> = "ChargingThreshold\0".encode_utf16().collect();
-        let mut val: u32 = 0;
-        let mut len: u32 = std::mem::size_of::<u32>() as u32;
-        let value_type = windows::Win32::System::Registry::REG_NONE;
-        let result = unsafe {
-            RegQueryValueExW(
-                hkey,
-                windows::core::PCWSTR(value_name.as_ptr()),
-                None,
-                Some(&mut value_type.clone() as *mut _),
-                Some(&mut val as *mut u32 as *mut u8),
-                Some(&mut len),
-            )
-        };
-        unsafe {
-            let _ = RegCloseKey(hkey);
-        }
-        if result.is_err() || val == 0 {
-            return None;
-        }
-        Some(val.clamp(40, 100) as u8)
+        Err(CHARGE_UNAVAILABLE.to_string())
     }
 
     #[cfg(test)]

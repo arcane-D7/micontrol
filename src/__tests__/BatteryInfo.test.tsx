@@ -146,4 +146,29 @@ describe('chargePhase + copy (integração)', () => {
     });
     expect(chargePhaseMessage(phase, { care: true, time: '' }).key).toBe('battery.phase.holding');
   });
+
+  it('94% com limite de 80% que o firmware NÃO confirma não é pausa (bug do dono)', () => {
+    const phase = chargePhase({
+      level: 94,
+      isCharging: false,
+      isPlugged: true,
+      limit: 80,
+      limitApplied: false,
+    });
+    expect(phase.kind).toBe('limitNotApplied');
+    expect(chargePhaseMessage(phase, { care: true, time: '' }).key).toBe(
+      'battery.phase.limitNotApplied',
+    );
+  });
+
+  it('com o limite confirmado no firmware o mesmo 94% volta a ser pausa', () => {
+    const phase = chargePhase({
+      level: 94,
+      isCharging: false,
+      isPlugged: true,
+      limit: 80,
+      limitApplied: true,
+    });
+    expect(phase.kind).toBe('holding');
+  });
 });

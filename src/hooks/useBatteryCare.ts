@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
+import type { ChargeLimitState } from '../types/charge';
 import { t } from './useI18n';
 
 const translate: TranslateFn = (key) => t(key as never);
@@ -19,6 +20,12 @@ const translate: TranslateFn = (key) => t(key as never);
 export interface BatteryCareState {
   /** null enquanto a leitura inicial não chegou (ou falhou). */
   care: boolean | null;
+  /**
+   * Verdade do firmware (pedido vs aplicado + motivo). `null` = ainda não lido.
+   * É isto que impede o cartão de chamar "pausa" a um limite que nunca chegou
+   * ao controlador (94% com limite de 80%).
+   */
+  limitState: ChargeLimitState | null;
   pending: boolean;
   error: string | null;
   setCare: (enabled: boolean) => Promise<void>;
@@ -27,6 +34,7 @@ export interface BatteryCareState {
 
 export function useBatteryCare(): BatteryCareState {
   const [care, setCareState] = useState<boolean | null>(null);
+  const [limitState, setLimitState] = useState<ChargeLimitState | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,6 +46,12 @@ export function useBatteryCare(): BatteryCareState {
     } catch (e) {
       setCareState(null);
       setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+    }
+    try {
+      // Não fatal: sem este estado o cartão simplesmente não afirma "pausa".
+      setLimitState(await invoke<ChargeLimitState>('get_charge_limit_state'));
+    } catch {
+      setLimitState(null);
     }
   }, []);
 
@@ -51,6 +65,12 @@ export function useBatteryCare(): BatteryCareState {
       await invoke('set_battery_care', { enabled });
       setCareState(enabled);
       setError(null);
+      // O write devolve a leitura de confirmação — reaproveita-a.
+      try {
+        setLimitState(await invoke<ChargeLimitState>('get_charge_limit_state'));
+      } catch {
+        /* mantém o estado anterior */
+      }
     } catch (e) {
       const message = getUserFriendlyMessage(parseErrorResponse(e), translate);
       setError(message);
@@ -62,5 +82,5 @@ export function useBatteryCare(): BatteryCareState {
     }
   }, []);
 
-  return { care, pending, error, setCare, reload };
+  return { care, limitState, pending, error, setCare, reload };
 }

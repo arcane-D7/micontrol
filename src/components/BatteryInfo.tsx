@@ -67,6 +67,12 @@ export function chargePhaseMessage(
         vars: { level: phase.level, limit: phase.limit },
         tone: 'warn',
       };
+    case 'limitNotApplied':
+      return {
+        key: 'battery.phase.limitNotApplied',
+        vars: { level: phase.level, limit: phase.limit },
+        tone: 'warn',
+      };
     case 'resuming':
       return { key: 'battery.phase.resuming', vars: { limit: phase.limit }, tone: 'neutral' };
     case 'full':
@@ -101,6 +107,11 @@ export interface BatteryInfoProps {
   limit?: number;
   /** null = ainda não se sabe (a ler `get_battery_care`). */
   care?: boolean | null;
+  /**
+   * O firmware confirmou o limite? `false` = não está no hardware (ou não foi
+   * possível relê-lo) → a fase nunca pode dizer "em pausa ao limite".
+   */
+  limitApplied?: boolean | null;
   /** Segundos desde a última leitura que chegou a este ecrã. */
   updatedAgoSec?: number | null;
   /** "14:32" quando a última leitura falhou; null quando está tudo bem. */
@@ -120,6 +131,7 @@ export default function BatteryInfo({
   threshold,
   limit: limitAlias,
   care = null,
+  limitApplied = null,
   updatedAgoSec = null,
   staleSince = null,
   unavailable = false,
@@ -157,6 +169,7 @@ export default function BatteryInfo({
     isCharging: battery.is_charging,
     isPlugged: battery.is_plugged,
     limit,
+    limitApplied,
     minutesRemaining: battery.time_remaining_minutes,
   });
   const message = chargePhaseMessage(phase, {
