@@ -19,11 +19,12 @@
 //!
 //! ## The fix
 //!
-//! A FIXED pool (default 4 threads) that NEVER exits — the same contract the
-//! bridge service uses for its pipe workers (S55 FIX 23b) and its dispatch
-//! pool (S68). Blocking work is submitted through an unbounded channel; the
-//! caller awaits a `tokio::sync::oneshot` with `tokio::time::timeout`, so the
-//! WAIT never occupies a Tokio worker either (P1-a, STAB-ROUND-1).
+//! A FIXED pool (8 threads since STAB-ROUND-1, 4 before) that NEVER exits —
+//! the same contract the bridge service uses for its pipe workers (S55 FIX
+//! 23b) and its dispatch pool (S68). Blocking work is submitted through an
+//! unbounded channel; the caller awaits a `tokio::sync::oneshot` with
+//! `tokio::time::timeout`, so the WAIT never occupies a Tokio worker either
+//! (P1-a, STAB-ROUND-1).
 //!
 //! ## Why the wait must be async
 //!
