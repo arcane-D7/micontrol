@@ -180,6 +180,16 @@ export interface FanInfo {
   ec_active?: EcActiveMode | null;
   /** Raw mode byte behind `ec_active`. `0` = "not nameable through this channel". */
   ec_active_raw?: number | null;
+   * OS-reported lid state when the reading was taken.
+   *
+   * `false` means the lid is closed, and on this platform the EC then runs its
+   * own clamshell fan table: the fan ramps within ~1 s of the lid closing while
+   * CPU/GPU power and temperatures stay flat, and no software path can write
+   * fan duty, so the fan may not follow `mode`. `null`/`undefined` = the
+   * platform did not report the lid switch (not "closed").
+   */
+  lid_open?: boolean | null;
+
 }
 
 /**

@@ -1,4 +1,4 @@
-//! Power event listener for sleep/resume detection.
+//! Power event listener for sleep/resume detection **and lid state**.
 //!
 //! Creates a hidden message-only window that receives `WM_POWERBROADCAST`
 //! messages. When a resume event is detected, it triggers sensor resets
@@ -7,16 +7,37 @@
 //! This solves the "Sensor unavailable after sleep" problem where the
 //! ambient light sensor, thermal sensors, and other hardware stop
 //! responding after the system wakes from sleep.
+//!
+//! ## Lid state (clamshell detection)
+//!
+//! The same window also registers for `GUID_LIDSWITCH_STATE_CHANGE`
+//! (`PowerSettingRegisterNotification`, `DEVICE_NOTIFY_WINDOW_HANDLE`), the only
+//! OS-level lid source on this platform:
+//!
+//! - `Win32_Fan` / ESIF expose **no** lid property,
+//! - WMAA has LOTS (`0x0C00/0x02`), a *configuration* value (lid open type),
+//!   not a live switch state,
+//! - `Kernel-Power` logs event 107 only when the lid action *acts* (sleep or
+//!   shutdown). With "lid close = do nothing" — the owner's setting — the
+//!   System log contains **no** lid records at all, which is why a
+//!   "fan ramps with the lid closed" complaint could not be correlated after
+//!   the fact.
+//!
+//! Every transition is logged at INFO with a thermal snapshot (temps, package
+//! power, EC mode) taken on a separate thread — the message loop must never
+//! block on WMI. The state is exposed through [`lid_state`] so other modules
+//! (e.g. `hw::fan`) can report it instead of guessing.
 
 #![cfg(windows)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use windows::core::w;
-use windows::core::PCWSTR;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use windows::core::{w, GUID, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Power::{PowerSettingRegisterNotification, POWERBROADCAST_SETTING};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_DESTROY, WM_POWERBROADCAST, WNDCLASSEXW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, DEVICE_NOTIFY_WINDOW_HANDLE,
+    PBT_POWERSETTINGCHANGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_POWERBROADCAST,
+    WNDCLASSEXW,
 };
 
 /// Message-only window class name.
@@ -27,7 +48,58 @@ const PBT_APMRESUMESUSPEND: u32 = 7;
 const PBT_APMRESUMEAUTOMATIC: u32 = 18;
 const PBT_APMSUSPEND: u32 = 4;
 
+/// `GUID_LIDSWITCH_STATE_CHANGE` — `{BA3E0F4D-B817-4094-A2D1-D56379E6A0F3}`.
+///
+/// Not exported by the `windows` crate; spelled out here so the value is
+/// reviewable. Data byte: non-zero = lid open, zero = lid closed.
+const GUID_LIDSWITCH_STATE_CHANGE: GUID =
+    GUID::from_u128(0xBA3E_0F4D_B817_4094_A2D1_D563_79E6_A0F3);
+
+/// Lid state as reported by the OS. `Unknown` until the first notification.
+const LID_UNKNOWN: u8 = 0;
+const LID_OPEN: u8 = 1;
+const LID_CLOSED: u8 = 2;
+
 static LISTENER_RUNNING: AtomicBool = AtomicBool::new(false);
+static LID_STATE: AtomicU8 = AtomicU8::new(LID_UNKNOWN);
+
+/// Latest OS-reported lid state.
+///
+/// `Some(true)` = lid open, `Some(false)` = lid closed, `None` = the platform
+/// has not reported the lid switch (notification not registered, or no switch).
+pub fn lid_state() -> Option<bool> {
+    match LID_STATE.load(Ordering::Relaxed) {
+        LID_OPEN => Some(true),
+        LID_CLOSED => Some(false),
+        _ => None,
+    }
+}
+
+/// `true` when the OS reports the lid closed. Unknown state is **not** closed:
+/// callers must not suppress behaviour on a missing notification.
+pub fn is_lid_closed() -> bool {
+    LID_STATE.load(Ordering::Relaxed) == LID_CLOSED
+}
+
+/// Map a `PBT_POWERSETTINGCHANGE` payload to a lid state.
+///
+/// Returns `None` for any other power setting (the window receives several:
+/// AC/DC source, display state, battery level, …). Pure so it can be pinned by
+/// a unit test without a window.
+fn lid_state_from_setting(setting: &GUID, data: &[u8]) -> Option<bool> {
+    if *setting != GUID_LIDSWITCH_STATE_CHANGE {
+        return None;
+    }
+    let first = *data.first()?;
+    Some(first != 0)
+}
+
+/// Persist a transition and return `(previous, current)` as option-bools.
+fn store_lid_state(open: bool) -> (Option<bool>, Option<bool>) {
+    let previous = lid_state();
+    LID_STATE.store(if open { LID_OPEN } else { LID_CLOSED }, Ordering::Relaxed);
+    (previous, lid_state())
+}
 
 /// Start the power event listener in a background thread.
 ///
@@ -80,6 +152,25 @@ pub fn start_power_listener() {
                 return;
             }
 
+            // Lid switch notifications. Registration also delivers the current
+            // state immediately, so `lid_state()` is populated from boot.
+            let hwnd = hwnd.unwrap();
+            let mut registration: *mut core::ffi::c_void = std::ptr::null_mut();
+            let rc = PowerSettingRegisterNotification(
+                &GUID_LIDSWITCH_STATE_CHANGE,
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+                hwnd,
+                &mut registration,
+            );
+            if rc.0 == 0 {
+                log::info!("[power_listener] lid-switch notifications registered");
+            } else {
+                log::warn!(
+                    "[power_listener] lid-switch registration failed: Win32 error {}",
+                    rc.0
+                );
+            }
+
             log::info!("[power_listener] Listening for power events");
 
             // Message loop
@@ -90,7 +181,7 @@ pub fn start_power_listener() {
                 windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
             }
 
-            let _ = DestroyWindow(hwnd.unwrap());
+            let _ = DestroyWindow(hwnd);
             LISTENER_RUNNING.store(false, Ordering::SeqCst);
             log::info!("[power_listener] Stopped");
         }
@@ -101,6 +192,29 @@ pub fn start_power_listener() {
 extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_POWERBROADCAST {
         let event_type = wparam.0 as u32;
+
+        if event_type == PBT_POWERSETTINGCHANGE {
+            // SAFETY: `lParam` is the `POWERBROADCAST_SETTING` the OS built for
+            // this message; `lid_from_lparam` validates the pointer and length.
+            if let Some(open) = unsafe { lid_from_lparam(lparam) } {
+                let (previous, current) = store_lid_state(open);
+                if previous != current {
+                    log::info!(
+                        target: "hw::power_listener",
+                        "[lid] {} (previous {})",
+                        if open { "OPEN" } else { "CLOSED" },
+                        match previous {
+                            Some(true) => "open",
+                            Some(false) => "closed",
+                            None => "unknown",
+                        }
+                    );
+                    log_lid_snapshot(open);
+                }
+            }
+            return LRESULT(1);
+        }
+
         match event_type {
             PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
                 log::info!("[power_listener] Resume from sleep detected — resetting sensors");
@@ -123,6 +237,47 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
+/// Read the lid flag out of a `PBT_POWERSETTINGCHANGE` `lParam`.
+///
+/// `lParam` points at a `POWERBROADCAST_SETTING` whose `Data` is a flexible
+/// array of `DataLength` bytes; only the first byte is read.
+unsafe fn lid_from_lparam(lparam: LPARAM) -> Option<bool> {
+    if lparam.0 == 0 {
+        return None;
+    }
+    let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
+    if setting.DataLength == 0 {
+        return None;
+    }
+    lid_state_from_setting(&setting.PowerSetting, &setting.Data)
+}
+
+/// Log one thermal snapshot next to a lid transition.
+///
+/// The snapshot is the evidence the historical investigation lacked: it records
+/// what the machine was doing at the exact moment the lid moved, so a later
+/// "the fan ramped" report can be checked against temps/power/EC mode instead
+/// of being reconstructed from unrelated timestamps. Runs on its own thread —
+/// the WMI/pipe reads must not block the window message loop.
+fn log_lid_snapshot(open: bool) {
+    std::thread::spawn(move || match crate::hw::fan::get_fan_info() {
+        Ok(info) => log::info!(
+            target: "hw::power_listener",
+            "[lid] snapshot lid_open={open} cpu={:?} gpu={:?} ambient={:?} tdp={:?} \
+             mode={:?} requested={} rpm={:?} source={:?}",
+            info.cpu_temp_celsius,
+            info.gpu_temp_celsius,
+            info.ambient_temp_celsius,
+            info.tdp_watts,
+            info.mode,
+            info.requested_speed_percent,
+            info.speed_rpm,
+            info.temp_source
+        ),
+        Err(e) => log::warn!(target: "hw::power_listener", "[lid] snapshot failed: {e}"),
+    });
+}
+
 /// Called when a resume from sleep is detected.
 ///
 /// Resets all hardware sensors that may have become unresponsive during sleep.
@@ -140,4 +295,67 @@ fn on_resume() {
     crate::hw::wmi_cache::invalidate();
 
     log::info!("[power_listener] Sensor reset complete");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A different power setting (AC/DC source) must not be read as a lid state.
+    #[test]
+    fn other_power_settings_are_ignored() {
+        let acdc = GUID::from_u128(0x5D3E_9A6C_5D5D_4B7A_9E1C_9C2D_2A1F_0B6B);
+        assert_eq!(lid_state_from_setting(&acdc, &[1]), None);
+    }
+
+    #[test]
+    fn lid_payload_zero_is_closed_and_nonzero_is_open() {
+        assert_eq!(
+            lid_state_from_setting(&GUID_LIDSWITCH_STATE_CHANGE, &[0]),
+            Some(false)
+        );
+        assert_eq!(
+            lid_state_from_setting(&GUID_LIDSWITCH_STATE_CHANGE, &[1]),
+            Some(true)
+        );
+        // Windows has shipped values other than 0/1 for "open"; anything
+        // non-zero is open.
+        assert_eq!(
+            lid_state_from_setting(&GUID_LIDSWITCH_STATE_CHANGE, &[2]),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn empty_payload_is_not_a_lid_reading() {
+        assert_eq!(
+            lid_state_from_setting(&GUID_LIDSWITCH_STATE_CHANGE, &[]),
+            None
+        );
+    }
+
+    /// Unknown must never be treated as "closed": suppression on a missing
+    /// notification would disable work on platforms without a lid switch.
+    #[test]
+    fn unknown_state_is_not_closed() {
+        LID_STATE.store(LID_UNKNOWN, Ordering::Relaxed);
+        assert_eq!(lid_state(), None);
+        assert!(!is_lid_closed());
+    }
+
+    #[test]
+    fn store_reports_the_previous_and_current_state() {
+        LID_STATE.store(LID_UNKNOWN, Ordering::Relaxed);
+        let (prev, cur) = store_lid_state(false);
+        assert_eq!((prev, cur), (None, Some(false)));
+        assert!(is_lid_closed());
+
+        let (prev, cur) = store_lid_state(true);
+        assert_eq!((prev, cur), (Some(false), Some(true)));
+        assert!(!is_lid_closed());
+
+        // Repeated identical notifications must not look like transitions.
+        let (prev, cur) = store_lid_state(true);
+        assert_eq!(prev, cur);
+    }
 }

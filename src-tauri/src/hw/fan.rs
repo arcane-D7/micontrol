@@ -76,6 +76,18 @@ pub struct FanInfo {
     /// mode this ACPI channel cannot name", not "Silence".
     #[serde(default)]
     pub ec_active_raw: Option<u16>,
+    /// OS-reported lid state at the time of the reading.
+    ///
+    /// `Some(false)` = lid closed. The EC switches to a **clamshell fan table**
+    /// on this platform (the fan ramps within ~1 s of the lid closing while
+    /// CPU/GPU power and temperatures stay flat), and that table is not
+    /// reachable from software: no WMAA function writes fan duty, IGCL
+    /// enumerates no fans and the EC performance-mode writes are no-ops. This
+    /// field exists so the UI can *explain* the fan instead of hiding it, and
+    /// so logs can attribute a fan report to lid state. `None` = the platform
+    /// did not report the lid switch.
+    #[serde(default)]
+    pub lid_open: Option<bool>,
 }
 
 /// What `set_fan_mode` actually did — as opposed to what the mode is called.
@@ -982,6 +994,20 @@ fn build_fan_info(
         temp_source: thermal.source,
         ec_active: ec.map(|(_, m)| m),
         ec_active_raw: ec.map(|(raw, _)| raw),
+        lid_open: os_lid_state(),
+    }
+}
+
+/// OS-reported lid state, or `None` when the platform has no lid notification
+/// (the Windows listener lives behind `cfg(windows)`).
+fn os_lid_state() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        crate::hw::power_listener::lid_state()
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -1252,6 +1278,22 @@ pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<FanModeR
     if used_qfan_channel {
         result.method.push_str("+ec_qfan");
     }
+
+    // The lid state explains a fan that ignores the request: with the lid
+    // closed the EC runs its own clamshell fan table, so neither the EC profile
+    // write nor an IGCL handle can be observed in the fan. Say so instead of
+    // reporting a mode that the hardware is not following.
+    if crate::hw::power_listener::is_lid_closed() {
+        let note = "The lid is closed: this platform's EC switches to a clamshell fan table \
+                    while the lid is shut, so the requested profile may not be what the fan \
+                    follows. Reopen the lid to apply or verify it."
+            .to_string();
+        result.warning = Some(match result.warning.take() {
+            Some(existing) => format!("{existing} {note}"),
+            None => note,
+        });
+    }
+
     log::info!(
         target: "hw::fan",
         "set_fan_mode {mode:?} {speed_percent}% → applied={} method={} rpm_control={} profile={ec_profile} qfan={:?}->{:?}",
@@ -1847,6 +1889,23 @@ mod tests {
     fn gauge_is_capped_at_full_scale() {
         let info = build_fan_info(FanMode::Auto, 100, Some(9000), thermal(None), None);
         assert_eq!(info.speed_percent, Some(100));
+    }
+
+    /// The lid state rides along with the fan reading so a fan report can be
+    /// attributed to the clamshell table; unknown stays `null`, never "closed".
+    #[test]
+    fn fan_info_carries_the_os_lid_state() {
+        let mut info = build_fan_info(FanMode::Auto, 50, None, thermal(None), None);
+        info.lid_open = Some(false);
+        let open = serde_json::to_value(&info).expect("FanInfo serialises");
+        assert_eq!(open["lid_open"], serde_json::json!(false));
+
+        info.lid_open = None;
+        let unknown = serde_json::to_value(&info).expect("FanInfo serialises");
+        assert!(
+            unknown["lid_open"].is_null(),
+            "an unreported lid must not read as closed"
+        );
     }
 
     /// An unavailable CPU sensor stays unavailable — no ambient value sneaks in.
