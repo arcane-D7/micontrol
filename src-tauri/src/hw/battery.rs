@@ -158,22 +158,136 @@ fn battery_timeout_message(
 #[cfg(windows)]
 const BATTERY_QUERY_MIN_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Timestamp of the last query that actually spawned a WMI thread.
+/// Consecutive caller-observed timeouts that open the circuit.
+///
+/// STAB-ROUND-1: 111 timeouts in 34.7 h, max 67.4 s. Retrying every 15 s into
+/// a wedged provider is what kept a pool thread (and a log line) busy for
+/// minutes at a time. Three strikes, then space the probes out.
 #[cfg(windows)]
-static LAST_BATTERY_QUERY_AT: Mutex<Option<Instant>> = Mutex::new(None);
+const BREAKER_TRIP_AFTER: u32 = 3;
 
-/// Returns true when enough time has passed since the last real query. Marks
-/// the timestamp on success so concurrent callers cannot both start a query.
+/// First backoff once the circuit opens; doubles on each failed half-open
+/// probe (30 s → 60 s → 120 s → 240 s → 300 s cap).
 #[cfg(windows)]
-fn should_query_battery_now() -> bool {
-    let mut guard = crate::util::panic::lock_or_recover(&LAST_BATTERY_QUERY_AT);
-    match *guard {
-        Some(last) if last.elapsed() < BATTERY_QUERY_MIN_INTERVAL => false,
-        _ => {
-            *guard = Some(Instant::now());
-            true
+const BREAKER_BASE_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Cap: even a degraded battery must be re-probed at least every 5 minutes so
+/// a real recovery is noticed and the UI leaves the "—" state.
+#[cfg(windows)]
+const BREAKER_MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// What a caller may do right now.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryGate {
+    /// Run the WMI query.
+    Query,
+    /// The 15 s throttle is active — serve the cached snapshot if there is one.
+    Throttled,
+    /// The circuit is open after consecutive timeouts — no probe is allowed
+    /// until `retry_in` elapses. Serve the cached snapshot (honesty rule: the
+    /// caller shows a real value or, with no snapshot, an error → "—").
+    CircuitOpen {
+        retry_in: Duration,
+        consecutive_timeouts: u32,
+    },
+}
+
+/// Throttle + circuit breaker for the battery WMI provider.
+///
+/// Pure state machine (takes `now` explicitly) so every branch is unit-tested
+/// without WMI, threads or sleeping.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+struct BatteryGate {
+    last_query_at: Option<Instant>,
+    consecutive_timeouts: u32,
+    open_until: Option<Instant>,
+    /// How many times the circuit has opened since the last success; drives
+    /// the exponential backoff.
+    open_level: u32,
+}
+
+#[cfg(windows)]
+impl BatteryGate {
+    const fn new() -> Self {
+        Self {
+            last_query_at: None,
+            consecutive_timeouts: 0,
+            open_until: None,
+            open_level: 0,
         }
     }
+
+    /// Decide whether this caller may start a real query, and mark the start
+    /// time when it may. One probe at a time is allowed after the backoff
+    /// expires (half-open); a failure re-opens with a longer backoff.
+    fn acquire(&mut self, now: Instant) -> QueryGate {
+        if let Some(until) = self.open_until {
+            if now < until {
+                return QueryGate::CircuitOpen {
+                    retry_in: until.saturating_duration_since(now),
+                    consecutive_timeouts: self.consecutive_timeouts,
+                };
+            }
+            self.open_until = None; // half-open: let exactly one probe through
+        }
+        match self.last_query_at {
+            Some(last) if now.saturating_duration_since(last) < BATTERY_QUERY_MIN_INTERVAL => {
+                QueryGate::Throttled
+            }
+            _ => {
+                self.last_query_at = Some(now);
+                QueryGate::Query
+            }
+        }
+    }
+
+    /// Record a caller-observed timeout. Returns `(streak, backoff)` when the
+    /// breaker trips or re-opens — the caller logs that as a STATE CHANGE.
+    fn record_timeout(&mut self, now: Instant) -> Option<(u32, Duration)> {
+        self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+        if self.consecutive_timeouts < BREAKER_TRIP_AFTER {
+            return None;
+        }
+        self.open_level = self.open_level.saturating_add(1);
+        // 1, 2, 4, 8, 16 — capped by BREAKER_MAX_BACKOFF below.
+        let factor = 1u32 << (self.open_level - 1).min(4);
+        let backoff = (BREAKER_BASE_BACKOFF * factor).min(BREAKER_MAX_BACKOFF);
+        self.open_until = Some(now + backoff);
+        Some((self.consecutive_timeouts, backoff))
+    }
+
+    /// Record a reply (success or a hard query error — either way the worker
+    /// is answering). Returns the streak it ended, when there was one.
+    fn record_success(&mut self) -> Option<u32> {
+        let streak = self.consecutive_timeouts;
+        let was_degraded = streak > 0 || self.open_until.is_some();
+        self.consecutive_timeouts = 0;
+        self.open_until = None;
+        self.open_level = 0;
+        was_degraded.then_some(streak)
+    }
+
+    /// True while the provider is timing out or the circuit is open — used to
+    /// demote the per-query slow lines from INFO to DEBUG.
+    fn is_degraded(&self) -> bool {
+        self.consecutive_timeouts > 0 || self.open_until.is_some()
+    }
+}
+
+#[cfg(windows)]
+static BATTERY_GATE: Mutex<BatteryGate> = Mutex::new(BatteryGate::new());
+
+#[cfg(windows)]
+fn battery_gate() -> std::sync::MutexGuard<'static, BatteryGate> {
+    crate::util::panic::lock_or_recover(&BATTERY_GATE)
+}
+
+/// True when a previous query timed out and the breaker is spacing attempts.
+#[cfg(windows)]
+fn breaker_degraded() -> bool {
+    battery_gate().is_degraded()
 }
 
 /// Fetch battery info without blocking the caller for longer than
@@ -192,11 +306,38 @@ fn should_query_battery_now() -> bool {
 pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
     use std::sync::mpsc;
 
-    if !should_query_battery_now() {
-        if let Some(info) = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone() {
-            return Ok(info);
+    let gate = battery_gate().acquire(Instant::now());
+    match gate {
+        QueryGate::Query => {}
+        QueryGate::Throttled => {
+            if let Some(info) = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone() {
+                return Ok(info);
+            }
+            // No snapshot yet (first call of the session) — fall through and query.
         }
-        // No snapshot yet (first call of the session) — fall through and query.
+        QueryGate::CircuitOpen {
+            retry_in,
+            consecutive_timeouts,
+        } => {
+            // P2-e: after three consecutive timeouts we stop hammering the
+            // wedged provider. The cached snapshot is a REAL past reading; if
+            // there is none the caller gets a timeout error and the UI shows
+            // "—" (honesty rule — never a fabricated value).
+            log::debug!(
+                target: "hw::battery",
+                "battery WMI query skipped: circuit open after {consecutive_timeouts} consecutive \
+                 timeouts (retry in {} ms)",
+                retry_in.as_millis()
+            );
+            return match crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone() {
+                Some(info) => Ok(info),
+                None => Err(HardwareError::Timeout(format!(
+                    "battery WMI query circuit open after {consecutive_timeouts} consecutive \
+                     timeouts (retry in {} s)",
+                    retry_in.as_secs().max(1)
+                ))),
+            };
+        }
     }
 
     let started = Instant::now();
@@ -216,6 +357,15 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
 
     match result_rx.recv_timeout(BATTERY_QUERY_TIMEOUT) {
         Ok(result) => {
+            // A reply — even a hard query error — means the provider answered.
+            if let Some(streak) = battery_gate().record_success() {
+                if streak > 0 {
+                    log::info!(
+                        target: "hw::battery",
+                        "battery WMI recovered after {streak} consecutive timeouts"
+                    );
+                }
+            }
             if let Ok(info) = &result {
                 let mut guard = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY);
                 *guard = Some(info.clone());
@@ -229,11 +379,25 @@ pub fn get_battery_info() -> HardwareResult<BatteryInfo> {
             // previous completed query's real duration comes from the worker.
             let waited = started.elapsed();
             let last_completed = last_query_latency();
-            log::warn!(
-                target: "hw::battery",
-                "{} — returning last known-good snapshot",
-                battery_timeout_message(waited, BATTERY_QUERY_TIMEOUT, last_completed)
-            );
+            // P2-e: three strikes open the circuit. Trips/re-opens are state
+            // changes and stay at WARN with the backoff they bought; the
+            // ordinary per-timeout line is a WARN only while the breaker is
+            // still closed, DEBUG afterwards (a chronic stall must not own
+            // 3 808 log lines again).
+            match battery_gate().record_timeout(Instant::now()) {
+                Some((streak, backoff)) => log::warn!(
+                    target: "hw::battery",
+                    "{} — circuit open for {} s after {streak} consecutive timeouts; \
+                     serving last known-good snapshot",
+                    battery_timeout_message(waited, BATTERY_QUERY_TIMEOUT, last_completed),
+                    backoff.as_secs()
+                ),
+                None => log::warn!(
+                    target: "hw::battery",
+                    "{} — returning last known-good snapshot",
+                    battery_timeout_message(waited, BATTERY_QUERY_TIMEOUT, last_completed)
+                ),
+            }
             let cached = crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone();
             if let Some(info) = cached {
                 Ok(info)
@@ -289,11 +453,18 @@ fn battery_worker_loop(rx: std::sync::mpsc::Receiver<BatteryRequest>) {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         LAST_QUERY_LATENCY_MS.store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
         if elapsed_ms >= BATTERY_SLOW_QUERY_LOG_MS {
-            log::info!(
-                target: "hw::battery",
+            // P2-e: while the provider is degraded these per-query lines are
+            // the flood (217 > 5 s and 76 > 10 s in 34.7 h) — DEBUG there,
+            // INFO only from a healthy state so a regression is still visible.
+            let msg = format!(
                 "battery WMI query took {elapsed_ms} ms (slow threshold {BATTERY_SLOW_QUERY_LOG_MS} ms, {})",
                 if result.is_ok() { "ok" } else { "failed" }
             );
+            if breaker_degraded() {
+                log::debug!(target: "hw::battery", "{msg}");
+            } else {
+                log::info!(target: "hw::battery", "{msg}");
+            }
         }
         let _ = req.result_tx.send(result);
     }
@@ -986,5 +1157,109 @@ mod tests {
         LAST_QUERY_LATENCY_MS.store(2_345, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(last_query_latency(), Some(Duration::from_millis(2_345)));
         LAST_QUERY_LATENCY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // ── P2-e: throttle + circuit breaker ─────────────────────────────────────
+
+    #[cfg(windows)]
+    #[test]
+    fn gate_throttles_real_queries_to_one_per_interval() {
+        let t0 = Instant::now();
+        let mut gate = BatteryGate::new();
+        assert_eq!(gate.acquire(t0), QueryGate::Query);
+        assert_eq!(
+            gate.acquire(t0 + Duration::from_secs(1)),
+            QueryGate::Throttled
+        );
+        assert_eq!(
+            gate.acquire(t0 + BATTERY_QUERY_MIN_INTERVAL),
+            QueryGate::Query
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn three_consecutive_timeouts_open_the_circuit_with_backoff() {
+        let t0 = Instant::now();
+        let mut gate = BatteryGate::new();
+
+        // 1st and 2nd timeout: still closed, still WARN-worthy individually.
+        assert_eq!(gate.acquire(t0), QueryGate::Query);
+        assert_eq!(gate.record_timeout(t0 + Duration::from_secs(5)), None);
+        assert_eq!(gate.acquire(t0 + Duration::from_secs(20)), QueryGate::Query);
+        assert_eq!(gate.record_timeout(t0 + Duration::from_secs(25)), None);
+
+        // 3rd timeout: the circuit opens for the base backoff.
+        assert_eq!(gate.acquire(t0 + Duration::from_secs(40)), QueryGate::Query);
+        let (streak, backoff) = gate
+            .record_timeout(t0 + Duration::from_secs(45))
+            .expect("third timeout must trip the breaker");
+        assert_eq!(streak, 3);
+        assert_eq!(backoff, BREAKER_BASE_BACKOFF);
+
+        // While open, callers are told to wait — no probe is issued.
+        match gate.acquire(t0 + Duration::from_secs(50)) {
+            QueryGate::CircuitOpen {
+                retry_in,
+                consecutive_timeouts,
+            } => {
+                assert_eq!(consecutive_timeouts, 3);
+                assert_eq!(retry_in, Duration::from_secs(25)); // open until t0+75
+            }
+            other => panic!("expected an open circuit, got {other:?}"),
+        }
+
+        // Exactly one half-open probe after the backoff…
+        assert_eq!(gate.acquire(t0 + Duration::from_secs(75)), QueryGate::Query);
+        // …and a failed probe doubles the window.
+        let (streak, backoff) = gate
+            .record_timeout(t0 + Duration::from_secs(80))
+            .expect("failed half-open probe must re-open");
+        assert_eq!(streak, 4);
+        assert_eq!(backoff, Duration::from_secs(60));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_reply_resets_the_breaker_and_the_streak() {
+        let t0 = Instant::now();
+        let mut gate = BatteryGate::new();
+        assert_eq!(gate.acquire(t0), QueryGate::Query);
+        assert_eq!(gate.record_timeout(t0 + Duration::from_secs(1)), None);
+        assert!(gate.is_degraded(), "one timeout is already degraded");
+
+        assert_eq!(gate.record_success(), Some(1));
+        assert!(!gate.is_degraded());
+        assert_eq!(gate.record_success(), None, "nothing to reset twice");
+
+        // A fresh streak starts from zero: two timeouts do not trip it.
+        assert_eq!(gate.acquire(t0 + Duration::from_secs(20)), QueryGate::Query);
+        assert_eq!(gate.record_timeout(t0 + Duration::from_secs(25)), None);
+        assert_eq!(gate.acquire(t0 + Duration::from_secs(40)), QueryGate::Query);
+        assert_eq!(gate.record_timeout(t0 + Duration::from_secs(45)), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn breaker_backoff_is_capped_at_five_minutes() {
+        let t0 = Instant::now();
+        let mut gate = BatteryGate::new();
+        let mut now = t0;
+        let mut last = Duration::ZERO;
+        for round in 0..10 {
+            // Force a probe each round (a real caller would wait out the
+            // window; the decision itself is what is under test).
+            gate.open_until = None;
+            now += BATTERY_QUERY_MIN_INTERVAL;
+            assert_eq!(gate.acquire(now), QueryGate::Query);
+            match gate.record_timeout(now) {
+                Some((_, backoff)) => last = backoff,
+                None => assert!(
+                    round + 1 < BREAKER_TRIP_AFTER,
+                    "must trip from the {BREAKER_TRIP_AFTER}rd timeout on"
+                ),
+            }
+        }
+        assert_eq!(last, BREAKER_MAX_BACKOFF);
     }
 }

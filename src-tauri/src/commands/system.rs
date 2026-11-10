@@ -279,7 +279,11 @@ pub async fn get_touchpad_info() -> Result<TouchpadInfo, ErrorResponse> {
     // tasks (the battery/WMI contention), not that this read is slow — the
     // default 15 s budget only made the UI wait for a slot. A short budget
     // surfaces the real cause quickly and lets the next poll succeed.
-    const TOUCHPAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    //
+    // STAB-ROUND-1 (P2-f): 5 s still let a saturated pool park this leg for
+    // five seconds, five times in a session. The normal read is milliseconds;
+    // 2 s is already 100× the healthy path and fails fast.
+    const TOUCHPAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
     let result =
         crate::util::blocking::run_blocking_timeout(TOUCHPAD_READ_TIMEOUT, hw_get_touchpad)
             .await
@@ -458,9 +462,18 @@ pub async fn set_autostart(enabled: bool) -> Result<(), ErrorResponse> {
 /// not be read instead of silently showing a shorter list.
 #[tauri::command]
 pub async fn get_startup_items(refresh: Option<bool>) -> Result<StartupSnapshot, ErrorResponse> {
-    run_blocking(move || hw_get_startup_items(refresh.unwrap_or(false)))
-        .await
-        .map_err(ErrorResponse::from)
+    // STAB-ROUND-1 (P2-f): the registry + StartupApproved enumeration takes
+    // ~1.15 s (36 entries), and it used to sit in the pool with the default
+    // 15 s budget. A wedged pool then held a UI-open path for a quarter of a
+    // minute. 5 s is >4× the measured healthy time and bounds the slot; with
+    // the fixed pool now waiting asynchronously, this only costs a worker
+    // thread, never the Tokio runtime.
+    const STARTUP_ITEMS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    crate::util::blocking::run_blocking_timeout(STARTUP_ITEMS_TIMEOUT, move || {
+        hw_get_startup_items(refresh.unwrap_or(false))
+    })
+    .await
+    .map_err(ErrorResponse::from)
 }
 
 /// Enable/disable one startup entry.

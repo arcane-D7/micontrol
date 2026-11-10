@@ -242,32 +242,83 @@ pub fn start_iot_event_listener() {
         // First tick fires immediately; the listener self-baselines.
         loop {
             interval.tick().await;
-            tick();
+            poll_and_apply().await;
         }
     });
 }
 
 /// Manually trigger a scan now (used by sleep-resume hook and tests).
+///
+/// Fire-and-forget: the scan needs a battery read, which must not run on the
+/// caller's thread (P1-b).
 pub fn scan_now() {
-    tick();
+    tauri::async_runtime::spawn(poll_and_apply());
 }
 
-fn tick() {
+/// Time budget for one listener battery read.
+///
+/// The query has its own 5 s internal timeout; the listener runs every 5 s
+/// and a skipped tick is cheap, so it caps the wait lower than that.
+const BATTERY_POLL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A slow/failed poll is worth a WARN, but a chronic WMI stall would flood the
+/// log (3 808 lines in 34.7 h in STAB-ROUND-1) — one WARN per 5 min, DEBUG
+/// otherwise. State transitions still log at INFO.
+const POLL_WARN_MIN_INTERVAL: Duration = Duration::from_secs(300);
+
+static LAST_POLL_WARN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn log_poll_problem(msg: &str) {
+    let mut guard = crate::util::panic::lock_or_recover(&LAST_POLL_WARN);
+    let due = (*guard)
+        .map(|at| at.elapsed() >= POLL_WARN_MIN_INTERVAL)
+        .unwrap_or(true);
+    if due {
+        *guard = Some(std::time::Instant::now());
+        log::warn!("{msg}");
+    } else {
+        log::debug!("{msg}");
+    }
+}
+
+/// Read the battery and apply the transition rules.
+///
+/// P1-b (STAB-ROUND-1): `tick()` used to call `hw::battery::get_battery_info()`
+/// — a blocking WMI call that can take 40+ s — directly inside the Tokio task,
+/// holding a runtime worker. It now runs on the dedicated fixed pool (which is
+/// itself waited on asynchronously), so a stalled query cannot starve the
+/// runtime. Transitions are applied only when a reading actually arrives; a
+/// skipped tick leaves the previous state untouched (no synthetic event).
+async fn poll_and_apply() {
     let cfg = IotEventsConfig::load();
     if !cfg.enabled {
         return;
     }
 
-    // Battery info is already cached/throttled inside hw::battery; on error we
-    // simply skip this tick (no event, no OSD).
-    let info = match crate::hw::battery::get_battery_info() {
-        Ok(i) => i,
-        Err(e) => {
+    let info = match crate::util::fixed_pool::run_blocking_timeout(
+        BATTERY_POLL_TIMEOUT,
+        crate::hw::battery::get_battery_info,
+    )
+    .await
+    {
+        Ok(Ok(info)) => info,
+        Ok(Err(e)) => {
             log::debug!("[iot_events] battery poll failed (skipping tick): {e}");
+            return;
+        }
+        Err(e) => {
+            log_poll_problem(&format!(
+                "[iot_events] battery poll exceeded {} ms (skipping tick): {e}",
+                BATTERY_POLL_TIMEOUT.as_millis()
+            ));
             return;
         }
     };
 
+    apply_battery_snapshot(&cfg, &info);
+}
+
+fn apply_battery_snapshot(cfg: &IotEventsConfig, info: &crate::hw::battery::BatteryInfo) {
     let ac_now = info.is_plugged;
     let charging_now = info.is_charging;
     let level_now = info.level;

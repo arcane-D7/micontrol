@@ -75,6 +75,7 @@ import type {
 } from '../types/hardware';
 
 import { createPollGuard, type PollGuard } from '../lib/pollGuard';
+import { runBounded } from '../lib/boundedPoll';
 
 // ── Hardware hook ────────────────────────────────────────────────────────────
 
@@ -119,6 +120,11 @@ export function useHardware() {
   const systemPollInFlightRef = useRef(false);
   const slowPollInFlightRef = useRef(false);
   const initialLoadInFlightRef = useRef(false);
+  // Cancellation for in-flight polls: React state must not be written after
+  // unmount, and a slow-poll batch that lost its race must not clobber a
+  // newer batch (STAB-ROUND-1, P1-c).
+  const mountedRef = useRef(true);
+  const slowPollEpochRef = useRef(0);
   // Watchdogs: if a poll leg hangs (e.g. WMI wedged after sleep), the in-flight
   // flag stays true forever and every later poll is skipped → CPU/GPU freeze in
   // the overview. Storing the start time lets the next tick detect the stall and
@@ -159,6 +165,12 @@ export function useHardware() {
 
   const FAST_POLL_INTERVAL = 2000;
   const SLOW_POLL_INTERVAL = 15000;
+  // STAB-ROUND-1 (P1-c): five invokes used to hit the backend on the same
+  // tick every 15 s. Two in flight plus a staggered start is enough for the
+  // slow tier, and stops the batch from flooding the blocking pool exactly
+  // when a stalled battery query is already holding it.
+  const SLOW_POLL_CONCURRENCY = 2;
+  const SLOW_POLL_JITTER_MS = 400;
 
   // Safe wrapper: catches per-invoke failures so one failing query doesn't
   // abort the entire batch. Returns the fallback value on failure. If the
@@ -254,15 +266,39 @@ export function useHardware() {
     if (slowPollInFlightRef.current || initialLoadInFlightRef.current) return;
     slowPollInFlightRef.current = true;
     slowPollStartedAtRef.current = Date.now();
+    const epoch = ++slowPollEpochRef.current;
+    const cancelled = () => !mountedRef.current || slowPollEpochRef.current !== epoch;
     try {
-      const [batteryResult, displayResult, touchpadResult, perfMode, chargeThreshold] =
-        await Promise.all([
-          safe(invoke<BatteryInfo>('get_battery_info'), null, 'get_battery_info'),
-          safe(invoke<DisplayInfo>('get_display_info'), null, 'get_display_info'),
-          safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'get_touchpad_info'),
-          safe(invoke<PerformanceMode>('get_performance_mode'), null, 'get_performance_mode'),
-          safe(invoke<number>('get_charging_threshold'), 80, 'get_charging_threshold'),
-        ]);
+      // P1-c: bounded concurrency + jitter instead of five simultaneous
+      // invokes. Each leg is already `safe()`-wrapped, so a rejected leg is a
+      // null value, not an exception; `skipped` (cancelled) is just ignored.
+      const outcomes = await runBounded<unknown>(
+        [
+          () => safe(invoke<BatteryInfo>('get_battery_info'), null, 'get_battery_info'),
+          () => safe(invoke<DisplayInfo>('get_display_info'), null, 'get_display_info'),
+          () => safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'get_touchpad_info'),
+          () => safe(invoke<PerformanceMode>('get_performance_mode'), null, 'get_performance_mode'),
+          () => safe(invoke<number>('get_charging_threshold'), 80, 'get_charging_threshold'),
+        ],
+        {
+          limit: SLOW_POLL_CONCURRENCY,
+          jitterMs: SLOW_POLL_JITTER_MS,
+          isCancelled: cancelled,
+        },
+      );
+      // No state writes after unmount, and no stale batch overwriting a newer
+      // one (the stall watchdog can release the in-flight flag while an old
+      // batch is still pending).
+      if (cancelled()) return;
+      const valueOf = <T>(index: number): T | null => {
+        const outcome = outcomes[index];
+        return outcome && outcome.status === 'fulfilled' ? (outcome.value as T) : null;
+      };
+      const batteryResult = valueOf<BatteryInfo>(0);
+      const displayResult = valueOf<DisplayInfo>(1);
+      const touchpadResult = valueOf<TouchpadInfo>(2);
+      const perfMode = valueOf<PerformanceMode>(3);
+      const chargeThreshold = valueOf<number>(4);
       if (batteryResult !== null) setBattery(batteryResult);
       if (displayResult !== null) setDisplay(displayResult);
       // Only update touchpad from poll when no user write is in flight.
@@ -274,7 +310,7 @@ export function useHardware() {
       if (perfMode && Date.now() >= perfWriteDirtyUntil.current) {
         setPerformanceModeState(perfMode);
       }
-      setChargingThresholdState(chargeThreshold);
+      if (chargeThreshold !== null) setChargingThresholdState(chargeThreshold);
       // Do NOT clear the error here (see fastPoll). Only the initial load with
       // full success or clearError() clears the error state.
     } finally {
@@ -285,6 +321,7 @@ export function useHardware() {
   const initialLoadRef = useRef(false);
 
   useEffect(() => {
+    mountedRef.current = true;
     const refreshIfVisible = (pollFn: () => Promise<void>) => {
       // The tray popup window is pre-created and often kept hidden.
       // Skip polling while hidden to avoid background WMI/query churn.
@@ -412,6 +449,10 @@ export function useHardware() {
     window.addEventListener('focus', onWindowFocus);
 
     return () => {
+      // Cancel queued/in-flight slow-poll legs: the epoch check makes any
+      // result that lands after this point a no-op (P1-c).
+      mountedRef.current = false;
+      slowPollEpochRef.current += 1;
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('focus', onWindowFocus);
       clearInterval(systemInterval);
