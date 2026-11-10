@@ -4,6 +4,7 @@ import { t } from '../../hooks/useI18n';
 import { PageHeader } from './PageHeader';
 import PerformanceMonitor from '../../components/PerformanceMonitor';
 import PerformanceModeSelector from '../../components/PerformanceModeSelector';
+import EcModeReadout from '../../components/EcModeReadout';
 import FunctionExplain from '../../components/FunctionExplain';
 import { useToast } from '../../contexts/ToastContext';
 import {
@@ -140,6 +141,10 @@ function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
         lastResult={hw.lastPerfResult}
       />
       <div className="card">
+        {/* The selector below is the STORED preference. This line is the
+            machine: the EC's own mode register, read back from the firmware.
+            They can disagree indefinitely — the registry is not evidence. */}
+        <EcModeReadout fan={hw.fan} />
         <PerformanceModeSelector
           current={hw.performanceMode}
           onChange={hw.setPerformanceMode}

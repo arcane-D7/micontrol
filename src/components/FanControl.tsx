@@ -4,6 +4,7 @@ import type { FanInfo, FanModeResult } from '../types/hardware';
 import { useToast } from '../contexts/ToastContext';
 import { Icon } from './ui/icons';
 import { InfoHint } from './ui/info-hint';
+import EcModeReadout from './EcModeReadout';
 
 interface Props {
   fan: FanInfo | null;
@@ -103,6 +104,9 @@ export default function FanControl({ fan, onModeChange }: Props) {
           </button>
         ))}
       </div>
+
+      {/* The buttons above store a preference; this line is the machine. */}
+      <EcModeReadout fan={fan} />
 
       {mode === 'fixed' && (
         <>

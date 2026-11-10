@@ -64,6 +64,18 @@ pub struct FanInfo {
     /// Which source produced [`FanInfo::cpu_temp_celsius`].
     #[serde(default)]
     pub temp_source: TempSource,
+    /// The EC's **active** performance mode, read back from the firmware
+    /// (`WMAA 0x0800 / 0`) — the truth, not the stored preference.
+    ///
+    /// `None` when the EC read failed (elevated bridge unavailable). Never
+    /// substitute the registry value here: on this machine the registry said
+    /// "Balance" for hours while the EC sat at QFAN=9.
+    #[serde(default)]
+    pub ec_active: Option<crate::hw::wmi_ec::EcActiveMode>,
+    /// Raw `FRD0` byte behind [`FanInfo::ec_active`]. `0` means "the EC is in a
+    /// mode this ACPI channel cannot name", not "Silence".
+    #[serde(default)]
+    pub ec_active_raw: Option<u16>,
 }
 
 /// What `set_fan_mode` actually did — as opposed to what the mode is called.
@@ -85,11 +97,30 @@ pub struct FanModeResult {
     pub rpm_control: bool,
     /// Honest caveat to show next to the result, when there is one.
     pub warning: Option<String>,
+    /// EC mode register (`QFAN`) read back *before* the write. `None` = the
+    /// readback was unavailable, so nothing can be claimed either way.
+    #[serde(default)]
+    pub ec_mode_before: Option<u16>,
+    /// EC mode register read back *after* the write.
+    #[serde(default)]
+    pub ec_mode_after: Option<u16>,
+    /// The write was **proven** to latch the EC register (see
+    /// [`crate::hw::wmi_ec::qfan_write_verified`]). This is the only field the
+    /// UI may use to say "applied" about the EC.
+    #[serde(default)]
+    pub ec_verified: bool,
 }
 
 impl FanModeResult {
     /// Build the result from the outcomes of the individual hardware paths.
-    pub fn new(mode: &FanMode, ec_profile: &str, ec_applied: bool, rpm_control: bool) -> Self {
+    pub fn new(
+        mode: &FanMode,
+        ec_profile: &str,
+        ec_applied: bool,
+        rpm_control: bool,
+        ec_mode_before: Option<u16>,
+        ec_mode_after: Option<u16>,
+    ) -> Self {
         let mut method = String::from("registry");
         if ec_applied {
             method.push_str("+ec_profile");
@@ -97,6 +128,11 @@ impl FanModeResult {
         if rpm_control {
             method.push_str("+igcl");
         }
+        let readback = match (ec_mode_before, ec_mode_after) {
+            (Some(b), Some(a)) => format!("the EC reported {b} before the write and {a} after"),
+            (_, Some(a)) => format!("the EC reports {a}"),
+            _ => "the EC did not answer the readback".to_string(),
+        };
         let warning = match mode {
             FanMode::Fixed if !rpm_control => Some(format!(
                 "Fixed speed requested, but this platform exposes no RPM control \
@@ -109,10 +145,11 @@ impl FanModeResult {
                  (minimum profile). The fan keeps running."
                     .to_string(),
             ),
-            FanMode::Auto if !ec_applied => Some(
-                "The EC fan profile could not be written; only the stored setting changed."
-                    .to_string(),
-            ),
+            FanMode::Auto if !ec_applied => Some(format!(
+                "The requested EC profile '{ec_profile}' did not latch: {readback}. \
+                 Only the stored setting changed — the before/after values above \
+                 come from the firmware's own mode register, not from the setting."
+            )),
             FanMode::Auto => None,
         };
         Self {
@@ -120,6 +157,9 @@ impl FanModeResult {
             method,
             rpm_control,
             warning,
+            ec_mode_before,
+            ec_mode_after,
+            ec_verified: ec_applied,
         }
     }
 
@@ -137,9 +177,12 @@ impl FanModeResult {
                 rpm_control: false,
                 warning: Some(
                     "The elevated helper did not report the fan result (older build); \
-                     only the stored setting is confirmed."
+                                 only the stored setting is confirmed."
                         .to_string(),
                 ),
+                ec_mode_before: None,
+                ec_mode_after: None,
+                ec_verified: false,
             },
         }
     }
@@ -814,7 +857,78 @@ pub async fn get_elevated_thermal_readings() -> EsifReadings {
 /// [`get_fan_info_seeded`] with readings fetched via the elevated bridge,
 /// because the thermal WMI classes deny unprivileged callers.
 pub fn get_fan_info() -> HardwareResult<FanInfo> {
-    get_fan_info_seeded(EsifReadings::unavailable())
+    get_fan_info_seeded(EsifReadings::unavailable(), None)
+}
+
+// ── EC active mode via the elevated bridge ──────────────────────────────────
+
+/// TTL cache for the elevated EC-mode read. The UI polls `get_fan_info` every
+/// 2 s; the EC mode changes only when somebody writes it, so a short TTL keeps
+/// the round-trips down without showing a stale mode after a change.
+type EcModeReading = (u16, crate::hw::wmi_ec::EcActiveMode);
+type EcModeCache = OnceLock<StdMutex<Option<(StdInstant, Option<EcModeReading>)>>>;
+static EC_MODE_CACHE: EcModeCache = OnceLock::new();
+const EC_MODE_CACHE_SECS: u64 = 3;
+
+/// Invalidate the cached EC mode (call after any mode write).
+pub fn invalidate_ec_mode_cache() {
+    if let Some(cache) = EC_MODE_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// Read the EC's active performance mode through the elevated bridge.
+///
+/// `MICommonInterface` denies user-mode CIM access on this platform, so the
+/// read has to run in the elevated dispatcher; the whitelisted `wmi_ec_read`
+/// command with `fun2=0x0800, fun3=0` is exactly that read. `None` means the
+/// read did not answer — never a fabricated mode.
+pub async fn get_ec_active_mode() -> Option<EcModeReading> {
+    let cache = EC_MODE_CACHE.get_or_init(|| StdMutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, value)) = *guard {
+            if at.elapsed() < StdDuration::from_secs(EC_MODE_CACHE_SECS) {
+                return value;
+            }
+        }
+    }
+
+    let raw = crate::elev_bridge::run_elevated_no_prompt(
+        "wmi_ec_read",
+        serde_json::json!({ "fun2": 0x0800, "fun3": 0x0000 }),
+    )
+    .await;
+
+    let value = match raw {
+        Ok(v) => {
+            let sger = v.get("sger").and_then(|s| s.as_u64()).unwrap_or(0);
+            let frd0 = v.get("frd0").and_then(|s| s.as_u64()).map(|f| f as u16);
+            match (sger, frd0) {
+                (0x8000, Some(raw_mode)) => Some((
+                    raw_mode,
+                    crate::hw::wmi_ec::EcActiveMode::from_raw(raw_mode),
+                )),
+                _ => {
+                    log::debug!(
+                        target: "hw::fan",
+                        "EC mode read via bridge returned no usable value: {v}"
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            log::debug!(target: "hw::fan", "EC mode read via bridge failed: {e}");
+            None
+        }
+    };
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((StdInstant::now(), value));
+    }
+    value
 }
 
 /// EC RAM reading via the `ecram_service` pipe.
@@ -852,6 +966,7 @@ fn build_fan_info(
     requested_speed_percent: u8,
     speed_rpm: Option<u32>,
     thermal: ThermalTotals,
+    ec: Option<EcModeReading>,
 ) -> FanInfo {
     FanInfo {
         mode,
@@ -865,6 +980,8 @@ fn build_fan_info(
         ambient_temp_celsius: thermal.ambient_temp,
         tdp_watts: thermal.tdp_watts,
         temp_source: thermal.source,
+        ec_active: ec.map(|(_, m)| m),
+        ec_active_raw: ec.map(|(raw, _)| raw),
     }
 }
 
@@ -879,7 +996,15 @@ struct ThermalTotals {
 
 /// Compute `FanInfo`, seeding the ESIF readings with values fetched from the
 /// elevated bridge when the direct (in-process) WMI query is denied.
-pub fn get_fan_info_seeded(elevated: EsifReadings) -> HardwareResult<FanInfo> {
+///
+/// `ec` is the EC's active mode `(raw, decoded)`. It can only be read from an
+/// elevated process on this platform (`MICommonInterface` denies user-mode
+/// CIM access with `Access denied`), which is why it is passed in instead of
+/// being fetched here — see [`get_ec_active_mode`].
+pub fn get_fan_info_seeded(
+    elevated: EsifReadings,
+    ec: Option<EcModeReading>,
+) -> HardwareResult<FanInfo> {
     // ── RPM: only a real sensor reading is reported ──────────────────────────
     // Win32_Fan.DesiredSpeed is empty on this platform and every EC RAM path is
     // denied, so this is normally `None` — not `0`.
@@ -956,11 +1081,20 @@ pub fn get_fan_info_seeded(elevated: EsifReadings) -> HardwareResult<FanInfo> {
     // MiInterface (ACPI WMAA method), NOT via IoTDriver or ECRAM.
     // wmi_ec::get_performance_mode() calls wmi_read(FUN2_EC_FUNC, 0) which
     // goes through the MICommonInterface WMI class in root\WMI.
-    // This works WITHOUT IoTDriver and WITHOUT elevation (when called from
-    // the elevated bridge process).
-    let ec_mode = crate::hw::wmi_ec::get_performance_mode().ok();
-    if let Some(ec_mode) = ec_mode {
-        log::debug!(target: "hw::fan", "EC performance mode via WMI: {:?}", ec_mode);
+    //
+    // PITFALL (verified 2026-11-10): that class DENIES user-mode access
+    // (`Access denied`), so this in-process read only succeeds when the whole
+    // app runs elevated — the normal path is the elevated bridge, which is why
+    // the decoded mode is passed in by the command layer instead.
+    let ec = match ec {
+        Some(v) => Some(v),
+        None => crate::hw::wmi_ec::read_active_mode().ok(),
+    };
+    if let Some((raw, mode)) = ec {
+        log::debug!(
+            target: "hw::fan",
+            "EC active mode via WMAA: raw={raw} ({mode:?})"
+        );
     }
 
     Ok(build_fan_info(
@@ -974,6 +1108,7 @@ pub fn get_fan_info_seeded(elevated: EsifReadings) -> HardwareResult<FanInfo> {
             tdp_watts,
             source: cpu_source,
         },
+        ec,
     ))
 }
 
@@ -997,11 +1132,11 @@ pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<FanModeR
     // MiInterface (ACPI WMAA method), NOT via IoTDriver or ECRAM.
     // wmi_ec::set_performance_mode() calls wmi_write(FUN2_EC_FUNC, mode, 0)
     // which goes through the MICommonInterface WMI class in root\WMI.
-    // FanMode → EcPerformanceMode mapping (unchanged):
-    //   Auto/Fixed >=80% → UltraPerformance (9)
-    //   Auto/Fixed >=50% → Balanced (6)
-    //   Auto/Fixed <50%  → Quiet (7)
-    //   Off              → SuperQuiet (8)
+    //
+    // PITFALL (verified live 2026-11-10): WMAA FUN3 5..8 write SMMT/SMMD + a
+    // DPTF variable and never touch QFAN, the register the read path reports.
+    // "Success" is not evidence — the register is read back before and after,
+    // and only `qfan_write_verified` may set `ec_verified`.
     let ec_mode = match mode {
         FanMode::Auto | FanMode::Fixed => {
             if speed_percent >= 80 {
@@ -1015,13 +1150,76 @@ pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<FanModeR
         FanMode::Off => crate::hw::wmi_ec::EcPerformanceMode::SuperQuiet,
     };
     let ec_profile = ec_profile_label(ec_mode);
-    let ec_applied = match crate::hw::wmi_ec::set_performance_mode(ec_mode) {
-        Ok(()) => true,
-        Err(e) => {
+
+    // Runs inside the elevated helper, so the in-process WMAA read works here.
+    let before = crate::hw::wmi_ec::read_active_mode()
+        .ok()
+        .map(|(raw, _)| raw);
+    let write_result = crate::hw::wmi_ec::set_performance_mode(ec_mode);
+    let after = crate::hw::wmi_ec::read_active_mode()
+        .ok()
+        .map(|(raw, _)| raw);
+
+    let mut ec_applied = match (&write_result, before, after) {
+        (Err(e), _, _) => {
             log::warn!("WMI EC set_performance_mode: {e}");
             false
         }
+        (Ok(()), Some(b), Some(a)) => {
+            let ok = crate::hw::wmi_ec::qfan_write_verified(ec_mode as u16, b, a);
+            if !ok {
+                log::warn!(
+                    target: "hw::fan",
+                    "EC profile write did not latch: requested FUN3={} ({ec_profile}), QFAN {b} -> {a}",
+                    ec_mode as u16
+                );
+            }
+            ok
+        }
+        (Ok(()), _, _) => {
+            log::warn!(
+                target: "hw::fan",
+                "EC profile write could not be verified (no mode readback)"
+            );
+            false
+        }
     };
+    let mut ec_mode_after = after;
+
+    // ── Fallback: the channel that actually moves QFAN ───────────────────────
+    // The WMAA profiles 5..8 (the ones this tab requests for Balance/Quiet/Off)
+    // never write QFAN on this firmware. When the readback proves the write did
+    // not latch, ask the same EC through the original Xiaomi channel
+    // (HQWmiCommonInterface.SetPerformanceMode → `ECWT(value, QFAN)`), then
+    // verify again. The requested fan *band* is preserved: >=80% → Turbo,
+    // >=50% → Balance, below/off → Silence.
+    let mut used_qfan_channel = false;
+    if !ec_applied {
+        let target = ec_qfan_for_fan_mode(&mode, speed_percent);
+        match crate::hw::performance::set_ec_qfan(u32::from(target)) {
+            Ok(()) => {
+                let rb = crate::hw::wmi_ec::read_active_mode()
+                    .ok()
+                    .map(|(raw, _)| raw);
+                let baseline = before.or(ec_mode_after);
+                if let (Some(b), Some(a)) = (baseline, rb) {
+                    if crate::hw::wmi_ec::qfan_write_verified(target, b, a) {
+                        ec_applied = true;
+                        used_qfan_channel = true;
+                    }
+                    ec_mode_after = Some(a);
+                }
+                if !ec_applied {
+                    log::warn!(
+                        target: "hw::fan",
+                        "EC QFAN write via HQ WMI did not latch either: requested {target}, readback {rb:?}"
+                    );
+                }
+            }
+            Err(e) => log::warn!(target: "hw::fan", "EC QFAN write via HQ WMI failed: {e}"),
+        }
+        invalidate_ec_mode_cache();
+    }
 
     // `true` only when an IGCL fan handle was actually programmed — i.e. the
     // fixed speed was really applied to a fan. Always false here.
@@ -1040,15 +1238,51 @@ pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<FanModeR
         }
     };
 
-    let result = FanModeResult::new(&mode, ec_profile, ec_applied, rpm_control);
+    let mut result = FanModeResult::new(
+        &mode,
+        ec_profile,
+        ec_applied,
+        rpm_control,
+        before,
+        ec_mode_after,
+    );
+    // Record the real before/after register values (the honest evidence).
+    result.ec_mode_before = before;
+    result.ec_mode_after = ec_mode_after;
+    if used_qfan_channel {
+        result.method.push_str("+ec_qfan");
+    }
     log::info!(
         target: "hw::fan",
-        "set_fan_mode {mode:?} {speed_percent}% → applied={} method={} rpm_control={} profile={ec_profile}",
+        "set_fan_mode {mode:?} {speed_percent}% → applied={} method={} rpm_control={} profile={ec_profile} qfan={:?}->{:?}",
         result.applied,
         result.method,
-        result.rpm_control
+        result.rpm_control,
+        result.ec_mode_before,
+        result.ec_mode_after
     );
     Ok(result)
+}
+
+/// The EC mode register value (`QFAN`) that matches a requested fan band.
+///
+/// Uses the EC's own numbering (the one `HQWmiCommonInterface.SetPerformanceMode`
+/// writes): 2 = Turbo, 1 = Balance, 0 = Silence. These are the three profiles
+/// with distinct fan tables; "Off" has no hardware equivalent and maps to
+/// Silence, which the result message says out loud.
+fn ec_qfan_for_fan_mode(mode: &FanMode, speed_percent: u8) -> u16 {
+    match mode {
+        FanMode::Off => 0,
+        FanMode::Auto | FanMode::Fixed => {
+            if speed_percent >= 80 {
+                2 // Turbo
+            } else if speed_percent >= 50 {
+                1 // Balance
+            } else {
+                0 // Silence
+            }
+        }
+    }
 }
 
 /// Human-readable name of the EC fan profile written by `set_fan_mode`.
@@ -1590,7 +1824,7 @@ mod tests {
     /// code reported `rpm = 0` *and* a 50 % gauge at the same time.
     #[test]
     fn no_rpm_sensor_reports_unavailable_not_zero() {
-        let info = build_fan_info(FanMode::Fixed, 50, None, thermal(Some(57.0)));
+        let info = build_fan_info(FanMode::Fixed, 50, None, thermal(Some(57.0)), None);
         assert_eq!(info.speed_rpm, None, "no sensor must not be reported as 0");
         assert_eq!(info.speed_percent, None, "gauge must not be synthesised");
         assert_eq!(
@@ -1604,21 +1838,21 @@ mod tests {
     /// the registry.
     #[test]
     fn measured_rpm_derives_the_percentage() {
-        let info = build_fan_info(FanMode::Fixed, 50, Some(3000), thermal(Some(57.0)));
+        let info = build_fan_info(FanMode::Fixed, 50, Some(3000), thermal(Some(57.0)), None);
         assert_eq!(info.speed_rpm, Some(3000));
         assert_eq!(info.speed_percent, Some(60), "3000 / 5000 = 60 %");
     }
 
     #[test]
     fn gauge_is_capped_at_full_scale() {
-        let info = build_fan_info(FanMode::Auto, 100, Some(9000), thermal(None));
+        let info = build_fan_info(FanMode::Auto, 100, Some(9000), thermal(None), None);
         assert_eq!(info.speed_percent, Some(100));
     }
 
     /// An unavailable CPU sensor stays unavailable — no ambient value sneaks in.
     #[test]
     fn unavailable_cpu_temperature_stays_none() {
-        let info = build_fan_info(FanMode::Auto, 50, None, thermal(None));
+        let info = build_fan_info(FanMode::Auto, 50, None, thermal(None), None);
         assert_eq!(info.cpu_temp_celsius, None);
         assert_eq!(info.temp_source, TempSource::Unavailable);
         assert_eq!(
@@ -1634,7 +1868,7 @@ mod tests {
     /// thing that happened, and the result says so instead of claiming success.
     #[test]
     fn fixed_without_igcl_does_not_claim_rpm_control() {
-        let result = FanModeResult::new(&FanMode::Fixed, "Balanced", true, false);
+        let result = FanModeResult::new(&FanMode::Fixed, "Balanced", true, false, Some(9), Some(9));
         assert!(result.applied, "the EC profile was applied");
         assert!(!result.rpm_control, "RPM were not pinned");
         assert_eq!(result.method, "registry+ec_profile");
@@ -1645,7 +1879,7 @@ mod tests {
 
     #[test]
     fn fixed_with_igcl_reports_rpm_control_and_no_warning() {
-        let result = FanModeResult::new(&FanMode::Fixed, "Balanced", true, true);
+        let result = FanModeResult::new(&FanMode::Fixed, "Balanced", true, true, Some(9), Some(9));
         assert!(result.applied && result.rpm_control);
         assert_eq!(result.method, "registry+ec_profile+igcl");
         assert_eq!(result.warning, None);
@@ -1653,7 +1887,7 @@ mod tests {
 
     #[test]
     fn off_mode_says_the_fan_keeps_running() {
-        let result = FanModeResult::new(&FanMode::Off, "SuperQuiet", true, false);
+        let result = FanModeResult::new(&FanMode::Off, "SuperQuiet", true, false, Some(9), Some(0));
         assert!(result.applied);
         let warning = result.warning.expect("a caveat is required");
         assert!(warning.contains("cannot stop the fan"));
@@ -1664,7 +1898,7 @@ mod tests {
     /// does not show a success toast.
     #[test]
     fn auto_with_no_hardware_path_is_not_applied() {
-        let result = FanModeResult::new(&FanMode::Auto, "Balanced", false, false);
+        let result = FanModeResult::new(&FanMode::Auto, "Balanced", false, false, Some(9), Some(9));
         assert!(!result.applied);
         assert_eq!(result.method, "registry");
         assert!(result.warning.is_some());
@@ -1688,8 +1922,35 @@ mod tests {
     /// A new helper's payload round-trips through JSON unchanged.
     #[test]
     fn bridge_reply_round_trips() {
-        let original = FanModeResult::new(&FanMode::Fixed, "Quiet", true, false);
+        let original = FanModeResult::new(&FanMode::Fixed, "Quiet", true, false, Some(2), Some(0));
         let value = serde_json::to_value(&original).expect("serialisable");
         assert_eq!(FanModeResult::from_bridge(&value), original);
+    }
+
+    /// The QFAN fallback must preserve the requested band, in the EC's own
+    /// numbering (2=Turbo, 1=Balance, 0=Silence).
+    #[test]
+    fn qfan_fallback_keeps_the_requested_band() {
+        assert_eq!(ec_qfan_for_fan_mode(&FanMode::Fixed, 100), 2);
+        assert_eq!(ec_qfan_for_fan_mode(&FanMode::Fixed, 80), 2);
+        assert_eq!(ec_qfan_for_fan_mode(&FanMode::Auto, 79), 1);
+        assert_eq!(ec_qfan_for_fan_mode(&FanMode::Auto, 50), 1);
+        assert_eq!(ec_qfan_for_fan_mode(&FanMode::Fixed, 49), 0);
+        assert_eq!(ec_qfan_for_fan_mode(&FanMode::Off, 100), 0);
+    }
+
+    /// A result that could not be verified must say so, and must carry the raw
+    /// register values instead of a friendly story.
+    #[test]
+    fn unverified_write_reports_the_real_readback() {
+        // Requested the WMAA "Balanced" profile (FUN3=6); the EC stayed at 9.
+        let result = FanModeResult::new(&FanMode::Auto, "Balanced", false, false, Some(9), Some(9));
+        assert!(!result.applied, "an unlatched write is not applied");
+        assert!(!result.ec_verified);
+        assert_eq!(result.ec_mode_before, Some(9));
+        assert_eq!(result.ec_mode_after, Some(9));
+        let warning = result.warning.expect("a caveat is required");
+        assert!(warning.contains("did not latch"), "says it did not latch");
+        assert!(warning.contains("reported 9"), "quotes the real readback");
     }
 }

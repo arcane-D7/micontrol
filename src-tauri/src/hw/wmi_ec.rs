@@ -100,7 +100,23 @@ fn make_buffer(fun1: u16, fun2: u16, fun3: u16, fun4: u32) -> [u8; BUFFER_SIZE] 
     buf
 }
 
-/// Performance mode IDs (FUN3 for FUN2=0x0800 write commands).
+/// WMAA `FUN2=0x0800` write-profile IDs (`FUN3`).
+///
+/// PITFALL — these names are the ones this app has always used, but they are
+/// **not** the EC's mode register values. The ACPI write branch treats them
+/// differently (decoded from `ssdt24.dsl`):
+///
+/// * `2/3/4/9/0x0A` write `QFAN` (EC RAM `0x68`) — the register the read path
+///   reports. These are the only values whose effect is readable back.
+/// * `5..=8` write `SMMT`/`SMMD` (EC RAM `0x4A`/`0x4B`) plus a DPTF OEM
+///   variable and never touch `QFAN`. On this firmware they are DPTF power
+///   profiles, **not** the fan/performance mode: writing `6` ("Balanced" here)
+///   while the EC sits at `9` leaves it at `9`, and `SGER` still says success.
+///
+/// The EC's own numbering (SSDB `SetPerformanceMode`, EC RAM `0x68`) is
+/// 0=Silence, 1=Balance, 2=Turbo, 3=Decepticon, 4..8=hidden profiles,
+/// 9=SmartAdaptive, 10=Smart, 11=LongBattery, 14=SmartAcceleration. See
+/// [`EcActiveMode`] for the read-back side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum EcPerformanceMode {
@@ -123,6 +139,109 @@ impl EcPerformanceMode {
             0x0A => Some(Self::Extreme),
             _ => None,
         }
+    }
+}
+
+/// The EC's **active** performance mode, as the ACPI read path can report it.
+///
+/// This is deliberately *not* [`EcPerformanceMode`]. The firmware's WMAA read
+/// (`FUN2=0x0800`, decoded from `ssdt24.dsl` / `dsdt.dsl` on this platform)
+/// returns EC RAM byte `0x68` (`QFAN`) through `FUNR(0x16)`, and the AML switch
+/// only has branches for five values:
+///
+/// ```text
+/// FNKN = Q_EC.FUNR(0x16)
+/// If (FNKN == 0x02) FRD0 = 0x02      // Turbo
+/// If (FNKN == 0x03) FRD0 = 0x03      // Decepticon
+/// If (FNKN == 0x09) FRD0 = 0x09      // SmartAdaptive
+/// If (FNKN == 0x04) FRD0 = 0x04      // Overdrive (hidden profile)
+/// If (FNKN == 0x0A) FRD0 = 0x0A      // Smart
+/// // no Else: every other QFAN value leaves FRD0 = 0
+/// ```
+///
+/// So a raw `0` does **not** mean "Silence": it means *the EC is in a mode the
+/// ACPI read path cannot name* (Silence, Balance, the hidden 5/6/7/8 profiles,
+/// LongBattery, …). Reporting it as a real mode would be a lie in the other
+/// direction, so it gets [`EcActiveMode::Unreported`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EcActiveMode {
+    /// QFAN 0x02 — the SSDB "Turbo" profile.
+    Turbo,
+    /// QFAN 0x03 — the SSDB "Decepticon" profile.
+    Decepticon,
+    /// QFAN 0x04 — hidden DPTF profile ODV1=4.
+    Overdrive,
+    /// QFAN 0x09 — SMMT-driven adaptive profile (the EC feeds NTDP dynamically
+    /// while on AC). This is the value the owner's machine sat at.
+    SmartAdaptive,
+    /// QFAN 0x0A — the SSDB "Smart" profile.
+    Smart,
+    /// Any other QFAN value: the read path collapses them all to 0, so the
+    /// exact mode is unknown from this channel alone.
+    Unreported,
+}
+
+impl EcActiveMode {
+    /// Map a raw `FRD0` byte from `FUN2=0x0800 / FUN3=0` to a readable mode.
+    pub fn from_raw(val: u16) -> Self {
+        match val {
+            2 => Self::Turbo,
+            3 => Self::Decepticon,
+            4 => Self::Overdrive,
+            9 => Self::SmartAdaptive,
+            0x0A => Self::Smart,
+            _ => Self::Unreported,
+        }
+    }
+
+    /// Stable machine-readable label (also used by the TS types).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Turbo => "turbo",
+            Self::Decepticon => "decepticon",
+            Self::Overdrive => "overdrive",
+            Self::SmartAdaptive => "smart_adaptive",
+            Self::Smart => "smart",
+            Self::Unreported => "unreported",
+        }
+    }
+
+    /// `false` only for [`EcActiveMode::Unreported`] — the case where the EC is
+    /// in a mode the WMAA read cannot name.
+    pub fn is_reported(self) -> bool {
+        self != Self::Unreported
+    }
+}
+
+/// Did a WMAA profile write really latch the EC mode?
+///
+/// The write path and the read path do **not** address the same thing for
+/// every mode. Decoded from `ssdt24.dsl` (WMAA `FUN1=0xFB00`):
+///
+/// * `FUN3 = 2, 3, 4, 9, 0x0A` → `ECWT(value, QFAN)` + `QV20(1,0x16)`, i.e. the
+///   value lands in the register the read path reports (EC RAM `0x68`).
+/// * `FUN3 = 5, 6, 7, 8` → `ECWT(0, SMMT)` + `ECWT(mode, SMMD)` (SMMT/SMMD are
+///   EC RAM `0x4A`/`0x4B`) + `NTDP(mode)`, i.e. a DPTF/OEM-variable profile.
+///   **QFAN is never written**, so the readback cannot change and the UI must
+///   not claim the mode was applied.
+/// * Any other `FUN3` → no EC write at all (the AML only sets `SGER = 0x8000`).
+///
+/// `SGER = 0x8000` is set unconditionally at the end of that AML branch, which
+/// is why `set_performance_mode(6)` used to report success while nothing moved.
+///
+/// Verification therefore depends on whether the requested value is one the
+/// read path can report:
+/// * reportable (`2/3/4/9/0x0A`) → the readback must equal the request;
+/// * unreportable (`5..=8`, and everything else) → the only evidence available
+///   is a *transition* to the unreported bucket (`0`), so a readback of `0`
+///   after a non-zero `before` proves the register moved; `0 → 0` proves
+///   nothing and stays unverified.
+pub fn qfan_write_verified(requested: u16, before: u16, after: u16) -> bool {
+    if EcActiveMode::from_raw(requested).is_reported() {
+        after == requested
+    } else {
+        after == 0 && before != 0
     }
 }
 
@@ -589,12 +708,41 @@ pub fn get_performance_mode() -> HardwareResult<EcPerformanceMode> {
     ))
 }
 
+/// Read the EC's active mode as `(raw, decoded)`.
+///
+/// `raw` is the firmware's `FRD0` verbatim (QFAN for the five reportable
+/// values, `0` otherwise) so callers can show the truth even when it is not a
+/// name we know.
+pub fn read_active_mode() -> HardwareResult<(u16, EcActiveMode)> {
+    #[cfg(windows)]
+    {
+        let resp = wmi_read(FUN2_EC_FUNC, 0)?;
+        if !resp.is_success() {
+            return Err(HardwareError::Wmi(format!(
+                "WMAA read failed: SGER=0x{:04X}",
+                resp.sger
+            )));
+        }
+        Ok((resp.frd0, EcActiveMode::from_raw(resp.frd0)))
+    }
+    #[cfg(not(windows))]
+    Err(HardwareError::NotSupported(
+        "WMI only available on Windows".into(),
+    ))
+}
+
 /// Set the performance mode via the EC.
 ///
 /// WORKING FORM — DO NOT MODIFY: Uses wmi_write(FUN2_EC_FUNC=0x0800, mode, 0).
 /// This sets the EC performance mode via the ACPI WMAA method through
 /// the MICommonInterface WMI class. Does NOT require IoTDriver.
 /// Modes: Performance=5, Balanced=6, Quiet=7, SuperQuiet=8, UltraPerformance=9, Extreme=0x0A
+///
+/// IMPORTANT (verified live 2026-11-10): `SGER=0x8000` is returned for every
+/// `FUN3` in this branch, including values the AML never acts on. Modes
+/// `5..=8` write SMMT/SMMD + a DPTF variable and **leave QFAN untouched**, so
+/// a readback cannot confirm them; only `2/3/4/9/0x0A` land in QFAN and are
+/// readable back. Use [`qfan_write_verified`] — never trust `Ok(())` here.
 pub fn set_performance_mode(mode: EcPerformanceMode) -> HardwareResult<()> {
     #[cfg(windows)]
     {
@@ -990,5 +1138,60 @@ mod tests {
         assert_eq!(resp.futr, 0x1000);
         assert_eq!(resp.frd0, 0x0006);
         assert_eq!(resp.frd1, 100);
+    }
+
+    #[test]
+    fn active_mode_only_names_the_five_aml_branches() {
+        // The AML switch has cases for exactly these QFAN values.
+        assert_eq!(EcActiveMode::from_raw(2), EcActiveMode::Turbo);
+        assert_eq!(EcActiveMode::from_raw(3), EcActiveMode::Decepticon);
+        assert_eq!(EcActiveMode::from_raw(4), EcActiveMode::Overdrive);
+        assert_eq!(EcActiveMode::from_raw(9), EcActiveMode::SmartAdaptive);
+        assert_eq!(EcActiveMode::from_raw(0x0A), EcActiveMode::Smart);
+        // Everything else falls through to FRD0 = 0: the mode is NOT "Silence",
+        // it is simply not reportable through this channel.
+        for raw in [0u16, 1, 5, 6, 7, 8, 11, 12, 13, 14, 0xFFFF] {
+            assert_eq!(
+                EcActiveMode::from_raw(raw),
+                EcActiveMode::Unreported,
+                "raw {raw} must not be named"
+            );
+            assert!(!EcActiveMode::from_raw(raw).is_reported());
+        }
+    }
+
+    #[test]
+    fn active_mode_labels_are_stable() {
+        assert_eq!(EcActiveMode::Turbo.label(), "turbo");
+        assert_eq!(EcActiveMode::Decepticon.label(), "decepticon");
+        assert_eq!(EcActiveMode::Overdrive.label(), "overdrive");
+        assert_eq!(EcActiveMode::SmartAdaptive.label(), "smart_adaptive");
+        assert_eq!(EcActiveMode::Smart.label(), "smart");
+        assert_eq!(EcActiveMode::Unreported.label(), "unreported");
+    }
+
+    #[test]
+    fn reportable_writes_need_an_exact_readback() {
+        // Live-verified: FUN3=0x0A latched QFAN=0x0A and the readback followed.
+        assert!(qfan_write_verified(0x0A, 9, 0x0A));
+        assert!(qfan_write_verified(9, 0x0A, 9));
+        assert!(qfan_write_verified(2, 9, 2));
+        // A write the AML ignores must never verify.
+        assert!(!qfan_write_verified(0x0A, 9, 9));
+        assert!(!qfan_write_verified(2, 0x0A, 0x0A));
+    }
+
+    #[test]
+    fn smm_profile_writes_only_verify_on_a_real_transition() {
+        // Live-verified: FUN3=6 left QFAN at 9, so the readback is unchanged.
+        assert!(!qfan_write_verified(6, 9, 9));
+        assert!(!qfan_write_verified(5, 9, 9));
+        assert!(!qfan_write_verified(7, 9, 9));
+        assert!(!qfan_write_verified(8, 9, 9));
+        // A move into the unreported bucket is evidence the register changed…
+        assert!(qfan_write_verified(6, 9, 0));
+        assert!(qfan_write_verified(8, 2, 0));
+        // …but 0 → 0 proves nothing and must stay unverified.
+        assert!(!qfan_write_verified(6, 0, 0));
     }
 }
