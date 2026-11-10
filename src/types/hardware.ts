@@ -180,6 +180,7 @@ export interface FanInfo {
   ec_active?: EcActiveMode | null;
   /** Raw mode byte behind `ec_active`. `0` = "not nameable through this channel". */
   ec_active_raw?: number | null;
+  /**
    * OS-reported lid state when the reading was taken.
    *
    * `false` means the lid is closed, and on this platform the EC then runs its
@@ -189,7 +190,6 @@ export interface FanInfo {
    * platform did not report the lid switch (not "closed").
    */
   lid_open?: boolean | null;
-
 }
 
 /**
@@ -197,12 +197,7 @@ export interface FanInfo {
  * `unreported` with `ec_active_raw === 0`.
  */
 export type EcActiveMode =
-  | 'turbo'
-  | 'decepticon'
-  | 'overdrive'
-  | 'smart_adaptive'
-  | 'smart'
-  | 'unreported';
+  'turbo' | 'decepticon' | 'overdrive' | 'smart_adaptive' | 'smart' | 'unreported';
 
 /**
  * What `set_fan_mode` actually did. `applied` does not mean the fan speed
