@@ -42,7 +42,9 @@ export default function EcModeReadout({ fan }: { fan: FanInfo | null }) {
           {known && mode ? t(LABEL_KEYS[mode]) : t('fan.ecUnavailable')}
         </span>
         {known && raw != null && (
-          <span style={{ fontSize: 12, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+          <span
+            style={{ fontSize: 12, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}
+          >
             raw {raw}
           </span>
         )}
