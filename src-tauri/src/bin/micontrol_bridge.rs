@@ -2022,6 +2022,17 @@ mod watchdog {
     const HEARTBEAT_READ_ATTEMPTS: u32 = 3;
     /// Default install location fallback.
     const DEFAULT_EXE: &str = r"C:\Program Files\MiControl\micontrol.exe";
+    /// Port the app's MCP plugin binds at startup. The previous instance's
+    /// listening socket must be gone before a relaunch, or the new process
+    /// dies on `bind 127.0.0.1:4000` (os error 10048) before it can log a
+    /// panic (2026-11-09 16:17: the app restarted 1.2 s after the kill, wrote
+    /// five lines and vanished; the watchdog only came back 2 min later).
+    const MCP_PORT: u16 = 4000;
+    /// Budget for the old listener to disappear before we relaunch.
+    const MCP_PORT_RELEASE_TIMEOUT_MS: u64 = 10_000;
+    /// First probe interval; doubles up to the max.
+    const MCP_PORT_POLL_MIN_MS: u64 = 100;
+    const MCP_PORT_POLL_MAX_MS: u64 = 1_000;
     /// Uninstall registry keys (DisplayIcon / InstallLocation) to find a
     /// relocated install.
     const UNINSTALL_KEYS: &[&str] = &[
@@ -2627,7 +2638,7 @@ mod watchdog {
                     "micontrol.exe not running after {misses} misses — relaunching (minimized)"
                 ));
                 if let Some(exe) = find_app_exe() {
-                    launch_app(&exe, true);
+                    launch_when_mcp_port_is_free(&exe, true);
                 }
             }
             WatchdogAction::Restart { cause } => {
@@ -2649,7 +2660,8 @@ mod watchdog {
                 if kill_app() {
                     if let Some(exe) = find_app_exe() {
                         // Visible window: the user must see that the UI is back.
-                        launch_app(&exe, false);
+                        // Wait for the old socket to leave :4000 first (P1-d).
+                        launch_when_mcp_port_is_free(&exe, false);
                     }
                 } else {
                     write_log("could not kill the app — waiting for the next poll");
@@ -2776,6 +2788,71 @@ mod watchdog {
             "micontrol.exe not found (checked uninstall keys + {DEFAULT_EXE})"
         ));
         None
+    }
+
+    /// True when `127.0.0.1:port` can be bound again.
+    ///
+    /// Deliberately a BIND probe, not a connect probe: connecting to the old
+    /// listener creates an accepted-but-unaccepted connection that keeps the
+    /// port occupied (TIME_WAIT) *after* the listener exits — the probe would
+    /// poison the very condition it is measuring. A bind leaves nothing behind
+    /// when it fails, and exactly mirrors what the new process will do.
+    fn mcp_port_is_free(port: u16) -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    }
+
+    /// Poll the MCP port with exponential backoff until it is released.
+    ///
+    /// Returns the total wait in ms, or `None` when the budget elapsed with
+    /// the port still taken. Backoff 100 → 200 → 400 → 800 → 1 000 ms: an
+    /// immediate release is noticed at once, a slow one costs ~10 wakeups,
+    /// not a busy loop or a fixed 5 s sleep.
+    fn wait_for_mcp_port_release(port: u16, timeout: std::time::Duration) -> Option<u64> {
+        let started = std::time::Instant::now();
+        let mut backoff = std::time::Duration::from_millis(MCP_PORT_POLL_MIN_MS);
+        let max_backoff = std::time::Duration::from_millis(MCP_PORT_POLL_MAX_MS);
+        loop {
+            if mcp_port_is_free(port) {
+                return Some(started.elapsed().as_millis() as u64);
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return None;
+            }
+            std::thread::sleep(backoff.min(timeout - elapsed));
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    }
+
+    /// Launch `micontrol.exe` only after the old instance released the MCP
+    /// port (P1-d, STAB-ROUND-1).
+    ///
+    /// If the port never frees inside the budget we still launch: refusing
+    /// would turn a possibly-doomed launch into a guaranteed outage, and the
+    /// watchdog has no other way to restore the UI. The log line names the
+    /// wait so a bind failure is attributable.
+    fn launch_when_mcp_port_is_free(exe: &std::path::Path, minimized: bool) -> bool {
+        match wait_for_mcp_port_release(
+            MCP_PORT,
+            std::time::Duration::from_millis(MCP_PORT_RELEASE_TIMEOUT_MS),
+        ) {
+            Some(waited_ms) => {
+                if waited_ms >= MCP_PORT_POLL_MIN_MS {
+                    write_log(&format!(
+                        "waited {waited_ms} ms for MCP port {MCP_PORT} to be released — launching"
+                    ));
+                }
+                launch_app(exe, minimized)
+            }
+            None => {
+                write_log(&format!(
+                    "MCP port {MCP_PORT} still in use after {MCP_PORT_RELEASE_TIMEOUT_MS} ms of \
+                     backoff retries — launching anyway (the new session may fail to bind; the \
+                     next poll will retry)"
+                ));
+                launch_app(exe, minimized)
+            }
+        }
     }
 
     /// Launch `micontrol.exe` into the interactive user session.
@@ -3365,6 +3442,69 @@ mod watchdog {
                 WatchdogAction::Idle
             );
             assert_eq!(state.restarts, 0);
+        }
+
+        // ── P1-d: relaunch must wait for the MCP port ───────────────────────
+
+        /// Real loopback socket (port 0 → the OS picks a free one).
+        fn bound_listener() -> (std::net::TcpListener, u16) {
+            let listener =
+                std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+            let port = listener.local_addr().expect("local_addr").port();
+            (listener, port)
+        }
+
+        #[test]
+        fn a_bound_listener_counts_as_busy_and_a_dropped_one_as_free() {
+            let (listener, port) = bound_listener();
+            assert!(
+                !mcp_port_is_free(port),
+                "a listening socket must be reported as busy"
+            );
+            drop(listener);
+            assert!(
+                mcp_port_is_free(port),
+                "the port must be reusable once the listener is gone"
+            );
+        }
+
+        #[test]
+        fn a_free_port_returns_immediately() {
+            let (listener, port) = bound_listener();
+            drop(listener);
+            let started = std::time::Instant::now();
+            let waited = wait_for_mcp_port_release(port, std::time::Duration::from_secs(2))
+                .expect("free port");
+            assert!(waited < 100, "must not sleep on an already free port");
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        }
+
+        #[test]
+        fn wait_returns_as_soon_as_the_listener_exits() {
+            let (listener, port) = bound_listener();
+            let releaser = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                drop(listener);
+            });
+            let waited = wait_for_mcp_port_release(port, std::time::Duration::from_secs(5))
+                .expect("the port is released mid-wait");
+            assert!(
+                (150..2_000).contains(&waited),
+                "expected to wait for the listener, waited {waited} ms"
+            );
+            releaser.join().expect("releaser thread");
+        }
+
+        #[test]
+        fn wait_times_out_while_the_listener_holds_the_port() {
+            let (_listener, port) = bound_listener(); // held for the whole test
+            let started = std::time::Instant::now();
+            let waited = wait_for_mcp_port_release(port, std::time::Duration::from_millis(400));
+            assert!(waited.is_none(), "a held port must time out");
+            assert!(
+                started.elapsed() >= std::time::Duration::from_millis(400),
+                "must honour the budget"
+            );
         }
     }
 }
