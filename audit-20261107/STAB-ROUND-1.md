@@ -401,3 +401,25 @@ Nenhum comando devolveu erro. Observações: CPU a 95 °C / 51 W no momento da s
 - Pós-fix: `audit-20261107/POST-FIX-REPORT.md` (0 starved na sessão de 07-Nov).
 - Re-scan anterior: `audit-20261107/logs-rescan.md` (já registava stall de 44,8 s em 08-Nov e o PANIC de bind).
 - Sondas vivas: `%TMPDIR%\live_probes.json` (9 comandos, latências e resultados).
+
+---
+
+# ADIÇÃO PÓS-FIX (deploy 10-Nov 20:17) — o que foi corrigido e verificado
+
+## Modos de performance (f9388fe)
+- **Causa**: WMAA FUN2=0x0800 só escreve QFAN (EC RAM 0x68) para 2/3/4/9/0x0A; os valores 5..8 escrevem SMMT/SMMD e nunca tocam no QFAN; SGER=0x8000 incondicional = "success" falso. QFAN=9 = SmartAdaptive, não Ultra.
+- **Fix**: EcActiveMode + escrita verificada (before/after, só applied se latchou) + fallback SSDB→QFAN + leitura honesta na UI ("EC active mode: smart_adaptive raw 9").
+
+## Ventoinha com tampa fechada (fcd4535)
+- **Causa**: a EC troca para tabela clamshell ao fechar a tampa — firmware; nenhum software desta máquina escreve fan duty.
+- **Fix**: listener GUID_LIDSWITCH_STATE_CHANGE (log [lid] CLOSED/OPEN + snapshot térmico), lid_open na FanInfo, aviso honesto na UI.
+- **Live**: lid_open=null (ainda sem notificação — honesto); a confirmar pelo dono ao fechar a tampa.
+
+## Proteção de carga (d668f49)
+- **Causa tripla**: ECRAM_WRITE 0xFE0B03A4/0xA7 negada (0x80070005 mesmo a SYSTEM) com fallback silencioso; protocolo real = WMAA 0x1000/0x02 com CÓDIGO de nível (1=80%); e wmi_ec_set_brightness_data escrevia o MESMO par (brilho 5..8 reescrevia o limite 70/60/50/40%).
+- **Fix**: escrita WMAA + read-back obrigatório; get_charge_limit_state; allowlist (0x1000,0x02); brilho removido; UI "Paused" só com applied=true.
+- **Live pós-deploy**: requested=80 → hardware=80, code=1, applied=true, source=firmware. Bateria 94%, charging=false (EC segura; retoma abaixo de 80).
+
+## Estabilidade (6 commits, 9bc780f..59a928b)
+- Pool async (tokio oneshot+timeout, 8 threads), bateria fora da task async (budget 3 s), slowPoll limitado (2+jitter+cancelamento), watchdog espera o :4000 (probe de bind, backoff, budget 10 s), BatteryGate circuit breaker (30/60/120/240 s), touchpad 2 s, startup budget 5 s. hardware.ts JSDoc corrigido (20 erros tsc no merge).
+- 917 testes lib + 24 bridge; gate 12/12.

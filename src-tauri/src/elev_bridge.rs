@@ -986,12 +986,22 @@ async fn run_elevated_inner(
     let dir = crate::elevated::elev_dir();
     // S26-006: run on a blocking thread — cleanup_stale_elev_files() uses
     // std::fs::read_dir. S69: FIXED pool (no tokio blocking-pool churn).
+    //
+    // STAB-ROUND-1 F-05: this sweep is housekeeping and must NOT gate the
+    // command. It used to `?` on the timeout, so a saturated pool aborted the
+    // request before it was even written (production: `wmi_ec_read_adapter_power`
+    // failed after 30.8 s because the cleanup had exhausted its 10 s budget).
+    // A stale file cannot collide with this request — the name carries a fresh
+    // request id — so a failed sweep is a warning, not a failure.
     let dir_clone = dir.clone();
-    crate::util::fixed_pool::run_blocking_timeout(Duration::from_secs(10), move || {
+    let sweep = crate::util::fixed_pool::run_blocking_timeout(Duration::from_secs(10), move || {
         cleanup_stale_elev_files(&dir_clone)
     })
     .await
-    .map_err(|e| format!("cleanup_stale_elev_files task failed: {e}"))?;
+    .map_err(|e| format!("cleanup_stale_elev_files task failed: {e}"));
+    if let Some(warning) = sweep_warning(sweep) {
+        log::warn!(target: "elev_bridge", "Elevated command '{cmd}': {warning}");
+    }
 
     let request_id = make_request_id();
     let cmd_path = dir.join(cmd_file_name(&request_id));
@@ -1817,6 +1827,19 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Map the pre-dispatch stale-file sweep to an optional warning.
+///
+/// STAB-ROUND-1 F-05: the sweep is housekeeping and must never abort the
+/// command. A pool timeout used to fail `wmi_ec_read_adapter_power` after
+/// 30.8 s before the request was even written. Returning `Option<String>`
+/// (instead of `Result`) makes it impossible to reintroduce `?` at the call
+/// site without changing the type.
+fn sweep_warning(result: Result<(), String>) -> Option<String> {
+    result
+        .err()
+        .map(|e| format!("stale-file sweep skipped ({e}) — dispatching anyway"))
+}
+
 fn cleanup_stale_elev_files(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -2187,6 +2210,21 @@ mod tests {
         assert!(!cooldown.allowed(201));
         assert!(!cooldown.allowed(200 + 59_999));
         assert!(cooldown.allowed(200 + 60_000));
+    }
+
+    #[test]
+    fn a_failed_stale_file_sweep_is_a_warning_not_an_abort() {
+        // STAB-ROUND-1 F-05: the sweep is housekeeping. If it times out on a
+        // saturated pool the command must still be dispatched — the old `?`
+        // killed `wmi_ec_read_adapter_power` after 30.8 s before writing the
+        // request file.
+        assert!(sweep_warning(Ok(())).is_none());
+        let warning = sweep_warning(Err(
+            "Timeout: blocking hardware operation exceeded 10 seconds".into(),
+        ))
+        .expect("a failed sweep must produce a warning");
+        assert!(warning.contains("dispatching anyway"), "{warning}");
+        assert!(warning.contains("exceeded 10 seconds"), "{warning}");
     }
 
     #[test]
