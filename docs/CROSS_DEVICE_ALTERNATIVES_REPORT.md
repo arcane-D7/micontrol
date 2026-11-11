@@ -1,5 +1,7 @@
 # Cross-Device & Open-Source Alternatives Report
 
+> **Status: research snapshot (MiControl 0.1.13).** The protocol analysis and roadmap below are reference material. Most Phase 1–3 items have since shipped as HAL modules: `hw/localsend.rs`, `hw/kde_connect.rs`, `hw/nfc_pairing.rs`, `hw/scrcpy_bridge.rs`, `hw/transcription.rs`, `hw/syncthing.rs`, `hw/phone_link.rs`, `hw/ble_scan.rs` / `ble_advertise.rs` / `ble_presence.rs`. Treat the roadmap as history, not as a to-do list.
+
 > **Date:** 2026-07-30
 > **Machine:** Xiaomi Book Pro 14 (TM2424) + Xiaomi 14T
 > **MiControl Version:** 0.1.13

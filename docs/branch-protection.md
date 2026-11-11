@@ -6,11 +6,12 @@ This document describes the required branch protection configuration for the `ma
 
 The following CI checks MUST pass before a pull request can be merged to `main`:
 
-| Check           | Job           | Description                                                          |
-| --------------- | ------------- | -------------------------------------------------------------------- |
-| `rust`          | CI / rust     | `cargo fmt --check`, `cargo check`, `cargo clippy`, `cargo test`     |
-| `frontend`      | CI / frontend | `tsc --noEmit`, `eslint`, `prettier --check`, `vite build`           |
-| `version:check` | CI / version  | Ensures package.json, Cargo.toml, and tauri.conf.json versions agree |
+| Check              | Job (ci.yml) | Description                                                                   |
+| ------------------ | ------------ | ----------------------------------------------------------------------------- |
+| `Quality checks`   | `quality`    | health-check steps `version,fmt,clippy,tsc,lint,format,i18n,toolchain`        |
+| `Tests + coverage` | `test`       | health-check steps `test-rust,test-front`, then uploads the coverage artifact |
+
+Both jobs call `scripts/health-check.mjs`, so the required checks are exactly what `pnpm run health-check` runs locally.
 
 ### Future Checks (when implemented)
 
@@ -24,7 +25,7 @@ The following CI checks MUST pass before a pull request can be merged to `main`:
 
 - **Minimum reviewers**: 1 (for small teams)
 - **Dismiss stale approvals**: Yes — when new commits are pushed, existing approvals are dismissed
-- **Require review from code owners**: Yes (when CODEOWNERS file is added)
+- **Require review from code owners**: Yes — `.github/CODEOWNERS` exists and assigns `src-tauri/`, `src/`, `.github/`, `docs/` and `*.md` to `@mafsc`
 
 ## Branch Protection Rules
 
@@ -36,7 +37,7 @@ The following CI checks MUST pass before a pull request can be merged to `main`:
 
 2. **Require status checks to pass**
    - Require branches to be up to date before merging
-   - Required checks: `rust`, `frontend`, `version:check`
+   - Required checks: `Quality checks`, `Tests + coverage`
 
 3. **Require conversation resolution**
    - All conversations on the PR must be resolved before merging
@@ -57,7 +58,7 @@ The following CI checks MUST pass before a pull request can be merged to `main`:
 4. Enable:
    - ☑ Require a pull request before merging (set required reviewers to 1)
    - ☑ Require status checks to pass before merging
-     - Select: `rust`, `frontend`, `version:check`
+     - Select: `Quality checks`, `Tests + coverage`
    - ☑ Require conversation resolution before merging
    - ☑ Do not allow bypassing the above settings
 
@@ -67,28 +68,26 @@ The following CI checks MUST pass before a pull request can be merged to `main`:
 gh api repos/{owner}/{repo}/branches/main/protection \
   --method PUT \
   --field required_pull_request_reviews='{"required_approving_review_count":1,"dismiss_stale_reviews":true}' \
-  --field required_status_checks='{"strict":true,"contexts":["rust","frontend","version:check"]}' \
+  --field required_status_checks='{"strict":true,"contexts":["Quality checks","Tests + coverage"]}' \
   --field enforce_admins=true \
   --field restrictions=null
 ```
 
 ## CODEOWNERS
 
-Create a `CODEOWNERS` file in the repository root:
+`.github/CODEOWNERS` already exists:
 
 ```
-# Default owner
-* @mafsc
-
 # Rust backend
-/src-tauri/ @mafsc
+src-tauri/                    @mafsc
 
 # Frontend
-/src/ @mafsc
+src/                          @mafsc
 
-# CI/CD
-/.github/ @mafsc
+# CI/CD and workflows
+.github/                      @mafsc
 
 # Documentation
-/docs/ @mafsc
+docs/                         @mafsc
+*.md                          @mafsc
 ```

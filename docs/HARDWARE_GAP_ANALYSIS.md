@@ -1,5 +1,7 @@
 # Hardware Gap Analysis: Xiaomi PC Manager vs MiControl
 
+> **Status: research snapshot (0.1.13).** The XPM API inventory below is reference material and remains valid; the per-gap "implemented in MiControl?" verdicts were written at 0.1.13 and several have since been closed — e.g. eye protection (`hw/eye_protection.rs`), NFC pairing (`hw/nfc_pairing.rs`), OS Turbo (`hw/os_turbo*.rs`), system cleanup (`hw/cleanup.rs`), security scan (`hw/security_scan.rs`), Fn-key remap (`hw/fn_key.rs`), colour calibration (`hw/color_calibration.rs`, `hw/icc_catalog.rs`). Check `src-tauri/src/hw/` before treating a gap as still open.
+
 > **Date:** 2026-07-24 (original analysis) · **Updated:** 2026-07-30 (implementation status)
 > **Machine:** Xiaomi Book Pro 14 (TM2424, SN 77079/26RV00757)
 > **XPM Version:** 5.8.0.57 (uninstalled, logs retained)

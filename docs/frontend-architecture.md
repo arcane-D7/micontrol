@@ -2,22 +2,22 @@
 
 ## Overview
 
-miPC's frontend is built with **React 19**, **TypeScript**, and **Vite**, communicating with the Rust backend through **Tauri v2 IPC** (`invoke`). The UI is a single-window, tab-based application with a sidebar for navigation and lazy-loaded tab content.
+miPC's frontend is built with **React 19**, **TypeScript**, and **Vite**, communicating with the Rust backend through **Tauri v2 IPC** (`invoke`). It is a three-window app (main window, tray popup, brightness OSD) whose main window uses a grouped sidebar with lazy-loaded tab content.
 
 ---
 
 ## Technology Stack
 
-| Layer        | Technology                    |
-| ------------ | ----------------------------- |
-| Framework    | React 19                      |
-| Language     | TypeScript 5.8                |
-| Bundler      | Vite 6                        |
-| IPC          | @tauri-apps/api/core (invoke) |
-| Styling      | Tailwind CSS + custom CSS     |
-| i18n         | react-i18next                 |
-| Testing      | Vitest + Testing Library      |
-| Code Quality | ESLint, Prettier, TypeScript  |
+| Layer        | Technology                             |
+| ------------ | -------------------------------------- |
+| Framework    | React 19                               |
+| Language     | TypeScript 5.8                         |
+| Bundler      | Vite 6                                 |
+| IPC          | @tauri-apps/api/core (invoke)          |
+| Styling      | Hand-written CSS + design tokens       |
+| i18n         | Custom module (`src/hooks/useI18n.ts`) |
+| Testing      | Vitest + Testing Library               |
+| Code Quality | ESLint, Prettier, TypeScript           |
 
 ---
 
@@ -37,19 +37,28 @@ graph TD
     end
 
     Sidebar --> NavItem1["overview"]
-    Sidebar --> NavItem2["performance"]
-    Sidebar --> NavItem3["battery"]
-    Sidebar --> NavItem4["display"]
-    Sidebar --> NavItem5["fan"]
-    Sidebar --> NavItem6["audio"]
-    Sidebar --> NavItem7["cast"]
-    Sidebar --> NavItemAll["... (18 total tabs)"]
+    Sidebar --> NavItem2["taskmgr"]
+    Sidebar --> NavItem3["system"]
+    Sidebar --> NavItem4["startup"]
+    Sidebar --> NavItem5["battery"]
+    Sidebar --> NavItem6["performance"]
+    Sidebar --> NavItem7["fan"]
+    Sidebar --> NavItem8["display"]
+    Sidebar --> NavItem9["color"]
+    Sidebar --> NavItem10["audio"]
+    Sidebar --> NavItem11["iot"]
+    Sidebar --> NavItem12["crossDevice"]
+    Sidebar --> NavItem13["touchpad"]
+    Sidebar --> NavItemAll["... (23 destinations in 5 groups)"]
 
-    TabContent --> LazyTabs["lazy() loaded tabs"]
+    TabContent --> LazyTabs["lazy() loaded tabs (24)"]
     LazyTabs --> OverviewTab
+    LazyTabs --> TaskManagerTab
+    LazyTabs --> SysOptTab
     LazyTabs --> PerformanceTab
     LazyTabs --> BatteryTab
     LazyTabs --> DisplayTab
+    LazyTabs --> ColorTab
     LazyTabs --> FanTab
     LazyTabs --> AudioTab
     LazyTabs --> CastTab
@@ -57,12 +66,15 @@ graph TD
     LazyTabs --> WiFiTab
     LazyTabs --> TouchpadTab
     LazyTabs --> StartupTab
-    LazyTabs --> UpdatesTab
     LazyTabs --> KeyboardTab
-    LazyTabs --> SetupTab
-    LazyTabs --> SettingsTab
+    LazyTabs --> SecurityTab
+    LazyTabs --> CrossDeviceTab
+    LazyTabs --> CleanupTab
+    LazyTabs --> FaceUnlockTab
     LazyTabs --> AiAnalysisTab
+    LazyTabs --> SettingsTab
     LazyTabs --> AboutTab
+    LazyTabs --> EcrDebugTab["EcrDebugTab (dev only)"]
 
     subgraph TrayPopup["TrayPopup"]
         TrayPerformance
@@ -91,7 +103,7 @@ React built-in hooks are used throughout; there is no external state management 
 graph LR
     subgraph Hooks["Custom Hooks"]
         useHardware
-        useI18n["useLanguage"]
+        useI18n["useI18n (t)"]
         useSettings
         useAnalysisLogger
     end
@@ -109,12 +121,18 @@ graph LR
 
 ### Custom Hooks
 
-| Hook                | File                             | Responsibility                                                                                                     |
-| ------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `useHardware`       | `src/hooks/useHardware.ts`       | Central hardware state (CPU, GPU, battery, fan, display, audio, touchpad, keyboard), refresh and error aggregation |
-| `useLanguage`       | `src/hooks/useI18n.ts`           | i18n setup with react-i18next, locale switching                                                                    |
-| `useSettings`       | `src/hooks/useSettings.ts`       | Persistent user preferences via localStorage                                                                       |
-| `useAnalysisLogger` | `src/hooks/useAnalysisLogger.ts` | AI analysis event logging                                                                                          |
+| Hook                  | File                               | Responsibility                                                                                                     |
+| --------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `useHardware`         | `src/hooks/useHardware.ts`         | Central hardware state (CPU, GPU, battery, fan, display, audio, touchpad, keyboard), refresh and error aggregation |
+| `useI18n`             | `src/hooks/useI18n.ts`             | Custom i18n store (`t()`, `LOCALES`, `SUPPORTED_LOCALES`) over `useSyncExternalStore` — no react-i18next           |
+| `useSettings`         | `src/hooks/useSettings.ts`         | Persistent user preferences via localStorage                                                                       |
+| `useOverview`         | `src/hooks/useOverview.ts`         | Overview snapshot (identity, thermals, memory, storage, battery)                                                   |
+| `useAiAnalysis`       | `src/hooks/useAiAnalysis.ts`       | AI analysis request/response, daily-limit accounting                                                               |
+| `useAnalysisLogger`   | `src/hooks/useAnalysisLogger.ts`   | AI analysis event logging                                                                                          |
+| `useAutoUpdate`       | `src/hooks/useAutoUpdate.ts`       | Updater plugin state and install flow                                                                              |
+| `useBatteryCare`      | `src/hooks/useBatteryCare.ts`      | Charging-limit (Battery Care) state                                                                                |
+| `usePowerProfiles`    | `src/hooks/usePowerProfiles.ts`    | Windows power-profile switching                                                                                    |
+| `useTelemetryConsent` | `src/hooks/useTelemetryConsent.ts` | Telemetry consent in the OS credential store                                                                       |
 
 ### Key Patterns
 
@@ -127,14 +145,18 @@ graph LR
 
 ## Routing
 
-miPC uses **tab-based navigation** driven by a `useState` string (no router library). The `MainWindow` component holds an `activeTab` state, and the `Sidebar` renders `NAV_ITEMS` as buttons. Clicking a tab updates `activeTab`, which conditionally renders the corresponding lazy-loaded page.
+miPC uses **tab-based navigation** driven by a `useState` string (no router library). `App` holds `activeTab` (persisted in `localStorage` under `micontrol_active_tab`), and `MainWindow` renders `NAV_GROUPS` — five labelled groups (System, Energy, Display & sound, Devices, Settings) with Settings pinned outside the scroll area — as buttons. Clicking a destination updates `activeTab`, which `renderTab()` maps to the corresponding lazy-loaded page.
 
 ```typescript
-const [activeTab, setActiveTab] = useState('overview');
+const [activeTab, setActiveTab] = useState(
+  () => localStorage.getItem('micontrol_active_tab') ?? 'overview',
+);
 
-// Sidebar button onClick → setActiveTab('battery')
-// TabContent renders: <BatteryTab /> when activeTab === 'battery'
+// Sidebar button onClick → onTabChange('battery')
+// renderTab() → <BatteryTab /> when activeTab === 'battery'
 ```
+
+`Alt+1` … `Alt+9` jump to the first nine destinations (`SHORTCUT_TABS`). The sidebar also has a search field that filters destinations by their translated label.
 
 Window type is determined by a URL query parameter (`?window=main`, `?window=tray`, `?window=brightness-osd`) set by Tauri at window creation.
 
@@ -149,10 +171,11 @@ Window type is determined by a URL query parameter (`?window=main`, `?window=tra
 | Spanish    | `src/i18n/es.json` |
 | French     | `src/i18n/fr.json` |
 
-- **Library**: `react-i18next`
-- **Initialization**: `useLanguage` hook in `src/hooks/useI18n.ts`
-- **Usage**: `t('nav.overview')` or `t('battery.chargeThreshold')`
-- **Locale switching**: Stored in `localStorage`, detected from system locale on first launch
+- **Library**: none — a small custom module (`src/hooks/useI18n.ts`) backed by `useSyncExternalStore`
+- **Initialization**: module-level locale detection (`localStorage` key `micontrol_lang`, then `navigator.language`, falling back to `en`); `setDocumentDir()` sets `<html lang>` and `dir`
+- **Usage**: `t('nav.overview')` or `t('battery.chargeThreshold')`; keys are typed from `en.json` (`StringKey`), so a missing key is a TypeScript error
+- **Locale switching**: stored in `localStorage`; `SUPPORTED_LOCALES` drives the picker
+- **Completeness gate**: `pnpm run i18n:check` (`scripts/check-i18n.mjs`) fails on missing/extra keys
 
 ---
 
@@ -179,15 +202,14 @@ sequenceDiagram
     UI->>UI: re-render
 ```
 
-Type definitions are co-located in the hook files (e.g., `useHardware.ts` exports `BatteryInfo`, `FanInfo`, `DisplayInfo`, etc.) rather than a separate `types/` folder.
+Type definitions live in `src/types/` (`hardware.ts`, `settings.ts`, `charge.ts`, `error.ts`); hooks import from there rather than re-declaring shapes.
 
 ---
 
 ## Styling
 
-- **Tailwind CSS** — Utility-first framework for rapid UI development.
-- **Custom CSS** — Additional styles in `src/styles/` for theming, animations, and component-specific overrides.
-- **Design Tokens** — CSS custom properties for colors, spacing, and typography. Theme switching (`light`/`dark`/`auto`) is driven by the `data-theme` attribute on `<html>`.
+- **Hand-written CSS** — `src/styles/globals.css` (tokens, layout, components) and `src/styles/primitives.css`, plus per-feature CSS files next to their components (e.g. `src/pages/tabs/color.css`). There is no CSS framework.
+- **Design Tokens** — CSS custom properties for colours, spacing, and typography. Theme switching (`light`/`dark`/`auto`) is driven by the `data-theme` attribute on `<html>`.
 - **`prefers-reduced-motion`** — All animations respect the user's motion preferences.
 
 ---
