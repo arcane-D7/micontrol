@@ -74,6 +74,83 @@ const ELEV_TIMEOUT_SECS: u64 = 15;
 const STALE_FILE_MAX_AGE_SECS: u64 = 120;
 static ELEV_REQUEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Which stage of the elevated dispatch is running.
+///
+/// P1-3 (recheck 2026-11-11): a `wmi_ec_read` reported its 15 s poll timeout
+/// but only released the caller after **124 s**. The time was spent in the
+/// phases *before* the poll — two pipe attempts (15 s each), the stale-file
+/// sweep (10 s), the HMAC key (10 s) and the task heal (30 s) — each with its
+/// own budget, so the sum was 8× the declared limit and one of the eight pool
+/// threads was held for two minutes. The total is now bounded by
+/// [`timeout_for_cmd`] and this enum names the phase that was running when the
+/// deadline hit, so the next occurrence is diagnosable from one log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElevPhase {
+    Start = 0,
+    Pipe = 1,
+    PipeRetry = 2,
+    Sweep = 3,
+    Sign = 4,
+    Dispatch = 5,
+    Poll = 6,
+    Uac = 7,
+}
+
+impl ElevPhase {
+    fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Pipe,
+            2 => Self::PipeRetry,
+            3 => Self::Sweep,
+            4 => Self::Sign,
+            5 => Self::Dispatch,
+            6 => Self::Poll,
+            7 => Self::Uac,
+            _ => Self::Start,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Start => "startup",
+            Self::Pipe => "bridge pipe round-trip",
+            Self::PipeRetry => "bridge pipe retry",
+            Self::Sweep => "stale-file sweep",
+            Self::Sign => "HMAC key / signing",
+            Self::Dispatch => "scheduled-task dispatch",
+            Self::Poll => "result poll",
+            Self::Uac => "UAC fallback",
+        }
+    }
+}
+
+/// Time left before the command's total budget expires.
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// Budget for one bridge-pipe attempt, or `None` when there is no point trying.
+///
+/// At most **half** the command budget, so the scheduled-task fallback always
+/// keeps the other half; never more than the 15 s pipe ceiling (the bridge
+/// answers in ~14 ms p50 / 29 ms p99, so 15 s is already ~1000× normal). Below
+/// 2 s of command budget the attempt is skipped outright — a sub-2 s window
+/// would fail a healthy service that happens to be under load.
+///
+/// Pure and unit-tested: this is the arithmetic whose absence let two attempts
+/// burn 30 s on a 15 s command.
+fn pipe_attempt_budget(command_remaining: Duration, hard_remaining: Duration) -> Option<Duration> {
+    if command_remaining < Duration::from_secs(2) || hard_remaining < Duration::from_millis(500) {
+        return None;
+    }
+    Some(
+        hard_remaining
+            .min(Duration::from_secs(ELEV_TIMEOUT_SECS))
+            .min(command_remaining / 2)
+            .max(Duration::from_secs(2)),
+    )
+}
+
 /// UAC prompts from background elevated dispatch are one-shot by default:
 /// once the user cancels a consent dialog (or the elevated helper fails to
 /// launch), every subsequent elevated call in this process skips the prompt
@@ -539,7 +616,7 @@ async fn run_elevated_strict(cmd: &'static str, args: Value) -> Result<Value, St
 /// the autonomous service boundary must call this helper instead of the
 /// generic elevation ladder.
 pub async fn run_elevated_bridge_only(cmd: &'static str, args: Value) -> Result<Value, String> {
-    let result = run_via_service_pipe(cmd, args).await;
+    let result = run_via_service_pipe(cmd, args, timeout_for_cmd(cmd)).await;
     if result.is_ok() {
         note_pipe_success();
     }
@@ -852,13 +929,67 @@ pub fn spawn_boot_summary() {
 ///
 /// Wrapper around [`run_elevated_inner`] so every exit path (including the
 /// circuit-breaker short-circuit) is accounted for exactly once.
+///
+/// P1-3: the whole dispatch is bounded by [`timeout_for_cmd`]. Before this, the
+/// per-phase budgets added up (2 × 15 s pipe + 10 s sweep + 10 s signing +
+/// 30 s heal + 15 s poll) and a single `wmi_ec_read` held its caller for
+/// 124 s — 8× the declared limit — while occupying one of the eight pool
+/// threads. The deadline is now the contract, and the phase that was running
+/// when it expired is named in the error.
 async fn run_elevated_impl(
     cmd: &'static str,
     args: Value,
     allow_uac: bool,
 ) -> Result<Value, String> {
     let started = Instant::now();
-    let result = run_elevated_inner(cmd, args, allow_uac).await;
+    let budget = timeout_for_cmd(cmd);
+    // A command the user explicitly triggered may still need the UAC fallback
+    // after the task path gives up. That prompt has its own bounded allowance
+    // (matching the 35 s `launch_uac_fallback` wait); background commands get
+    // exactly the declared budget, which is the contract P1-3 is about.
+    let total_budget = if allow_uac {
+        budget + Duration::from_secs(35)
+    } else {
+        budget
+    };
+    let poll_deadline = started + budget;
+    let hard_deadline = started + total_budget;
+    let phase = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(ElevPhase::Start as u8));
+
+    let result = match tokio::time::timeout(
+        total_budget,
+        run_elevated_inner(
+            cmd,
+            args,
+            allow_uac,
+            phase.clone(),
+            poll_deadline,
+            hard_deadline,
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            let stuck = ElevPhase::from_code(phase.load(Ordering::Relaxed));
+            let elapsed = started.elapsed();
+            log::warn!(
+                target: "elev_bridge",
+                "Elevated command '{cmd}' exceeded its total budget of {} s (stuck in '{}' \
+                 after {} ms) — aborted at the declared limit instead of waiting for every \
+                 phase to time out",
+                total_budget.as_secs(),
+                stuck.describe(),
+                elapsed.as_millis()
+            );
+            Err(format!(
+                "Elevated command '{cmd}' exceeded its total budget of {} s (stuck in '{}') — \
+                 aborted at the declared limit",
+                total_budget.as_secs(),
+                stuck.describe()
+            ))
+        }
+    };
     let elapsed = started.elapsed();
 
     note_boot_outcome(cmd, elapsed, &result);
@@ -885,11 +1016,22 @@ async fn run_elevated_impl(
 
 /// Shared implementation; `allow_uac` controls whether the function may
 /// escalate via a `ShellExecuteExW("runas")` UAC prompt as a last resort.
+///
+/// `phase`, `poll_deadline` and `hard_deadline` come from
+/// [`run_elevated_impl`]: every sub-wait is capped by the time left, so the
+/// phases can never add up past the budget. `poll_deadline` is when the result
+/// poll gives up (the declared command budget); `hard_deadline` additionally
+/// covers the UAC allowance for user-initiated commands.
 async fn run_elevated_inner(
     cmd: &'static str,
     args: Value,
     allow_uac: bool,
+    phase: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    poll_deadline: Instant,
+    hard_deadline: Instant,
 ) -> Result<Value, String> {
+    let set_phase = |p: ElevPhase| phase.store(p as u8, Ordering::Relaxed);
+
     // Serialise elevated calls. The scheduled-task path has no request-id argv,
     // so the elevated helper discovers the newest pending file. Running one at a
     // time prevents cross-request mixups.
@@ -905,7 +1047,7 @@ async fn run_elevated_inner(
         let args2 = args.clone();
         let cmd_static: &'static str = cmd;
         return match crate::util::fixed_pool::run_blocking_timeout(
-            Duration::from_secs(timeout_for_cmd(cmd).as_secs()),
+            remaining(poll_deadline),
             move || {
                 let result = crate::elevated::dispatch_cmd(cmd_static, args2);
                 if result["ok"].as_bool().unwrap_or(false) {
@@ -934,10 +1076,22 @@ async fn run_elevated_inner(
     // command reaches the scheduled task immediately.
     let mut pipe_was_skipped = false;
     if pipe_attempt_allowed() {
-        if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
-            note_pipe_success();
-            note_elevated_success();
-            return Ok(response);
+        // P1-3: half the command budget (max 15 s) — the bridge answers in
+        // ~14 ms p50 / 29 ms p99, so this is ~250× the normal latency while
+        // still leaving the scheduled-task path half the budget to work with.
+        match pipe_attempt_budget(
+            poll_deadline.saturating_duration_since(Instant::now()),
+            remaining(hard_deadline),
+        ) {
+            Some(pipe_budget) => {
+                set_phase(ElevPhase::Pipe);
+                if let Ok(response) = run_via_service_pipe(cmd, args.clone(), pipe_budget).await {
+                    note_pipe_success();
+                    note_elevated_success();
+                    return Ok(response);
+                }
+            }
+            None => pipe_was_skipped = true,
         }
     } else {
         pipe_was_skipped = true;
@@ -951,15 +1105,35 @@ async fn run_elevated_inner(
     // used to crash at exit (S66-001) and still costs a process spawn +
     // WER report. A single short retry absorbs the transient failures
     // without measurably delaying the genuine-failure fallback.
+    //
+    // P1-3: the retry only runs while the command still has budget left. It
+    // must not start a fresh 15 s window (that is how two attempts cost 30 s
+    // on a 15 s command), and a spent budget is not a pipe health signal, so
+    // a skipped retry does not count towards the cooldown.
     if pipe_attempt_allowed() {
-        if let Ok(response) = run_via_service_pipe(cmd, args.clone()).await {
-            note_pipe_success();
-            note_elevated_success();
-            log::debug!(
-                target: "elev_bridge",
-                "Elevated command '{cmd}' succeeded on pipe retry (transient failure absorbed)"
-            );
-            return Ok(response);
+        match pipe_attempt_budget(
+            poll_deadline.saturating_duration_since(Instant::now()),
+            remaining(hard_deadline),
+        ) {
+            Some(pipe_budget) => {
+                set_phase(ElevPhase::PipeRetry);
+                if let Ok(response) = run_via_service_pipe(cmd, args.clone(), pipe_budget).await {
+                    note_pipe_success();
+                    note_elevated_success();
+                    log::debug!(
+                        target: "elev_bridge",
+                        "Elevated command '{cmd}' succeeded on pipe retry (transient failure absorbed)"
+                    );
+                    return Ok(response);
+                }
+            }
+            None => {
+                pipe_was_skipped = true;
+                log::debug!(
+                    target: "elev_bridge",
+                    "Pipe retry skipped for '{cmd}': budget exhausted — using the scheduled task"
+                );
+            }
         }
     } else if !pipe_was_skipped {
         // The first attempt tripped the cooldown mid-call; do not retry.
@@ -983,6 +1157,19 @@ async fn run_elevated_inner(
         ));
     }
 
+    // P1-3: the pipe attempts above are capped at a fraction of the budget. If
+    // they consumed all of it, fail with a clear reason instead of dispatching
+    // a helper whose result could never be awaited inside the limit (that is
+    // how the caller ended up waiting 124 s for a 15 s command).
+    if remaining(poll_deadline) < Duration::from_secs(1) {
+        return Err(format!(
+            "Elevated command '{cmd}' exhausted its {} s budget before the scheduled-task path \
+             (the bridge pipe did not answer) — aborted instead of dispatching a helper that \
+             could not be awaited within the limit",
+            timeout_for_cmd(cmd).as_secs()
+        ));
+    }
+
     let dir = crate::elevated::elev_dir();
     // S26-006: run on a blocking thread — cleanup_stale_elev_files() uses
     // std::fs::read_dir. S69: FIXED pool (no tokio blocking-pool churn).
@@ -994,11 +1181,18 @@ async fn run_elevated_inner(
     // A stale file cannot collide with this request — the name carries a fresh
     // request id — so a failed sweep is a warning, not a failure.
     let dir_clone = dir.clone();
-    let sweep = crate::util::fixed_pool::run_blocking_timeout(Duration::from_secs(10), move || {
-        cleanup_stale_elev_files(&dir_clone)
-    })
-    .await
-    .map_err(|e| format!("cleanup_stale_elev_files task failed: {e}"));
+    set_phase(ElevPhase::Sweep);
+    // P1-3: housekeeping must not eat the command's last milliseconds.
+    let sweep = if remaining(hard_deadline) < Duration::from_millis(500) {
+        Ok(())
+    } else {
+        crate::util::fixed_pool::run_blocking_timeout(
+            remaining(hard_deadline).min(Duration::from_secs(10)),
+            move || cleanup_stale_elev_files(&dir_clone),
+        )
+        .await
+        .map_err(|e| format!("cleanup_stale_elev_files task failed: {e}"))
+    };
     if let Some(warning) = sweep_warning(sweep) {
         log::warn!(target: "elev_bridge", "Elevated command '{cmd}': {warning}");
     }
@@ -1022,7 +1216,7 @@ async fn run_elevated_inner(
     // loop, which would block the async runtime. S69: FIXED pool (no tokio
     // blocking-pool churn).
     let key = crate::util::fixed_pool::run_blocking_timeout(
-        Duration::from_secs(10),
+        remaining(hard_deadline).min(Duration::from_secs(10)),
         auth::get_or_create_key,
     )
     .await
@@ -1049,6 +1243,7 @@ async fn run_elevated_inner(
 
     // Launch the scheduled task (returns immediately; task runs asynchronously).
     // CREATE_NO_WINDOW prevents the flash of a console window on every call.
+    set_phase(ElevPhase::Dispatch);
     let task_ok = run_schtasks_run().await;
 
     // S37-001: Release the serialization lock BEFORE the result-poll loop.
@@ -1066,7 +1261,7 @@ async fn run_elevated_inner(
         // `cargo tauri dev` and points to the debug exe.
         // S69: FIXED pool (no tokio blocking-pool churn).
         let healed = crate::util::fixed_pool::run_blocking_timeout(
-            Duration::from_secs(30),
+            remaining(hard_deadline).min(Duration::from_secs(30)),
             ensure_task_correct_path,
         )
         .await
@@ -1128,9 +1323,12 @@ async fn run_elevated_inner(
         note_elevated_failure();
     }
 
-    // Poll for the result file (check every 150 ms, timeout per-command)
+    // Poll for the result file (check every 150 ms) until the command's total
+    // deadline. P1-3: this used to start a *fresh* `timeout_for_cmd` budget
+    // after the pipe/sweep/sign/heal phases had already spent theirs, which is
+    // how a 15 s command reached 124 s.
     let timeout = timeout_for_cmd(cmd);
-    let start = Instant::now();
+    set_phase(ElevPhase::Poll);
     loop {
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
 
@@ -1169,10 +1367,11 @@ async fn run_elevated_inner(
             };
         }
 
-        if start.elapsed() > timeout {
+        if Instant::now() >= poll_deadline {
             // The scheduled task ran but produced no result.  This usually means
             // the task is registered without the `--elevated` argument (so the
             // full GUI launched instead of the helper).
+            let elapsed_ms = timeout.saturating_sub(remaining(poll_deadline)).as_millis();
             #[cfg(windows)]
             {
                 if !allow_uac {
@@ -1182,19 +1381,20 @@ async fn run_elevated_inner(
                     // makes the failure actionable instead of silent.
                     log::warn!(
                         target: "elev_bridge",
-                        "Elevated command '{}' produced no result within {} ms (limit {} s); \
+                        "Elevated command '{}' produced no result within {} ms (total budget {} s); \
                          UAC fallback disabled by design for background commands (MIOT-38) — \
                          scheduled task '{}' is broken or not running the helper",
                         cmd,
-                        start.elapsed().as_millis(),
+                        elapsed_ms,
                         timeout.as_secs(),
                         TASK_NAME
                     );
                     return Err(format!(
-                        "Elevated command '{}' timed out after {} ms (limit {} s) and UAC fallback \
-                         is disabled for this operation (background command, MIOT-38 policy).",
+                        "Elevated command '{}' timed out after {} ms (total budget {} s) and UAC \
+                         fallback is disabled for this operation (background command, MIOT-38 \
+                         policy).",
                         cmd,
-                        start.elapsed().as_millis(),
+                        elapsed_ms,
                         timeout.as_secs()
                     ));
                 }
@@ -1206,7 +1406,7 @@ async fn run_elevated_inner(
                 // churn).
                 let req_id_owned = request_id.clone();
                 let uac_result = crate::util::fixed_pool::run_blocking_timeout(
-                    Duration::from_secs(35),
+                    remaining(hard_deadline).min(Duration::from_secs(35)),
                     move || launch_elevated_via_uac(&req_id_owned),
                 )
                 .await
@@ -1280,8 +1480,12 @@ async fn run_elevated_inner(
 ///
 /// Returns `Err` when the service is not installed/running or the command
 /// fails; the caller falls back to the scheduled task in that case.
+///
+/// `timeout` bounds the whole round-trip. P1-3: it is the caller's *remaining*
+/// budget, not a fresh 15 s, so a wedged pipe cannot spend more time than the
+/// command is allowed to take.
 #[cfg(windows)]
-async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
+async fn run_via_service_pipe(cmd: &str, args: Value, timeout: Duration) -> Result<Value, String> {
     let request_id = make_request_id();
     let nonce = auth::generate_nonce();
     let mut payload = serde_json::json!({
@@ -1315,11 +1519,8 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
     // → COM init + TLS teardown → the residual handle leak).
     let body = payload.to_string();
     let result = tokio::time::timeout(
-        Duration::from_secs(ELEV_TIMEOUT_SECS),
-        crate::util::fixed_pool::run_blocking_timeout(
-            Duration::from_secs(ELEV_TIMEOUT_SECS),
-            move || pipe_request(&body),
-        ),
+        timeout,
+        crate::util::fixed_pool::run_blocking_timeout(timeout, move || pipe_request(&body)),
     )
     .await
     .map_err(|_| {
@@ -1331,13 +1532,15 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
         note_pipe_timeout("round-trip timeout");
         log_rate_limited(true, "pipe_request_failed", |_| {
             format!(
-                "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
-                 (service did not respond) — falling back to scheduled task path"
+                "Bridge service pipe round-trip timed out after {} ms \
+                 (service did not respond) — falling back to scheduled task path",
+                timeout.as_millis()
             )
         });
         format!(
-            "Bridge service pipe round-trip timed out after {ELEV_TIMEOUT_SECS}s \
-             (service did not respond)"
+            "Bridge service pipe round-trip timed out after {} ms \
+             (service did not respond)",
+            timeout.as_millis()
         )
     })?
     .map_err(|e| {
@@ -1398,7 +1601,11 @@ async fn run_via_service_pipe(cmd: &str, args: Value) -> Result<Value, String> {
 }
 
 #[cfg(not(windows))]
-async fn run_via_service_pipe(_cmd: &str, _args: Value) -> Result<Value, String> {
+async fn run_via_service_pipe(
+    _cmd: &str,
+    _args: Value,
+    _timeout: Duration,
+) -> Result<Value, String> {
     Err("Bridge service pipe only available on Windows".to_string())
 }
 
@@ -2247,5 +2454,98 @@ mod tests {
         // After recovery, two new timeouts are needed to skip again.
         assert_eq!(cooldown.note_timeout(70_000), None);
         assert_eq!(cooldown.note_timeout(70_100), Some(2));
+    }
+
+    // ── P1-3: the total budget is the contract ─────────────────────────────
+
+    /// The declared limit for a routine command is 15 s — the number the
+    /// recheck compared against the observed 124 s.
+    #[test]
+    fn routine_commands_declare_a_fifteen_second_budget() {
+        assert_eq!(timeout_for_cmd("wmi_ec_read"), Duration::from_secs(15));
+        assert_eq!(
+            timeout_for_cmd("get_charge_limit_state"),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            timeout_for_cmd("ensure_ecram_service"),
+            Duration::from_secs(90)
+        );
+    }
+
+    /// Every phase must be nameable: the whole point of the enum is that the
+    /// timeout error says *where* the time went instead of only how much.
+    #[test]
+    fn every_phase_round_trips_and_has_a_label() {
+        for phase in [
+            ElevPhase::Start,
+            ElevPhase::Pipe,
+            ElevPhase::PipeRetry,
+            ElevPhase::Sweep,
+            ElevPhase::Sign,
+            ElevPhase::Dispatch,
+            ElevPhase::Poll,
+            ElevPhase::Uac,
+        ] {
+            assert_eq!(ElevPhase::from_code(phase as u8), phase);
+            assert!(!phase.describe().is_empty());
+        }
+        // An unknown code must not panic — it degrades to "startup".
+        assert_eq!(ElevPhase::from_code(200), ElevPhase::Start);
+    }
+
+    /// The remaining-budget helper must never go negative (a `Duration`
+    /// subtraction panic would turn a slow command into a crash).
+    #[test]
+    fn remaining_budget_saturates_at_zero() {
+        let past = Instant::now() - Duration::from_secs(5);
+        assert_eq!(remaining(past), Duration::ZERO);
+        let future = Instant::now() + Duration::from_secs(5);
+        assert!(remaining(future) > Duration::from_secs(4));
+    }
+
+    /// A pipe attempt may never take more than half the command budget: the
+    /// scheduled-task fallback needs the other half. This is the arithmetic
+    /// that was missing when two 15 s attempts ran on a 15 s command.
+    #[test]
+    fn a_pipe_attempt_never_takes_more_than_half_the_command_budget() {
+        let fifteen = Duration::from_secs(15);
+        assert_eq!(
+            pipe_attempt_budget(fifteen, fifteen),
+            Some(Duration::from_millis(7_500)),
+            "15 s command → 7.5 s pipe window"
+        );
+
+        // A long command is capped by the 15 s pipe ceiling, not by its budget.
+        assert_eq!(
+            pipe_attempt_budget(Duration::from_secs(90), Duration::from_secs(90)),
+            Some(Duration::from_secs(15))
+        );
+
+        // Two attempts on a 15 s command can no longer sum to 30 s.
+        let first = pipe_attempt_budget(fifteen, fifteen).unwrap();
+        let left = fifteen - first;
+        let second = pipe_attempt_budget(left, left).unwrap();
+        assert!(
+            first + second < fifteen,
+            "two pipe attempts must leave room for the task path: {first:?} + {second:?}"
+        );
+    }
+
+    /// With no budget left the attempt is skipped instead of being given a
+    /// fresh window.
+    #[test]
+    fn a_spent_budget_skips_the_pipe_entirely() {
+        assert_eq!(pipe_attempt_budget(Duration::ZERO, Duration::ZERO), None);
+        assert_eq!(
+            pipe_attempt_budget(Duration::from_millis(1500), Duration::from_secs(1)),
+            None,
+            "under 2 s of command budget is not worth a pipe attempt"
+        );
+        assert_eq!(
+            pipe_attempt_budget(Duration::from_secs(10), Duration::from_millis(100)),
+            None,
+            "a spent hard deadline skips the pipe even with command budget left"
+        );
     }
 }
