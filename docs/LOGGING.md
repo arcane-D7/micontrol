@@ -144,6 +144,16 @@ shutdown limpo por desenho; o log dele é o `tauri-app-helper.log`.
 - O helper elevado terminar abruptamente (`TerminateProcess`) — é intencional.
 - O bridge reiniciar por política do serviço — fica registado em `bridge.log`.
 - Uma rotação de log — não afeta o marcador.
+- **Event 7031 ×2 do `MiControlFace` a cada instalação/actualização** — é o
+  padrão do installer, não uma falha. O hook NSIS faz `sc delete MiControlFace`
+  e depois `micontrol_face_svc.exe install` (serviço novo), o que mata a
+  instância antiga sem `SERVICE_CONTROL_STOP` → o SCM regista 7031 e **reinicia**
+  a acção correctiva em 5 s; a segunda ocorrência vem do ciclo de
+  stop/start da verificação pós-instalação (mais 10 s). `face_svc.log` mostra
+  sempre `stopping` → `starting` e o serviço termina `RUNNING`; o mesmo par
+  aparece em todas as instalações do histórico (13:12, 15:33, 16:36, 20:15).
+  Só é sinal de problema se o serviço **não** ficar `RUNNING` no fim — aí sim,
+  procure `0xc0000005` em `FrameServerClient.dll_unloaded`.
 
 ---
 
@@ -175,6 +185,22 @@ auditoria. O logger agora suprime repetições:
 Para ver **todas** as ocorrências de um erro que foi deduplicado, procure o
 resumo `×N repetições suprimidas` e conte a partir da primeira linha; o resumo
 diz quantas foram omitidas.
+
+### Deduplicação no local da chamada
+
+Três fontes de ruído crónico não passam pelo limiter genérico (são `INFO` ou
+`DEBUG`, e a primeira ocorrência tem de aparecer sempre). São filtradas no
+próprio módulo:
+
+| Origem | Regra | Porquê |
+| --- | --- | --- |
+| `hw::battery` — `battery WMI query took N ms` | `DEBUG`; **um** `INFO` por episódio lento (uma query rápida fecha o episódio) | 1 438 linhas = 33 % do log em 19 h 30 m |
+| `hw::ecram` — `Region … unavailable` | `INFO` uma vez por processo **por região e por tipo**; `DEBUG` depois | `DriverBlocked` em ERAM/SMA2 é o estado esperado desta plataforma, mas era registado a cada leitura (~4 s) |
+| `micontrol_bridge` — `read 0 bytes (client closed before sending)` | regista a primeira sonda e volta a falar quando chega um pedido real | a sonda de saúde do supervisor liga e fecha a cada 30 s (2 803 linhas em 19 h 30 m) |
+
+A chave de região inclui o `RegionBlockKind`: se ERAM passar de `DriverBlocked`
+(esperado) para `ServiceUnavailable` (falha real), a linha volta a aparecer a
+`INFO`.
 
 ---
 
