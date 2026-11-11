@@ -904,9 +904,10 @@ pub fn read_named_region(region: &str) -> HardwareResult<Vec<u8>> {
         }
         Err(pipe_err) => {
             let kind = classify_region_block(&pipe_err);
-            log::warn!(
-                target: "hw::ecram",
-                "Region {region} unavailable ({kind:?}): ecram_service: {pipe_err} | direct IOCTL: {direct_err}"
+            log_region_blocked_once(
+                region,
+                kind,
+                &format!("ecram_service: {pipe_err} | direct IOCTL: {direct_err}"),
             );
             Err(HardwareError::EcramBlocked {
                 region: region.to_ascii_uppercase(),
@@ -939,6 +940,43 @@ pub fn classify_region_block(reason: &str) -> RegionBlockKind {
         RegionBlockKind::ServiceUnavailable
     } else {
         RegionBlockKind::Unknown
+    }
+}
+
+/// Emit the "region blocked" diagnostic **once per process per region**.
+///
+/// P2-5 (recheck 2026-11-11): `Region ERAM unavailable (DriverBlocked)` was
+/// logged at WARN on every map read — the frontend polls every ~4 s, so an
+/// *expected* platform condition (`IoTDriver.sys` refuses ERAM/SMA2 even for
+/// SYSTEM) produced 1 line/4 s of warning noise and pushed real warnings out
+/// of the tail. The first occurrence keeps the full explanation at INFO; later
+/// ones go to DEBUG. A *new* kind for the same region (e.g. `DriverBlocked` →
+/// `ServiceUnavailable`) is a real fault and logs again.
+fn log_region_blocked_once(region: &str, kind: RegionBlockKind, detail: &str) {
+    static SEEN: OnceLock<std::sync::Mutex<Vec<(String, RegionBlockKind)>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+
+    let first = {
+        let mut guard = match seen.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.iter().any(|(r, k)| r == region && *k == kind) {
+            false
+        } else {
+            guard.push((region.to_string(), kind));
+            true
+        }
+    };
+
+    if first {
+        log::info!(
+            target: "hw::ecram",
+            "Region {region} unavailable ({kind:?}) — expected on this platform for ERAM/SMA2 \
+             (IoTDriver refuses the address even for SYSTEM); further occurrences at DEBUG: {detail}"
+        );
+    } else {
+        log::debug!(target: "hw::ecram", "Region {region} unavailable ({kind:?}): {detail}");
     }
 }
 
@@ -1064,17 +1102,11 @@ pub fn read_eram_map() -> HardwareResult<EramMap> {
             bytes.len()
         ))),
         Err(HardwareError::EcramBlocked { kind, detail, .. }) => {
-            log::warn!(
-                target: "hw::ecram",
-                "ERAM read unavailable ({kind:?}); building partial map (available=false): {detail}"
-            );
+            log_region_blocked_once("ERAM", kind, &detail);
             Ok(partial_eram_map_from_wmi(kind, &detail))
         }
         Err(other) => {
-            log::warn!(
-                target: "hw::ecram",
-                "ERAM read unavailable ({other}); building partial map (available=false)"
-            );
+            log_region_blocked_once("ERAM", RegionBlockKind::Unknown, &other.to_string());
             Ok(partial_eram_map_from_wmi(
                 RegionBlockKind::Unknown,
                 &other.to_string(),

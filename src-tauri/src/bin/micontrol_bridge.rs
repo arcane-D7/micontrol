@@ -1246,6 +1246,9 @@ mod pipe_server {
     }
 
     fn handle_client(handle: windows::Win32::Foundation::HANDLE) {
+        // P2: whether the previous connection was an empty health probe. Used
+        // to log the 2/min probe only on change instead of 2 803 times.
+        static LAST_CONNECTION_WAS_EMPTY: AtomicBool = AtomicBool::new(false);
         let t0 = std::time::Instant::now();
         bridge_log("client connected");
         // S55 FIX 24d: the pipe instance was created with FILE_FLAG_OVERLAPPED
@@ -1329,9 +1332,20 @@ mod pipe_server {
         }
 
         if total_read == 0 {
-            bridge_log("read 0 bytes (client closed before sending)");
+            // P2 (recheck 2026-11-11): the app's health supervisor probes this
+            // pipe every 30 s (2/min) with a connect-and-close, which produced
+            // 2 803 identical "read 0 bytes" lines in 19 h 30 m — pure noise
+            // that buried real failures. Log the first one and then stay
+            // silent until a real request intervenes (i.e. only on change).
+            if !LAST_CONNECTION_WAS_EMPTY.swap(true, Ordering::Relaxed) {
+                bridge_log(
+                    "read 0 bytes (client closed before sending) — health probe; \
+                     repeats suppressed until a real request arrives",
+                );
+            }
             return;
         }
+        LAST_CONNECTION_WAS_EMPTY.store(false, Ordering::Relaxed);
 
         let request_str = String::from_utf8_lossy(&read_buf[..total_read]).to_string();
         let cmd_desc = serde_json::from_str::<serde_json::Value>(&request_str)

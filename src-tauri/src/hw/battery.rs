@@ -119,6 +119,14 @@ static LAST_GOOD_BATTERY: Mutex<Option<BatteryInfo>> = Mutex::new(None);
 #[cfg(windows)]
 static LAST_QUERY_LATENCY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Whether the previous query was already over the slow threshold.
+///
+/// P2-4: the slow-query line ran 1 438× in 19 h 30 m (33 % of the log). One
+/// INFO per slow *episode* keeps a regression visible; the rest is DEBUG.
+#[cfg(windows)]
+static LAST_QUERY_WAS_SLOW: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// A completed battery WMI query slower than this is logged with its measured
 /// duration (the normal path is ~10-100 ms; multi-second queries explain the
 /// timeouts).
@@ -453,18 +461,25 @@ fn battery_worker_loop(rx: std::sync::mpsc::Receiver<BatteryRequest>) {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         LAST_QUERY_LATENCY_MS.store(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
         if elapsed_ms >= BATTERY_SLOW_QUERY_LOG_MS {
-            // P2-e: while the provider is degraded these per-query lines are
-            // the flood (217 > 5 s and 76 > 10 s in 34.7 h) — DEBUG there,
-            // INFO only from a healthy state so a regression is still visible.
+            // P2-4 (recheck 2026-11-11): 1 438 lines in 19 h 30 m = 33 % of the
+            // app log. The per-query duration of a chronically slow provider is
+            // diagnostic detail, not a status event — the breaker already logs
+            // the state changes (timeout / circuit open / recovery) at
+            // INFO/WARN. Keep exactly ONE INFO per slow episode so a new
+            // regression is still visible, and DEBUG for the rest of the run.
+            let was_slow = LAST_QUERY_WAS_SLOW.swap(true, std::sync::atomic::Ordering::Relaxed);
             let msg = format!(
                 "battery WMI query took {elapsed_ms} ms (slow threshold {BATTERY_SLOW_QUERY_LOG_MS} ms, {})",
                 if result.is_ok() { "ok" } else { "failed" }
             );
-            if breaker_degraded() {
+            if was_slow || breaker_degraded() {
                 log::debug!(target: "hw::battery", "{msg}");
             } else {
                 log::info!(target: "hw::battery", "{msg}");
             }
+        } else {
+            // A fast query ends the slow episode, so the next one logs again.
+            LAST_QUERY_WAS_SLOW.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         let _ = req.result_tx.send(result);
     }
