@@ -278,6 +278,284 @@ pub fn get_charging_threshold() -> HardwareResult<u8> {
     Ok(get_requested_threshold())
 }
 
+// ── Reconciliation (P1-2, recheck 2026-11-11) ───────────────────────────────
+//
+// The EC forgets the limit across an S3 cycle and across `ecram_service`
+// restarts. The 2026-11-11 recheck found the hardware at 100 % (code 0) while
+// the registry still said 80 %: the limit applied at 20:17 was gone after the
+// 02:23 → 10:55 resume, and nothing ever re-asserted it. The read-back was
+// honest (`applied=false`) but the machine charged to 100 % for 8 h.
+//
+// The reconciler re-asserts the *requested* value, but only through a gate:
+// one write per cooldown window, exponential backoff on failure. A firmware
+// that refuses the write can therefore never turn into a write loop.
+
+/// Minimum spacing between two reconciliation writes.
+pub const RECONCILE_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
+/// Ceiling for the failure backoff.
+pub const RECONCILE_MAX_BACKOFF_MS: u64 = 60 * 60 * 1000;
+
+/// What the reconciler should do with the current (requested, hardware) pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileAction {
+    /// The firmware already holds the requested value.
+    InSync,
+    /// Care is off (requested 100 %). Turning care *off* is a user action, not
+    /// a drift to auto-correct: writing 100 % would silently disable battery
+    /// care, so the reconciler leaves it alone.
+    CareOff,
+    /// The firmware value could not be read — never write blind.
+    Unreadable,
+    /// Write the requested value now.
+    Apply,
+    /// A write is due but the gate is closed; retry after `retry_in_ms`.
+    Deferred { retry_in_ms: u64 },
+}
+
+impl ReconcileAction {
+    /// Short label for the log line.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::InSync => "in sync",
+            Self::CareOff => "care off",
+            Self::Unreadable => "hardware unreadable",
+            Self::Apply => "apply",
+            Self::Deferred { .. } => "deferred",
+        }
+    }
+}
+
+/// Write gate for the reconciler. Pure and clock-injected so every transition
+/// is unit-testable without touching the firmware.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReconcileGate {
+    last_attempt_ms: Option<u64>,
+    consecutive_failures: u32,
+}
+
+impl ReconcileGate {
+    pub const fn new() -> Self {
+        Self {
+            last_attempt_ms: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// How long the gate stays closed after the last attempt.
+    ///
+    /// 5 min after a success; 10, 20, 40, 60 min after consecutive failures.
+    pub fn cooldown_ms(&self) -> u64 {
+        if self.consecutive_failures == 0 {
+            return RECONCILE_MIN_INTERVAL_MS;
+        }
+        let factor = 1u64 << self.consecutive_failures.min(4);
+        RECONCILE_MIN_INTERVAL_MS
+            .saturating_mul(factor)
+            .min(RECONCILE_MAX_BACKOFF_MS)
+    }
+
+    /// Decide what to do at `now_ms`.
+    pub fn decide(&self, now_ms: u64, requested: u8, hardware: Option<u8>) -> ReconcileAction {
+        if requested >= 100 {
+            return ReconcileAction::CareOff;
+        }
+        let Some(hardware) = hardware else {
+            return ReconcileAction::Unreadable;
+        };
+        if hardware == requested {
+            return ReconcileAction::InSync;
+        }
+        match self.last_attempt_ms {
+            None => ReconcileAction::Apply,
+            Some(last) => {
+                let elapsed = now_ms.saturating_sub(last);
+                let cooldown = self.cooldown_ms();
+                if elapsed >= cooldown {
+                    ReconcileAction::Apply
+                } else {
+                    ReconcileAction::Deferred {
+                        retry_in_ms: cooldown - elapsed,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record that a write is being attempted now.
+    pub fn note_attempt(&mut self, now_ms: u64) {
+        self.last_attempt_ms = Some(now_ms);
+    }
+
+    /// The firmware accepted the write — clear the backoff.
+    pub fn note_success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    /// The write failed — widen the next window.
+    pub fn note_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+
+    /// Consecutive failures so far (diagnostics).
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
+static RECONCILE_GATE: std::sync::Mutex<ReconcileGate> =
+    std::sync::Mutex::new(ReconcileGate::new());
+
+fn reconcile_gate() -> std::sync::MutexGuard<'static, ReconcileGate> {
+    match RECONCILE_GATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Re-assert the requested charging limit when the firmware has drifted.
+///
+/// Called at app start, on resume from sleep, and whenever a read-back reports
+/// `applied=false` with care on. Every path goes through [`ReconcileGate`], so
+/// the worst case is one write per 5 min (widening to 60 min while the
+/// firmware keeps refusing).
+///
+/// Runs in the **app** process and dispatches through the elevated bridge: the
+/// MICommonInterface instance query is denied to non-admin callers, which is
+/// why the read and the write are elevated commands in the first place.
+#[cfg(windows)]
+pub async fn reconcile_charge_limit(trigger: &str) -> ReconcileAction {
+    use crate::elev_bridge;
+
+    // Read the truth. A failed read is not a reason to write.
+    let state: ChargeLimitState =
+        match elev_bridge::run_elevated_no_prompt("get_charge_limit_state", serde_json::json!({}))
+            .await
+        {
+            Ok(raw) => match serde_json::from_value(raw) {
+                Ok(state) => state,
+                Err(e) => {
+                    log::debug!(
+                        target: "hw::charging",
+                        "[charge_limit] reconcile ({trigger}): unreadable state ({e})"
+                    );
+                    return ReconcileAction::Unreadable;
+                }
+            },
+            Err(e) => {
+                log::debug!(
+                    target: "hw::charging",
+                    "[charge_limit] reconcile ({trigger}): state read failed ({e})"
+                );
+                return ReconcileAction::Unreadable;
+            }
+        };
+
+    let now = crate::util::auth::now_ms();
+    let action = {
+        let gate = reconcile_gate();
+        gate.decide(now, state.requested_threshold, state.hardware_threshold)
+    };
+
+    match action {
+        ReconcileAction::Apply => {
+            {
+                let mut gate = reconcile_gate();
+                gate.note_attempt(now);
+            }
+            let requested = state.requested_threshold;
+            let result = elev_bridge::run_elevated_no_prompt(
+                "set_charging_threshold",
+                serde_json::json!({ "threshold": requested }),
+            )
+            .await;
+
+            match result {
+                Ok(raw) => {
+                    let applied = serde_json::from_value::<ChargingResult>(raw)
+                        .ok()
+                        .filter(|r| r.success);
+                    match applied {
+                        Some(r) => {
+                            reconcile_gate().note_success();
+                            log::info!(
+                                target: "hw::charging",
+                                "[charge_limit] re-applied {requested}% on {trigger} \
+                                 (was {:?}%, read-back {:?}%)",
+                                state.hardware_threshold,
+                                r.hardware_threshold
+                            );
+                        }
+                        None => {
+                            let mut gate = reconcile_gate();
+                            gate.note_failure();
+                            let next = gate.cooldown_ms() / 1000;
+                            log::warn!(
+                                target: "hw::charging",
+                                "[charge_limit] re-apply {requested}% on {trigger} was not \
+                                 confirmed by the firmware (was {:?}%) — next attempt in {next} s",
+                                state.hardware_threshold
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    let mut gate = reconcile_gate();
+                    gate.note_failure();
+                    let next = gate.cooldown_ms() / 1000;
+                    log::warn!(
+                        target: "hw::charging",
+                        "[charge_limit] re-apply {requested}% on {trigger} failed: {e} — \
+                         next attempt in {next} s"
+                    );
+                }
+            }
+        }
+        ReconcileAction::Deferred { retry_in_ms } => log::debug!(
+            target: "hw::charging",
+            "[charge_limit] reconcile ({trigger}): drift {:?}% → {}% deferred, retry in {} s",
+            state.hardware_threshold,
+            state.requested_threshold,
+            retry_in_ms / 1000
+        ),
+        ReconcileAction::InSync | ReconcileAction::CareOff | ReconcileAction::Unreadable => {
+            log::debug!(
+                target: "hw::charging",
+                "[charge_limit] reconcile ({trigger}): {} (requested {}%, hardware {:?}%)",
+                action.describe(),
+                state.requested_threshold,
+                state.hardware_threshold
+            );
+        }
+    }
+
+    action
+}
+
+/// Periodic reconciliation worker (5 min).
+///
+/// The UI only reads the limit when the Battery tab opens, so a drift that
+/// happens while the app sits in the tray would otherwise persist until the
+/// user looked. The gate keeps this cheap: a read every 5 min, a write only
+/// when the firmware actually disagrees.
+#[cfg(windows)]
+pub fn start_charge_limit_reconciler() {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn(async {
+        // Let the bridge service and the elevated path settle after boot.
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        loop {
+            reconcile_charge_limit("periodic").await;
+            tokio::time::sleep(std::time::Duration::from_secs(
+                RECONCILE_MIN_INTERVAL_MS / 1000,
+            ))
+            .await;
+        }
+    });
+}
+
 // ── Battery Care toggle ─────────────────────────────────────────────────────
 //
 // "Care" and "limit" are the same firmware field: code 0 means care off
@@ -434,5 +712,105 @@ mod tests {
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["applied"], serde_json::json!(false));
         assert_eq!(v["source"], serde_json::json!("registry"));
+    }
+
+    // ── P1-2: the reconciler ────────────────────────────────────────────────
+
+    /// The production drift: requested 80, firmware 100 → write.
+    #[test]
+    fn drift_with_care_on_is_applied() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 80, Some(100)), ReconcileAction::Apply);
+    }
+
+    /// Nothing to do when the firmware already holds the request.
+    #[test]
+    fn matching_hardware_is_in_sync() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 80, Some(80)), ReconcileAction::InSync);
+    }
+
+    /// Care off (100 %) is a user decision, not a drift to auto-correct.
+    #[test]
+    fn care_off_is_never_rewritten() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 100, Some(80)), ReconcileAction::CareOff);
+        assert_eq!(gate.decide(1_000, 100, Some(100)), ReconcileAction::CareOff);
+    }
+
+    /// An unreadable firmware must never be written blind.
+    #[test]
+    fn unreadable_hardware_is_not_written() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 80, None), ReconcileAction::Unreadable);
+    }
+
+    /// One write per 5 min: a second call inside the window is deferred, and
+    /// the deferral reports the remaining time.
+    #[test]
+    fn writes_are_rate_limited_to_one_per_five_minutes() {
+        let mut gate = ReconcileGate::new();
+        assert_eq!(gate.decide(0, 80, Some(100)), ReconcileAction::Apply);
+        gate.note_attempt(0);
+        gate.note_success();
+
+        assert_eq!(
+            gate.decide(60_000, 80, Some(100)),
+            ReconcileAction::Deferred {
+                retry_in_ms: RECONCILE_MIN_INTERVAL_MS - 60_000
+            }
+        );
+        // Exactly at the boundary the gate reopens.
+        assert_eq!(
+            gate.decide(RECONCILE_MIN_INTERVAL_MS, 80, Some(100)),
+            ReconcileAction::Apply
+        );
+    }
+
+    /// A firmware that keeps refusing must widen the window, never loop.
+    #[test]
+    fn failures_back_off_exponentially_up_to_the_cap() {
+        let mut gate = ReconcileGate::new();
+        assert_eq!(gate.cooldown_ms(), RECONCILE_MIN_INTERVAL_MS);
+
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            gate.note_failure();
+            seen.push(gate.cooldown_ms());
+        }
+        assert_eq!(
+            seen,
+            vec![
+                10 * 60_000,
+                20 * 60_000,
+                40 * 60_000,
+                RECONCILE_MAX_BACKOFF_MS,
+                RECONCILE_MAX_BACKOFF_MS,
+                RECONCILE_MAX_BACKOFF_MS,
+            ]
+        );
+        assert_eq!(gate.consecutive_failures(), 6);
+
+        // A success clears the backoff entirely.
+        gate.note_success();
+        assert_eq!(gate.cooldown_ms(), RECONCILE_MIN_INTERVAL_MS);
+        assert_eq!(gate.consecutive_failures(), 0);
+    }
+
+    /// The gate must not write twice inside a backoff window even when the
+    /// drift is still present — this is the "never a write loop" property.
+    #[test]
+    fn backoff_window_blocks_repeated_writes() {
+        let mut gate = ReconcileGate::new();
+        gate.note_attempt(0);
+        gate.note_failure(); // cooldown 10 min
+        assert!(matches!(
+            gate.decide(5 * 60_000, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        assert_eq!(
+            gate.decide(10 * 60_000, 80, Some(100)),
+            ReconcileAction::Apply
+        );
     }
 }
