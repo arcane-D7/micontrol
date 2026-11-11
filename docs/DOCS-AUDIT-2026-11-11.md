@@ -182,6 +182,8 @@ Nenhuma especificação foi inventada: cada linha acrescentada tem origem num fi
 
 ## 6. Verificação de markdown
 
-- `markdownlint` **não** está nas dependências do projecto (`package.json` não o lista) e `node_modules` não está instalado neste worktree — não foi possível correr um linter de markdown. `prettier` e `eslint` só cobrem `src/` (`lint-staged` aplica `prettier` a `src/**/*.md`, não a `docs/`).
+- `markdownlint` **não** está nas dependências do projecto (`package.json` não o lista), pelo que não foi usado.
+- O gate real do repositório é o **prettier** via `lint-staged` (`.lintstagedrc.json` cobre `*.{json,css,md}`). O hook de pré-commit correu sobre os 16 ficheiros alterados e passou; normalizou ênfase (`*x*` → `_x_`) e alinhamento de tabelas em `docs/edge-slide-protocol-re.md` e nos restantes, o que explica parte do tamanho do diff.
 - Verificação feita: scanner de links relativos sobre os 99 `.md` → **11 links quebrados**, todos em documentos históricos e listados em §5.4 (o link do README para este relatório foi criado e resolve).
-- Tabelas, blocos de código e cabeçalhos dos ficheiros alterados foram revistos manualmente; nenhum bloco ficou aberto.
+- Blocos de código com número par de fences em todos os ficheiros alterados; tabelas e cabeçalhos revistos manualmente.
+- Comandos documentados executados para prova: `pnpm run health-check -- --list`, `pnpm run version:check` (✓ 0.2.20), `pnpm run i18n:check` (✓ sem chaves em falta).
