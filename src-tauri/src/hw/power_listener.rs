@@ -454,12 +454,12 @@ fn on_resume() {
 
     // P1-2 (recheck 2026-11-11): the EC forgets the charging limit across an
     // S3 cycle — the 02:23 → 10:55 resume left the hardware at 100 % while
-    // the user had asked for 80 %. Re-assert the requested value here, on the
-    // resume broadcast, through the gated reconciler (read-back + log; never
-    // an unconditional write loop). Fire-and-forget: this runs on the window
+    // the user had asked for 80 %. This is a power event, not a poll, so it
+    // takes the forced path (30 s floor instead of the 5 min window); the
+    // failure backoff still applies. Fire-and-forget: this runs on the window
     // message thread and must not block on an elevated round-trip.
     tauri::async_runtime::spawn(async {
-        crate::hw::charging::reconcile_charge_limit("resume").await;
+        crate::hw::charging::reconcile_charge_limit_with("resume", true).await;
     });
 
     log::info!("[power_listener] Sensor reset complete");

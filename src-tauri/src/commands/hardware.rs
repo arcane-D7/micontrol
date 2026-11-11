@@ -82,6 +82,11 @@ pub async fn get_charge_limit_state() -> Result<crate::hw::charging::ChargeLimit
     let state: crate::hw::charging::ChargeLimitState = serde_json::from_value(raw)
         .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))?;
 
+    // Refresh the app-side cache the hold state renders from: the read itself
+    // runs in the elevated helper, so this is the only place the app process
+    // learns the firmware value.
+    crate::hw::charging::note_firmware_state(&state);
+
     if !state.applied && state.requested_threshold < 100 {
         #[cfg(windows)]
         tauri::async_runtime::spawn(async {
@@ -90,6 +95,17 @@ pub async fn get_charge_limit_state() -> Result<crate::hw::charging::ChargeLimit
     }
 
     Ok(state)
+}
+
+/// Live hold state — the phase the machine is really in, plus the numbers the
+/// UI shows ("holding at 80", "above the limit, this firmware cannot
+/// discharge", "charging to 80").
+///
+/// Cheap by design: it reads the cached battery snapshot and the last verified
+/// firmware value, so the battery tab can poll it without WMI or elevation.
+#[tauri::command]
+pub fn get_charge_hold_state() -> crate::hw::charging::ChargeHoldState {
+    crate::hw::charging::current_hold_state()
 }
 
 #[tauri::command]

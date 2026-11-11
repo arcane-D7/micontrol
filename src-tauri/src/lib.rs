@@ -33,14 +33,14 @@ use commands::face::{
 };
 use commands::hardware::{
     ensure_bridge_service, ensure_iot_service, get_audio_devices, get_audio_volume,
-    get_battery_care, get_cast_devices, get_charge_limit_state, get_charging_threshold,
-    get_ecram_map, get_function_key, get_iot_device_info, get_iot_region_hex, get_iot_wifi_list,
-    get_perf_debug, get_performance_mode, get_primary_thermal_zone, get_scenario_rules,
-    get_thermal_zones, hq_change_boot_option, hq_enable_pxe_boot, hq_load_default,
-    hq_s5_rtc_wake_enable, hq_set_performance_mode, hq_set_shipping_country_code,
-    hq_set_wifi_country_code, iot_connect_wifi, iot_delete_wifi_item, iot_empty_wifi_items,
-    iot_notify_event, iot_pipe_available, iot_reset_device, iot_set_device_status,
-    iot_write_wifi_item, is_elevated, read_ecram_raw, relaunch_as_admin,
+    get_battery_care, get_cast_devices, get_charge_hold_state, get_charge_limit_state,
+    get_charging_threshold, get_ecram_map, get_function_key, get_iot_device_info,
+    get_iot_region_hex, get_iot_wifi_list, get_perf_debug, get_performance_mode,
+    get_primary_thermal_zone, get_scenario_rules, get_thermal_zones, hq_change_boot_option,
+    hq_enable_pxe_boot, hq_load_default, hq_s5_rtc_wake_enable, hq_set_performance_mode,
+    hq_set_shipping_country_code, hq_set_wifi_country_code, iot_connect_wifi, iot_delete_wifi_item,
+    iot_empty_wifi_items, iot_notify_event, iot_pipe_available, iot_reset_device,
+    iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw, relaunch_as_admin,
     set_audio_default_endpoint, set_audio_mute, set_audio_volume, set_battery_care,
     set_charging_threshold, set_function_key, set_performance_mode, set_scenario_rules,
     start_casting, stop_casting, wifi_connect, wifi_disconnect, wifi_scan, wifi_status,
@@ -499,6 +499,8 @@ pub fn run() {
             set_charging_threshold,
             // Firmware truth for the limit (requested vs applied)
             get_charge_limit_state,
+            // Live hold phase ("holding at 80", "above limit", "charging")
+            get_charge_hold_state,
             // Battery Care toggle (firmware field, LONL/HBDA)
             get_battery_care,
             set_battery_care,
@@ -972,13 +974,14 @@ pub fn run() {
             crate::hw::power_listener::start_power_listener();
 
             // P1-2 (recheck 2026-11-11): the EC forgets the charging limit
-            // across S3 and across ecram_service restarts. Re-assert the
-            // user's requested limit at startup and every 5 min thereafter,
-            // gated to at most one write per window (backoff on failure).
-            // The 20:17 limit survived until the 02:23 → 10:55 resume and
-            // then silently reverted to 100 %.
+            // across S3 and across power-source changes. The supervisor
+            // re-asserts the user's requested limit at startup, on resume, on
+            // AC plug and every 5 min thereafter (gated to at most one write
+            // per window, backoff on failure), and logs the real hold phase
+            // every 45 s. The 20:17 limit survived until the 02:23 → 10:55
+            // resume and then silently reverted to 100 %.
             #[cfg(windows)]
-            crate::hw::charging::start_charge_limit_reconciler();
+            crate::hw::charging::start_charge_hold_supervisor();
 
             // MIOT-01: IoT event listener — synthesizes power/charging/low-
             // battery events into native OSD notifications. Reads config from

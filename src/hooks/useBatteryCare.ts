@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
-import type { ChargeLimitState } from '../types/charge';
+import type { ChargeHoldState, ChargeLimitState } from '../types/charge';
 import { t } from './useI18n';
 
 const translate: TranslateFn = (key) => t(key as never);
@@ -26,6 +26,12 @@ export interface BatteryCareState {
    * ao controlador (94% com limite de 80%).
    */
   limitState: ChargeLimitState | null;
+  /**
+   * Fase real do controlo de carga ("holding at 80", "above limit", …).
+   * Barata: o backend lê o snapshot da bateria e o último read-back do
+   * firmware, sem WMI nem elevação. `null` = ainda não lido.
+   */
+  holdState: ChargeHoldState | null;
   pending: boolean;
   error: string | null;
   setCare: (enabled: boolean) => Promise<void>;
@@ -35,6 +41,7 @@ export interface BatteryCareState {
 export function useBatteryCare(): BatteryCareState {
   const [care, setCareState] = useState<boolean | null>(null);
   const [limitState, setLimitState] = useState<ChargeLimitState | null>(null);
+  const [holdState, setHoldState] = useState<ChargeHoldState | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,6 +59,11 @@ export function useBatteryCare(): BatteryCareState {
       setLimitState(await invoke<ChargeLimitState>('get_charge_limit_state'));
     } catch {
       setLimitState(null);
+    }
+    try {
+      setHoldState(await invoke<ChargeHoldState>('get_charge_hold_state'));
+    } catch {
+      setHoldState(null);
     }
   }, []);
 
@@ -82,5 +94,5 @@ export function useBatteryCare(): BatteryCareState {
     }
   }, []);
 
-  return { care, limitState, pending, error, setCare, reload };
+  return { care, limitState, holdState, pending, error, setCare, reload };
 }

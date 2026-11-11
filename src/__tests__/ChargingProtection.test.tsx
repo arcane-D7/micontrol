@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import ChargingProtection from '../components/ChargingProtection';
 import { t } from '../hooks/useI18n';
+import type { ChargeHoldState } from '../types/charge';
 
 /**
  * Feedback imediato do limite (spec §5.6.3) — o segundo RED do audit:
@@ -115,5 +116,52 @@ describe('ChargingProtection — limite com feedback imediato', () => {
     const { props } = setup({ care: true });
     fireEvent.click(screen.getByRole('switch'));
     await waitFor(() => expect(props.onDisableCare).toHaveBeenCalled());
+  });
+});
+
+/**
+ * F5 — a fase do backend governa a linha de estado.
+ *
+ * O dono viu "req 80, hw 80, applied:true" com o pack a 100 %. O cartão tem de
+ * dizer que está ACIMA do limite (e que este firmware não descarrega), nunca
+ * "pausa aos 80 %". E quando a fase é `holding`, tem de o dizer com o nível.
+ */
+describe('ChargingProtection — fase real do controlo (F5)', () => {
+  const hold = (phase: ChargeHoldState['phase'], over: Partial<ChargeHoldState> = {}) =>
+    ({
+      phase,
+      level: 100,
+      limit: 80,
+      band_low: 78,
+      band_high: 80,
+      firmware_threshold: 80,
+      applied: true,
+      charging: false,
+      plugged: true,
+      can_discharge: false,
+      detail: null,
+      verified_ms: 1,
+      ...over,
+    }) satisfies ChargeHoldState;
+
+  it('acima do limite diz que está acima — e que não há descarga', () => {
+    setup({ level: 100, holdState: hold('above_limit') });
+    const line = screen.getByTestId('charge-hold');
+    expect(line).toHaveAttribute('data-phase', 'above_limit');
+    expect(line).toHaveTextContent(t('charging.hold.aboveLimit', { level: 100, limit: 80 }));
+    // A linha antiga (inferida) não se repete por cima.
+    expect(screen.queryByTestId('limit-derived')).toBeNull();
+  });
+
+  it('na banda diz "a segurar nos 80%"', () => {
+    setup({ level: 79, holdState: hold('holding', { level: 79, charging: false }) });
+    expect(screen.getByTestId('charge-hold')).toHaveTextContent(
+      t('charging.hold.holding', { level: 79, limit: 80 }),
+    );
+  });
+
+  it('sem read-back do firmware não afirma nada sobre o hardware', () => {
+    setup({ level: 79, holdState: hold('unknown', { firmware_threshold: null, applied: false }) });
+    expect(screen.getByTestId('charge-hold')).toHaveTextContent(t('charging.hold.unknown'));
   });
 });
