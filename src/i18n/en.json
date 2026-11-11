@@ -555,6 +555,15 @@
     "careSwitch": "Limit charging"
   },
   "charging": {
+    "hold": {
+      "holding": "Holding at {level}% — the limit is {limit}%",
+      "aboveLimit": "Battery at {level}% — above the {limit}% limit. This firmware has no discharge channel: charging stays stopped here and the limit acts on the next cycle.",
+      "charging": "Charging up to {limit}%",
+      "idle": "Plugged in, below {limit}% — not charging right now",
+      "onBattery": "On battery — the {limit}% limit applies when you plug in",
+      "drifted": "The {limit}% limit is not on the firmware — re-applying",
+      "unknown": "Charge limit not verified yet"
+    },
     "title": "Charging Control",
     "subtitle": "Limit maximum charge to extend battery lifespan",
     "enableToggle": "Charge Limit",

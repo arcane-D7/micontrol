@@ -555,6 +555,15 @@
     "careSwitch": "Limiter la charge"
   },
   "charging": {
+    "hold": {
+      "holding": "Maintien à {level}% — la limite est {limit}%",
+      "aboveLimit": "Batterie à {level}% — au-dessus de la limite de {limit}%. Ce firmware n'a pas de canal de décharge : la charge reste arrêtée ici et la limite s'appliquera au prochain cycle.",
+      "charging": "Charge jusqu'à {limit}%",
+      "idle": "Branché, sous {limit}% — pas de charge en ce moment",
+      "onBattery": "Sur batterie — la limite de {limit}% s'applique au branchement",
+      "drifted": "La limite de {limit}% n'est pas sur le firmware — réapplication",
+      "unknown": "Limite de charge pas encore confirmée"
+    },
     "title": "Contrôle de charge",
     "subtitle": "Limitez la charge maximale pour prolonger la durée de vie de la batterie",
     "threshold": "Seuil de charge",

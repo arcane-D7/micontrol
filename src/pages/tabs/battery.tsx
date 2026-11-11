@@ -54,7 +54,14 @@ function useBatteryFreshness(hasBattery: boolean) {
 }
 
 function BatteryTab({ hw }: Props) {
-  const { care, limitState, pending: carePending, setCare, reload: reloadCare } = useBatteryCare();
+  const {
+    care,
+    limitState,
+    holdState,
+    pending: carePending,
+    setCare,
+    reload: reloadCare,
+  } = useBatteryCare();
   const { updatedAgoSec, lastReadClock } = useBatteryFreshness(hw.battery != null);
   const { setChargingThreshold, refreshBattery } = hw;
 
@@ -124,6 +131,7 @@ function BatteryTab({ hw }: Props) {
             onEnableCare={enableCare}
             onDisableCare={disableCare}
             limitState={limitState}
+            holdState={holdState}
           />
         )}
 

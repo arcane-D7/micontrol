@@ -294,6 +294,14 @@ pub fn get_charging_threshold() -> HardwareResult<u8> {
 pub const RECONCILE_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
 /// Ceiling for the failure backoff.
 pub const RECONCILE_MAX_BACKOFF_MS: u64 = 60 * 60 * 1000;
+/// Floor between two *forced* re-asserts (resume / AC plug).
+pub const FORCE_MIN_INTERVAL_MS: u64 = 30 * 1000;
+/// How long a firmware read-back stays usable for the hold state.
+pub const FIRMWARE_CACHE_TTL_MS: u64 = 15 * 60 * 1000;
+/// Hold supervisor tick. State machine only — it never writes on a timer.
+pub const HOLD_TICK_MS: u64 = 45 * 1000;
+/// Width of the band below the limit that still counts as "held".
+pub const HOLD_RESUME_MARGIN: u8 = 2;
 
 /// What the reconciler should do with the current (requested, hardware) pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +389,35 @@ impl ReconcileGate {
         }
     }
 
+    /// Same decision, but a *power event* (resume, AC plug) may shorten the
+    /// wait to [`FORCE_MIN_INTERVAL_MS`].
+    ///
+    /// The 5 min window exists to stop a UI poll from becoming a write loop.
+    /// A resume or an AC plug is not a poll: the EC has just dropped the
+    /// setting and every minute spent waiting is charge the user did not ask
+    /// for. The failure backoff is still honoured — a firmware that refuses
+    /// the write must never be hammered, whatever triggered the attempt.
+    pub fn decide_forced(
+        &self,
+        now_ms: u64,
+        requested: u8,
+        hardware: Option<u8>,
+    ) -> ReconcileAction {
+        let base = self.decide(now_ms, requested, hardware);
+        if !matches!(base, ReconcileAction::Deferred { .. }) {
+            return base;
+        }
+        if self.consecutive_failures > 0 {
+            return base;
+        }
+        match self.last_attempt_ms {
+            Some(last) if now_ms.saturating_sub(last) >= FORCE_MIN_INTERVAL_MS => {
+                ReconcileAction::Apply
+            }
+            _ => base,
+        }
+    }
+
     /// Record that a write is being attempted now.
     pub fn note_attempt(&mut self, now_ms: u64) {
         self.last_attempt_ms = Some(now_ms);
@@ -412,6 +449,250 @@ fn reconcile_gate() -> std::sync::MutexGuard<'static, ReconcileGate> {
     }
 }
 
+// ── Active hold (F5, 2026-11-11) ────────────────────────────────────────────
+//
+// What this firmware can and cannot do — measured, see
+// `audit-20261107/CHARGE-HOLD-DEBUG.md`:
+//
+//  * The limit is a **ceiling**, not a setpoint. The EC stops charging at
+//    `HBDA` and lets the pack sit there. There is no discharge command
+//    anywhere: the WMAA write branch of `FUN2=0x1000` has exactly one case
+//    (`FUN3=0x02` → `LONL`/`HBDA`), `IoTDriver.sys` exposes exactly two
+//    IOCTLs over three physical regions (none of them ERAM), and the original
+//    `IoTService.exe` has no charging command at all. A pack above the limit
+//    therefore stays there — the app must say so, not promise a discharge.
+//  * The EC drops `LONL`/`HBDA` on its own across power-source changes and S3
+//    cycles: on 2026-11-11 the read-back returned code 0 while the last write
+//    was 80 and no software wrote 0. That is why the original PC Manager
+//    re-applies on every AC/DC transition
+//    (`PerformanceModesModule::OnAcDcPowerSource` → `resume_charging_protect`).
+//
+// So "hold at 80 %" means: keep the firmware value at 80 and verify it. The
+// supervisor below is the loop that does exactly that, and reports the phase
+// the machine is really in.
+
+/// Which part of the hold cycle the machine is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldPhase {
+    /// No limit requested (100 %): the pack charges to full.
+    Off,
+    /// The firmware holds the requested value and the pack sits in the band.
+    Holding,
+    /// Above the limit. This firmware cannot discharge — it will hold on the
+    /// next charge cycle instead.
+    AboveLimit,
+    /// Plugged, below the band, charging toward the limit.
+    Charging,
+    /// Plugged, below the band, not charging right now (thermal pause, etc.).
+    Idle,
+    /// On battery, below the limit — the ceiling applies at the next plug-in.
+    OnBattery,
+    /// The firmware reports a different value than the request.
+    Drifted,
+    /// The firmware value could not be read (or is stale).
+    Unknown,
+}
+
+impl HoldPhase {
+    /// Short label for logs and diagnostics.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Holding => "holding",
+            Self::AboveLimit => "above limit",
+            Self::Charging => "charging",
+            Self::Idle => "idle",
+            Self::OnBattery => "on battery",
+            Self::Drifted => "drifted",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One snapshot of the hold state, as the UI needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChargeHoldState {
+    pub phase: HoldPhase,
+    /// Battery level in percent; `None` when no snapshot is available.
+    pub level: Option<u8>,
+    /// Requested limit (registry). 100 = no limit.
+    pub limit: u8,
+    /// Lowest level that still counts as held (`limit - HOLD_RESUME_MARGIN`).
+    pub band_low: u8,
+    /// The limit itself.
+    pub band_high: u8,
+    /// Value the firmware reported at the last read-back.
+    pub firmware_threshold: Option<u8>,
+    /// True only when the firmware reported the requested value.
+    pub applied: bool,
+    pub charging: Option<bool>,
+    pub plugged: Option<bool>,
+    /// Always false on this firmware: there is no discharge channel. Exposed
+    /// so the UI can state the limit without promising a discharge.
+    pub can_discharge: bool,
+    /// Why the phase is what it is, when that needs saying.
+    pub detail: Option<String>,
+    /// When the firmware value was last verified (ms since epoch).
+    pub verified_ms: Option<u64>,
+}
+
+/// Decide the phase from four raw facts. Pure — every branch is unit-tested.
+///
+/// `firmware` is the last read-back of `WMAA 0x1000/0x02`; `None` means the
+/// value is unknown (never read, or older than the cache TTL) and the app must
+/// not claim the limit is applied.
+pub fn decide_hold(
+    level: Option<u8>,
+    limit: u8,
+    firmware: Option<u8>,
+    charging: Option<bool>,
+    plugged: Option<bool>,
+) -> HoldPhase {
+    if limit >= 100 {
+        return HoldPhase::Off;
+    }
+    let Some(level) = level else {
+        return HoldPhase::Unknown;
+    };
+    let Some(hardware) = firmware else {
+        return HoldPhase::Unknown;
+    };
+    if hardware != limit {
+        return HoldPhase::Drifted;
+    }
+    if level > limit {
+        return HoldPhase::AboveLimit;
+    }
+    if level.saturating_add(HOLD_RESUME_MARGIN) >= limit {
+        return HoldPhase::Holding;
+    }
+    match (plugged, charging) {
+        (Some(false), _) => HoldPhase::OnBattery,
+        (Some(true), Some(false)) => HoldPhase::Idle,
+        _ => HoldPhase::Charging,
+    }
+}
+
+/// Build the full state (phase + the numbers the UI renders).
+pub fn compute_hold_state(
+    level: Option<u8>,
+    limit: u8,
+    firmware: Option<u8>,
+    charging: Option<bool>,
+    plugged: Option<bool>,
+    verified_ms: Option<u64>,
+) -> ChargeHoldState {
+    let phase = decide_hold(level, limit, firmware, charging, plugged);
+    let detail = match phase {
+        HoldPhase::Unknown if level.is_none() => Some("battery level unavailable".to_string()),
+        HoldPhase::Unknown => Some("charge limit not verified yet".to_string()),
+        HoldPhase::Drifted => Some(format!(
+            "firmware reports {}%, requested {limit}%",
+            firmware
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "an unknown value".into())
+        )),
+        HoldPhase::AboveLimit => Some(
+            "above the limit: this firmware has no discharge channel, so the pack stays here \
+             until it is used"
+                .to_string(),
+        ),
+        _ => None,
+    };
+    ChargeHoldState {
+        phase,
+        level,
+        limit,
+        band_low: limit.saturating_sub(HOLD_RESUME_MARGIN),
+        band_high: limit,
+        firmware_threshold: firmware,
+        applied: firmware == Some(limit),
+        charging,
+        plugged,
+        can_discharge: false,
+        detail,
+        verified_ms,
+    }
+}
+
+#[cfg(windows)]
+static LAST_FIRMWARE: std::sync::Mutex<Option<(u8, u64)>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+fn firmware_cache() -> std::sync::MutexGuard<'static, Option<(u8, u64)>> {
+    crate::util::panic::lock_or_recover(&LAST_FIRMWARE)
+}
+
+/// Record the firmware truth returned by a read-back.
+///
+/// The WMAA read runs in the *elevated* process, so the app process cannot
+/// observe it directly; every path that receives a [`ChargeLimitState`] from
+/// the bridge must call this, otherwise the hold state falls back to `Unknown`.
+pub fn note_firmware_state(state: &ChargeLimitState) {
+    #[cfg(windows)]
+    {
+        if let Some(value) = state.hardware_threshold {
+            *firmware_cache() = Some((value, crate::util::auth::now_ms()));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = state;
+}
+
+#[cfg(windows)]
+fn note_firmware_value(value: u8) {
+    *firmware_cache() = Some((value, crate::util::auth::now_ms()));
+}
+
+/// Last verified firmware value and when it was seen, if still fresh.
+#[cfg(windows)]
+pub fn last_firmware(now_ms: u64) -> Option<(u8, u64)> {
+    match *firmware_cache() {
+        Some((value, at)) if now_ms.saturating_sub(at) <= FIRMWARE_CACHE_TTL_MS => {
+            Some((value, at))
+        }
+        _ => None,
+    }
+}
+
+/// Current hold state, computed from the cached battery snapshot.
+///
+/// Cheap by design: no WMI query and no elevated round-trip, so the UI can
+/// poll it as often as it likes. The firmware half comes from the last
+/// read-back; when it is older than [`FIRMWARE_CACHE_TTL_MS`] the phase is
+/// `Unknown` and the supervisor re-verifies.
+#[cfg(windows)]
+pub fn current_hold_state() -> ChargeHoldState {
+    let now = crate::util::auth::now_ms();
+    let snapshot = crate::hw::battery::cached_battery_info();
+    let (level, charging, plugged) = match &snapshot {
+        Some(b) => (
+            Some(b.level.clamp(0, 100)),
+            Some(b.is_charging),
+            Some(b.is_plugged),
+        ),
+        None => (None, None, None),
+    };
+    let (firmware, verified_ms) = match last_firmware(now) {
+        Some((value, at)) => (Some(value), Some(at)),
+        None => (None, None),
+    };
+    compute_hold_state(
+        level,
+        get_requested_threshold(),
+        firmware,
+        charging,
+        plugged,
+        verified_ms,
+    )
+}
+
+#[cfg(not(windows))]
+pub fn current_hold_state() -> ChargeHoldState {
+    compute_hold_state(None, get_requested_threshold(), None, None, None, None)
+}
+
 /// Re-assert the requested charging limit when the firmware has drifted.
 ///
 /// Called at app start, on resume from sleep, and whenever a read-back reports
@@ -424,6 +705,16 @@ fn reconcile_gate() -> std::sync::MutexGuard<'static, ReconcileGate> {
 /// why the read and the write are elevated commands in the first place.
 #[cfg(windows)]
 pub async fn reconcile_charge_limit(trigger: &str) -> ReconcileAction {
+    reconcile_charge_limit_with(trigger, false).await
+}
+
+/// Reconcile, optionally treating the trigger as a power event.
+///
+/// `force = true` is for resume and AC-plug: the EC has just dropped the
+/// setting, so waiting out the 5 min poll window means charging above the
+/// limit. The failure backoff still applies (see [`ReconcileGate::decide_forced`]).
+#[cfg(windows)]
+pub async fn reconcile_charge_limit_with(trigger: &str, force: bool) -> ReconcileAction {
     use crate::elev_bridge;
 
     // Read the truth. A failed read is not a reason to write.
@@ -450,10 +741,17 @@ pub async fn reconcile_charge_limit(trigger: &str) -> ReconcileAction {
             }
         };
 
+    // Every read refreshes the cache the hold state renders from.
+    note_firmware_state(&state);
+
     let now = crate::util::auth::now_ms();
     let action = {
         let gate = reconcile_gate();
-        gate.decide(now, state.requested_threshold, state.hardware_threshold)
+        if force {
+            gate.decide_forced(now, state.requested_threshold, state.hardware_threshold)
+        } else {
+            gate.decide(now, state.requested_threshold, state.hardware_threshold)
+        }
     };
 
     match action {
@@ -477,6 +775,9 @@ pub async fn reconcile_charge_limit(trigger: &str) -> ReconcileAction {
                     match applied {
                         Some(r) => {
                             reconcile_gate().note_success();
+                            if let Some(hw) = r.hardware_threshold {
+                                note_firmware_value(hw);
+                            }
                             log::info!(
                                 target: "hw::charging",
                                 "[charge_limit] re-applied {requested}% on {trigger} \
@@ -531,14 +832,23 @@ pub async fn reconcile_charge_limit(trigger: &str) -> ReconcileAction {
     action
 }
 
-/// Periodic reconciliation worker (5 min).
+/// Periodic hold supervisor (45 s tick, 5 min verify).
 ///
 /// The UI only reads the limit when the Battery tab opens, so a drift that
 /// happens while the app sits in the tray would otherwise persist until the
-/// user looked. The gate keeps this cheap: a read every 5 min, a write only
-/// when the firmware actually disagrees.
+/// user looked. Two different cadences, on purpose:
+///
+///  * **45 s** — recompute the phase from the cached battery snapshot. No WMI
+///    query and no elevated call, so it costs nothing; it is what makes the
+///    log show the real state ("holding at 80", "above limit", "charging") and
+///    what the UI polls.
+///  * **5 min** — verify the firmware value through the elevated bridge and
+///    re-assert on drift. An elevated round-trip every 45 s would spawn a
+///    scheduled task 80 times an hour; the reconcile gate already caps writes
+///    to one per window, and the events that actually drop the setting
+///    (resume, AC plug) take the forced path instead of waiting for this tick.
 #[cfg(windows)]
-pub fn start_charge_limit_reconciler() {
+pub fn start_charge_hold_supervisor() {
     static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
@@ -546,12 +856,54 @@ pub fn start_charge_limit_reconciler() {
     tauri::async_runtime::spawn(async {
         // Let the bridge service and the elevated path settle after boot.
         tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let mut last_verify_ms: u64 = 0;
+        let mut last_phase: Option<HoldPhase> = None;
         loop {
-            reconcile_charge_limit("periodic").await;
-            tokio::time::sleep(std::time::Duration::from_secs(
-                RECONCILE_MIN_INTERVAL_MS / 1000,
-            ))
-            .await;
+            let now = crate::util::auth::now_ms();
+            let state = current_hold_state();
+
+            if last_phase != Some(state.phase) {
+                log::info!(
+                    target: "hw::charging",
+                    "[charge_hold] phase={} ({}%) limit={}% band=[{}..{}] firmware={:?}% charging={:?} plugged={:?}",
+                    state.phase.describe(),
+                    state
+                        .level
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    state.limit,
+                    state.band_low,
+                    state.band_high,
+                    state.firmware_threshold,
+                    state.charging,
+                    state.plugged
+                );
+                last_phase = Some(state.phase);
+            }
+
+            let verify_due = now.saturating_sub(last_verify_ms) >= RECONCILE_MIN_INTERVAL_MS;
+            // A drifted/unknown firmware read is worth re-checking sooner than
+            // the 5 min window — but never more than once a minute.
+            let drift_due = matches!(state.phase, HoldPhase::Drifted | HoldPhase::Unknown)
+                && now.saturating_sub(last_verify_ms) >= 60_000;
+            if verify_due || drift_due {
+                last_verify_ms = now;
+                reconcile_charge_limit("hold").await;
+                // The reconcile just refreshed the firmware cache; recompute so
+                // the next tick's transition compares like with like.
+                let refreshed = current_hold_state();
+                if last_phase != Some(refreshed.phase) {
+                    log::info!(
+                        target: "hw::charging",
+                        "[charge_hold] phase={} after verify (firmware={:?}%)",
+                        refreshed.phase.describe(),
+                        refreshed.firmware_threshold
+                    );
+                    last_phase = Some(refreshed.phase);
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(HOLD_TICK_MS)).await;
         }
     });
 }
@@ -811,6 +1163,134 @@ mod tests {
         assert_eq!(
             gate.decide(10 * 60_000, 80, Some(100)),
             ReconcileAction::Apply
+        );
+    }
+
+    // ── F5: the hold phase ──────────────────────────────────────────────────
+
+    #[test]
+    fn hold_phase_covers_every_real_state() {
+        let (on, off) = (Some(true), Some(false));
+        // care off
+        assert_eq!(
+            decide_hold(Some(100), 100, Some(100), off, on),
+            HoldPhase::Off
+        );
+        // above the limit — no discharge on this firmware
+        assert_eq!(
+            decide_hold(Some(100), 80, Some(80), off, on),
+            HoldPhase::AboveLimit
+        );
+        // at the limit
+        assert_eq!(
+            decide_hold(Some(80), 80, Some(80), off, on),
+            HoldPhase::Holding
+        );
+        // inside the band (limit - HOLD_RESUME_MARGIN)
+        assert_eq!(
+            decide_hold(Some(78), 80, Some(80), on, on),
+            HoldPhase::Holding
+        );
+        // just below the band
+        assert_eq!(
+            decide_hold(Some(77), 80, Some(80), on, on),
+            HoldPhase::Charging
+        );
+        // plugged but not charging right now
+        assert_eq!(
+            decide_hold(Some(77), 80, Some(80), off, on),
+            HoldPhase::Idle
+        );
+        // on battery below the limit
+        assert_eq!(
+            decide_hold(Some(60), 80, Some(80), off, off),
+            HoldPhase::OnBattery
+        );
+        // firmware disagrees
+        assert_eq!(
+            decide_hold(Some(60), 80, Some(100), on, on),
+            HoldPhase::Drifted
+        );
+        // firmware unreadable / stale
+        assert_eq!(decide_hold(Some(60), 80, None, on, on), HoldPhase::Unknown);
+        // level unreadable
+        assert_eq!(decide_hold(None, 80, Some(80), on, on), HoldPhase::Unknown);
+    }
+
+    /// The owner's report, exactly: limit verified at 80 % and the pack at
+    /// 100 %. The app must say "above the limit", never "holding at 80".
+    #[test]
+    fn pack_above_the_limit_is_not_reported_as_holding() {
+        let state = compute_hold_state(Some(100), 80, Some(80), Some(false), Some(true), Some(1));
+        assert_eq!(state.phase, HoldPhase::AboveLimit);
+        assert!(state.applied, "the limit IS on the firmware");
+        assert!(
+            !state.can_discharge,
+            "this firmware has no discharge channel"
+        );
+        assert_eq!((state.band_low, state.band_high), (78, 80));
+        assert!(state.detail.unwrap().contains("no discharge"));
+    }
+
+    #[test]
+    fn hold_state_exposes_the_requested_band() {
+        let state = compute_hold_state(Some(79), 80, Some(80), Some(false), Some(true), None);
+        assert_eq!(state.phase, HoldPhase::Holding);
+        assert_eq!(state.band_low, 78);
+        assert_eq!(state.band_high, 80);
+        assert!(state.applied);
+    }
+
+    #[test]
+    fn hold_state_never_claims_applied_without_a_firmware_value() {
+        let state = compute_hold_state(Some(80), 80, None, Some(false), Some(true), None);
+        assert!(!state.applied);
+        assert_eq!(state.phase, HoldPhase::Unknown);
+    }
+
+    // ── F5: forced re-assert on power events ───────────────────────────────
+
+    /// A resume/AC plug must not wait out the 5 min poll window.
+    #[test]
+    fn forced_reassert_shortens_the_window_to_the_floor() {
+        let mut gate = ReconcileGate::new();
+        gate.note_attempt(0);
+        gate.note_success();
+
+        // 10 s later the normal gate defers for the rest of the window…
+        assert!(matches!(
+            gate.decide(10_000, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        // …and the forced path still refuses before the 30 s floor.
+        assert!(matches!(
+            gate.decide_forced(10_000, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        // At the floor it applies.
+        assert_eq!(
+            gate.decide_forced(FORCE_MIN_INTERVAL_MS, 80, Some(100)),
+            ReconcileAction::Apply
+        );
+    }
+
+    /// Forcing must never defeat the failure backoff: a firmware that refuses
+    /// the write cannot be retried on every AC/DC flicker.
+    #[test]
+    fn forced_reassert_respects_the_failure_backoff() {
+        let mut gate = ReconcileGate::new();
+        gate.note_attempt(0);
+        gate.note_failure(); // cooldown 10 min
+        assert!(matches!(
+            gate.decide_forced(FORCE_MIN_INTERVAL_MS, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        // In sync is in sync, forced or not.
+        assert_eq!(gate.decide_forced(0, 80, Some(80)), ReconcileAction::InSync);
+        // Care off is still a user decision.
+        assert_eq!(
+            gate.decide_forced(0, 100, Some(80)),
+            ReconcileAction::CareOff
         );
     }
 }

@@ -22,7 +22,7 @@ import { useState } from 'react';
 import { t } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
 import { getUserFriendlyMessage, parseErrorResponse, type TranslateFn } from '../types/error';
-import type { ChargeLimitState } from '../types/charge';
+import type { ChargeHoldState, ChargeLimitState } from '../types/charge';
 import InfoModal, { InfoRow, InfoSection } from './InfoModal';
 import { Card } from './ui/card';
 import { Icon } from './ui/icons';
@@ -71,6 +71,15 @@ export interface ChargingProtectionProps {
    * (94% com limite de 80%) numa mensagem falsa.
    */
   limitState?: ChargeLimitState | null;
+  /**
+   * Fase real do controlo de carga (`get_charge_hold_state`).
+   *
+   * Vem do backend, que a calcula a partir do último read-back do firmware e
+   * do snapshot da bateria. Quando presente é ela que governa a linha de
+   * estado: "a segurar nos 80%", "acima do limite — este firmware não
+   * descarrega", "a carregar até aos 80%".
+   */
+  holdState?: ChargeHoldState | null;
 }
 
 export default function ChargingProtection({
@@ -83,6 +92,7 @@ export default function ChargingProtection({
   onDisableCare,
   battery = null,
   limitState = null,
+  holdState = null,
 }: ChargingProtectionProps) {
   const [optimistic, setOptimistic] = useState<number | null>(null);
   const [applying, setApplying] = useState(false);
@@ -195,6 +205,35 @@ export default function ChargingProtection({
           ? t('charging.state.paused', { level: currentLevel, limit: display })
           : null;
 
+  // A fase do backend manda, quando existe: é a única que sabe se o limite
+  // está mesmo no firmware e se o pack está acima dele. Sem ela, o cartão cai
+  // na inferência antiga (que nunca afirma "pausa" sem `applied`).
+  const hold =
+    holdState && careEnabled && display < 100 && !applying && !failure ? holdState : null;
+  const holdText = (() => {
+    if (!hold) return null;
+    const levelNow = hold.level ?? currentLevel;
+    switch (hold.phase) {
+      case 'holding':
+        return t('charging.hold.holding', { level: levelNow, limit: hold.limit });
+      case 'above_limit':
+        return t('charging.hold.aboveLimit', { level: levelNow, limit: hold.limit });
+      case 'charging':
+        return t('charging.hold.charging', { limit: hold.limit });
+      case 'idle':
+        return t('charging.hold.idle', { limit: hold.limit });
+      case 'on_battery':
+        return t('charging.hold.onBattery', { limit: hold.limit });
+      case 'drifted':
+        return t('charging.hold.drifted', { limit: hold.limit });
+      case 'unknown':
+        return t('charging.hold.unknown');
+      default:
+        return null;
+    }
+  })();
+  const statusText = holdText ?? stateText;
+
   return (
     <Card
       title={t('battery.careTitle')}
@@ -239,9 +278,15 @@ export default function ChargingProtection({
         />
       </div>
 
-      {stateText && (
-        <div className="charge-state" role="status" aria-live="polite">
-          {stateText}
+      {statusText && (
+        <div
+          className="charge-state"
+          role="status"
+          aria-live="polite"
+          data-testid="charge-hold"
+          data-phase={hold?.phase ?? 'derived'}
+        >
+          {statusText}
         </div>
       )}
 
@@ -278,7 +323,8 @@ export default function ChargingProtection({
           </button>
         </div>
       ) : (
-        derived && (
+        derived &&
+        !holdText && (
           <div
             className={`mc-hero__phase${
               derived.tone === 'warn'

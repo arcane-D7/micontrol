@@ -109,6 +109,18 @@ const BATTERY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 static LAST_GOOD_BATTERY: Mutex<Option<BatteryInfo>> = Mutex::new(None);
 
+/// Last successful battery snapshot, without touching WMI.
+///
+/// The UI and the `iot_events` poller refresh this every ~15 s. Background
+/// workers (the charge-hold supervisor) read the snapshot instead of issuing
+/// their own query: a battery WMI call can block for seconds and must never
+/// run on the async runtime. Returns `None` only before the first successful
+/// query of the session.
+#[cfg(windows)]
+pub fn cached_battery_info() -> Option<BatteryInfo> {
+    crate::util::panic::lock_or_recover(&LAST_GOOD_BATTERY).clone()
+}
+
 /// Wall-clock duration of the last COMPLETED WMI battery query, in ms.
 ///
 /// The caller can only observe "the reply did not arrive within the timeout",

@@ -337,6 +337,16 @@ fn apply_battery_snapshot(cfg: &IotEventsConfig, info: &crate::hw::battery::Batt
                     });
                 }
                 fire_hook(if ac_now { "ac_on" } else { "ac_off" });
+                // F5: the EC drops the charging limit on power-source changes
+                // (the OEM re-applies on every AC/DC transition for the same
+                // reason). Plugging in is when a missing limit costs charge,
+                // so re-assert it right away instead of waiting for the 5 min
+                // poll window. Unplugging only needs the periodic verify.
+                if ac_now {
+                    tauri::async_runtime::spawn(async {
+                        crate::hw::charging::reconcile_charge_limit_with("ac_plug", true).await;
+                    });
+                }
             }
         }
         *last_ac = Some(ac_now);
