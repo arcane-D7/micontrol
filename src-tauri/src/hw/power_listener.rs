@@ -11,8 +11,19 @@
 //! ## Lid state (clamshell detection)
 //!
 //! The same window also registers for `GUID_LIDSWITCH_STATE_CHANGE`
-//! (`PowerSettingRegisterNotification`, `DEVICE_NOTIFY_WINDOW_HANDLE`), the only
+//! (`RegisterPowerSettingNotification`, `DEVICE_NOTIFY_WINDOW_HANDLE`), the only
 //! OS-level lid source on this platform:
+//!
+//! > **Why user32 and not powrprof (P1-1, recheck 2026-11-11).** The app used
+//! > to call `powrprof!PowerSettingRegisterNotification`, which returns
+//! > `ERROR_INVALID_PARAMETER` (87) on this host no matter the window kind —
+//! > proven by an isolated probe from a clean process with a valid, message-only
+//! > *and* top-level window. `user32!RegisterPowerSettingNotification` returns a
+//! > valid `HPOWERNOTIFY` for the same window and the same GUID. The powrprof
+//! > variant stays as a fallback (it is correct on other builds), but the
+//! > primary is user32. A registration failure is now an **ERROR**, never a
+//! > silent WARN: the previous WARN hid a dead feature for 19 h 30 m while the
+//! > machine actually entered S3.
 //!
 //! - `Win32_Fan` / ESIF expose **no** lid property,
 //! - WMAA has LOTS (`0x0C00/0x02`), a *configuration* value (lid open type),
@@ -33,7 +44,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use windows::core::{w, GUID, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::Power::{PowerSettingRegisterNotification, POWERBROADCAST_SETTING};
+use windows::Win32::System::Power::{
+    PowerSettingRegisterNotification, RegisterPowerSettingNotification, POWERBROADCAST_SETTING,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW, DEVICE_NOTIFY_WINDOW_HANDLE,
     PBT_POWERSETTINGCHANGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_POWERBROADCAST,
@@ -101,6 +114,131 @@ fn store_lid_state(open: bool) -> (Option<bool>, Option<bool>) {
     (previous, lid_state())
 }
 
+// ── Lid-switch subscription (P1-1) ──────────────────────────────────────────
+//
+// Which API actually accepted the subscription. Recorded so the startup
+// self-test can prove the feature is live instead of assuming it.
+
+/// How the lid-switch subscription ended up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LidRegistration {
+    /// `user32!RegisterPowerSettingNotification` accepted the window (primary).
+    User32,
+    /// user32 was refused; `powrprof!PowerSettingRegisterNotification` accepted.
+    PowrProf,
+    /// Both APIs refused: no lid notification will ever arrive this session.
+    Unavailable,
+}
+
+impl LidRegistration {
+    /// `true` when at least one API accepted the subscription.
+    pub fn is_registered(self) -> bool {
+        !matches!(self, Self::Unavailable)
+    }
+
+    /// Short label for the log line.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::User32 => "user32!RegisterPowerSettingNotification",
+            Self::PowrProf => "powrprof!PowerSettingRegisterNotification (fallback)",
+            Self::Unavailable => "none",
+        }
+    }
+}
+
+/// Log level an outcome must be reported at.
+///
+/// This is the startup self-test: a dead subscription is a **missing feature**
+/// and must be loud. The 2026-11-11 recheck found `Win32 error 87` at WARN once
+/// at boot and then 19 h 30 m of silence — including a real S3 cycle — while
+/// `lid_open` stayed `null`. An operator reading the log could not tell that
+/// from "the lid never moved".
+pub fn registration_log_level(outcome: LidRegistration) -> log::Level {
+    match outcome {
+        LidRegistration::User32 | LidRegistration::PowrProf => log::Level::Info,
+        LidRegistration::Unavailable => log::Level::Error,
+    }
+}
+
+/// Result of the two-step subscription attempt.
+///
+/// Carries the error codes so the caller can put them in the log; the decision
+/// itself ([`LidRegistration`]) stays a plain enum so it is cheap to assert on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LidRegistrationOutcome {
+    pub registration: LidRegistration,
+    /// Registration handle (`HPOWERNOTIFY` / powrprof registration), if any.
+    pub handle: Option<isize>,
+    /// `HRESULT`/Win32 code from the user32 attempt.
+    pub user32_error: Option<u32>,
+    /// `WIN32_ERROR` code from the powrprof fallback.
+    pub powrprof_error: Option<u32>,
+}
+
+/// One registration attempt, reduced to a handle or an error code.
+type RegisterAttempt = Result<isize, u32>;
+
+/// Try user32 first, powrprof second, and report what happened.
+///
+/// The two attempts are injected so the failure path — the one that was
+/// silently swallowed in production — is unit-testable without a window, a
+/// message loop, or a real failure of either DLL.
+fn register_lid_notifications_with<U, P>(user32: U, powrprof: P) -> LidRegistrationOutcome
+where
+    U: FnOnce() -> RegisterAttempt,
+    P: FnOnce() -> RegisterAttempt,
+{
+    match user32() {
+        Ok(handle) => LidRegistrationOutcome {
+            registration: LidRegistration::User32,
+            handle: Some(handle),
+            user32_error: None,
+            powrprof_error: None,
+        },
+        Err(user32_error) => match powrprof() {
+            Ok(handle) => LidRegistrationOutcome {
+                registration: LidRegistration::PowrProf,
+                handle: Some(handle),
+                user32_error: Some(user32_error),
+                powrprof_error: None,
+            },
+            Err(powrprof_error) => LidRegistrationOutcome {
+                registration: LidRegistration::Unavailable,
+                handle: None,
+                user32_error: Some(user32_error),
+                powrprof_error: Some(powrprof_error),
+            },
+        },
+    }
+}
+
+/// Emit the subscription result at the level [`registration_log_level`] picks.
+fn log_lid_registration(outcome: &LidRegistrationOutcome) {
+    match outcome.registration {
+        LidRegistration::User32 => log::info!(
+            target: "hw::power_listener",
+            "[power_listener] lid-switch notifications registered via {}",
+            outcome.registration.describe()
+        ),
+        LidRegistration::PowrProf => log::warn!(
+            target: "hw::power_listener",
+            "[power_listener] lid-switch registered via {} — user32 refused it (0x{:08X}); \
+             lid events will arrive through the slower powrprof path",
+            outcome.registration.describe(),
+            outcome.user32_error.unwrap_or(0)
+        ),
+        LidRegistration::Unavailable => log::error!(
+            target: "hw::power_listener",
+            "[power_listener] lid notifications unavailable: user32 RegisterPowerSettingNotification \
+             failed (0x{:08X}) and the powrprof fallback failed (Win32 error {}) — lid_open will \
+             stay unknown for this session and no resume-triggered re-apply will fire from the lid \
+             subscription (resume broadcasts still arrive)",
+            outcome.user32_error.unwrap_or(0),
+            outcome.powrprof_error.unwrap_or(0)
+        ),
+    }
+}
+
 /// Start the power event listener in a background thread.
 ///
 /// This creates a hidden message-only window that receives power broadcast
@@ -154,22 +292,42 @@ pub fn start_power_listener() {
 
             // Lid switch notifications. Registration also delivers the current
             // state immediately, so `lid_state()` is populated from boot.
+            //
+            // P1-1: user32 first (powrprof returns 87 on this host), with the
+            // powrprof call kept as a fallback. Both failures are an ERROR —
+            // the outcome is logged, not swallowed.
             let hwnd = hwnd.unwrap();
-            let mut registration: *mut core::ffi::c_void = std::ptr::null_mut();
-            let rc = PowerSettingRegisterNotification(
-                &GUID_LIDSWITCH_STATE_CHANGE,
-                DEVICE_NOTIFY_WINDOW_HANDLE,
-                hwnd,
-                &mut registration,
+            let outcome = register_lid_notifications_with(
+                || {
+                    // SAFETY: hwnd is a live window on this thread; the GUID is
+                    // a 'static constant. The returned HPOWERNOTIFY stays valid
+                    // for as long as the window does.
+                    RegisterPowerSettingNotification(
+                        hwnd,
+                        &GUID_LIDSWITCH_STATE_CHANGE,
+                        DEVICE_NOTIFY_WINDOW_HANDLE,
+                    )
+                    .map(|handle| handle.0)
+                    .map_err(|e| e.code().0 as u32)
+                },
+                || {
+                    let mut registration: *mut core::ffi::c_void = std::ptr::null_mut();
+                    // SAFETY: same live hwnd and 'static GUID; the out-pointer
+                    // is a valid stack slot.
+                    let rc = PowerSettingRegisterNotification(
+                        &GUID_LIDSWITCH_STATE_CHANGE,
+                        DEVICE_NOTIFY_WINDOW_HANDLE,
+                        hwnd,
+                        &mut registration,
+                    );
+                    if rc.0 == 0 {
+                        Ok(registration as isize)
+                    } else {
+                        Err(rc.0)
+                    }
+                },
             );
-            if rc.0 == 0 {
-                log::info!("[power_listener] lid-switch notifications registered");
-            } else {
-                log::warn!(
-                    "[power_listener] lid-switch registration failed: Win32 error {}",
-                    rc.0
-                );
-            }
+            log_lid_registration(&outcome);
 
             log::info!("[power_listener] Listening for power events");
 
@@ -294,6 +452,16 @@ fn on_resume() {
     // Clear WMI cache so fresh queries are made after resume
     crate::hw::wmi_cache::invalidate();
 
+    // P1-2 (recheck 2026-11-11): the EC forgets the charging limit across an
+    // S3 cycle — the 02:23 → 10:55 resume left the hardware at 100 % while
+    // the user had asked for 80 %. Re-assert the requested value here, on the
+    // resume broadcast, through the gated reconciler (read-back + log; never
+    // an unconditional write loop). Fire-and-forget: this runs on the window
+    // message thread and must not block on an elevated round-trip.
+    tauri::async_runtime::spawn(async {
+        crate::hw::charging::reconcile_charge_limit("resume").await;
+    });
+
     log::info!("[power_listener] Sensor reset complete");
 }
 
@@ -357,5 +525,55 @@ mod tests {
         // Repeated identical notifications must not look like transitions.
         let (prev, cur) = store_lid_state(true);
         assert_eq!(prev, cur);
+    }
+
+    // ── P1-1: the subscription self-test ────────────────────────────────────
+
+    /// The production failure: both APIs refuse. That must be an ERROR, not
+    /// the WARN that hid a dead listener for 19 h 30 m.
+    #[test]
+    fn both_apis_failing_is_an_error_not_a_warning() {
+        let outcome = register_lid_notifications_with(|| Err(0x8007_0057), || Err(87));
+        assert_eq!(outcome.registration, LidRegistration::Unavailable);
+        assert!(!outcome.registration.is_registered());
+        assert_eq!(outcome.handle, None);
+        assert_eq!(outcome.user32_error, Some(0x8007_0057));
+        assert_eq!(outcome.powrprof_error, Some(87));
+        assert_eq!(
+            registration_log_level(outcome.registration),
+            log::Level::Error,
+            "a dead lid subscription must be logged at ERROR"
+        );
+    }
+
+    /// user32 is the primary: when it works, powrprof must not even be tried.
+    #[test]
+    fn user32_success_does_not_fall_back() {
+        let outcome = register_lid_notifications_with(
+            || Ok(0x1234),
+            || panic!("powrprof must not be called when user32 succeeds"),
+        );
+        assert_eq!(outcome.registration, LidRegistration::User32);
+        assert_eq!(outcome.handle, Some(0x1234));
+        assert_eq!(outcome.user32_error, None);
+        assert_eq!(
+            registration_log_level(outcome.registration),
+            log::Level::Info
+        );
+    }
+
+    /// The powrprof path is kept as a fallback and is reported as such.
+    #[test]
+    fn powrprof_is_the_fallback_when_user32_fails() {
+        let outcome = register_lid_notifications_with(|| Err(0x8007_0057), || Ok(0x5678));
+        assert_eq!(outcome.registration, LidRegistration::PowrProf);
+        assert_eq!(outcome.handle, Some(0x5678));
+        assert_eq!(outcome.user32_error, Some(0x8007_0057));
+        assert_eq!(outcome.powrprof_error, None);
+        assert!(outcome.registration.is_registered());
+        assert_eq!(
+            registration_log_level(outcome.registration),
+            log::Level::Info
+        );
     }
 }
