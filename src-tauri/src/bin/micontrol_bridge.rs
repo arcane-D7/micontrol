@@ -1334,9 +1334,10 @@ mod pipe_server {
         if total_read == 0 {
             // P2 (recheck 2026-11-11): the app's health supervisor probes this
             // pipe every 30 s (2/min) with a connect-and-close, which produced
-            // 2 803 identical "read 0 bytes" lines in 19 h 30 m — pure noise
-            // that buried real failures. Log the first one and then stay
-            // silent until a real request intervenes (i.e. only on change).
+            // 2 342 identical "read 0 bytes" lines in the 19 h 30 m audit
+            // window — pure noise that buried real failures. Log the first one
+            // and then stay silent until a real request intervenes (i.e. only
+            // on change).
             if !LAST_CONNECTION_WAS_EMPTY.swap(true, Ordering::Relaxed) {
                 bridge_log(
                     "read 0 bytes (client closed before sending) — health probe; \

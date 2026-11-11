@@ -196,7 +196,7 @@ próprio módulo:
 | --- | --- | --- |
 | `hw::battery` — `battery WMI query took N ms` | `DEBUG`; **um** `INFO` por episódio lento (uma query rápida fecha o episódio) | 1 438 linhas = 33 % do log em 19 h 30 m |
 | `hw::ecram` — `Region … unavailable` | `INFO` uma vez por processo **por região e por tipo**; `DEBUG` depois | `DriverBlocked` em ERAM/SMA2 é o estado esperado desta plataforma, mas era registado a cada leitura (~4 s) |
-| `micontrol_bridge` — `read 0 bytes (client closed before sending)` | regista a primeira sonda e volta a falar quando chega um pedido real | a sonda de saúde do supervisor liga e fecha a cada 30 s (2 803 linhas em 19 h 30 m) |
+| `micontrol_bridge` — `read 0 bytes (client closed before sending)` | regista a primeira sonda e volta a falar quando chega um pedido real | a sonda de saúde do supervisor liga e fecha a cada 30 s (2 342 linhas na janela de 19 h 30 m) |
 
 A chave de região inclui o `RegionBlockKind`: se ERAM passar de `DriverBlocked`
 (esperado) para `ServiceUnavailable` (falha real), a linha volta a aparecer a
