@@ -1,43 +1,40 @@
 # Release Process
 
-MiControl uses a fully automated semantic release pipeline. No manual version bumping, changelog editing, or tag creation is needed.
+MiControl releases are cut by a script and built by CI: `pnpm run release <type>` bumps the version everywhere, commits, tags and pushes; the tag push triggers `release.yml`, which runs the health checks, builds, signs and publishes. Changelog editing is manual (the release body is extracted from `CHANGELOG.md`).
 
 ## How It Works
 
 ```
-  Conventional Commits          auto-release.yml             release.yml
-  ────────────────────          ────────────────             ──────────
+  Conventional Commits            scripts/release.cjs             release.yml
+  ────────────────────            ───────────────────             ───────────
   feat: add X
   fix: resolve Y
-  push to main ──────────────►  Analyze commits since
-                                last tag
 
-                                Determine bump type:
-                                  feat → minor
-                                  fix  → patch
-                                  !    → major
+  pnpm run release patch ──────►  Guard: clean tree, on main,
+  (or minor / major / X.Y.Z)      in sync with origin/main
 
-                                Bump version in:
-                                  package.json
-                                  Cargo.toml
-                                  tauri.conf.json
+                                  Bump version via
+                                  scripts/sync-version.cjs:
+                                    package.json
+                                    src-tauri/Cargo.toml
+                                    src-tauri/tauri.conf.json
 
-                                Update CHANGELOG.md
+                                  Commit chore(release): vX.Y.Z
+                                  Tag vX.Y.Z
+                                  Push main + tag
 
-                                Commit + tag vX.Y.Z
-                                Push to main
+                                  tag push ──────────────────►  Job 1: Health checks
+                                                                 (scripts/health-check.mjs)
 
-                                tag push ──────────────►  Health checks
-                                                          (fmt, clippy, test,
-                                                           lint, tsc, build)
-
-                                                          Build + sign Tauri
-
-                                                          Generate latest.json
-
-                                                          Create GitHub Release
-                                                          with installer artifacts
+                                                               Job 2: Build & publish
+                                                                 pnpm run tauri build -f face
+                                                                 build static setup shell
+                                                                 sign payload + latest.json
+                                                                 offline dry-run validation
+                                                                 GitHub Release from CHANGELOG
 ```
+
+There is **no** `auto-release.yml` and **no** release-please integration in this repository. A release is cut by running the release script on `main`; the tag push is what triggers `release.yml`.
 
 ## Conventional Commits
 
@@ -53,21 +50,21 @@ footer(s) (optional)
 
 ### Commit Types
 
-| Type       | Release Trigger       | Example                            |
-| ---------- | --------------------- | ---------------------------------- |
-| `feat`     | Minor (0.1.0 → 0.2.0) | `feat: add fan curve editor`       |
-| `fix`      | Patch (0.1.0 → 0.1.1) | `fix: resolve tray icon crash`     |
-| `perf`     | Patch (0.1.0 → 0.1.1) | `perf: optimize WMI cache refresh` |
-| `feat!`    | Major (0.1.0 → 1.0.0) | `feat!: redesign settings UI`      |
-| `fix!`     | Major (0.1.0 → 1.0.0) | `fix!: change ECRAM protocol`      |
-| `revert`   | Patch (0.1.0 → 0.1.1) | `revert: remove fan curve editor`  |
-| `chore`    | No release            | `chore: update dependencies`       |
-| `docs`     | No release            | `docs: update README`              |
-| `refactor` | No release            | `refactor: simplify IPC layer`     |
-| `test`     | No release            | `test: add battery unit tests`     |
-| `ci`       | No release            | `ci: add auto-release workflow`    |
-| `style`    | No release            | `style: format imports`            |
-| `build`    | No release            | `build: update Cargo.toml deps`    |
+| Type       | Bump to pass            | Example                            |
+| ---------- | ----------------------- | ---------------------------------- |
+| `feat`     | `minor` (0.1.0 → 0.2.0) | `feat: add fan curve editor`       |
+| `fix`      | `patch` (0.1.0 → 0.1.1) | `fix: resolve tray icon crash`     |
+| `perf`     | `patch` (0.1.0 → 0.1.1) | `perf: optimize WMI cache refresh` |
+| `feat!`    | `major` (0.1.0 → 1.0.0) | `feat!: redesign settings UI`      |
+| `fix!`     | `major` (0.1.0 → 1.0.0) | `fix!: change ECRAM protocol`      |
+| `revert`   | `patch` (0.1.0 → 0.1.1) | `revert: remove fan curve editor`  |
+| `chore`    | no release              | `chore: update dependencies`       |
+| `docs`     | no release              | `docs: update README`              |
+| `refactor` | no release              | `refactor: simplify IPC layer`     |
+| `test`     | no release              | `test: add battery unit tests`     |
+| `ci`       | no release              | `ci: add auto-release workflow`    |
+| `style`    | no release              | `style: format imports`            |
+| `build`    | no release              | `build: update Cargo.toml deps`    |
 
 ### Breaking Changes
 
@@ -87,24 +84,27 @@ BREAKING CHANGE: Settings schema changed, old configs need migration.
 
 ## Workflows
 
-### `auto-release.yml`
-
-- **Trigger**: Push to `main`
-- **Action**: Analyzes conventional commits since the last tag, determines bump type (patch/minor/major), bumps version, updates CHANGELOG.md, creates and pushes git tag
-- **No PR needed**: Commits directly to main and creates the tag
-- **Can be manually triggered**: Use `workflow_dispatch` with `force=true` to force a patch release even without releasable commits
-
 ### `release.yml`
 
-- **Trigger**: Tag push `v*.*.*`
-- **Job 1 — Health Checks**: `cargo fmt --check`, `cargo check`, `cargo clippy -D warnings`, `cargo test`, `tsc --noEmit`, `eslint`, `prettier --check`, `pnpm run build`, i18n check
-- **Job 2 — Build & Publish**: Builds Tauri app with signing, generates `latest.json`, creates GitHub Release with installer artifacts
-- **Job 2 depends on Job 1**: Release only proceeds if all health checks pass
+- **Trigger**: tag push `v*`, or `workflow_dispatch` with a `tag` input
+- **Job 1 — Health checks**: runs `node scripts/health-check.mjs` (version consistency, `cargo fmt --check`, clippy with `-D warnings`, Rust tests, `tsc --noEmit`, ESLint, Prettier, Vitest + coverage, Vite build, i18n check, handle-leak gate, toolchain check)
+- **Job 2 — Build & publish**: `pnpm run tauri build -f face`, builds the static setup shell, signs the decoupled payload and generates `latest.json`, runs an offline dry-run release validation, then creates the GitHub Release with the body extracted from `CHANGELOG.md`
+- **Job 2 depends on Job 1**: the release only proceeds if every health check passes
+- **Concurrency**: `release-build` with `cancel-in-progress`, so a re-pushed tag cancels the older build instead of doubling the Windows runner budget
 
 ### `ci.yml`
 
-- **Trigger**: PR to `main`, push to `main`
-- **Purpose**: Continuous integration checks on every PR/push
+- **Trigger**: PR to `main`, push to `main`, `workflow_dispatch`
+- **Jobs**: `quality` (health-check steps `version,fmt,clippy,tsc,lint,format,i18n,toolchain`) and `test` (health-check steps `test-rust,test-front`, then uploads the coverage artifact)
+
+### Other workflows
+
+| Workflow                    | Trigger                               | Purpose                                            |
+| --------------------------- | ------------------------------------- | -------------------------------------------------- |
+| `codeql.yml`                | push / PR to `main`                   | CodeQL static analysis (JS/TS; non-blocking)       |
+| `driverstore-integrity.yml` | weekly cron, paths push/PR, dispatch  | Verifies the deployed DriverStore `IoTService.exe` |
+| `landing.yml`               | push to `main` touching landing paths | Builds and deploys the landing page                |
+| `warm-cache.yml`            | dispatch only (disabled)              | Kept for manual release-cache warming              |
 
 ## Prerequisites
 
@@ -144,14 +144,22 @@ If these secrets are not set, the release will succeed but the installer will be
 
 ## Cutting a Release
 
-The release process is **fully automated** via [release-please](https://github.com/googleapis/release-please):
+1. **Commit changes** using Conventional Commits format (e.g., `feat: add X`, `fix: resolve Y`) and merge them to `main`.
+2. **Make sure `main` is clean and in sync** — the release script refuses to run otherwise.
+3. **Run the release script** with the bump type:
 
-1. **Commit changes** using Conventional Commits format (e.g., `feat: add X`, `fix: resolve Y`)
-2. **Push to `main`** — release-please automatically maintains a "release PR" with version bump + changelog
-3. **Merge the release PR** — release-please creates the git tag `vX.Y.Z`
-4. **Tag push triggers `release.yml`** which runs health checks, builds, signs, and publishes
+   ```bash
+   pnpm run release patch    # 0.2.20 → 0.2.21
+   pnpm run release minor    # 0.2.20 → 0.3.0
+   pnpm run release major    # 0.2.20 → 1.0.0
+   pnpm run release 1.2.3    # explicit version
+   ```
 
-No manual version bumping, changelog editing, or tag creation is needed.
+   It bumps `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` through `scripts/sync-version.cjs`, commits `chore(release): vX.Y.Z`, creates the annotated tag and pushes both `main` and the tag.
+
+4. **The tag push triggers `release.yml`**, which runs the health checks, builds, signs, and publishes.
+
+No manual changelog editing is needed — the release body is extracted from `CHANGELOG.md` by `scripts/extract-changelog.mjs`.
 
 ### Verify the release
 
@@ -160,25 +168,9 @@ No manual version bumping, changelog editing, or tag creation is needed.
 - Download the installer and verify the signature
 - Test the updater by installing the previous version and updating
 
-### Emergency Manual Release
+### Re-running a release build
 
-If the automated pipeline is broken, you can manually trigger a release:
-
-```bash
-# Bump patch version: 1.0.0 → 1.0.1
-pnpm run release patch
-
-# Bump minor version: 1.0.0 → 1.1.0
-pnpm run release minor
-
-# Bump major version: 1.0.0 → 2.0.0
-pnpm run release major
-
-# Or specify an explicit version
-pnpm run release 1.2.3
-```
-
-This bumps version, syncs configs, commits, tags, and pushes — triggering `release.yml`.
+If the build failed but the tag is correct, re-run `release.yml` from the Actions UI (`workflow_dispatch` with the `tag` input) instead of creating a new version. Re-pushing the same tag also works — the `release-build` concurrency group cancels the stale run.
 
 ## Key Rotation
 

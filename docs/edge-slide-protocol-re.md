@@ -1,11 +1,11 @@
 # Edge slide — protocolo real (engenharia reversa) e onde o nosso código se perdia
 
 **Data:** 2026-11-08 · **Âmbito:** BLTP7853 (touchpad do Xiaomi Book Pro / TM2424), MiControl 0.2.20
-**Fontes lidas (fora do repo):** `~/Documents/Projects/miPC/SvrCModule.dll_strings.json`,
-`~/Documents/Projects/miPC/_re_touchpad.py`, `~/Documents/Projects/miPC/RELATORIO_ESTADO_ATUAL.md`,
-`~/Documents/Projects/miPC/analysis_binaries/SYSTEM_INVESTIGATION_REPORT.md`,
-`~/Documents/Projects/miPC/micontrol/sprint-planning/sprint-01-touchpad-charger-fix/sprint.md`
-(S1-003 DSDT/SSDT, S1-009), `~/Documents/Projects/miPC/audit-20261107/logs-rescan.md`,
+**Fontes lidas (fora do repo):** `C:/Projects/miPC/SvrCModule.dll_strings.json`,
+`C:/Projects/miPC/_re_touchpad.py`, `C:/Projects/miPC/RELATORIO_ESTADO_ATUAL.md`,
+`C:/Projects/miPC/analysis_binaries/SYSTEM_INVESTIGATION_REPORT.md`,
+`C:/Projects/miPC/miControl/sprint-planning/sprint-01-touchpad-charger-fix/sprint.md`
+(S1-003 DSDT/SSDT, S1-009), `C:/Projects/miPC/audit-20261107/logs-rescan.md`,
 `audit-20261107/func-audit/display.md`.
 
 ---
@@ -13,7 +13,7 @@
 ## 1. TL;DR
 
 1. **Não há protocolo de EC nem registo de hardware para o edge slide.** O gesto é
-   reconhecido em *user space* a partir dos relatórios HID padrão (PTP) do touchpad.
+   reconhecido em _user space_ a partir dos relatórios HID padrão (PTP) do touchpad.
    Nenhum registo EC, nenhum output report de "activar gesto".
 2. A Xiaomi **divide o gesto em dois processos**: `PluginGesture.dll` reconhece e
    publica um `GesturePipeCmd` por named pipe; `MiHygieneBroker.exe` executa a acção
@@ -21,7 +21,7 @@
 3. A flag de activação é **registry-only**: valor `EdgeSlide` (o nosso
    `HKCU\Software\MiControl\Touchpad\EdgeSlide`). O `SvrCModule` regista
    `get/set_touchpad_edge_sliding` e **não** emite `SetOutputReport` para o efeito.
-4. O único efeito *no dispositivo* por cada passo do gesto é um **tick háptico**:
+4. O único efeito _no dispositivo_ por cada passo do gesto é um **tick háptico**:
    frame HID `0D 09 FD 01 00 03 00 00 02 32 CE` (cmd `0x02`, payload `[0x32, 0xCE]`).
 5. **O nosso bug não era o reconhecimento — era o routing.** O gesto era reconhecido
    (`edge-slide captured`, 54× no log) mas a acção nunca corria: **zero** linhas
@@ -34,21 +34,21 @@
 
 O touchpad expõe 5 colecções HID. As que interessam:
 
-| Colecção | Usage Page | Conteúdo |
-|---|---|---|
-| COL01 | 0x0001 (Generic Desktop) + 0x000D (Digitizer) | **PTP**: Contact Count, X/Y, TipSwitch |
-| COL04/COL05 | 0xFF00 / 0xFF01 (vendor) | diagnóstico/tuning do controlador — não usar para gestos |
+| Colecção    | Usage Page                                    | Conteúdo                                                 |
+| ----------- | --------------------------------------------- | -------------------------------------------------------- |
+| COL01       | 0x0001 (Generic Desktop) + 0x000D (Digitizer) | **PTP**: Contact Count, X/Y, TipSwitch                   |
+| COL04/COL05 | 0xFF00 / 0xFF01 (vendor)                      | diagnóstico/tuning do controlador — não usar para gestos |
 
 Layout efectivo do relatório de input (confirmado pelo `HidP_*` em produção e pelos
 testes S1-002):
 
-| Campo | Usage Page / ID | Link Collection | Notas |
-|---|---|---|---|
-| Contact Count | `0x000D` / `0x0054` | 0 | nº de contactos no relatório |
-| X | `0x0001` / `0x0030` | 1..5 | **um por contacto** |
-| Y | `0x0001` / `0x0031` | 1..5 | idem |
-| TipSwitch | `0x000D` / `0x0042` | 1..5 | dedo fisicamente em contacto |
-| Confidence | `0x000D` / `0x0047` | 1..5 | presente no descriptor; não usado |
+| Campo         | Usage Page / ID     | Link Collection | Notas                             |
+| ------------- | ------------------- | --------------- | --------------------------------- |
+| Contact Count | `0x000D` / `0x0054` | 0               | nº de contactos no relatório      |
+| X             | `0x0001` / `0x0030` | 1..5            | **um por contacto**               |
+| Y             | `0x0001` / `0x0031` | 1..5            | idem                              |
+| TipSwitch     | `0x000D` / `0x0042` | 1..5            | dedo fisicamente em contacto      |
+| Confidence    | `0x000D` / `0x0047` | 1..5            | presente no descriptor; não usado |
 
 Intervalo lógico desta unidade (log de 13:26:38):
 `x_max = 3282`, `y_max = 2124` (≈ 10.5 × 6.8 cm → ~312 unidades/mm em X, ~312 em Y).
@@ -119,9 +119,9 @@ um evento.
 
 ### 3.2 Registo de configuração
 
-| Onde | Valor | Tipo | Significado |
-|---|---|---|---|
-| Registry | `EdgeSlide` | DWORD | 0/1 — liga o gesto |
+| Onde     | Valor                | Tipo  | Significado           |
+| -------- | -------------------- | ----- | --------------------- |
+| Registry | `EdgeSlide`          | DWORD | 0/1 — liga o gesto    |
 | Registry | `GesturesScreenshot` | DWORD | idem, para os 5 dedos |
 
 O nosso código usa `HKCU\Software\MiControl\Touchpad\EdgeSlide`
@@ -154,11 +154,11 @@ let deadband = charger_aware_y_deadband(state.y_max).min(y_step / 2);
 
 Com `y_max = 2124`:
 
-| Grandeza | Valor | Efeito |
-|---|---|---|
-| `y_step` | `2124/24 = 88` | precisa de 88 unidades para 1 passo |
-| deadband (sem carregador) | `2% × 2124 = 42`, cap `88/2 = 44` | **42** |
-| movimento real por frame a 250 Hz | 15–30 unidades | **descartado como ruído** |
+| Grandeza                          | Valor                             | Efeito                              |
+| --------------------------------- | --------------------------------- | ----------------------------------- |
+| `y_step`                          | `2124/24 = 88`                    | precisa de 88 unidades para 1 passo |
+| deadband (sem carregador)         | `2% × 2124 = 42`, cap `88/2 = 44` | **42**                              |
+| movimento real por frame a 250 Hz | 15–30 unidades                    | **descartado como ruído**           |
 
 Ou seja: **todo** o movimento real de um swipe normal era rejeitado pelo deadband.
 O `captured` acontecia (usa deslocamento total, não por frame) e a partir daí nenhuma
@@ -195,15 +195,15 @@ intervalo lógico são rejeitadas.
 
 ### Correcções aplicadas (resumo)
 
-| # | Mudança | Teste |
-|---|---|---|
-| A | deadband `min(y_step/6)` | `edge_slide_real_geometry_emits_steps_at_250hz` (falha com `/2`: "got 0") |
-| B | re-armar só na zona de iniciação + limpar sessão | `edge_slide_does_not_rearm_after_leaving_the_zone` |
-| C | `select_contact` com TipSwitch + continuidade | `edge_slide_survives_a_contact_slot_shuffle` |
-| D | validar coordenadas contra `x_max/y_max` | `edge_slide_ignores_out_of_range_coordinates` |
-| E | debounce de 3 frames antes de terminar | idem B/C |
-| F | `ended` só em INFO se `captured`; `armed` em DEBUG | ruído de log (348/10 min → ~0) |
-| G | decaimento do acumulador 25% → 12.5%/frame | A |
+| #   | Mudança                                            | Teste                                                                     |
+| --- | -------------------------------------------------- | ------------------------------------------------------------------------- |
+| A   | deadband `min(y_step/6)`                           | `edge_slide_real_geometry_emits_steps_at_250hz` (falha com `/2`: "got 0") |
+| B   | re-armar só na zona de iniciação + limpar sessão   | `edge_slide_does_not_rearm_after_leaving_the_zone`                        |
+| C   | `select_contact` com TipSwitch + continuidade      | `edge_slide_survives_a_contact_slot_shuffle`                              |
+| D   | validar coordenadas contra `x_max/y_max`           | `edge_slide_ignores_out_of_range_coordinates`                             |
+| E   | debounce de 3 frames antes de terminar             | idem B/C                                                                  |
+| F   | `ended` só em INFO se `captured`; `armed` em DEBUG | ruído de log (348/10 min → ~0)                                            |
+| G   | decaimento do acumulador 25% → 12.5%/frame         | A                                                                         |
 
 ---
 
@@ -260,7 +260,7 @@ Duas conclusões:
 
 1. O dispositivo vinculado é **o relógio**, não o telemóvel — o MAC configurado
    (`D8-80-3C-D0-1C-A4`) e o nome (`Amazfit Balance 2`) são do relógio. O lock
-   dependia, portanto, do RSSI de um dispositivo *wearable* que passa a maior parte do
+   dependia, portanto, do RSSI de um dispositivo _wearable_ que passa a maior parte do
    tempo ligado por BLE ao telemóvel e deixa de anunciar.
 2. `FC:43:45:81:4B:9A` — o MAC antigo que o audit interpretou como "rotação de
    endereço" — **continua a anunciar** e é o telemóvel (sem `local_name`). Não houve
@@ -272,7 +272,7 @@ Duas conclusões:
 
 ## 8. O reconhecedor original, desmontado (2026-11-08)
 
-Até aqui o RE tinha sido feito sobre *strings* do `SvrCModule.dll`. Esta secção vem
+Até aqui o RE tinha sido feito sobre _strings_ do `SvrCModule.dll`. Esta secção vem
 do binário que **faz** o gesto: `C:\MI_Backup\XiaomiPCManager\5.8.0.57\Plugins\PluginGesture.dll`
 (244 952 bytes, PDB `...\src\Plugins\PluginGesture\plugin_gesture.cpp`) e
 `MiTouchGesture.dll` (50 392 bytes), desmontados com capstone. Todos os endereços
@@ -280,16 +280,16 @@ abaixo são RVA + image base `0x180000000`, build 5.8.0.57.
 
 ### 8.1 Não existe "zona de gesto" no controlador — 0x5D é o motor háptico
 
-A hipótese de trabalho era: *0x5D configuraria a banda de gesto no controlador, e
-por isso o rato não anda no original*. **É falsa, e o binário mostra porquê.**
+A hipótese de trabalho era: _0x5D configuraria a banda de gesto no controlador, e
+por isso o rato não anda no original_. **É falsa, e o binário mostra porquê.**
 
-| Report | Quem usa | Payload | Significado |
-|---|---|---|---|
-| `0x02` | `PluginGesture!0x180018750` | `[0x32, 0xCE]`, fase `01`, **um só frame** | tick háptico por passo |
-| `0x58` (leitura) | `PluginGesture!0x18001968b` | len 0, op `02` → `HidD_GetInputReport` | lê o gear do slide; espera `byte[4] == 0x50` |
-| `0x58` (escrita) | `PluginGesture!0x18001972e` | `[0x05]` + commit `0x01 [0x58 0xA8]`, `Sleep(0x78)` = 120 ms | `WriteMotorSildeGears` — força do tick |
-| `0x5D` | `SvrCModule` (e nós) | 2 shorts LE, ex. `(80,104)` | **`WriteMotorGears`** — força do motor esquerdo/direito |
-| `0x59` | `SvrCModule` | LE short `01 00`/`02 00` | `WriteEnableHeavyPress` |
+| Report           | Quem usa                    | Payload                                                      | Significado                                             |
+| ---------------- | --------------------------- | ------------------------------------------------------------ | ------------------------------------------------------- |
+| `0x02`           | `PluginGesture!0x180018750` | `[0x32, 0xCE]`, fase `01`, **um só frame**                   | tick háptico por passo                                  |
+| `0x58` (leitura) | `PluginGesture!0x18001968b` | len 0, op `02` → `HidD_GetInputReport`                       | lê o gear do slide; espera `byte[4] == 0x50`            |
+| `0x58` (escrita) | `PluginGesture!0x18001972e` | `[0x05]` + commit `0x01 [0x58 0xA8]`, `Sleep(0x78)` = 120 ms | `WriteMotorSildeGears` — força do tick                  |
+| `0x5D`           | `SvrCModule` (e nós)        | 2 shorts LE, ex. `(80,104)`                                  | **`WriteMotorGears`** — força do motor esquerdo/direito |
+| `0x59`           | `SvrCModule`                | LE short `01 00`/`02 00`                                     | `WriteEnableHeavyPress`                                 |
 
 - `0x5D` `High = (104, 128)` é o **par de gears dos dois motores** (issue #106), não
   uma largura de banda. `(104, 104)` era ignorado porque o firmware descarta o
@@ -301,7 +301,7 @@ por isso o rato não anda no original*. **É falsa, e o binário mostra porquê.
   "Feature report 0x5D" do issue #106 é uma imprecisão de nomenclatura: 0x5D é um
   **Output report**, tal como o nosso `send_touchpad_command` já o envia.
 - `WriteMotorSildeGears` (0x58) é o único sítio onde aparece o `80` de
-  *"Ajust slide gears to 80"*: o original lê o report (0x58, op `02`) com
+  _"Ajust slide gears to 80"_: o original lê o report (0x58, op `02`) com
   `HidD_GetInputReport`, compara `byte[4] == 0x50` e, se não bater, escreve
   0x58 `[0x05]` seguido do commit `0x01 [0x58 0xA8]` com `Sleep(0x78)` = 120 ms
   entre os dois — a confirmação independente do par write+commit e do atraso de
@@ -316,20 +316,20 @@ certo.
 
 `handle_edge_slide` original ≈ `0x1800190d3`–`0x1800193d8`:
 
-| Constante | Onde | Efeito |
-|---|---|---|
-| `24/25` = 96 % (`0x180018ae3`) | `xmm12` | bordo **direito**: `x > 0.96·x_max` |
-| `1/25` = 4 % (`0x180018ada` → `x_max/25`) | `xmm11` | bordo **esquerdo**: `x < 0.04·x_max` |
-| `-100.0` (`0x180018aec`) | `xmm10` | converte Δy em **percentagem da altura** |
-| `cmp eax, 0xFA` (250) | `0x1800191a3` | **pré-rolo**: só captura depois de 250 unidades (8 mm) de Δy |
-| `cmp r8d, 2` (volume) | `0x1800191c0` | cada passo = 2 % da altura (≈1,4 mm) |
-| `cmp r8d, 4` (brilho) | `0x180019390` | cada passo = 4 % da altura (≈2,7 mm) |
-| `0xAF`/`0xAE` | `0x1800191e2` | `SendInput(VK_VOLUME_UP/DOWN)` |
-| `0x6F`/`0x70` | `0x180018182` | `SendInput(VK_BRIGHTNESS_DOWN/UP)` |
+| Constante                                 | Onde          | Efeito                                                       |
+| ----------------------------------------- | ------------- | ------------------------------------------------------------ |
+| `24/25` = 96 % (`0x180018ae3`)            | `xmm12`       | bordo **direito**: `x > 0.96·x_max`                          |
+| `1/25` = 4 % (`0x180018ada` → `x_max/25`) | `xmm11`       | bordo **esquerdo**: `x < 0.04·x_max`                         |
+| `-100.0` (`0x180018aec`)                  | `xmm10`       | converte Δy em **percentagem da altura**                     |
+| `cmp eax, 0xFA` (250)                     | `0x1800191a3` | **pré-rolo**: só captura depois de 250 unidades (8 mm) de Δy |
+| `cmp r8d, 2` (volume)                     | `0x1800191c0` | cada passo = 2 % da altura (≈1,4 mm)                         |
+| `cmp r8d, 4` (brilho)                     | `0x180019390` | cada passo = 4 % da altura (≈2,7 mm)                         |
+| `0xAF`/`0xAE`                             | `0x1800191e2` | `SendInput(VK_VOLUME_UP/DOWN)`                               |
+| `0x6F`/`0x70`                             | `0x180018182` | `SendInput(VK_BRIGHTNESS_DOWN/UP)`                           |
 
 Notas de comportamento que só o binário revela:
 
-1. **Âncora obrigatória na banda**: o primeiro ponto do traço *e* o ponto actual têm
+1. **Âncora obrigatória na banda**: o primeiro ponto do traço _e_ o ponto actual têm
    de estar dentro dos 4 %. Não há histerese — se o dedo derivar para dentro, o
    gesto morre e a âncora é reposta a `-1.0f` (`0xbf800000` em `0x180019242`).
 2. **Pré-rolo de 250 unidades** antes de qualquer acção. É este — e não a largura da
@@ -338,7 +338,7 @@ Notas de comportamento que só o binário revela:
    re-ancora (o `pct > 2` já está garantido pelos 250 unidades).
 3. O `g_timer.GetMs() > 500` que aparece nas strings **é só do log**: o frame háptico
    é enviado na mesma; o gate de 500 ms protege a linha de log.
-4. **O original lê `TipSwitch` (0x42) *e* `Confidence` (0x47)** —
+4. **O original lê `TipSwitch` (0x42) _e_ `Confidence` (0x47)** —
    `HidP_GetUsages` sobre as duas usage arrays em `0x180018dde`. O nosso
    `select_contact` só usa TipSwitch; `Confidence` continua por explorar como
    métrica de qualidade de contacto.
@@ -349,15 +349,15 @@ Notas de comportamento que só o binário revela:
 
 ### 8.3 O que mudou neste branch (`f4b/edge-zone`)
 
-| Área | Antes | Agora | Porquê |
-|---|---|---|---|
-| Cursor | `WH_MOUSE_LL` desligado por constante (`EDGE_POINTER_SUPPRESSION = false`), o rato andava | `ClipCursor` para um pixel no frame de captura, libertado em todos os caminhos terminais + watchdog de 4 s | O hook LL corria na thread do gesto (que faz WMI/OSD) e o movimento engolido era re-aplicado como salto ao largar. `ClipCursor` prende de facto (verificado nesta máquina: 638,805 mantém-se após `SetCursorPos(+300,+200)`) e não salta ao libertar |
-| Banda | `x_max/8` (12,5 %) / `x_max/3` (33 %) | **16 % / 28 %**, configurável (`ZoneStartPct`, `ZoneContinuePct`) | 4 % do original é ~4 mm — não se acerta com o dedo. 16 % ≈ 17 mm é uma área utilizável; a histerese de 28 % deixa derivar sem matar o gesto |
-| Captura | `y_max/80` = 0,85 mm | `y_max·118/1000` = **250 unidades = 8 mm** (o `0xFA` do original) | É o que impede o gesto de "interferir no uso normal": um toque normal no bordo não percorre 8 mm |
-| Acção no 1.º frame | nenhuma (só depois de mais `y_step`) | **uma**, exactamente como o original | Feedback imediato no momento em que o gesto compromete |
-| Acumulador | decaimento de 1/8 em **todos** os frames, deadband `y_step/6` | decaimento só nos frames de ruído, deadband `y_step/10` | A 10 unidades/frame o equilíbrio era `8×10 = 80 < y_step = 88` — o gesto capturava e **nunca** dava passo, a mesma classe de bug de §4 |
-| Tick háptico | frame construído e testado, **nunca enviado** | `0D 09 FD 01 00 03 00 00 02 32 CE` por passo, limitado a ~25/s | É o único efeito no dispositivo que o original produz por passo |
-| Log de escrita | INFO em todas | INFO nas configurações (0x5D/0x59/0x5B), DEBUG no tick | Os bytes exactos continuam registados para reversão sem inundar o log a 25 Hz |
+| Área               | Antes                                                                                     | Agora                                                                                                      | Porquê                                                                                                                                                                                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cursor             | `WH_MOUSE_LL` desligado por constante (`EDGE_POINTER_SUPPRESSION = false`), o rato andava | `ClipCursor` para um pixel no frame de captura, libertado em todos os caminhos terminais + watchdog de 4 s | O hook LL corria na thread do gesto (que faz WMI/OSD) e o movimento engolido era re-aplicado como salto ao largar. `ClipCursor` prende de facto (verificado nesta máquina: 638,805 mantém-se após `SetCursorPos(+300,+200)`) e não salta ao libertar |
+| Banda              | `x_max/8` (12,5 %) / `x_max/3` (33 %)                                                     | **16 % / 28 %**, configurável (`ZoneStartPct`, `ZoneContinuePct`)                                          | 4 % do original é ~4 mm — não se acerta com o dedo. 16 % ≈ 17 mm é uma área utilizável; a histerese de 28 % deixa derivar sem matar o gesto                                                                                                          |
+| Captura            | `y_max/80` = 0,85 mm                                                                      | `y_max·118/1000` = **250 unidades = 8 mm** (o `0xFA` do original)                                          | É o que impede o gesto de "interferir no uso normal": um toque normal no bordo não percorre 8 mm                                                                                                                                                     |
+| Acção no 1.º frame | nenhuma (só depois de mais `y_step`)                                                      | **uma**, exactamente como o original                                                                       | Feedback imediato no momento em que o gesto compromete                                                                                                                                                                                               |
+| Acumulador         | decaimento de 1/8 em **todos** os frames, deadband `y_step/6`                             | decaimento só nos frames de ruído, deadband `y_step/10`                                                    | A 10 unidades/frame o equilíbrio era `8×10 = 80 < y_step = 88` — o gesto capturava e **nunca** dava passo, a mesma classe de bug de §4                                                                                                               |
+| Tick háptico       | frame construído e testado, **nunca enviado**                                             | `0D 09 FD 01 00 03 00 00 02 32 CE` por passo, limitado a ~25/s                                             | É o único efeito no dispositivo que o original produz por passo                                                                                                                                                                                      |
+| Log de escrita     | INFO em todas                                                                             | INFO nas configurações (0x5D/0x59/0x5B), DEBUG no tick                                                     | Os bytes exactos continuam registados para reversão sem inundar o log a 25 Hz                                                                                                                                                                        |
 
 O `WH_MOUSE_LL` foi **removido** (não apenas desligado): era código morto que
 prometia uma supressão que nunca aconteceu.

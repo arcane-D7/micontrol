@@ -1,5 +1,7 @@
 # MiControl — Stability Report v3
 
+> **Historical snapshot — do not update.** This report records the state of the codebase at the commit named in `Baseline` and is kept for traceability. Findings may already be fixed. For current architecture see [architecture.md](./architecture.md); for current logging see [LOGGING.md](./LOGGING.md).
+
 **Date:** 2026-06-25  
 **Auditor:** Automated multi-agent audit (3 parallel subagents — Security, Architecture, UI/UX+Performance+AI+DevOps)  
 **Scope:** Full codebase — security, architecture, stability, UI/UX, performance, AI responsibility, DevOps  
