@@ -364,6 +364,16 @@
     DetailPrint "  Removing old MiControlFace service entry (if present)..."
     nsExec::ExecToLog '"$SYSDIR\sc.exe" delete MiControlFace'
     Pop $1
+    ; EXPECTED SIDE EFFECT (P2-face, recheck 2026-11-11): deleting a RUNNING
+    ; service kills the process without SERVICE_CONTROL_STOP, so the SCM logs
+    ; three things per install: Event 7031 for the old instance, then the
+    ; service's own restart action, then a second 7031 from the post-install
+    ; start/stop cycle. Both are benign as long as the service ends RUNNING
+    ; (verified: face_svc.log shows stopping -> starting on every install,
+    ; 13:12 / 15:33 / 16:36 / 20:15). Do not "fix" this by adding a stop
+    ; first: stop waits on the camera teardown, which is the ERROR_SERVICE_
+    ; MARKED_FOR_DELETE failure this delete-first order was introduced for.
+    ; See docs/LOGGING.md §3 "O que não é um crash".
     ; Install the LocalSystem auth service (auto-start) as a FRESH service.
     nsExec::ExecToLog '"$INSTDIR\micontrol_face_svc.exe" install'
     Pop $0

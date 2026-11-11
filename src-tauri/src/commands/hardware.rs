@@ -69,12 +69,27 @@ pub async fn get_charging_threshold(_state: State<'_, AppState>) -> Result<u8, E
 }
 
 /// Firmware truth: requested vs applied-on-hardware, plus why not.
+///
+/// P1-2 (recheck 2026-11-11): a read that comes back `applied=false` while
+/// care is on is *also* the cheapest place to notice a drift, so it kicks off
+/// the gated reconciler. The reconcile is fire-and-forget — the read must not
+/// pay for an elevated write — and the gate caps it at one write per 5 min, so
+/// a UI that polls this command cannot turn into a write loop.
 #[tauri::command]
 pub async fn get_charge_limit_state() -> Result<crate::hw::charging::ChargeLimitState, ErrorResponse>
 {
     let raw = elev_bridge::run_elevated("get_charge_limit_state", serde_json::json!({})).await?;
-    serde_json::from_value(raw)
-        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
+    let state: crate::hw::charging::ChargeLimitState = serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))?;
+
+    if !state.applied && state.requested_threshold < 100 {
+        #[cfg(windows)]
+        tauri::async_runtime::spawn(async {
+            crate::hw::charging::reconcile_charge_limit("read-back").await;
+        });
+    }
+
+    Ok(state)
 }
 
 #[tauri::command]

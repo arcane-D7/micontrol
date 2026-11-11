@@ -971,6 +971,15 @@ pub fn run() {
             #[cfg(windows)]
             crate::hw::power_listener::start_power_listener();
 
+            // P1-2 (recheck 2026-11-11): the EC forgets the charging limit
+            // across S3 and across ecram_service restarts. Re-assert the
+            // user's requested limit at startup and every 5 min thereafter,
+            // gated to at most one write per window (backoff on failure).
+            // The 20:17 limit survived until the 02:23 → 10:55 resume and
+            // then silently reverted to 100 %.
+            #[cfg(windows)]
+            crate::hw::charging::start_charge_limit_reconciler();
+
             // MIOT-01: IoT event listener — synthesizes power/charging/low-
             // battery events into native OSD notifications. Reads config from
             // HKCU\SOFTWARE\MiControl\IotEvents; fully isolated from other HW.
