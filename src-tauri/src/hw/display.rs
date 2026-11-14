@@ -1584,10 +1584,14 @@ pub fn smart_predict_brightness(lux: f32) -> Option<u8> {
 static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Request a sensor reset on the next polling cycle.
-/// Called when a WM_POWERBROADCAST resume event is received.
-pub fn request_sensor_reset() {
+///
+/// Callers own the *reason*: a real resume (power listener) is INFO, a
+/// degraded/stuck sensor (health supervisor, adaptive-brightness watchdog) is
+/// DEBUG noise. This used to log "(power resume event)" for every caller,
+/// which put six fake resumes in a 7 h window with no suspend at all.
+pub fn request_sensor_reset(reason: &str) {
     SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
-    log::info!("[display] Sensor reset requested (power resume event)");
+    log::debug!("[display] Sensor reset requested ({reason})");
 }
 
 /// Cached LightSensor instance — re-created only when a reset is requested.
@@ -2093,7 +2097,7 @@ pub async fn adaptive_brightness_loop() {
                          readings) — requesting sensor reset",
                         consecutive_invalid_reads
                     );
-                    request_sensor_reset();
+                    request_sensor_reset("sensor stuck (invalid readings)");
                     consecutive_invalid_reads = 0;
                 }
                 continue;
@@ -2106,7 +2110,7 @@ pub async fn adaptive_brightness_loop() {
                          requesting sensor reset",
                         consecutive_invalid_reads
                     );
-                    request_sensor_reset();
+                    request_sensor_reset("sensor stuck (no reading)");
                     consecutive_invalid_reads = 0;
                 }
                 if !no_sensor_warned {
