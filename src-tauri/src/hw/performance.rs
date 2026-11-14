@@ -82,9 +82,43 @@ pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<Performance
             // The EC mode changed — drop the cached readback so the next UI poll
             // shows the real value instead of up to 3 s of stale mode.
             crate::hw::fan::invalidate_ec_mode_cache();
+
+            // VERIFY the value actually latched in `QFAN`. The HQ WMI method
+            // returns success even when the EC refuses the value: measured live
+            // on the TM2424 firmware, Turbo (2) latches and LongBattery (11)
+            // leaves QFAN untouched — reporting success there was a lie.
+            let want = mode.to_hw_value() as u16;
+            let raw = crate::hw::wmi_ec::read_active_mode().ok().map(|(r, _)| r);
+            if raw == Some(want) {
+                return Ok(PerformanceResult {
+                    success: true,
+                    method: "hq_wmi+ec_wmaa+registry+overlay".to_string(),
+                    mode,
+                });
+            }
+            // LongBattery (11) is refused by this firmware's QFAN register; the
+            // Smart profile (10) is the adaptive battery curve it does accept.
+            if mode == PerformanceMode::LongBattery && send_via_hq_wmi_raw(10).is_ok() {
+                if let Ok((r2, _)) = crate::hw::wmi_ec::read_active_mode() {
+                    if r2 == 10 {
+                        crate::hw::fan::invalidate_ec_mode_cache();
+                        log::info!(
+                            "[perf] LongBattery: QFAN refuses 11; Smart profile (10) latched instead"
+                        );
+                        return Ok(PerformanceResult {
+                            success: true,
+                            method: "hq_wmi+smart_fallback+ec_wmaa+registry+overlay".to_string(),
+                            mode,
+                        });
+                    }
+                }
+            }
+            log::warn!(
+                "[perf] EC refused the fan profile: requested {want}, QFAN reads {raw:?}"
+            );
             return Ok(PerformanceResult {
-                success: true,
-                method: "hq_wmi+ec_wmaa+registry+overlay".to_string(),
+                success: false,
+                method: format!("hq_wmi(refused {want}->{raw:?})+ec_wmaa+registry+overlay"),
                 mode,
             });
         }
