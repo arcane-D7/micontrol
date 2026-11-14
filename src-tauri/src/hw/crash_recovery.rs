@@ -145,7 +145,22 @@ pub struct CrashRecoveryStatus {
 /// 3. Registers WER crash dump collection
 /// 4. Marks the current session as "running" (not yet cleanly exited)
 pub fn init_crash_recovery() -> HardwareResult<CrashRecoveryStatus> {
-    let abnormal_restart_detected = check_abnormal_restart();
+    let flagged = check_abnormal_restart();
+    // The flag lives in HKCU and is only cleared by the app's own clean-exit
+    // path, so an installer/uninstaller kill (WM_CLOSE + taskkill, or the NSIS
+    // /UPDATE teardown) always leaves it set. The session marker knows better:
+    // when it classified the previous session as an installer shutdown, the
+    // flag is stale, not evidence of a crash. Without this, every update
+    // produced "Abnormal restart detected" one line after "previous session
+    // was terminated by the installer (intentional, not a crash)".
+    let installer_announced = crate::util::session_marker::previous_session_ended_at_installer();
+    if flagged && installer_announced {
+        log::info!(
+            target: "hw::crash_recovery",
+            "Abnormal-restart flag ignored — the installer announced the previous shutdown (intentional, not a crash)"
+        );
+    }
+    let abnormal_restart_detected = abnormal_restart_from_flag(flagged, installer_announced);
 
     if abnormal_restart_detected {
         log::warn!(
@@ -223,6 +238,14 @@ fn check_abnormal_restart() -> bool {
     {
         false
     }
+}
+
+/// Decide whether the persisted flag really means "the previous session
+/// crashed", given what the session marker knows about how it ended.
+///
+/// Pure so the installer-suppression rule is testable without the registry.
+fn abnormal_restart_from_flag(flagged: bool, installer_announced: bool) -> bool {
+    flagged && !installer_announced
 }
 
 /// Mark the current session as "running" — if the process dies without
@@ -880,6 +903,17 @@ pub fn start_heartbeat_ticker() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The HKCU flag survives an installer kill (the app never reaches its
+    /// clean-exit path), which used to raise "Abnormal restart detected" right
+    /// after the session marker said the installer had announced the shutdown.
+    #[test]
+    fn an_installer_shutdown_never_counts_as_an_abnormal_restart() {
+        assert!(abnormal_restart_from_flag(true, false));
+        assert!(!abnormal_restart_from_flag(true, true));
+        assert!(!abnormal_restart_from_flag(false, false));
+        assert!(!abnormal_restart_from_flag(false, true));
+    }
 
     #[test]
     fn starvation_marker_round_trips() {

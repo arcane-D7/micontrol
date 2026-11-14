@@ -339,6 +339,31 @@ pub fn begin_session(log_dir: &Path) -> PreviousSession {
     begin_session_with(log_dir, &installer_marker_path())
 }
 
+/// The verdict [`begin_session`] reached for the session that just ended.
+///
+/// Kept process-wide because consumers that start later (crash recovery runs
+/// inside Tauri's `setup`, after the log layer) need the same answer without
+/// re-reading a marker file the current session has already overwritten.
+pub fn previous_session_verdict() -> Option<PreviousSession> {
+    LAST_VERDICT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// True when the previous session ended because the installer/uninstaller
+/// announced the kill (`installer-shutdown.marker` written during that
+/// session). An intentional teardown must never be reported as a crash.
+pub fn previous_session_ended_at_installer() -> bool {
+    matches!(
+        previous_session_verdict(),
+        Some(PreviousSession::InstallerShutdown { .. })
+    )
+}
+
+/// Verdict of the session that just ended, shared with later startup phases.
+static LAST_VERDICT: std::sync::Mutex<Option<PreviousSession>> = std::sync::Mutex::new(None);
+
 /// [`begin_session`] with an explicit installer-announcement path (unit tests
 /// use a temp file instead of the real `%ProgramData%` one).
 fn begin_session_with(log_dir: &Path, installer_marker: &Path) -> PreviousSession {
@@ -364,6 +389,12 @@ fn begin_session_with(log_dir: &Path, installer_marker: &Path) -> PreviousSessio
     marker.pid = Some(std::process::id());
     marker.version = Some(env!("CARGO_PKG_VERSION").to_string());
     let _ = write_marker(log_dir, &marker);
+
+    // Publish the verdict before returning: crash recovery (which runs later,
+    // inside Tauri's `setup`) must not call an installer kill a crash.
+    *LAST_VERDICT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(previous.clone());
 
     previous
 }
@@ -647,6 +678,33 @@ mod tests {
             !marker.exists(),
             "the announcement must be consumed on read"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Crash recovery runs after the log layer; it consumes the verdict the
+    /// session marker published instead of re-reading an overwritten marker.
+    #[test]
+    fn the_installer_verdict_is_published_for_later_startup_phases() {
+        let dir = temp_dir("verdict");
+        begin(&dir);
+        let marker = announcement(&dir);
+        fs::write(&marker, "state=installer-shutdown\n").unwrap();
+
+        let previous = begin(&dir);
+        assert!(matches!(
+            previous,
+            PreviousSession::InstallerShutdown { .. }
+        ));
+        assert_eq!(previous_session_verdict(), Some(previous));
+        assert!(
+            previous_session_ended_at_installer(),
+            "the installer's own shutdown must be visible to crash recovery"
+        );
+
+        // And a crash still reads as a crash: the next start sees `running`.
+        let crashed = begin(&dir);
+        assert!(matches!(crashed, PreviousSession::Running { .. }));
+        assert!(!previous_session_ended_at_installer());
         let _ = fs::remove_dir_all(&dir);
     }
 

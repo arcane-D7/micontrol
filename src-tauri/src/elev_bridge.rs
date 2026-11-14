@@ -973,21 +973,51 @@ async fn run_elevated_impl(
         Err(_) => {
             let stuck = ElevPhase::from_code(phase.load(Ordering::Relaxed));
             let elapsed = started.elapsed();
-            log::warn!(
-                target: "elev_bridge",
-                "Elevated command '{cmd}' exceeded its total budget of {} s (stuck in '{}' \
-                 after {} ms) — aborted at the declared limit instead of waiting for every \
-                 phase to time out",
-                total_budget.as_secs(),
-                stuck.describe(),
-                elapsed.as_millis()
-            );
-            Err(format!(
-                "Elevated command '{cmd}' exceeded its total budget of {} s (stuck in '{}') — \
-                 aborted at the declared limit",
-                total_budget.as_secs(),
-                stuck.describe()
-            ))
+            // A timeout that fires late is not the same as one honoured at the
+            // declared limit: the runtime can be blocked (battery WMI stalls)
+            // and the timer only gets polled afterwards — 15 s budget, 29.6 s
+            // in phase 'startup', 34.3 s of wall clock. Say which one happened.
+            let overrun = elapsed.saturating_sub(total_budget).as_millis();
+            let (log_line, reason) = if overrun > 500 {
+                (
+                    format!(
+                        "Elevated command '{cmd}' ran {elapsed_ms} ms for a {budget} s budget \
+                         ({} ms past the deadline, stuck in '{phase}') — the deadline could not \
+                         be enforced on time, the async runtime was blocked",
+                        overrun,
+                        elapsed_ms = elapsed.as_millis(),
+                        budget = total_budget.as_secs(),
+                        phase = stuck.describe()
+                    ),
+                    format!(
+                        "Elevated command '{cmd}' ran {elapsed_ms} ms for a {budget} s budget \
+                         ({} ms past the deadline, stuck in '{phase}')",
+                        overrun,
+                        elapsed_ms = elapsed.as_millis(),
+                        budget = total_budget.as_secs(),
+                        phase = stuck.describe()
+                    ),
+                )
+            } else {
+                (
+                    format!(
+                        "Elevated command '{cmd}' exceeded its total budget of {budget} s \
+                         (stuck in '{phase}' after {elapsed_ms} ms) — aborted at the declared \
+                         limit instead of waiting for every phase to time out",
+                        budget = total_budget.as_secs(),
+                        phase = stuck.describe(),
+                        elapsed_ms = elapsed.as_millis()
+                    ),
+                    format!(
+                        "Elevated command '{cmd}' exceeded its total budget of {budget} s \
+                         (stuck in '{phase}') — aborted at the declared limit",
+                        budget = total_budget.as_secs(),
+                        phase = stuck.describe()
+                    ),
+                )
+            };
+            log::warn!(target: "elev_bridge", "{log_line}");
+            Err(reason)
         }
     };
     let elapsed = started.elapsed();
@@ -1035,7 +1065,24 @@ async fn run_elevated_inner(
     // Serialise elevated calls. The scheduled-task path has no request-id argv,
     // so the elevated helper discovers the newest pending file. Running one at a
     // time prevents cross-request mixups.
-    let _guard = ELEV_REQUEST_LOCK.lock().await;
+    //
+    // The wait is BOUNDED by the command budget: an unbounded `lock().await`
+    // sat in phase 'startup' for 29.6 s (observed 09:14:11) behind another
+    // command that had overrun, so the caller waited 34.3 s for a 15 s budget
+    // and the log claimed it had "aborted at the declared limit". A caller that
+    // cannot get the lock in time now fails inside its own budget with a
+    // reason that names the real cause.
+    let _guard =
+        match tokio::time::timeout(remaining(poll_deadline), ELEV_REQUEST_LOCK.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(format!(
+                    "Elevated command '{cmd}' could not start within its {} s budget: another \
+                 elevated command held the serialization lock (phase 'startup')",
+                    timeout_for_cmd(cmd).as_secs()
+                ));
+            }
+        };
 
     // ── Fast path: already elevated ──────────────────────────────────────────
     // When this process is running as an administrator (dev mode or installed
@@ -1183,15 +1230,23 @@ async fn run_elevated_inner(
     let dir_clone = dir.clone();
     set_phase(ElevPhase::Sweep);
     // P1-3: housekeeping must not eat the command's last milliseconds.
+    //
+    // It also must not run on every dispatch: the sweep is a `read_dir` over
+    // `%LOCALAPPDATA%\MiControl` and, when the filesystem is slow, it takes
+    // seconds. Observed 09:35:25: 16 128 ms stuck in 'stale-file sweep' — the
+    // housekeeping consumed the whole budget of a dispatch that never left.
+    // Stale files are 120 s old by definition, so once per 5 min is plenty.
     let sweep = if remaining(hard_deadline) < Duration::from_millis(500) {
         Ok(())
-    } else {
+    } else if claim_sweep_slot() {
         crate::util::fixed_pool::run_blocking_timeout(
-            remaining(hard_deadline).min(Duration::from_secs(10)),
+            remaining(hard_deadline).min(SWEEP_TIMEOUT),
             move || cleanup_stale_elev_files(&dir_clone),
         )
         .await
         .map_err(|e| format!("cleanup_stale_elev_files task failed: {e}"))
+    } else {
+        Ok(())
     };
     if let Some(warning) = sweep_warning(sweep) {
         log::warn!(target: "elev_bridge", "Elevated command '{cmd}': {warning}");
@@ -2047,6 +2102,41 @@ fn sweep_warning(result: Result<(), String>) -> Option<String> {
         .map(|e| format!("stale-file sweep skipped ({e}) — dispatching anyway"))
 }
 
+/// Maximum wall time the pre-dispatch housekeeping may take. A sweep that
+/// needs longer is abandoned (a warning, never a failed command) so it can
+/// never consume the dispatch budget.
+const SWEEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Minimum spacing between two stale-file sweeps.
+const SWEEP_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
+
+/// Claim the right to run the stale-file sweep now.
+///
+/// Returns `false` while another dispatch already did it inside the window.
+/// `compare_exchange` makes the claim atomic, so two concurrent dispatches
+/// cannot both decide to sweep.
+fn claim_sweep_slot() -> bool {
+    static LAST_SWEEP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = now_ms();
+    let last = LAST_SWEEP_MS.load(Ordering::Relaxed);
+    if !sweep_is_due(last, now) {
+        return false;
+    }
+    LAST_SWEEP_MS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// Is a sweep due, given the last one's timestamp? Pure, so the window is
+/// unit-tested without touching the clock.
+///
+/// A clock that jumped backwards counts as due: the stored timestamp is no
+/// longer comparable, and blocking housekeeping until the clock catches up
+/// would let stale files accumulate for the whole jump.
+fn sweep_is_due(last_ms: u64, now_ms: u64) -> bool {
+    now_ms < last_ms || now_ms - last_ms >= SWEEP_MIN_INTERVAL_MS
+}
+
 fn cleanup_stale_elev_files(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -2240,6 +2330,25 @@ fn ensure_task_correct_path() -> TaskHealResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-dispatch housekeeping is a `read_dir`; running it on every
+    /// dispatch let a slow filesystem eat a whole 15 s budget (observed:
+    /// 16 128 ms stuck in 'stale-file sweep'). It must be windowed.
+    #[test]
+    fn the_stale_file_sweep_is_windowed_not_per_dispatch() {
+        // First call of the process (no previous sweep) is due immediately.
+        assert!(sweep_is_due(0, SWEEP_MIN_INTERVAL_MS));
+        // Inside the window: not due, whatever the dispatch rate.
+        assert!(!sweep_is_due(1_000_000, 1_000_000));
+        assert!(!sweep_is_due(
+            1_000_000,
+            1_000_000 + SWEEP_MIN_INTERVAL_MS - 1
+        ));
+        // At the window edge: due again.
+        assert!(sweep_is_due(1_000_000, 1_000_000 + SWEEP_MIN_INTERVAL_MS));
+        // A clock that jumps backwards must not stall the sweep forever.
+        assert!(sweep_is_due(5_000_000, 1_000));
+    }
 
     // ── P1: SCM-based availability decision ────────────────────────────────
 

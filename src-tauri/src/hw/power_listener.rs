@@ -441,7 +441,7 @@ fn log_lid_snapshot(open: bool) {
 /// Resets all hardware sensors that may have become unresponsive during sleep.
 fn on_resume() {
     // Reset the ambient light sensor
-    crate::hw::display::request_sensor_reset();
+    crate::hw::display::request_sensor_reset("power resume");
 
     // S37-006: Reset the elevated thermal circuit-breaker + TTL cache.
     // After sleep/resume the MiControlBridge service may be momentarily

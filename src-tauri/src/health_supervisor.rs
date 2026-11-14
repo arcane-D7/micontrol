@@ -330,7 +330,7 @@ async fn check_ambient_sensor() {
     }
 
     if !healthy {
-        crate::hw::display::request_sensor_reset();
+        crate::hw::display::request_sensor_reset("ambient sensor degraded");
     }
 }
 

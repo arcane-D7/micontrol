@@ -679,6 +679,18 @@ mod imp {
 /// so the extra cost is the 200 + 400 ms backoff).
 pub(crate) const TRANSIENT_READ_ATTEMPTS: u32 = 3;
 
+/// Attempts for a read that is cheap to retry and expensive to lose.
+///
+/// The charge-limit register (`WMAA 0x1000/0x02`) is read once per 5 min by the
+/// reconciler and on every Battery-tab open, and a failed read makes the hold
+/// phase fall back to `unknown` (8 times in 7.75 h of production). Measured
+/// stalls of the SAME provider run into seconds while the 600 ms budget of the
+/// generic path gives up after ~1 s. Five attempts with a 250 ms linear
+/// backoff cost 2.5 s at worst, once per 5 min, and still fail honestly when
+/// the provider is really gone.
+pub(crate) const PATIENT_READ_ATTEMPTS: u32 = 5;
+pub(crate) const PATIENT_READ_BACKOFF_MS: u64 = 250;
+
 /// Is this error the provider stall that must be retried?
 ///
 /// ONLY `0x80041002` (WBEM_E_NOT_FOUND) — on this provider that HRESULT is
@@ -695,7 +707,21 @@ pub(crate) fn is_transient_provider_stall(message: &str) -> bool {
 /// Split out (with the sleep injected) so the retry policy is unit-tested
 /// without touching WMI: the production caller passes
 /// `std::thread::sleep`, tests count the sleeps instead.
-fn with_transient_retry<T, F, S>(mut call: F, mut sleep: S) -> HardwareResult<T>
+fn with_transient_retry<T, F, S>(call: F, sleep: S) -> HardwareResult<T>
+where
+    F: FnMut() -> HardwareResult<T>,
+    S: FnMut(u64),
+{
+    with_transient_retry_config(call, sleep, TRANSIENT_READ_ATTEMPTS, 200)
+}
+
+/// [`with_transient_retry`] with an explicit attempt/backoff budget.
+fn with_transient_retry_config<T, F, S>(
+    mut call: F,
+    mut sleep: S,
+    attempts: u32,
+    base_backoff_ms: u64,
+) -> HardwareResult<T>
 where
     F: FnMut() -> HardwareResult<T>,
     S: FnMut(u64),
@@ -706,20 +732,18 @@ where
             Ok(value) => return Ok(value),
             Err(e) => {
                 attempt += 1;
-                if attempt >= TRANSIENT_READ_ATTEMPTS
-                    || !is_transient_provider_stall(&e.to_string())
-                {
+                if attempt >= attempts || !is_transient_provider_stall(&e.to_string()) {
                     return Err(e);
                 }
                 // The provider needs a moment to rebuild the method parameters;
                 // 200 ms was enough in the measured recovery, 400 ms covers the
                 // slower stalls. Linear, not exponential: the whole budget is
-                // 600 ms and the caller's timeout is seconds.
-                let backoff_ms = 200 * u64::from(attempt);
+                // the caller's timeout.
+                let backoff_ms = base_backoff_ms * u64::from(attempt);
                 log::debug!(
                     target: "hw::wmi_ec",
                     "WMAA read hit a degraded WMI provider ({e}); retry {attempt}/{} after {backoff_ms} ms",
-                    TRANSIENT_READ_ATTEMPTS - 1
+                    attempts - 1
                 );
                 sleep(backoff_ms);
             }
@@ -742,6 +766,22 @@ pub fn wmi_read(fun2: u16, fun3: u16) -> HardwareResult<WmaaResponse> {
     with_transient_retry(
         || imp::wmi_call(FUN1_READ, fun2, fun3, 0),
         |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+    )
+}
+
+/// Read a WMAA register with the patient retry budget.
+///
+/// Only for registers that are polled rarely and whose loss is visible: the
+/// charge-limit reconciler reads `0x1000/0x02` once per 5 min and a blank
+/// read-back makes the hold phase fall back to `unknown`. Never use this on a
+/// hot poll path — a stalled provider would hold the caller ~2.5 s.
+#[cfg(windows)]
+pub fn wmi_read_patient(fun2: u16, fun3: u16) -> HardwareResult<WmaaResponse> {
+    with_transient_retry_config(
+        || imp::wmi_call(FUN1_READ, fun2, fun3, 0),
+        |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        PATIENT_READ_ATTEMPTS,
+        PATIENT_READ_BACKOFF_MS,
     )
 }
 
@@ -1310,6 +1350,35 @@ mod tests {
         // Never a third sleep: the last failure is returned, not retried.
         assert_eq!(sleeps.len() as u32, TRANSIENT_READ_ATTEMPTS - 1);
         assert_eq!(sleeps, vec![200, 400]);
+    }
+
+    #[test]
+    fn the_patient_budget_covers_the_slow_stalls_that_blank_the_charge_read() {
+        // The charge register is polled once per 5 min; a 600 ms budget gave up
+        // while the measured stalls of this provider ran into seconds, and the
+        // hold supervisor flapped to `unknown` eight times in 7.75 h.
+        let mut calls = 0u32;
+        let mut sleeps = Vec::new();
+        let result: HardwareResult<u16> = with_transient_retry_config(
+            || {
+                calls += 1;
+                Err(HardwareError::Wmi("0x80041002".into()))
+            },
+            |ms| sleeps.push(ms),
+            PATIENT_READ_ATTEMPTS,
+            PATIENT_READ_BACKOFF_MS,
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, PATIENT_READ_ATTEMPTS);
+        assert_eq!(sleeps, vec![250, 500, 750, 1000]);
+        assert!(
+            sleeps.iter().sum::<u64>() >= 2_000,
+            "the patient budget must span the multi-second stalls, got {sleeps:?}"
+        );
+        assert!(
+            sleeps.iter().sum::<u64>() <= 3_000,
+            "and stay far below the caller's timeout, got {sleeps:?}"
+        );
     }
 
     #[test]

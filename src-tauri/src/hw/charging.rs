@@ -140,7 +140,9 @@ fn validate(threshold: u8) -> HardwareResult<u8> {
 pub fn read_hardware_threshold() -> HardwareResult<u8> {
     #[cfg(windows)]
     {
-        let resp = crate::hw::wmi_ec::wmi_read(FUN2_CHARGE, FUN3_CHARGE)?;
+        // Patient budget on purpose: this register is polled once per 5 min and
+        // a blank read-back is what makes the hold supervisor flap to `unknown`.
+        let resp = crate::hw::wmi_ec::wmi_read_patient(FUN2_CHARGE, FUN3_CHARGE)?;
         if resp.sger != SGER_SUCCESS {
             return Err(HardwareError::Wmi(format!(
                 "WMAA 0x1000/0x02 read rejected: SGER=0x{:04X}",
