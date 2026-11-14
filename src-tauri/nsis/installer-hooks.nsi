@@ -32,9 +32,17 @@
   ; spawning it. The shell is now size-validated before it replaces anything:
   ; copy to `.new`, check the size, and only then rename over the live shell.
   ; A bad bundle therefore never destroys a working shell.
+  ; v2 (2026-11-14): the .new+Rename dance silently failed on every deploy since
+  ; 2026-11-08 (the deployed shell stayed the 0-byte file from 2026-11-07 and no
+  ; log recorded why). This version logs every decision to
+  ; $INSTDIR\setup\install-hook.log, deletes the destination first (a Rename
+  ; over an existing file can fail when any handle is open) and retries the
+  ; copy three times. The ROOT copy is kept as a local self-heal source for the
+  ; app's bootstrap (no network needed).
+  CreateDirectory "$INSTDIR\setup"
+  FileOpen $9 "$INSTDIR\setup\install-hook.log" w
   ${If} ${FileExists} "$INSTDIR\micontrol_setup.exe"
-    ; Exact byte size via FileSeek (FileFunc's ${GetSize} requires a unit
-    ; suffix and silently warns "unknown variable" on a typo).
+    FileWrite $9 "root copy: present$\r$\n"
     StrCpy $0 0
     ClearErrors
     FileOpen $1 "$INSTDIR\micontrol_setup.exe" r
@@ -42,49 +50,55 @@
       FileSeek $1 0 END $0
       FileClose $1
     ${EndIf}
+    FileWrite $9 "root size: $0 bytes$\r$\n"
     ${If} $0 >= 500000
-      CreateDirectory "$INSTDIR\setup"
-      Delete "$INSTDIR\setup\micontrol_setup.exe.new"
-      CopyFiles /SILENT "$INSTDIR\micontrol_setup.exe" "$INSTDIR\setup\micontrol_setup.exe.new"
-      StrCpy $1 0
-      ClearErrors
-      FileOpen $2 "$INSTDIR\setup\micontrol_setup.exe.new" r
-      ${IfNot} ${Errors}
-        FileSeek $2 0 END $1
-        FileClose $2
-      ${EndIf}
-      ${If} $1 >= 500000
-        ; Rename must replace the destination in one step (MOVEFILE_REPLACE_
-        ; EXISTING) so the live shell is never truncated first.
-        Rename "$INSTDIR\setup\micontrol_setup.exe.new" "$INSTDIR\setup\micontrol_setup.exe"
-        ; Post-condition: verify the deployed shell is still a real binary.
-        ; Rename fails when the destination is in use (a shell is running an
-        ; update right now) — in that case the existing shell is kept.
-        StrCpy $2 0
+      StrCpy $8 0
+      deploy_retry:
+        IntOp $8 $8 + 1
+        Delete "$INSTDIR\setup\micontrol_setup.exe.new"
+        CopyFiles /SILENT "$INSTDIR\micontrol_setup.exe" "$INSTDIR\setup\micontrol_setup.exe.new"
+        StrCpy $1 0
         ClearErrors
-        FileOpen $3 "$INSTDIR\setup\micontrol_setup.exe" r
+        FileOpen $2 "$INSTDIR\setup\micontrol_setup.exe.new" r
         ${IfNot} ${Errors}
-          FileSeek $3 0 END $2
-          FileClose $3
+          FileSeek $2 0 END $1
+          FileClose $2
         ${EndIf}
+        FileWrite $9 "attempt $8: new size: $1 bytes$\r$\n"
+        ${If} $1 >= 500000
+          ClearErrors
+          Delete "$INSTDIR\setup\micontrol_setup.exe"
+          Rename "$INSTDIR\setup\micontrol_setup.exe.new" "$INSTDIR\setup\micontrol_setup.exe"
+          StrCpy $2 0
+          ClearErrors
+          FileOpen $3 "$INSTDIR\setup\micontrol_setup.exe" r
+          ${IfNot} ${Errors}
+            FileSeek $3 0 END $2
+            FileClose $3
+          ${EndIf}
+          FileWrite $9 "final size: $2 bytes$\r$\n"
+        ${EndIf}
+        ${If} $2 < 500000
+          ${If} $8 < 3
+            Sleep 400
+            Goto deploy_retry
+          ${EndIf}
+        ${EndIf}
+      ${If} $2 >= 500000
+        FileWrite $9 "RESULT: deployed ($2 bytes)$\r$\n"
+        Delete "$INSTDIR\micontrol_setup.exe"
         Delete "$INSTDIR\setup\micontrol_setup.exe.new"
-        ${If} $2 >= 500000
-          DetailPrint "Setup shell deployed to setup\micontrol_setup.exe (decoupled updates enabled)."
-        ${Else}
-          DetailPrint "WARNING: could not replace setup\micontrol_setup.exe (in use) — previous shell kept; the runtime bootstrap keeps updates working."
-        ${EndIf}
       ${Else}
-        Delete "$INSTDIR\setup\micontrol_setup.exe.new"
-        DetailPrint "WARNING: setup shell copy is only $1 bytes — previous shell preserved; updates fall back to the runtime bootstrap."
+        FileWrite $9 "RESULT: FAILED after $8 attempts — root copy kept for the app bootstrap$\r$\n"
       ${EndIf}
     ${Else}
-      DetailPrint "WARNING: bundled setup shell is only $0 bytes (corrupt resource) — not deployed; the runtime bootstrap will download a valid one."
+      FileWrite $9 "RESULT: root copy too small ($0 bytes) — not deployed; runtime bootstrap owns it$\r$\n"
+      Delete "$INSTDIR\micontrol_setup.exe"
     ${EndIf}
-    ; The root copy is only the transport vehicle for the resource system.
-    Delete "$INSTDIR\micontrol_setup.exe"
   ${Else}
-    DetailPrint "Note: setup shell not in bundle — first payload update will download it (runtime bootstrap)."
+    FileWrite $9 "root copy: MISSING — runtime bootstrap owns it$\r$\n"
   ${EndIf}
+  FileClose $9
 
   ; ── Windows startup (register auto-start; desktop shortcut is handled by
   ;    the installer.nsi template's finish page) ─────────────────────────────

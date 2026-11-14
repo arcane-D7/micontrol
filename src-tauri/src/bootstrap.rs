@@ -138,6 +138,33 @@ pub fn ensure_shell(install_dir: &Path, repo: Option<&str>) -> Result<BootstrapR
         );
     }
 
+    // Local self-heal (2026-11-14): the installer keeps the bundled shell at
+    // the install root as a pristine source. Deploying from it is network-free
+    // and fixes the class of failure where the NSIS hook's copy silently
+    // failed (the deployed shell stayed a 0-byte file for a week).
+    let local_src = install_dir.join("micontrol_setup.exe");
+    if is_valid_shell(&local_src) {
+        let tmp = shell_path.with_extension("exe.part");
+        let _ = std::fs::remove_file(&tmp);
+        if let Some(parent) = tmp.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&local_src, &tmp)
+            .map_err(|e| format!("cannot copy {}: {e}", local_src.display()))?;
+        if is_valid_shell(&tmp) {
+            std::fs::rename(&tmp, &shell_path).map_err(|e| {
+                format!("cannot move {} to {}: {e}", tmp.display(), shell_path.display())
+            })?;
+            return Ok(BootstrapResult {
+                shell_path,
+                downloaded: false,
+                sig_verified: verify_authenticode_file(&local_src),
+            });
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     let repo = repo.unwrap_or(DEFAULT_REPO);
     let asset = format!("{repo}/releases/latest/download/MiControl_Setup.exe");
     let url = format!("https://github.com/{asset}");
