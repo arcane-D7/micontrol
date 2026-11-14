@@ -136,16 +136,6 @@ jobs:
           }
           exit $last
 
-      - name: Build Tauri app
-        run: pnpm run tauri build -f face
-        env:
-          # Same job parallelism as ci.yml's smoke test / warm-cache job so
-          # the compile characteristics (memory pressure, artifact layout)
-          # match exactly — builds stay environment-agnostic.
-          CARGO_BUILD_JOBS: '2'
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
       - name: Build static setup shell
         shell: pwsh
         run: |
@@ -153,7 +143,7 @@ jobs:
           # release path (cargo build -p micontrol-setup --profile shell-release)
           # and verifies its expected signing state.
           cargo build -p micontrol-setup --profile shell-release --manifest-path src-tauri/Cargo.toml
-          $shell = "src-tauri/target/release/shell-release/micontrol_setup.exe"
+          $shell = "src-tauri/target/shell-release/micontrol_setup.exe"
           if (-not (Test-Path $shell)) { throw "shell binary not found: $shell" }
           $size = (Get-Item $shell).Length
           if ($size -lt 500000 -or $size -gt (16 * 1024 * 1024)) {
@@ -178,6 +168,16 @@ jobs:
           $bundleDir = "src-tauri/target/release/bundle/nsis"
           New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
           Copy-Item $shell (Join-Path $bundleDir 'MiControl_Setup.exe') -Force
+
+      - name: Build Tauri app
+        run: pnpm run tauri build -f face
+        env:
+          # Same job parallelism as ci.yml's smoke test / warm-cache job so
+          # the compile characteristics (memory pressure, artifact layout)
+          # match exactly — builds stay environment-agnostic.
+          CARGO_BUILD_JOBS: '2'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build, sign decoupled payload and generate latest.json
         shell: pwsh

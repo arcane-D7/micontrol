@@ -175,3 +175,30 @@ CPU 552,8 s em 19,5 h (**0,79 %** médio).
 ---
 
 *Relatório gerado por auditoria de logs + IPC, só leitura. Fontes: `%LOCALAPPDATA%\MiControl\logs\tauri-app.log` (sessão a partir da linha 4030), `tauri-app-helper.log`, `%PROGRAMDATA%\MiControl\logs\{bridge,watchdog,ecram_service}.log`, Event Log Application/System desde 10-Nov 20:00, e sondas MCP a `127.0.0.1:4000`.*
+
+
+---
+
+# ADIÇÃO PÓS-FIX (deploy 11-Nov 18:22) — os 2 P1 do recheck fechados com prova
+
+## P1-1 Listener da tampa (2749518) — CORRIGIDO E PROVADO AO VIVO
+- Causa: powrprof!PowerSettingRegisterNotification devolve Win32 error 87 neste host; trocado para user32!RegisterPowerSettingNotification (primário) com fallback powrprof + auto-teste que sobe ERROR se ambos falharem.
+- **Prova no arranque da app**: `[lid] OPEN (previous unknown)` + snapshot `lid_open=true cpu=None gpu=None tdp=None mode=Auto` às 18:22:08. Antes: zero eventos em 19h30m.
+
+## P1-2 Limite de carga após resume (32c2c84) — CORRIGIDO E PROVADO AO VIVO
+- ReconcileGate (1 escrita/5 min, backoff 10/20/40/60 min) com gatilhos: arranque, resume (PBT_APMRESUMEAUTOMATIC), worker 5 min, e applied=false com care on.
+- **Prova**: `[charge_limit] re-applied 80% on periodic (was Some(100)%, read-back Some(80)%)` às 18:22:28 — o drift do S3 foi detectado e corrigido automaticamente.
+- IPC 3×: 2× `hw=80 applied=true src=firmware`; 1× engasgo WMI `0x80041002` → honesto "not confirmed" (reconcile volta a tentar).
+
+## P1-3 elev_bridge (9fcab26) — timeout único por dispatch (fases dentro do mesmo orçamento, ElevPhase no erro).
+## P2 higiene (f293ac1): slow-query→DEBUG (1 449→~1/3 do log eliminado), ERAM→INFO 1×/região, sonda bridge 2/min→só mudanças (2 342 linhas→1). Face 7031 ×2 documentado como benigno (sc delete pattern).
+
+## WARNs do arranque da sessão nova (5, todos benignos ou conhecidos)
+1. crash_recovery: restart anormal (o installer matou a sessão anterior — esperado).
+2. igcl_session ctlInit 0x40000009 (severity bit clear, non-fatal, conhecido).
+3. ble_advertise publisher.Start 0x80070005 (Acesso negado, conhecido — BLE beacon precisa de elevação).
+4. hotkey Win+Shift+F23 já registado (instância anterior a morrer — transitório).
+5. DSDT ERAM discovery fallback hardcoded (conhecido).
+
+## Estado final
+- 0 ERROR, ~5 WARN benignos; bridge 0 falhas; reconciliador ativo; lid listener ativo; limite 80% no firmware.
