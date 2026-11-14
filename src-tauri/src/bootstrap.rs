@@ -154,7 +154,11 @@ pub fn ensure_shell(install_dir: &Path, repo: Option<&str>) -> Result<BootstrapR
             .map_err(|e| format!("cannot copy {}: {e}", local_src.display()))?;
         if is_valid_shell(&tmp) {
             std::fs::rename(&tmp, &shell_path).map_err(|e| {
-                format!("cannot move {} to {}: {e}", tmp.display(), shell_path.display())
+                format!(
+                    "cannot move {} to {}: {e}",
+                    tmp.display(),
+                    shell_path.display()
+                )
             })?;
             return Ok(BootstrapResult {
                 shell_path,
