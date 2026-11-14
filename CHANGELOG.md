@@ -5,7 +5,22 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.21] - 2026-11-14
+
+### Highlights
+
+- **New identity.** Grayscale-only brand (hairline-friendly): new app/tray icons, in-app mark, brand sheet in `docs/brand/`.
+- **Hairline theme.** Full UI migration to the gray-scale + pastel token system (24 tabs), 96 SVG icons replace every emoji, accessible InfoHints on non-obvious controls, touchpad help accordion for Edge Slide.
+- **Overview is a real system summary.** Hardware (CPU/GPU/NPU via ComputeAccelerator/RAM/disk/display), live temperatures with source badges, full battery block (health, capacity, voltage, limit state), system state and shortcuts — one 1 ms snapshot (`get_overview_snapshot`).
+- **Startup manager.** Every Windows startup entry (HKCU/HKLM Run, Startup folders, scheduled logon tasks) with real enable/disable via `StartupApproved`; machine-level toggles through the signed elevated bridge. MiControl's own switch moved to Settings.
+- **Color management, fixed for Windows 11.** `SetICMProfileW`/`GetICMProfileW` are no longer exported by mscms on current builds — profile loading now uses `AssociateColorProfileWithDeviceW` + `WcsGetDefaultColorProfile`. Panel detected by EDID, curated ICC catalog with size/`acsp`/SHA-256 validation, install via the elevated bridge; the Xiaomi D65P3 profile loads for real.
+- **Charging protection actually works.** The limit is applied with the firmware's own channel (`WMAA FUN2=0x1000`, level codes) and a supervisor holds the 78–80% band, re-applying on resume and AC-plug (the EC drops the setting across power transitions). Above the band the UI says so honestly; this firmware has no discharge channel.
+- **Performance modes tell the truth.** The active EC mode is read from the EC (`QFAN`, SmartAdaptive = raw 9) instead of echoing the registry; mode writes are verified before/after and fall back to the SSDB channel that latches.
+- **Fan with the lid closed is explained.** A lid listener (Windows power broadcast) logs `[lid] CLOSED/OPEN` with a thermal snapshot; the fan follows the EC's clamshell table by design and the UI now says so.
+- **Edge Slide usable.** Cursor is pinned during the gesture (`ClipCursor`), pre-roll 8 mm, band 16%/28% adjustable via `HKCU\Software\MiControl\Touchpad`, one haptic tick per step.
+- **Stability.** Blocking `recv_timeout` inside async removed (no more runtime starvation), watchdog waits for port 4000 before relaunching, battery WMI circuit breaker, log noise cut by ~95 % on the noisiest paths, installer shell deploy v2 with a per-step log and a network-free bootstrap self-heal.
+- **Signing.** The setup shell is Authenticode-signed (self-signed certificate; SmartScreen will still warn until a CA certificate is installed — the pipeline is ready for one) and the updater payload is minisign-signed.
+
 
 ### Fixed
 

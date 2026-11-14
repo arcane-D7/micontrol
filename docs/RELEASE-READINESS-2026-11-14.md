@@ -405,3 +405,25 @@ pnpm run version:check && pnpm run i18n:check
 # shell estático (tem de existir ANTES do tauri build)
 cargo build -p micontrol-setup --profile shell-release --manifest-path src-tauri/Cargo.toml
 ```
+
+
+---
+
+# ACTUALIZAÇÃO PÓS-AVALIAÇÃO (14-Nov 11:06)
+
+## B3 — RESOLVIDO E PROVADO
+- **Build-order**: `scripts/publish-release.ps1` e `.github/workflows/release.yml` passam a construir o shell estático **antes** do `tauri build`; o path do CI foi corrigido (`target/shell-release`, não `target/release/shell-release`).
+- **Causa raiz do setup a 0 bytes desde 07-Nov**: o par `.new`+`Rename` do POSTINSTALL falhava em silêncio em todos os deploys. Substituído por **delete-then-copy com 3 retries + log de cada passo** em `$INSTDIR\setup\install-hook.log`.
+- **Auto-cura sem rede**: o bootstrap da app copia a cópia raiz do instalador (`$INSTDIR\micontrol_setup.exe`) quando a shell instalada é inválida, antes de tentar o download do GitHub.
+- **Prova no deploy de 14-Nov 11:06**: `install-hook.log` = `root size: 2672640 · attempt 1 · final size: 2672640 · RESULT: deployed`; `setup\micontrol_setup.exe` = 2 672 640 B (era 0 desde 07-Nov). O caminho de updates desacoplado está finalmente funcional.
+
+## Estado actualizado dos bloqueadores
+| # | Estado |
+|---|---|
+| B1 bump 0.2.21 | **aberto — decisão do dono** |
+| B2 senha da chave do updater | **aberto — dono** (chave existe em ~/.tauri/micontrol-new.key; password indisponível) |
+| B3 shell 0 bytes | **FECHADO** (deploy 11:06, provado) |
+| B4 Authenticode | **aberto — dono** (0 certificados de code-signing em qualquer store) |
+| B5 release notes | **aberto** (draft em §7; actualizar com as vagas 4b–7) |
+| B6 AGENTS.md/SECURITY.md | **aberto — protegido, só o dono** |
+| B7 rollback | **aberto** (guardar o setup actual como `MiControl_0.2.20_prev_x64-setup.exe` antes do próximo deploy) |

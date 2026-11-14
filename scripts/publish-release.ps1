@@ -74,7 +74,7 @@ if ((Test-Path $shellCached) -and -not $RebuildShell) {
   Copy-Item $shellRaw $shellCached -Force
   # Authenticode-sign the shell (same cert the Tauri bundler uses).
   Write-Host '    signing shell (signtool)...'
-  $certThumb = '4678FB4266F446C72CF4A181D6A348B9EE9C9661'
+  $certThumb = '7838982959B86B5E7795A4025208A7E68F34F755'  # self-signed code-signing (2026-11-14)
   # SDK layout: bin\<version>\<arch>\signtool.exe (NOT bin\*-x64\).
   $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter 'signtool.exe' -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match '\\x64\\' } |
