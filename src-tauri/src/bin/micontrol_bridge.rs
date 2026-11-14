@@ -34,7 +34,7 @@
 #![cfg(windows)]
 
 use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1245,10 +1245,34 @@ mod pipe_server {
         }
     }
 
+    /// At most one health-probe line per this window (the probe runs 2×/min).
+    pub(crate) const EMPTY_PROBE_LOG_INTERVAL_MS: u64 = 10 * 60 * 1000;
+
+    /// Should this empty connection produce a log line? Pure so the window is
+    /// tested: the previous "reset by any real request" flag never suppressed
+    /// anything because a real poll lands between two 30 s probes.
+    pub(crate) fn should_log_empty_probe(now_ms: u64, last_log_ms: u64) -> bool {
+        last_log_ms == 0 || now_ms.saturating_sub(last_log_ms) >= EMPTY_PROBE_LOG_INTERVAL_MS
+    }
+
+    /// Wall-clock now in epoch milliseconds (wall clock: the log rate must be
+    /// comparable across processes).
+    fn probe_now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
     fn handle_client(handle: windows::Win32::Foundation::HANDLE) {
-        // P2: whether the previous connection was an empty health probe. Used
-        // to log the 2/min probe only on change instead of 2 803 times.
-        static LAST_CONNECTION_WAS_EMPTY: AtomicBool = AtomicBool::new(false);
+        // P2: the app's health supervisor probes this pipe every 30 s with a
+        // connect-and-close. The first suppression attempt ("log on change,
+        // reset by any real request") did not work: a real poll lands between
+        // two probes every 15 s, so the flag was cleared constantly and
+        // bridge.log still collected 1 601 + 3 828 probe lines in 53 h — one
+        // per 30 s. Suppression is now TIME-based and independent of traffic.
+        static LAST_EMPTY_PROBE_LOG_MS: AtomicU64 = AtomicU64::new(0);
+        static EMPTY_PROBES_SINCE_LOG: AtomicU64 = AtomicU64::new(0);
         let t0 = std::time::Instant::now();
         bridge_log("client connected");
         // S55 FIX 24d: the pipe instance was created with FILE_FLAG_OVERLAPPED
@@ -1332,21 +1356,22 @@ mod pipe_server {
         }
 
         if total_read == 0 {
-            // P2 (recheck 2026-11-11): the app's health supervisor probes this
-            // pipe every 30 s (2/min) with a connect-and-close, which produced
-            // 2 342 identical "read 0 bytes" lines in the 19 h 30 m audit
-            // window — pure noise that buried real failures. Log the first one
-            // and then stay silent until a real request intervenes (i.e. only
-            // on change).
-            if !LAST_CONNECTION_WAS_EMPTY.swap(true, Ordering::Relaxed) {
-                bridge_log(
+            // Health-probe bookkeeping: one line per window, carrying the count
+            // of probes that were suppressed (so the rate is still measurable).
+            let now = probe_now_ms();
+            let last = LAST_EMPTY_PROBE_LOG_MS.load(Ordering::Relaxed);
+            if should_log_empty_probe(now, last) {
+                LAST_EMPTY_PROBE_LOG_MS.store(now, Ordering::Relaxed);
+                let suppressed = EMPTY_PROBES_SINCE_LOG.swap(0, Ordering::Relaxed);
+                bridge_log(&format!(
                     "read 0 bytes (client closed before sending) — health probe; \
-                     repeats suppressed until a real request arrives",
-                );
+                     {suppressed} identical probe(s) suppressed since the last line"
+                ));
+            } else {
+                EMPTY_PROBES_SINCE_LOG.fetch_add(1, Ordering::Relaxed);
             }
             return;
         }
-        LAST_CONNECTION_WAS_EMPTY.store(false, Ordering::Relaxed);
 
         let request_str = String::from_utf8_lossy(&read_buf[..total_read]).to_string();
         let cmd_desc = serde_json::from_str::<serde_json::Value>(&request_str)
@@ -3520,6 +3545,30 @@ mod watchdog {
                 started.elapsed() >= std::time::Duration::from_millis(400),
                 "must honour the budget"
             );
+        }
+
+        /// RECHECK-2: the probe line was supposed to be suppressed "until a
+        /// real request arrives", but a real poll lands every 15 s between two
+        /// 30 s probes, so the flag was cleared constantly: 5 429 lines in
+        /// 53 h (1 601 + 3 828) — one per 30 s. Time-based now.
+        #[test]
+        fn the_health_probe_line_is_windowed() {
+            use crate::pipe_server::{should_log_empty_probe, EMPTY_PROBE_LOG_INTERVAL_MS};
+            // First probe of the process logs.
+            assert!(should_log_empty_probe(1_000_000, 0));
+            // The next 19 probes inside 10 min do not.
+            assert!(!should_log_empty_probe(1_000_000 + 30_000, 1_000_000));
+            assert!(!should_log_empty_probe(
+                1_000_000 + EMPTY_PROBE_LOG_INTERVAL_MS - 1,
+                1_000_000
+            ));
+            // The window reopens.
+            assert!(should_log_empty_probe(
+                1_000_000 + EMPTY_PROBE_LOG_INTERVAL_MS,
+                1_000_000
+            ));
+            // A backwards clock must not spam.
+            assert!(!should_log_empty_probe(500, 1_000_000));
         }
     }
 }

@@ -1573,7 +1573,7 @@ async fn run_via_service_pipe(cmd: &str, args: Value, timeout: Duration) -> Resu
         log::warn!("Bridge response not valid JSON ({e}) — falling back to task path");
         format!("Invalid bridge response JSON: {e}")
     })?;
-    if let Err(e) = auth::verify_payload(&mut v, &key) {
+    if let Err(e) = auth::verify_response(&mut v, &key) {
         log::warn!("Bridge response HMAC verification failed: {e} — falling back to task path");
         return Err(format!("Bridge response authentication failed: {e}"));
     }

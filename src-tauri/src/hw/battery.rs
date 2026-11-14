@@ -133,17 +133,42 @@ static LAST_QUERY_LATENCY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::
 
 /// Whether the previous query was already over the slow threshold.
 ///
-/// P2-4: the slow-query line ran 1 438× in 19 h 30 m (33 % of the log). One
-/// INFO per slow *episode* keeps a regression visible; the rest is DEBUG.
+/// Superseded by [`BATTERY_SLOW_INFO_INTERVAL_MS`]: "one INFO per slow
+/// episode" still produced 811 lines in 53 h because the provider alternates
+/// 1.1 s and 0.9 s, and every fast query reset the episode. Kept only so the
+/// old field name does not silently disappear from the diagnostics.
 #[cfg(windows)]
 static LAST_QUERY_WAS_SLOW: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// A completed battery WMI query slower than this is logged with its measured
-/// duration (the normal path is ~10-100 ms; multi-second queries explain the
-/// timeouts).
+/// One INFO per slow-query window, regardless of how the samples interleave.
+///
+/// Recheck 2026-11-14: 811 INFO lines in 53 h (8 % of the app log) with a
+/// healthy provider that is simply *usually* above threshold. The breaker
+/// already logs the state changes (timeout / circuit open / recovery), so the
+/// per-query duration only needs a periodic sample.
 #[cfg(windows)]
-const BATTERY_SLOW_QUERY_LOG_MS: u64 = 1_000;
+const BATTERY_SLOW_INFO_INTERVAL_MS: u64 = 10 * 60 * 1000;
+
+/// Timestamp of the last INFO slow-query line.
+#[cfg(windows)]
+static LAST_SLOW_INFO_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Should this slow query be written at INFO? Pure so the window is tested.
+#[cfg(windows)]
+pub(crate) fn should_log_slow_info(now_ms: u64, last_info_ms: u64) -> bool {
+    last_info_ms == 0 || now_ms.saturating_sub(last_info_ms) >= BATTERY_SLOW_INFO_INTERVAL_MS
+}
+
+/// A completed battery WMI query slower than this is logged with its measured
+/// duration.
+///
+/// Raised from 1 000 to 2 500 ms (STAB-ROUND-1 recommended 2 500-3 000): the
+/// provider's *typical* query on this host is 1.2-2.0 s, so the old threshold
+/// fired on the normal case. Real stalls are still visible (timeouts are WARN
+/// at 5 s, and the breaker reports every state change).
+#[cfg(windows)]
+const BATTERY_SLOW_QUERY_LOG_MS: u64 = 2_500;
 
 /// Format the timeout warning with the MEASURED wait instead of the constant
 /// threshold. Pure so the format is unit-tested (the old code printed
@@ -477,17 +502,24 @@ fn battery_worker_loop(rx: std::sync::mpsc::Receiver<BatteryRequest>) {
             // app log. The per-query duration of a chronically slow provider is
             // diagnostic detail, not a status event — the breaker already logs
             // the state changes (timeout / circuit open / recovery) at
-            // INFO/WARN. Keep exactly ONE INFO per slow episode so a new
-            // regression is still visible, and DEBUG for the rest of the run.
-            let was_slow = LAST_QUERY_WAS_SLOW.swap(true, std::sync::atomic::Ordering::Relaxed);
+            // INFO/WARN. One INFO per 10 min keeps a regression visible; the
+            // rest is DEBUG. (Recheck 2026-11-14: the "one per episode" latch
+            // did not work — alternating fast/slow queries reset it 811 times.)
+            let now_ms = now_epoch_ms();
+            let due = should_log_slow_info(
+                now_ms,
+                LAST_SLOW_INFO_MS.load(std::sync::atomic::Ordering::Relaxed),
+            );
             let msg = format!(
                 "battery WMI query took {elapsed_ms} ms (slow threshold {BATTERY_SLOW_QUERY_LOG_MS} ms, {})",
                 if result.is_ok() { "ok" } else { "failed" }
             );
-            if was_slow || breaker_degraded() {
-                log::debug!(target: "hw::battery", "{msg}");
-            } else {
+            LAST_QUERY_WAS_SLOW.store(true, std::sync::atomic::Ordering::Relaxed);
+            if due && !breaker_degraded() {
+                LAST_SLOW_INFO_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                 log::info!(target: "hw::battery", "{msg}");
+            } else {
+                log::debug!(target: "hw::battery", "{msg}");
             }
         } else {
             // A fast query ends the slow episode, so the next one logs again.
@@ -828,16 +860,40 @@ fn local_ac_probe_is_useless() -> bool {
     retry_at != 0 && now_epoch_ms() < retry_at
 }
 
+/// Last reason written at INFO for the local AC probe, so the 5-minute
+/// re-deferral does not repeat the same full sentence.
+///
+/// Recheck 2026-11-14: the probe is denied on this host by design and the
+/// deferral is renewed every 5 min, which produced 487 identical INFO lines in
+/// 53 h (5 % of the log). The first line per reason stays at INFO — it is what
+/// explains why the local path is idle — and a *different* reason is news
+/// again, so a new failure mode is never hidden.
+#[cfg(windows)]
+static LOCAL_AC_PROBE_LOGGED_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 #[cfg(windows)]
 fn defer_local_ac_probe(reason: &str) {
     let retry_at = now_epoch_ms().saturating_add(LOCAL_AC_PROBE_DEFER_SECS * 1000);
-    let previous = LOCAL_AC_PROBE_RETRY_AT_MS.swap(retry_at, std::sync::atomic::Ordering::Relaxed);
-    if previous == 0 || previous < retry_at {
-        log::info!(
-            target: "hw::battery",
-            "local AC adapter-power probe skipped for {LOCAL_AC_PROBE_DEFER_SECS}s ({reason}); \
-             the elevated bridge path is unaffected and the local probe retries afterwards"
-        );
+    LOCAL_AC_PROBE_RETRY_AT_MS.store(retry_at, std::sync::atomic::Ordering::Relaxed);
+    // Log the first deferral of the session and any change of reason; renewals
+    // of an already-reported condition are DEBUG.
+    let is_new_reason = {
+        let mut last = crate::util::panic::lock_or_recover(&LOCAL_AC_PROBE_LOGGED_REASON);
+        if last.as_deref() == Some(reason) {
+            false
+        } else {
+            *last = Some(reason.to_string());
+            true
+        }
+    };
+    let msg = format!(
+        "local AC adapter-power probe skipped for {LOCAL_AC_PROBE_DEFER_SECS}s ({reason}); \
+         the elevated bridge path is unaffected and the local probe retries afterwards"
+    );
+    if is_new_reason {
+        log::info!(target: "hw::battery", "{msg}");
+    } else {
+        log::debug!(target: "hw::battery", "{msg} (renewed)");
     }
 }
 
@@ -1288,5 +1344,26 @@ mod tests {
             }
         }
         assert_eq!(last, BREAKER_MAX_BACKOFF);
+    }
+
+    /// Recheck 2026-11-14: the "one INFO per slow episode" latch produced 811
+    /// lines in 53 h because the provider alternates above/below the 1 s
+    /// threshold, resetting the episode on every fast query. The window is now
+    /// time-based.
+    #[test]
+    fn slow_query_info_is_windowed_not_episode_based() {
+        // First slow query of the session is news.
+        assert!(should_log_slow_info(1_000_000, 0));
+        // A second slow query 1 s later is not.
+        assert!(!should_log_slow_info(1_001_000, 1_000_000));
+        // …nor after 9 min.
+        assert!(!should_log_slow_info(1_000_000 + 9 * 60 * 1000, 1_000_000));
+        // The window reopens at 10 min.
+        assert!(should_log_slow_info(
+            1_000_000 + BATTERY_SLOW_INFO_INTERVAL_MS,
+            1_000_000
+        ));
+        // A clock that goes backwards must not spam (saturating_sub).
+        assert!(!should_log_slow_info(5_000, 1_000_000));
     }
 }
