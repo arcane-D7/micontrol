@@ -692,6 +692,16 @@ fn async_runtime_alive() -> bool {
 /// crash — the exact "zombie" state that previously kept the process alive
 /// with a fresh heartbeat but no UI. The runtime probe (S56) covers the other
 /// freeze mode: window alive but every invoke stuck on starved workers.
+///
+/// RECHECK-2 (2026-11-14): `get_webview_window("main")` is NOT a WebView2
+/// liveness check. In production the renderer was GONE (zero
+/// `msedgewebview2.exe` children of the app, 53 h uptime) while the Tauri
+/// window object still existed, so this function answered `true`, `ui_ok`
+/// stayed 1 and the watchdog never restarted the zombie: the owner was left
+/// with a dead window whose `execute_js` failed with wry
+/// `0x8007139F (RO_E_INVALID_STATE)`. A window handle is a Rust-side registry
+/// entry; the renderer is a separate process tree and its absence is the
+/// signal.
 #[cfg(windows)]
 fn ui_is_alive() -> bool {
     let Some(app) = APP_HANDLE.get() else {
@@ -700,7 +710,93 @@ fn ui_is_alive() -> bool {
     if app.get_webview_window("main").is_none() {
         return false;
     }
+    if !renderer_state_is_alive(webview2_child_count(), renderer_uptime_ms()) {
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::error!(
+                target: "hw::crash_recovery",
+                "WebView2 renderer is gone (no msedgewebview2.exe child process) while the \
+                 window object still exists — reporting ui_ok=0 so the watchdog can restart \
+                 this zombie instead of leaving a dead window"
+            );
+        }
+        return false;
+    }
     async_runtime_alive()
+}
+
+/// Name of the WebView2 renderer process (child of the host app).
+#[cfg(windows)]
+const WEBVIEW2_PROCESS: &str = "msedgewebview2.exe";
+
+/// How long after the first heartbeat a missing renderer is tolerated.
+///
+/// The renderer spawns during WebView2 setup, which can trail the first
+/// heartbeat by a second or two — this window is deliberately generous because
+/// a false `ui_ok=0` costs a restart.
+#[cfg(windows)]
+const WEBVIEW_STARTUP_GRACE_MS: u64 = 90_000;
+
+/// Decide from the measured facts. Pure so both directions are unit-tested.
+///
+/// `count == None` means the snapshot API failed: an unknown state must never
+/// be reported as a dead UI (that would restart a healthy app).
+pub(crate) fn renderer_state_is_alive(count: Option<usize>, uptime_ms: u64) -> bool {
+    match count {
+        None => true,
+        Some(n) if n > 0 => true,
+        Some(_) => uptime_ms < WEBVIEW_STARTUP_GRACE_MS,
+    }
+}
+
+/// Milliseconds since this module first asked (slightly LATER than process
+/// start, which makes the grace window conservative).
+#[cfg(windows)]
+fn renderer_uptime_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+/// Number of `msedgewebview2.exe` processes whose parent is this process.
+///
+/// `None` when the toolhelp snapshot could not be taken — see
+/// [`renderer_state_is_alive`] for why that must not look like a crash.
+#[cfg(windows)]
+fn webview2_child_count() -> Option<usize> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+    // leak-check: RAII guard closes the toolhelp snapshot on every return path.
+    let snapshot = crate::util::win_handle::OwnedHandle::new(raw);
+    if snapshot.is_invalid() {
+        return None;
+    }
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let me = std::process::id();
+    let mut count = 0usize;
+    let mut more = unsafe { Process32FirstW(snapshot.raw(), &mut entry) }.is_ok();
+    while more {
+        if entry.th32ParentProcessID == me {
+            let name = String::from_utf16_lossy(&entry.szExeFile);
+            if name
+                .trim_end_matches('\0')
+                .eq_ignore_ascii_case(WEBVIEW2_PROCESS)
+            {
+                count += 1;
+            }
+        }
+        more = unsafe { Process32NextW(snapshot.raw(), &mut entry) }.is_ok();
+    }
+    Some(count)
 }
 
 /// Mark the app's liveness for the watchdog. Called AFTER WebView2 setup
@@ -844,5 +940,20 @@ mod tests {
             vec![1, 2, 10, 20, 30],
             "only the first spike, the second failure and escalation boundaries are logged"
         );
+    }
+
+    /// RECHECK-2: production had zero `msedgewebview2.exe` children with the
+    /// window object still registered, and `ui_ok` stayed 1 for hours.
+    #[test]
+    fn a_missing_renderer_is_reported_as_a_dead_ui() {
+        // Healthy: renderer present.
+        assert!(renderer_state_is_alive(Some(4), 300_000));
+        // Dead renderer after the startup grace: the UI is a zombie.
+        assert!(!renderer_state_is_alive(Some(0), 300_000));
+        assert!(!renderer_state_is_alive(Some(0), WEBVIEW_STARTUP_GRACE_MS));
+        // Still inside the grace window: the renderer may not have spawned yet.
+        assert!(renderer_state_is_alive(Some(0), 5_000));
+        // Unknown state (snapshot failed) must never force a restart.
+        assert!(renderer_state_is_alive(None, 300_000));
     }
 }

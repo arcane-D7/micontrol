@@ -36,6 +36,27 @@ fn legacy_key_path() -> PathBuf {
     crate::elevated::elev_dir().join("elev_key.bin")
 }
 
+/// Windows lock/sharing violations raised when another process holds the key
+/// file for a few milliseconds.
+///
+/// Production shape (recheck 2026-11-14): `[os_turbo] drift re-apply failed:
+/// Cannot lock HMAC key file: … (os error 33)` and the matching
+/// `Cannot read HMAC key file: … (os error 33)` — four WARNs in 53 h. The app,
+/// the elevated helper and the bridge service all open this one file, and
+/// `ERROR_LOCK_VIOLATION` does NOT map to `WouldBlock` in Rust's `ErrorKind`,
+/// so the existing retry loop treated a 5 ms overlap as a permanent failure.
+const WIN32_LOCK_VIOLATION: i32 = 33;
+const WIN32_SHARING_VIOLATION: i32 = 32;
+
+/// Is this error a transient overlap with another process holding the key?
+pub(crate) fn is_lock_contention(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::WouldBlock
+        || matches!(
+            err.raw_os_error(),
+            Some(WIN32_LOCK_VIOLATION) | Some(WIN32_SHARING_VIOLATION)
+        )
+}
+
 /// Get the shared HMAC key, creating it if it does not exist.
 ///
 /// The key is 32 random bytes generated on first call and persisted to disk.
@@ -69,7 +90,7 @@ pub fn get_or_create_key() -> Result<Vec<u8>, String> {
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => break,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(ref e) if is_lock_contention(e) => {
                 if std::time::Instant::now() > deadline {
                     return Err("Timeout acquiring HMAC key file lock (5s)".to_string());
                 }
@@ -122,11 +143,25 @@ pub fn get_or_create_key() -> Result<Vec<u8>, String> {
 /// Read the shared HMAC key (fail-closed if it does not exist).
 ///
 /// Used by the elevated helper: if the key file is missing or unreadable,
-/// all commands are rejected.
+/// all commands are rejected. A *lock* overlap with the app or the bridge is
+/// retried a few times (50 ms apart, ≤ 500 ms) — see [`is_lock_contention`]:
+/// failing the whole command because another process held the file for 3 ms
+/// produced `Bridge auth key unavailable: … os error 33` in production.
 pub fn read_key() -> Result<Vec<u8>, String> {
     migrate_legacy_key();
     let path = key_path();
-    let bytes = std::fs::read(&path).map_err(|e| format!("Cannot read HMAC key file: {e}"))?;
+    const ATTEMPTS: u32 = 10;
+    let mut attempt = 0u32;
+    let bytes = loop {
+        match std::fs::read(&path) {
+            Ok(bytes) => break bytes,
+            Err(e) if is_lock_contention(&e) && attempt + 1 < ATTEMPTS => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("Cannot read HMAC key file: {e}")),
+        }
+    };
     if bytes.len() != 32 {
         return Err("HMAC key file is corrupt (wrong length)".to_string());
     }
@@ -252,6 +287,38 @@ pub fn sign_payload(payload: &mut serde_json::Value, key: &[u8]) {
 /// Returns `Ok(())` if the HMAC is valid and the timestamp is fresh.
 /// Returns `Err(message)` if verification fails.
 pub fn verify_payload(payload: &mut serde_json::Value, key: &[u8]) -> Result<(), String> {
+    verify_hmac_and_strip(payload, key)?;
+
+    // Check timestamp freshness — fail-closed if the field is absent.
+    let ts = payload
+        .get("created_at_ms")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "Missing required created_at_ms field".to_string())?;
+    if !is_timestamp_fresh(ts) {
+        return Err(format!(
+            "Command timestamp {ts} is stale (older than {MAX_COMMAND_AGE_MS} ms)"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify an authenticated **response** (same HMAC, no freshness window).
+///
+/// A response echoes the request's `created_at_ms`, so when the bridge was busy
+/// for longer than [`MAX_COMMAND_AGE_MS`] the HMAC is still valid but the
+/// freshness check rejected it as "stale": production logged `Bridge response
+/// HMAC verification failed: Command timestamp … is stale` at 2026-11-14
+/// 00:53:52 — during a 129 s battery stall — and paid a whole scheduled-task
+/// elevation for a response the bridge had already delivered correctly.
+/// Freshness is a replay guard for *incoming commands*; a response is already
+/// bound to the single-use `request_id` this process issued.
+pub fn verify_response(payload: &mut serde_json::Value, key: &[u8]) -> Result<(), String> {
+    verify_hmac_and_strip(payload, key)
+}
+
+/// Strip `hmac` and verify it with the current key (old key during rotation).
+fn verify_hmac_and_strip(payload: &mut serde_json::Value, key: &[u8]) -> Result<(), String> {
     // Extract and remove the hmac field
     let expected_hmac = payload
         .get("hmac")
@@ -268,7 +335,7 @@ pub fn verify_payload(payload: &mut serde_json::Value, key: &[u8]) -> Result<(),
 
     // S24-003: Try current key first, then old key for grace period.
     if verify_hmac(key, body.as_bytes(), &expected_hmac) {
-        // Current key verified — continue to timestamp check.
+        // Current key verified.
     } else if let Ok(old_key) = read_old_key() {
         if verify_hmac(&old_key, body.as_bytes(), &expected_hmac) {
             log::warn!("Payload verified with old key — key rotation in progress");
@@ -277,17 +344,6 @@ pub fn verify_payload(payload: &mut serde_json::Value, key: &[u8]) -> Result<(),
         }
     } else {
         return Err("HMAC verification failed".to_string());
-    }
-
-    // Check timestamp freshness — fail-closed if the field is absent.
-    let ts = payload
-        .get("created_at_ms")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| "Missing required created_at_ms field".to_string())?;
-    if !is_timestamp_fresh(ts) {
-        return Err(format!(
-            "Command timestamp {ts} is stale (older than {MAX_COMMAND_AGE_MS} ms)"
-        ));
     }
 
     Ok(())
@@ -720,5 +776,61 @@ mod tests {
         let subkey =
             derive_subkey_from_key(key, "").expect("HKDF with empty purpose should succeed");
         assert_eq!(subkey.len(), 32);
+    }
+
+    /// Production shape: the app, an elevated helper and the bridge all open
+    /// `elev_key.bin`; a 3 ms overlap surfaced as "os error 33" and failed the
+    /// whole command. Rust does NOT map ERROR_LOCK_VIOLATION to WouldBlock, so
+    /// it must be recognised by its raw OS code.
+    #[test]
+    fn lock_violation_is_contention_not_a_hard_failure() {
+        assert!(is_lock_contention(&std::io::Error::from_raw_os_error(33)));
+        assert!(is_lock_contention(&std::io::Error::from_raw_os_error(32)));
+        assert!(is_lock_contention(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        // A missing file or a denied read must fail immediately — retrying
+        // those only delays the honest error.
+        assert!(!is_lock_contention(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(!is_lock_contention(&std::io::Error::from_raw_os_error(5)));
+    }
+
+    /// A slow bridge (129 s battery stall in production) answers with an
+    /// intact HMAC but a stale `created_at_ms`. The response must be accepted;
+    /// only incoming commands are freshness-checked.
+    #[test]
+    fn a_late_but_authentic_response_is_not_rejected_as_stale() {
+        let key = b"test-key-32-bytes-long-1234567890";
+        let stale_ts = now_ms() - MAX_COMMAND_AGE_MS - 60_000;
+        let build = || {
+            serde_json::json!({
+                "protocol_version": 3,
+                "request_id": "req-1",
+                "created_at_ms": stale_ts,
+                "ok": true,
+                "data": { "value": 42 },
+            })
+        };
+
+        let mut response = build();
+        sign_payload(&mut response, key);
+        assert!(
+            verify_response(&mut response, key).is_ok(),
+            "a late response with a valid HMAC must be accepted"
+        );
+
+        // The same payload as an incoming command is still rejected.
+        let mut command = build();
+        sign_payload(&mut command, key);
+        let err = verify_payload(&mut command, key).unwrap_err();
+        assert!(err.contains("stale"), "got: {err}");
+
+        // …and a tampered response still fails the HMAC.
+        let mut tampered = build();
+        sign_payload(&mut tampered, key);
+        tampered["data"]["value"] = serde_json::json!(43);
+        assert!(verify_response(&mut tampered, key).is_err());
     }
 }

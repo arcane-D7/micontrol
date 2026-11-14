@@ -57,6 +57,52 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(30);
 /// Consecutive far observations required before a lock is even considered.
 const FAR_CONFIRM_SAMPLES: u32 = 3;
 
+/// How often a *steady-state* sample still reaches INFO (1 scan = 30 s).
+///
+/// 10 samples ≈ 5 min: often enough that a field test sees the current
+/// far/miss counters without waiting, rare enough that the line stops being
+/// the app log. Production (recheck 2026-11-14): 6 410 `[ble_presence] sample`
+/// lines in 53 h = 66 % of the whole file, all at INFO.
+const SAMPLE_INFO_EVERY: u64 = 10;
+
+/// Level for one scan result.
+///
+/// A state transition is news and always goes to INFO, and so does the first
+/// sample after it (the `sample_log_level` caller clears the streak on a
+/// change) plus one heartbeat every [`SAMPLE_INFO_EVERY`] scans. Everything
+/// else is a counter tick: DEBUG.
+pub(crate) fn sample_log_level(state_changed: bool, scan_index: u64) -> log::Level {
+    if state_changed || scan_index.is_multiple_of(SAMPLE_INFO_EVERY) {
+        log::Level::Info
+    } else {
+        log::Level::Debug
+    }
+}
+
+/// Monotonic scan counter, used only for the heartbeat decision.
+static SCAN_INDEX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The state string last written at INFO, so a transition is not missed when
+/// it happens on a non-heartbeat scan.
+static LAST_LOGGED_STATE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Decide the level for this scan and remember the state.
+fn sample_level_for(outcome_state: &str) -> log::Level {
+    let index = SCAN_INDEX.fetch_add(1, Ordering::Relaxed) + 1;
+    let changed = {
+        let mut last = match LAST_LOGGED_STATE.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let changed = last.as_deref() != Some(outcome_state);
+        if changed {
+            *last = Some(outcome_state.to_string());
+        }
+        changed
+    };
+    sample_log_level(changed, index)
+}
+
 /// How long the device must have been continuously far before locking.
 const FAR_CONFIRM_WINDOW: Duration = Duration::from_secs(60);
 
@@ -465,8 +511,10 @@ async fn scan_once() -> Result<(), String> {
                     .or(Some(found.address.clone()));
             }
             *lock_last_seen() = Some(now);
-            // Raw sample, always at INFO: this is the line a field test reads.
-            log::info!(
+            // A field test reads this line. Steady-state scans are DEBUG so a
+            // 53 h session does not put 6 410 counter ticks in the log.
+            log::log!(
+                sample_level_for(outcome.state.as_str()),
                 "[ble_presence] sample rssi={:?} dbm threshold={} state={} streak={}/{} far_for={}s matched={:?} addr={}",
                 found.rssi,
                 cfg.rssi_lock_dbm,
@@ -492,7 +540,8 @@ async fn scan_once() -> Result<(), String> {
                 st.miss_streak = outcome.miss_streak;
                 st.last_seen_seconds_ago = last_seen_seconds_ago();
             }
-            log::info!(
+            log::log!(
+                sample_level_for(outcome.state.as_str()),
                 "[ble_presence] sample rssi=none (no advertisement) state={} streak={}/{} far_for={}s misses={} last_seen={:?}s",
                 outcome.state.as_str(),
                 outcome.far_streak,
@@ -1273,5 +1322,37 @@ mod tests {
             "the canonical comparison must match the address btleplug prints"
         );
         println!("[ble_presence.test] matched {} ({:?})", hit.0, hit.1);
+    }
+
+    /// Recheck 2026-11-14: the sampler wrote one INFO per 30 s scan — 6 410
+    /// lines in 53 h, 66 % of the app log — carrying nothing but counters. A
+    /// transition is still news, and a 5-minute heartbeat keeps the line
+    /// available to the field-test procedure documented in the skill.
+    #[test]
+    fn steady_state_samples_stop_flooding_info() {
+        assert_eq!(sample_log_level(true, 3), log::Level::Info);
+        assert_eq!(sample_log_level(false, 1), log::Level::Debug);
+        assert_eq!(sample_log_level(false, 9), log::Level::Debug);
+        assert_eq!(sample_log_level(false, SAMPLE_INFO_EVERY), log::Level::Info);
+        assert_eq!(
+            sample_log_level(false, SAMPLE_INFO_EVERY * 3),
+            log::Level::Info
+        );
+        // One transition among 100 steady scans produces exactly two INFO
+        // lines (the transition itself is counted separately).
+        let infos = (1..=100u64)
+            .filter(|i| sample_log_level(false, *i) == log::Level::Info)
+            .count();
+        assert_eq!(infos, 10, "one heartbeat per 10 scans");
+    }
+
+    #[test]
+    fn the_state_is_remembered_so_a_transition_is_never_missed() {
+        // First scan of a session is news.
+        assert_eq!(sample_level_for("near"), log::Level::Info);
+        // The next one is not.
+        assert_eq!(sample_level_for("near"), log::Level::Debug);
+        // A transition back to far is news again, even off-beat.
+        assert_eq!(sample_level_for("far"), log::Level::Info);
     }
 }

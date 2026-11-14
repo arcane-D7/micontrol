@@ -2501,8 +2501,13 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
         return; // Only act on key-down events.
     }
 
-    // Log every active WMI key event regardless of what happens next.
-    log::info!("[hotkeys] WMI key: class={class_name} detail={detail:02X?}");
+    // Raw event trace. DEBUG since the recheck of 2026-11-14: the IoT driver
+    // re-announces the same Fn key while it is held and the sampler logged
+    // 1 063 of these in 53 h (11 % of the app log) with no action attached.
+    // The dispatched action below stays at INFO, which is what a support
+    // report needs ("which action fired"), and RUST_LOG=debug brings the raw
+    // line back for Fn-key investigations.
+    log::debug!("[hotkeys] WMI key: class={class_name} detail={detail:02X?}");
 
     // Per-key debounce: IoTDriver may fire active=true repeatedly while a
     // key is held.  Use the distinguish_byte (key code) as the debounce key

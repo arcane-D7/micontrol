@@ -1135,7 +1135,14 @@ mod pipe_server {
 
     /// Upper bound on concurrent client handler threads. A local flood must
     /// not be able to spawn unbounded threads in the SYSTEM service.
-    const MAX_CONCURRENT_CLIENTS: usize = 16;
+    ///
+    /// 16 was too tight for a real event: at the 2026-11-12 09:40 resume the
+    /// app, the bridge and the thermal poller all reconnected at once and the
+    /// service dropped 14 connections in 500 ms ("Too many concurrent pipe
+    /// clients"), which the app's watchdog read as a dead service and restarted
+    /// (9 s without IoT commands). Clients are short-lived — a slot is held
+    /// only for one request — so a larger ceiling costs nothing at rest.
+    const MAX_CONCURRENT_CLIENTS: usize = 64;
     static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
     /// RAII slot in the concurrent-client budget.

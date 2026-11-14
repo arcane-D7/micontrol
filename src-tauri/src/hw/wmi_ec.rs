@@ -670,10 +670,79 @@ mod imp {
 // Response: SGER=0x8000 means success. FRD0/FRD1 contain the result data.
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Attempts for a transient provider stall (`0x80041002`) on a WMAA read.
+///
+/// Measured on this host: 1 716 elevated reads in 53 h, 129 of them failed
+/// with `WBEM_E_NOT_FOUND` (7.5 %), and every retry in the historical log
+/// returned a value moments later. Three attempts cover the stall without
+/// making a genuinely broken provider slow (each failed call returns in ~5 ms,
+/// so the extra cost is the 200 + 400 ms backoff).
+pub(crate) const TRANSIENT_READ_ATTEMPTS: u32 = 3;
+
+/// Is this error the provider stall that must be retried?
+///
+/// ONLY `0x80041002` (WBEM_E_NOT_FOUND) — on this provider that HRESULT is
+/// raised while it rebuilds its method parameters and the next call succeeds.
+/// `0x80041010` (WBEM_E_INVALID_CLASS) is the opposite: a class that is really
+/// absent, where retrying only wastes time. Never widen this predicate to
+/// "any WMI error" — a permission failure must fail fast.
+pub(crate) fn is_transient_provider_stall(message: &str) -> bool {
+    message.contains("0x80041002")
+}
+
+/// Run `call`, retrying ONLY the transient provider stall.
+///
+/// Split out (with the sleep injected) so the retry policy is unit-tested
+/// without touching WMI: the production caller passes
+/// `std::thread::sleep`, tests count the sleeps instead.
+fn with_transient_retry<T, F, S>(mut call: F, mut sleep: S) -> HardwareResult<T>
+where
+    F: FnMut() -> HardwareResult<T>,
+    S: FnMut(u64),
+{
+    let mut attempt = 0u32;
+    loop {
+        match call() {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= TRANSIENT_READ_ATTEMPTS
+                    || !is_transient_provider_stall(&e.to_string())
+                {
+                    return Err(e);
+                }
+                // The provider needs a moment to rebuild the method parameters;
+                // 200 ms was enough in the measured recovery, 400 ms covers the
+                // slower stalls. Linear, not exponential: the whole budget is
+                // 600 ms and the caller's timeout is seconds.
+                let backoff_ms = 200 * u64::from(attempt);
+                log::debug!(
+                    target: "hw::wmi_ec",
+                    "WMAA read hit a degraded WMI provider ({e}); retry {attempt}/{} after {backoff_ms} ms",
+                    TRANSIENT_READ_ATTEMPTS - 1
+                );
+                sleep(backoff_ms);
+            }
+        }
+    }
+}
+
 /// Read a WMAA register via WMI MiInterface.
+///
+/// Retries the transient provider stall in-process (see
+/// [`is_transient_provider_stall`]). Before this, a stall answered `Err` to
+/// `run_elevated_impl`, which could not tell "the command failed" from "the
+/// pipe failed" and therefore re-dispatched a SECOND elevation through the
+/// scheduled task: two process spawns and two failures for one 5 ms hiccup
+/// (129 failed helper runs in 53 h, each matching an app-side failure at the
+/// same second). A stall also blanked the charge-limit read-back, which is
+/// what made the hold supervisor flap to `phase=unknown`.
 #[cfg(windows)]
 pub fn wmi_read(fun2: u16, fun3: u16) -> HardwareResult<WmaaResponse> {
-    imp::wmi_call(FUN1_READ, fun2, fun3, 0)
+    with_transient_retry(
+        || imp::wmi_call(FUN1_READ, fun2, fun3, 0),
+        |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+    )
 }
 
 /// Write a WMAA register via WMI MiInterface.
@@ -1182,5 +1251,78 @@ mod tests {
         assert!(qfan_write_verified(8, 2, 0));
         // …but 0 → 0 proves nothing and must stay unverified.
         assert!(!qfan_write_verified(6, 0, 0));
+    }
+
+    /// Production shape: 62 app-visible + 129 helper-level stalls in 53 h, all
+    /// the same `WBEM_E_NOT_FOUND` while the provider rebuilt its parameters.
+    #[test]
+    fn only_the_provider_stall_is_retried() {
+        assert!(is_transient_provider_stall("Hardware error: 0x80041002"));
+        assert!(is_transient_provider_stall(
+            "WMI query failed: provider returned 0x80041002 (WBEM_E_NOT_FOUND)"
+        ));
+        // A truly absent class, an access denial and an IO error must fail fast.
+        assert!(!is_transient_provider_stall(
+            "Hardware error: 0x80041010 (WBEM_E_INVALID_CLASS)"
+        ));
+        assert!(!is_transient_provider_stall(
+            "Hardware error: 0x80070005 (Access is denied)"
+        ));
+        assert!(!is_transient_provider_stall(
+            "Timeout: blocking hardware operation exceeded 5 seconds"
+        ));
+        assert!(!is_transient_provider_stall(""));
+    }
+
+    #[test]
+    fn a_stall_recovered_on_the_second_call_never_surfaces() {
+        let mut calls = 0u32;
+        let mut sleeps = Vec::new();
+        let result: HardwareResult<u16> = with_transient_retry(
+            || {
+                calls += 1;
+                if calls < 2 {
+                    Err(HardwareError::Wmi("0x80041002".into()))
+                } else {
+                    Ok(65)
+                }
+            },
+            |ms| sleeps.push(ms),
+        );
+        assert_eq!(result.unwrap(), 65);
+        assert_eq!(calls, 2, "one retry is enough for a single stall");
+        assert_eq!(sleeps, vec![200], "first backoff is 200 ms");
+    }
+
+    #[test]
+    fn a_persistent_stall_gives_up_after_the_declared_attempts() {
+        let mut calls = 0u32;
+        let mut sleeps = Vec::new();
+        let result: HardwareResult<u16> = with_transient_retry(
+            || {
+                calls += 1;
+                Err(HardwareError::Wmi("0x80041002".into()))
+            },
+            |ms| sleeps.push(ms),
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, TRANSIENT_READ_ATTEMPTS);
+        // Never a third sleep: the last failure is returned, not retried.
+        assert_eq!(sleeps.len() as u32, TRANSIENT_READ_ATTEMPTS - 1);
+        assert_eq!(sleeps, vec![200, 400]);
+    }
+
+    #[test]
+    fn a_non_transient_error_is_not_retried() {
+        let mut calls = 0u32;
+        let result: HardwareResult<u16> = with_transient_retry(
+            || {
+                calls += 1;
+                Err(HardwareError::Wmi("0x80070005".into()))
+            },
+            |_| panic!("a hard failure must not back off"),
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "permission failures fail fast");
     }
 }
