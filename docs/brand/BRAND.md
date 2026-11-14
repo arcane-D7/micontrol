@@ -3,6 +3,10 @@
 > Documento de marca do MiControl (app de desktop Windows, Tauri + Rust, centro de controlo de um
 > Xiaomi Book Pro 14). Escrito para o dono decidir; números medidos, não adjectivos.
 >
+> **Versão 1.1 — grayscale.** O accent periwinkle `#87A2EA` foi retirado: a identidade é só cinzas
+> neutros. O `preview.html` é self-contained desde esta versão (SVG inline + PNG em data: URI), para
+> os ícones aparecerem em qualquer contexto, incluindo widget embutido.
+>
 > **Estado:** proposta para aprovação. `src-tauri/icons/` e `src/` **não foram tocados** nesta fase.
 > Tudo o que é preciso para aplicar está em `docs/brand/` e o passo de aplicação está no §10.
 
@@ -13,14 +17,16 @@
 - **Símbolo:** um **M** de quatro traços, monoline, com os cantos exteriores cortados a 45° e o vale
   interior a **60,00° exactos**, assente na linha de base. É o monograma do nome e o desenho de um
   *detente* — o entalhe onde um valor fica fixo.
-- **Ícone da app:** o M em tinta `#191B1D` sobre uma **placa accent `#87A2EA`** em squircle (raio 22%).
-  Glifo escuro sobre placa clara: 6,9:1. A alternativa vazada perdeu no teste a 16 px.
+- **Ícone da app:** o M em tinta `#191B1D` sobre uma **placa cinza clara `#E8E9EA`** em squircle
+  (raio 22%). Contraste do glifo: **14,21:1** (AA e AAA). No tema escuro, placa `#232527` com
+  M `#F2F3F4`: **13,84:1**. A alternativa vazada perdeu no teste a 16 px.
 - **Wordmark:** «MiControl» construído letra a letra com a mesma gramática de barras — sem `<text>`,
   sem ficheiro de fonte, sem licença a comprar.
-- **Uma só cor de marca:** o accent periwinkle existe num sítio, a placa do ícone. Símbolo e wordmark
-  são sempre `currentColor`, logo funcionam em claro, escuro, mono e sobre fotografia.
-- **Auditoria `svg_audit.py` (heurística):** símbolo 100/100 · ícone 100/100 · lockup vertical 100/100 ·
-  wordmark e lockups horizontais 99/100 · corte pequeno 100/100.
+- **Zero cor de marca:** só cinzas neutros (croma ≤ 4/255). Não há accent, nem gradientes, nem
+  sombras. Símbolo e wordmark são `currentColor`; a placa existe em duas versões (clara/escura).
+- **Auditoria `svg_audit.py` (heurística):** todos os 10 SVG de marca e o `preview.html` a
+  **100/100**; os três conceitos históricos a 90–95/100 (só lhes falta `<title>` e, em dois,
+  `width`/`height` fixos na raiz).
 
 ---
 
@@ -31,10 +37,10 @@ Cinco adjectivos, na ordem em que mandam:
 | Adjectivo     | O que significa no desenho                                                                 |
 | ------------- | ------------------------------------------------------------------------------------------ |
 | **Preciso**   | Ângulos exactos (60°, 45°, 90°), espessuras iguais, nada «a olho».                          |
-| **Calmo**     | Sem gradientes, sem brilhos, sem sombras. Um accent só, e só onde há estado.                 |
+| **Calmo**     | Sem gradientes, sem brilhos, sem sombras. Sem cor de marca: só cinzas.                      |
 | **Honesto**   | Mostra o que mede. O logo não promete velocidade nem jogos; promete controlo verificável.    |
 | **Técnico**   | Parece um instrumento, não um brinquedo. A referência é a folha de desenho, não o dashboard. |
-| **Contido**   | Um símbolo, uma cor, uma regra. Se uma ideia precisa de legenda, não entra.                  |
+| **Contido**   | Um símbolo, uma escala, uma regra. Se uma ideia precisa de legenda, não entra.               |
 
 **Anti-referências (o que o MiControl não é):** não é gamer (nada de chamas, engrenagens, escudos,
 ventoinhas estilizadas, néon), não é Xiaomi (não imita o logo «Mi»), não é um medidor (o produto
@@ -58,11 +64,11 @@ a preservar, não a deitar fora.
 sombras, um accent que só pinta estado. A marca respeita isso e acrescenta o que a UI não pode ter: a
 16 px uma linha de 1,5 não sobrevive, por isso o **símbolo é a única massa sólida da identidade** — o
 resto (wordmark, ícones, réguas) é linha. O contraste é intencional: a marca é o objecto; a interface é
-a grelha que o mede.
+a grelha que o mede. A marca **não** usa o accent da UI: é grayscale por decisão (§6).
 
 **Relação com a palavra «control».** Controlar não é ter muitos botões; é ter autoridade sobre um
 valor. O símbolo não mostra um painel, mostra o ponto onde a autoridade se exerce. Daí também a
-disciplina do resto: uma cor, um accent, uma espessura.
+disciplina do resto: uma espessura, uma escala de cinzas, zero cor.
 
 ## 3. Três direcções, e porque ficou esta
 
@@ -161,61 +167,87 @@ Decisões de desenho, e o que as resolveu:
 - **Espaçamento por par** (`M-i` 5, `i-C` 8, `C-o` 7, `o-n` 8, `n-t` 5, `t-r` 6, `r-o` 7, `o-l` 9):
   pares com curvas pedem mais ar do que pares de hastes.
 
-O wordmark é **todo `currentColor`**. O accent não entra na tipografia — ver §6.
+O wordmark é **todo `currentColor`**. Não há accent para entrar na tipografia — ver §6.
 
-## 6. Cor
+## 6. Cor — só cinzas
 
-| Token                  | Hex       | oklch              | Onde                                                |
-| ---------------------- | --------- | ------------------ | --------------------------------------------------- |
-| **accent (marca)**     | `#87A2EA` | `72% .11 268`      | placa do ícone; é o `--accent` do tema **escuro**    |
-| **tinta**              | `#191B1D` | `22% .006 250`     | M no ícone, wordmark, símbolo (`--ink` do tema claro) |
-| plano claro            | `#F3F5F6` | `96.8% .003 250`   | fundo do tema claro (`--bg`)                         |
-| plano escuro           | `#15181A` | `20.6% .006 250`   | `--surface` do tema escuro                           |
+A identidade não tem cor de marca. A paleta é uma escala neutra: quatro tokens de tinta/placa e os
+dois planos do tema. A única «cor» que o logo usa é a diferença entre tinta e placa.
 
-**Porque `#87A2EA` e não o accent do tema claro (`#6581D4`).** O ícone precisa de um campo *claro*
-para o glifo ser *escuro*: medido, tinta sobre `#87A2EA` dá **6,9:1**; sobre `#6581D4` daria 4,6:1.
-Também é o valor que o brief do produto nomeia (`oklch(72% .11 268)`).
+| Token         | Hex       | Onde                                        | Croma  |
+| ------------- | --------- | ------------------------------------------- | ------ |
+| **tinta**     | `#191B1D` | símbolo, wordmark, glifo no tile claro      | 4/255  |
+| **placa clara** | `#E8E9EA` | tile no tema claro; ícone da app          | 2/255  |
+| **placa escura** | `#232527` | tile em superfícies escuras              | 4/255  |
+| **tinta clara** | `#F2F3F4` | M sobre a placa escura                     | 2/255  |
+| plano claro   | `#F3F5F6` | fundo do tema claro (`--bg`)                | 3/255  |
+| plano escuro  | `#15181A` | fundo do tema escuro                        | 2/255  |
 
-**Contrastes medidos (WCAG, luminância relativa):**
+**Nenhuma destas cores tem matiz.** O croma máximo é 4/255 — abaixo do limiar em que o olho lê «cor».
+O antigo accent periwinkle `#87A2EA` (croma 99/255) foi retirado na v1.1 a pedido do dono e **não teve
+substituto**: a marca é contraste, não cor. Não há gradiente, sombra nem opacidade em nenhum ficheiro.
 
-| Par                              | Rácio  | Leitura                                   |
-| -------------------------------- | ------ | ----------------------------------------- |
-| tinta `#191B1D` sobre accent     | 6,9:1  | AA para texto — o glifo do ícone é sólido  |
-| accent sobre branco              | 2,5:1  | **não usar accent como texto**             |
-| accent sobre `--bg` escuro       | 7,5:1  | a placa salta na barra escura              |
-| accent sobre `--surface` claro   | 2,5:1  | chega para forma, não para texto           |
+**Contrastes medidos (WCAG 2.x, luminância relativa):**
 
-Regra: **o accent é uma superfície, nunca tinta.** Se precisares de periwinkle em texto, não é este
-token — é um erro de hierarquia.
+| Par                              | Rácio   | Leitura                                                        |
+| -------------------------------- | ------- | -------------------------------------------------------------- |
+| tinta `#191B1D` sobre placa `#E8E9EA` | 14,21:1 | **AAA** — o glifo do ícone (AA pede 4,5:1)                |
+| tinta clara `#F2F3F4` sobre placa `#232527` | 13,84:1 | **AAA** — o glifo no tile escuro                    |
+| tinta sobre branco               | 17,27:1 | AAA — símbolo e wordmark no tema claro                        |
+| placa clara sobre branco         | 1,22:1  | só o bordo da placa; o M escuro é que carrega a forma         |
+| placa escura sobre o plano escuro | 1,16:1 | a placa dissolve-se; o M claro carrega a forma                |
+| placa escura sobre branco        | 15,38:1 | a placa salta no claro                                        |
+
+**O tile de app é o claro** (`logo-tile.svg`: `#E8E9EA` + `#191B1D`, 14,21:1). É a variante que se lê
+nas duas barras do Windows: na escura a placa é o objecto claro; na clara o M escuro é a forma. O
+bordo da placa sobre branco é apenas 1,22:1 — não é contraste de leitura e não se vende como tal; o
+que garante a leitura é o glifo. **O tile escuro** (`logo-tile-dark.svg`: `#232527` + `#F2F3F4`,
+13,84:1) existe para superfícies escuras dentro da app; aí a placa quase desaparece (1,16:1) e o que
+fica é o M claro — é intencional.
+
+**Regra:** a paleta é fechada. Qualquer cor com croma > 6/255 é defeito e o `svg_audit.py` chumba o
+ficheiro (foi assim que o roxo antigo foi varrido de todos os SVGs). Se a UI precisa de estado, usa o
+accent dela; a marca não empresta cor a botões, gráficos ou texto.
 
 ## 7. Ficheiros e como se regeneram
 
 ```
 docs/brand/
-├─ BRAND.md                     este documento
-├─ preview.html                 folha de aprovação (claro/escuro, escada de tamanhos, sidebar)
+├─ BRAND.md                     este documento (v1.1 — grayscale)
+├─ preview.html                 folha de aprovação — self-contained: SVG inline + PNG em data: URI
 ├─ logo-mark.svg                símbolo (M, currentColor)                 ← mestre
 ├─ logo-mark-small.svg          corte pequeno (haste 22%, currentColor)   ← 16–24 px mono
-├─ logo-tile.svg                ícone (placa accent + M tinta)            ← mestre do ícone
+├─ logo-tile.svg                ícone da app (placa #E8E9EA + M #191B1D)  ← mestre do ícone
+├─ logo-tile-dark.svg           ícone para superfícies escuras (#232527 + #F2F3F4)
 ├─ logo-wordmark.svg            «MiControl» (currentColor)
-├─ logo-primary.svg             lockup horizontal (placa + wordmark)
+├─ logo-primary.svg             lockup horizontal (placa clara + wordmark)
+├─ logo-primary-dark.svg        lockup horizontal para fundo escuro
 ├─ logo-primary-mono.svg        lockup a uma tinta (placa com M vazado, evenodd)
 ├─ logo-stacked.svg             lockup vertical
+├─ logo-stacked-dark.svg        lockup vertical para fundo escuro
 ├─ concepts/                    as três direcções exploradas (A, B, C), a preto
 ├─ icons/                       icon set pronto a copiar para src-tauri/icons
 └─ tools/
    ├─ build_brand.py            geometria → SVG (stdlib, determinístico)
    ├─ rasterize.py              SVG → PNG/ICO (Chrome headless em lote)
-   └─ build_preview.py          SVG → preview.html (inline + tokens do tema)
+   ├─ build_preview.py          SVG → preview.html (inline + data: URI) e valida o self-containment
+   └─ svg_audit.py              auditoria: vectorial puro, paleta cinza, AA, preview sem referências
 ```
 
 ```bash
-python docs/brand/tools/build_brand.py     # reescreve os 6 SVG
+python docs/brand/tools/build_brand.py     # reescreve os 10 SVG
 python docs/brand/tools/rasterize.py       # reescreve icons/ (PNG + ICO + tray)
-python docs/brand/tools/build_preview.py   # reescreve preview.html
+python docs/brand/tools/build_preview.py   # reescreve preview.html e falha se houver referência externa
+python docs/brand/tools/svg_audit.py       # auditoria (exit 1 se algum ficheiro < 90)
 ```
 
-Os três correm com o Python do sistema, sem dependências externas além do Pillow (que já existe) e de
+**`preview.html` é self-contained desde a v1.1.** Na v1.0 usava `<img src="icons/…">` e
+`<img src="logo-…svg">` relativos: no repo abria bem, mas num widget embutido (iframe/outro contexto)
+as imagens apareciam quebradas. Agora os SVG entram como markup inline e os PNG como `data: URI`
+base64; o `build_preview.py` tem um validador que falha o build se existir um `src`/`href` que não
+seja `data:`, um `<link>`, um `@import` ou um `url()` externo.
+
+Os quatro correm com o Python do sistema, sem dependências externas além do Pillow (que já existe) e de
 um Chrome/Edge para rasterizar.
 
 **Ícones gerados em `docs/brand/icons/`:** `icon.ico` (7 tamanhos: 16, 24, 32, 48, 64, 128, 256),
@@ -256,18 +288,18 @@ mestre). Nada entra nessa margem — nem texto, nem réguas, nem o bordo de um c
 | Wordmark                      | 96 px de largura | abaixo disso a haste cai a <1,5 px               |
 | Lockup horizontal             | 180 px de largura | ou passar ao `logo-stacked.svg`                  |
 
-**Fundos aprovados:** `--bg` claro, `--surface` claro, `--bg` escuro, `--surface` escuro, placa accent
-(versão mono). Sobre fotografia, usar sempre a versão mono com o M vazado.
+**Fundos aprovados:** `--bg` claro, `--surface` claro, `--bg` escuro, `--surface` escuro, placa clara
+(no claro) e placa escura (no escuro). Sobre fotografia, usar sempre a versão mono com o M vazado.
 
 **Nunca:**
 
 - pôr o M solto ao lado de «MiControl» — lê-se «MMiControl» (aconteceu no primeiro render deste
   trabalho); na sidebar o M vive na linha do logo, com o texto à direita;
-- usar o accent como cor de texto (2,5:1);
+- usar qualquer cor com matiz (a paleta é fechada; croma > 6/255 é defeito);
 - rodar, inclinar, contornar, sombrear ou aplicar gradiente ao símbolo;
 - esticar o wordmark (a largura é consequência da construção, não um parâmetro);
 - usar o M dentro de um círculo, quadrado ou «badge» que não seja a placa definida;
-- recolorir a placa com uma cor que não seja o accent (o ícone perde o contraste medido).
+- recolorir a placa com uma cor que não seja `#E8E9EA`/`#232527` (o ícone perde o contraste medido).
 
 ## 10. Aplicar na app (passo pendente de aprovação)
 
@@ -315,17 +347,22 @@ o ícone novo.
 | --- | -------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | 1   | Aprovar a direcção B (M de precisão)                            | sim — é a que sobrevive a 16 px e a única que diz o nome                   |
 | 2   | Sidebar: marca a 16 px (recomendado) ou manter 22 px            | **16 px** — a 22 px o M fica 1,6× a altura do texto e domina a linha       |
-| 3   | Tray: placa (recomendado) ou M mono                             | **placa** — o M em periwinkle desaparece na barra clara; o mono em tinta desaparece na escura |
+| 3   | Tray: placa clara (recomendado) ou M mono                       | **placa clara** — na barra escura a placa é o objecto; na clara o M escuro (17:1 sobre o plano) carrega a forma. Um M mono desaparece numa das duas |
 | 4   | Substituir `MiControlIcon` e aplicar os ícones                  | quando quiseres; o passo a passo está no §10                              |
 | 5   | Versão empilhada para o README/landing                          | `logo-stacked.svg` já existe; escolher onde entra                          |
-| 6   | Registo de marca                                                | **não foi feito nenhum estudo de anterioridade** — recomenda-se pesquisa profissional antes de uso público |
+| 6   | Accent da UI (`src/styles/globals.css`) ainda é periwinkle      | fora do âmbito da marca; se o dono quiser, neutraliza-se numa passagem só da UI |
+| 7   | Registo de marca                                                | **não foi feito nenhum estudo de anterioridade** — recomenda-se pesquisa profissional antes de uso público |
 
 ## 12. Limites deste trabalho
 
 - **Não houve pesquisa de anterioridade nem verificação de marcas.** O M é um desenho original, mas
   originalidade não é o mesmo que disponibilidade registral.
-- **A auditoria `svg_audit.py` é heurística** (100/100 no símbolo e no ícone não é um certificado: é a
-  ausência de falhas que a ferramenta sabe detectar).
+- **A auditoria `svg_audit.py` é heurística** (100/100 não é um certificado: é a ausência de falhas
+  que a ferramenta sabe detectar — vectorial puro, paleta cinza, viewBox, acessibilidade e o
+  contraste do tile).
+- **O preview foi verificado em Chrome/Edge headless a partir de `file://` no repo e a partir de uma
+  cópia em `%TEMP%`** — o segundo teste simula o caso embutido (sem os ficheiros vizinhos). Os ícones
+  aparecem nos dois.
 - **Os ícones foram vistos a 16, 24, 32, 48, 64, 128, 256 e 512 px** em fundo claro e escuro, mas não
   foram instalados numa barra de tarefas real do Windows 11 com DPI 125/150%. Vale a pena confirmar
   visualmente depois do passo §10.
