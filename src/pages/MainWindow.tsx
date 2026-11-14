@@ -252,7 +252,7 @@ const Sidebar = memo(function Sidebar({
   return (
     <nav aria-label={t('nav.label')} className="sidebar">
       <div className="sidebar-logo">
-        <MiControlIcon size={22} />
+        <MiControlIcon size={16} />
         MiControl
       </div>
 

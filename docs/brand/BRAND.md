@@ -269,9 +269,10 @@ um Chrome/Edge para rasterizar.
    anti-aliasing próprio; reduzido de 256 fica mole.
 4. **`.ico` escrito à mão.** Formato ICONDIR + entradas PNG (Vista+), com cada tamanho rasterizado
    individualmente. `Pillow.save(format="ICO")` reduziria tudo a partir de uma imagem só.
-5. **O `src-tauri/icons/icon.icns` fica desactualizado** se os PNG forem substituídos. O produto só
-   empacota `nsis` (Windows), por isso não é bloqueador; se um dia houver macOS, o `.icns` regenera-se
-   no macOS com `iconutil`.
+5. **O `src-tauri/icons/icon.icns` foi regenerado** a partir de um render de 1024 px da placa
+   (Pillow, entradas 16/32/128/256/512 + @2x), porque nesta máquina não há `iconutil`. O produto só
+   empacota `nsis` (Windows), por isso o `.icns` não entra em nenhum bundle actual; se houver macOS,
+   vale reconfirmar com `iconutil` antes do primeiro build.
 
 ## 9. Uso correcto
 
@@ -301,10 +302,9 @@ mestre). Nada entra nessa margem — nem texto, nem réguas, nem o bordo de um c
 - usar o M dentro de um círculo, quadrado ou «badge» que não seja a placa definida;
 - recolorir a placa com uma cor que não seja `#E8E9EA`/`#232527` (o ícone perde o contraste medido).
 
-## 10. Aplicar na app (passo pendente de aprovação)
+## 10. Aplicado na app
 
-Nesta fase **nada disto foi feito**: `src-tauri/icons/` e `src/` estão como estavam. Quando o dono
-aprovar:
+Aplicado no branch `f8/identity` (direcção aprovada pelo dono). Passos executados:
 
 ```bash
 # 1. ícones da app (mesmos nomes, mesmo sítio)
@@ -315,9 +315,15 @@ mkdir -p public/icons && cp docs/brand/logo-tile.svg public/icons/icon.svg
 ```
 
 ```tsx
-// 3. src/components/MiControlIcon.tsx — substituir o placeholder pelo símbolo novo
-//    (path do logo-mark.svg; o M antigo era um polyline de 2,5 com dois pontos e uma barra)
-<path fill="currentColor" d="M5 0L13 0L39 45.033L65 0L73 0L78 5L78 67L73 72L65 72L65 25.894L39 70.927L13 25.894L13 72L5 72L0 67L0 5Z" />
+// 3. src/components/MiControlIcon.tsx — placeholder substituído pelo símbolo novo.
+//    Usa o CORTE PEQUENO (logo-mark-small.svg: haste 22%, sem chanfros), que é o
+//    especificado para 16–24 px; o M antigo era um polyline de 2,5 com dois pontos
+//    e uma barra em var(--accent).
+<path
+  fill="currentColor"
+  d="M0 0L17 0L39 38.105L61 0L78 0L78 0L78 72L78 72L61 72L61 33.862L39 71.967L17 33.862L17 72L0 72L0 72L0 0Z"
+/>
+// viewBox="-2 -2 82 76"; height = size × 76/82 (a marca não é quadrada)
 ```
 
 ```diff
@@ -335,20 +341,20 @@ mkdir -p public/icons && cp docs/brand/logo-tile.svg public/icons/icon.svg
 ```
 
 O ponto 3 tem de ser feito com o gerador, não à mão: `python docs/brand/tools/build_brand.py` imprime
-a geometria e `docs/brand/logo-mark.svg` é o resultado — copiar o `d` de lá.
+a geometria e `docs/brand/logo-mark-small.svg` é o resultado — copiar o `d` de lá.
 
-**Nota sobre o favicon:** `index.html` e `landing.html` declaram `/icons/icon.svg`, mas
-`public/icons/` não existe no repo. É um 404 silencioso em dev e na landing; o passo 2 resolve-o com
-o ícone novo.
+**Nota sobre o favicon:** `index.html` e `landing.html` declaram `/icons/icon.svg` e `public/icons/`
+não existia no repo — 404 silencioso em dev e na landing. O passo 2 criou o ficheiro; os dois builds
+(`build` e `build:landing`) copiam-no para `dist/icons/icon.svg` e `dist-landing/icons/icon.svg`.
 
 ## 11. O que fica por decidir
 
 | #   | Decisão                                                        | Recomendação                                                              |
 | --- | -------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| 1   | Aprovar a direcção B (M de precisão)                            | sim — é a que sobrevive a 16 px e a única que diz o nome                   |
-| 2   | Sidebar: marca a 16 px (recomendado) ou manter 22 px            | **16 px** — a 22 px o M fica 1,6× a altura do texto e domina a linha       |
+| 1   | Aprovar a direcção B (M de precisão)                            | aprovada e aplicada em `f8/identity`                                      |
+| 2   | Sidebar: marca a 16 px (recomendado) ou manter 22 px            | **16 px, aplicado** — a 22 px o M fica 1,6× a altura do texto e domina a linha |
 | 3   | Tray: placa clara (recomendado) ou M mono                       | **placa clara** — na barra escura a placa é o objecto; na clara o M escuro (17:1 sobre o plano) carrega a forma. Um M mono desaparece numa das duas |
-| 4   | Substituir `MiControlIcon` e aplicar os ícones                  | quando quiseres; o passo a passo está no §10                              |
+| 4   | Substituir `MiControlIcon` e aplicar os ícones                  | **feito** — ver §10                                                       |
 | 5   | Versão empilhada para o README/landing                          | `logo-stacked.svg` já existe; escolher onde entra                          |
 | 6   | Accent da UI (`src/styles/globals.css`) ainda é periwinkle      | fora do âmbito da marca; se o dono quiser, neutraliza-se numa passagem só da UI |
 | 7   | Registo de marca                                                | **não foi feito nenhum estudo de anterioridade** — recomenda-se pesquisa profissional antes de uso público |
