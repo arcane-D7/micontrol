@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -8 472 88" role="img" aria-label="MiControl">
+  <title>MiControl</title>
+  <path fill="currentColor" transform="translate(0 0)" d="M5 0L13 0L39 45.033L65 0L73 0L78 5L78 67L73 72L65 72L65 25.894L39 70.927L13 25.894L13 72L5 72L0 67L0 5Z"/>
+  <path fill="currentColor" transform="translate(87 0)" d="M0 22L13 22L13 72L0 72Z"/>
+  <path fill="currentColor" transform="translate(87 0)" d="M0 0L13 0L13 13L0 13Z"/>
+  <path fill="currentColor" transform="translate(105 0)" d="M65.451 49.111A35 35 0 1 1 65.451 22.889L53.398 27.759A22 22 0 1 0 53.398 44.241Z"/>
+  <path fill="currentColor" transform="translate(179 0)" d="M0 46A26 26 0 1 1 52 46A26 26 0 1 1 0 46ZM13 46A13 13 0 1 0 39 46A13 13 0 1 0 13 46Z"/>
+  <path fill="currentColor" transform="translate(238 0)" d="M0 47.5A25.5 25.5 0 0 1 51 47.5L38 47.5A12.5 12.5 0 0 0 13 47.5ZM0 47.5L13 47.5L13 72L0 72ZM38 47.5L51 47.5L51 72L38 72Z"/>
+  <path fill="currentColor" transform="translate(297 0)" d="M11.5 9L24.5 9L24.5 72L11.5 72ZM0 16L36 16L36 29L0 29Z"/>
+  <path fill="currentColor" transform="translate(338 0)" d="M0 22L13 22L13 72L0 72ZM13 22A26 26 0 0 1 39 48L26 48A13 13 0 0 0 13 35Z"/>
+  <path fill="currentColor" transform="translate(384 0)" d="M0 46A26 26 0 1 1 52 46A26 26 0 1 1 0 46ZM13 46A13 13 0 1 0 39 46A13 13 0 1 0 13 46Z"/>
+  <path fill="currentColor" transform="translate(443 0)" d="M0 0L13 0L13 72L0 72Z"/>
+</svg>
