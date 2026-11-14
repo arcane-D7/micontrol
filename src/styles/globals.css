@@ -466,7 +466,7 @@ body {
 .sidebar-logo {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 6px 10px 12px;
   font-size: 1rem;
   font-weight: 700;
