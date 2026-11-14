@@ -113,9 +113,7 @@ pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<Performance
                     }
                 }
             }
-            log::warn!(
-                "[perf] EC refused the fan profile: requested {want}, QFAN reads {raw:?}"
-            );
+            log::warn!("[perf] EC refused the fan profile: requested {want}, QFAN reads {raw:?}");
             return Ok(PerformanceResult {
                 success: false,
                 method: format!("hq_wmi(refused {want}->{raw:?})+ec_wmaa+registry+overlay"),
