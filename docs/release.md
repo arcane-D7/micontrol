@@ -272,3 +272,27 @@ To deploy the custom IoTService.exe:
   - `0xFE0B0E00` / 0x100 bytes (ECRAM sensor block)
 - ERAM (`0xFE0B0300`) and SMA2 (`0xFE0B0A00`) are **not accessible via IoTDriver** — not in allowed ranges. AC adapter wattage is available via WMI instead.
 - See [RE_ANALYSIS_REPORT.md](./RE_ANALYSIS_REPORT.md) for complete details
+
+
+## Assinatura do updater — protocolo recuperado (2026-11-14)
+
+Fonte: histórico de sessões do Copilot (runbook das releases 0.1.18/0.1.20) + verificação ao vivo na máquina.
+
+### Factos
+- **Chave correcta**: `~/.tauri/micontrol-new.key` — a pubkey em `tauri.conf.json` **bate exactamente** com `micontrol-new.key.pub`. Existem duas chaves antigas (`micontrol.key`, `micontrol-key`) e o CLI escolhe-as por omissão se `TAURI_SIGNING_PRIVATE_KEY` não estiver definida. **Definir sempre explicitamente.**
+- **Password**: está guardada como **variável de ambiente de utilizador** `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (13 caracteres) e também como secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` no repo GitHub (confirmado via `gh secret list`, 2026-07-20). Não é preciso digitá-la — com as duas env vars definidas o signing corre sem prompt (verificado: `tauri signer sign` produziu um `.sig` válido).
+
+### Sequência (PowerShell, sem prompts)
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content "$env:USERPROFILE\.tauri\micontrol-new.key" -Raw).Trim()
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Environment]::GetEnvironmentVariable('TAURI_SIGNING_PRIVATE_KEY_PASSWORD','User')
+pnpm run tauri build -f face --config build-local-nosign.json   # sem cert local; o updater fica assinado
+# latest.json para o endpoint do updater:
+node scripts/generate-latest-json.mjs <versao> <caminho .sig> "https://github.com/arcane-D7/micontrol/releases/latest/download/MiControl_<versao>_x64-setup.exe" src-tauri/target/release/bundle/nsis/latest.json
+# corpo da release a partir do CHANGELOG:
+node scripts/extract-changelog.mjs <versao> body.md
+gh release create v<versao> --repo arcane-D7/micontrol --title "..." --notes-file body.md <artefactos>
+```
+- Alternativa: `scripts/publish-release.ps1 -Version <versao>` faz tudo (carrega a chave sozinho; a password vem da env var — "no prompt" confirmado em 0.1.20).
+- **Depois do tag push, o `release.yml` do CI arranca e NÃO consegue compilar** (runner de 2 vCPU): cancelar com `gh run cancel <id> --repo arcane-D7/micontrol`.
+- Produção local usa `--config build-local-nosign.json` (sem certificado Authenticode); o `TAURI_SIGNING_PRIVATE_KEY` trata apenas do artefacto do updater.
