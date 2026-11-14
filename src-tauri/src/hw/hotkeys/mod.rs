@@ -561,7 +561,17 @@ async fn apply_copilot_fix_inner() -> CopilotApplyOutcome {
     {
         Ok(result) => {
             if let Some(stdout) = result.get("stdout").and_then(|v| v.as_str()) {
-                log::info!("[hotkeys] Copilot policy set: {}", stdout.trim());
+                // The elevated script returns one result per line. Log them
+                // joined: a multi-line message leaves every following line
+                // without a timestamp/level prefix, which breaks log parsing
+                // (4 such lines per start in production).
+                let summary = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                log::info!("[hotkeys] Copilot policy set: {summary}");
             }
         }
         Err(e) => {
