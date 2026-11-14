@@ -221,7 +221,7 @@ def main() -> None:
     tmp = ICONS / "_tmp"
     tile = (ROOT / "logo-tile.svg").read_text(encoding="utf-8")
 
-    # 1. Ícone da app — placa accent com o M, rasterizada de raiz por tamanho
+    # 1. Ícone da app — placa cinza clara com o M, rasterizada de raiz por tamanho
     app_sizes = [512, 256, 128, 64, 48, 32, 24, 16]
     got = render_batch([(f"tile-{s}.png", tile, s, s) for s in app_sizes], tmp)
     (ICONS / "icon.png").write_bytes(got["tile-512.png"].read_bytes())
@@ -238,10 +238,9 @@ def main() -> None:
         (ICONS / f"Square{s}x{s}Logo.png").write_bytes(got2[f"s{s}.png"].read_bytes())
     (ICONS / "StoreLogo.png").write_bytes(got2["s50.png"].read_bytes())
 
-    # 3. Tray — o mesmo ícone, em 16/24/32/48. A placa accent garante contraste
-    #    tanto na barra clara como na escura; um M solto em periwinkle
-    #    desaparece em fundo claro (medido no preview) e um M em tinta
-    #    desaparece em fundo escuro.
+    # 3. Tray — o mesmo ícone, em 16/24/32/48. A placa clara dá um campo de
+    #    contraste ao M nas duas barras: no escuro a placa é o objecto, no
+    #    claro o M escuro carrega a forma (contraste medido no BRAND.md §6).
     got3 = render_batch([(f"tray-{s}.png", tile, s, s) for s in (48, 32, 24, 16)], tmp)
     for s in (16, 24, 32, 48):
         (ICONS / f"tray-{s}.png").write_bytes(got3[f"tray-{s}.png"].read_bytes())

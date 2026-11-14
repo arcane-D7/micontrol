@@ -29,9 +29,12 @@ M_VALLEY = 50.0  # vértice interior do V
 M_FLAT = 0.0     # face plana no fundo do vale; 0 = bico exacto a 60 graus
 
 INK = "currentColor"
-INK_HEX = "#191b1d"
-NL = chr(10)  # nova linha, para nao depender de escapes no shell  # = oklch(22% .006 250), o --ink do tema claro
-ACCENT = "#87a2ea"  # = oklch(72% .11 268), o --accent do tema escuro — ver BRAND.md §5
+INK_HEX = "#191b1d"      # tinta: glifo na placa clara, wordmark, símbolo
+NL = chr(10)  # nova linha, para nao depender de escapes no shell
+# Paleta 100% cinza (sem accent) — ver BRAND.md §6.
+PLATE_LIGHT = "#e8e9ea"  # placa do tile em tema claro
+PLATE_DARK = "#232527"   # placa do tile em tema escuro
+GLYPH_DARK = "#f2f3f4"   # M sobre a placa escura
 
 
 def n(v: float) -> str:
@@ -264,7 +267,7 @@ def rounded_rect(x, y, w, h, rad):
 
 
 def tile_paths(size=256.0, pad=10.0, rad=56.0):
-    """Devolve (plate_d, glyph_d) da placa accent com o M em tinta."""
+    """Devolve (plate_d, glyph_d) da placa com o M."""
     plate = rounded_rect(pad, pad, size - 2 * pad, size - 2 * pad, rad)
     bold = dict(stem=16.0, flat=0.0, chamfer=6.0)
     scale = 0.56 * (size - 2 * pad) / M_W
@@ -275,20 +278,25 @@ def tile_paths(size=256.0, pad=10.0, rad=56.0):
     return plate, glyph
 
 
-def write_tile(name="logo-tile.svg"):
+def write_tile(name="logo-tile.svg", plate_color=PLATE_LIGHT, glyph_color=INK_HEX):
     """
-    Ícone da app: placa accent (squircle 22%) com o M em tinta.
+    Ícone da app: placa (squircle 22%) com o M em tinta.
 
     Decisão (ver BRAND.md §4): o glifo escuro sobre placa clara ganha ao M
     vazado a 16–32 px — o vazado muda de cor com a barra de tarefas e perde
     contraste; a placa redonda é a forma nativa do Windows 11.
     O M do ícone é o corte «small»: haste a 22% da altura (vs 18% do mestre),
     porque a 16 px só a espessura e o contraste sobrevivem.
+
+    A identidade é grayscale: `logo-tile.svg` é a placa clara (#E8E9EA com
+    M #191B1D, ratio 14,2:1) e `logo-tile-dark.svg` a placa escura (#232527
+    com M #F2F3F4, ratio 13,8:1). O tile rasterizado (icon.ico/PNG) usa a
+    variante clara — é a que se lê nas duas barras do Windows.
     """
     plate, glyph = tile_paths()
     body = (
-        f'  <path fill="{ACCENT}" d="{plate}"/>\n'
-                f'  <path fill="{INK_HEX}" d="{glyph}"/>\n'
+        f'  <path fill="{plate_color}" d="{plate}"/>\n'
+        f'  <path fill="{glyph_color}" d="{glyph}"/>\n'
     )
     (ROOT / name).write_text(svg((0, 0, 256, 256), body, 256, "MiControl"), encoding="utf-8")
 
@@ -305,7 +313,7 @@ def write_wordmark():
     )
 
 
-def write_primary(name="logo-primary.svg", mono=False):
+def write_primary(name="logo-primary.svg", mono=False, dark=False):
     """
     Lockup horizontal: placa (altura = altura das maiusculas) + wordmark.
 
@@ -314,16 +322,20 @@ def write_primary(name="logo-primary.svg", mono=False):
 
     mono=True -> uma so tinta (currentColor): a placa leva o M vazado a
     fill-rule="evenodd", portanto funciona sobre qualquer fundo.
+    dark=True -> placa escura com M claro (para superficies escuras); o
+    wordmark continua currentColor.
     """
     subs, total = wordmark()
     gap, pad = 24.0, 10.0
     x0 = CAP + gap
     plate, glyph = tile_paths(size=CAP, pad=0.0, rad=CAP * 0.22)
+    plate_color = PLATE_DARK if dark else PLATE_LIGHT
+    glyph_color = GLYPH_DARK if dark else INK_HEX
     if mono:
         body = f'  <path fill="{INK}" fill-rule="evenodd" d="{plate}{glyph}"/>' + NL
     else:
-        body = f'  <path fill="{ACCENT}" d="{plate}"/>' + NL
-        body += f'  <path fill="{INK_HEX}" d="{glyph}"/>' + NL
+        body = f'  <path fill="{plate_color}" d="{plate}"/>' + NL
+        body += f'  <path fill="{glyph_color}" d="{glyph}"/>' + NL
     for d, _kind, x in subs:
         body += f'  <path fill="{INK}" transform="translate({n(x0 + x)} 0)" d="{d}"/>' + NL
     w = x0 + total
@@ -333,17 +345,19 @@ def write_primary(name="logo-primary.svg", mono=False):
     )
 
 
-def write_stacked(name="logo-stacked.svg"):
+def write_stacked(name="logo-stacked.svg", dark=False):
     """Lockup vertical: placa em cima, wordmark centrado em baixo."""
     subs, total = wordmark()
     plate, glyph = tile_paths(size=CAP, pad=0.0, rad=CAP * 0.22)
+    plate_color = PLATE_DARK if dark else PLATE_LIGHT
+    glyph_color = GLYPH_DARK if dark else INK_HEX
     gap, pad = 28.0, 10.0
     w = max(CAP, total)
     x_plate = (w - CAP) / 2
     y_word = CAP + gap
     body = f'  <g transform="translate({n(x_plate)} 0)">' + NL
-    body += f'    <path fill="{ACCENT}" d="{plate}"/>' + NL
-    body += f'    <path fill="{INK_HEX}" d="{glyph}"/>' + NL
+    body += f'    <path fill="{plate_color}" d="{plate}"/>' + NL
+    body += f'    <path fill="{glyph_color}" d="{glyph}"/>' + NL
     body += "  </g>" + NL
     x0 = (w - total) / 2
     for d, _kind, x in subs:
@@ -373,10 +387,13 @@ def write_concept_b():
 def main():
     write_mark()
     write_tile()
+    write_tile(name="logo-tile-dark.svg", plate_color=PLATE_DARK, glyph_color=GLYPH_DARK)
     write_wordmark()
     write_primary()
+    write_primary(name="logo-primary-dark.svg", dark=True)
     write_primary(name="logo-primary-mono.svg", mono=True)
     write_stacked()
+    write_stacked(name="logo-stacked-dark.svg", dark=True)
     write_concept_b()
     print("svg:", sorted(p.name for p in ROOT.glob("logo-*.svg")))
 
