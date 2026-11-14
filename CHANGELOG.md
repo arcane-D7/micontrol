@@ -5,6 +5,12 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.22] - 2026-11-14
+
+### Fixed
+
+- **The performance-mode switch no longer reports success when the EC refuses the profile.** Live measurement on this firmware: `Turbo` (2) latches in `QFAN`, but `LongBattery` (11) is refused and `QFAN` keeps its previous value while the old code returned `success: true` and the UI showed "not nameable (raw 0)". `set_performance_mode` now reads `QFAN` back after the write: an unlatched value returns `success: false` with the requested/actual pair, and `LongBattery` falls back to the **Smart** profile (10) — the adaptive battery curve this EC does accept — reported as `hq_wmi+smart_fallback`.
+
 ## [0.2.21] - 2026-11-14
 
 ### Highlights
