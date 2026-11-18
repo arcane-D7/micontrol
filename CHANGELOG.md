@@ -5,6 +5,12 @@ All notable changes to miPC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Clean-machine installs no longer abort on the DriverStore ACL.** The installer replaced `…\DriverStore\FileRepository\iotdriver.inf_*\IoTService.exe` with `ecram_service.exe` via `CopyFiles`, which never reports an error: on a machine where the package dir keeps the default ACL (SYSTEM-only write, no explicit user ACE) the copy failed silently, the old `${FileExists}` check passed on the OEM binary anyway, and `install-service` then ran the OEM Xiaomi `IoTService.exe` — which cannot start on its own (exit `0xC0000135`, `STATUS_DLL_NOT_FOUND`) — aborting the whole installation. The hook now verifies the copy byte-for-byte (`fc /b`), retries it as SYSTEM through a one-shot scheduled task when the ACL denies the write, and never runs `install-service` over the OEM binary. Any remaining failure is a warning, not an abort: the app installs, EC RAM degrades to "unavailable", and the elevated helper re-attempts the replacement on the first start.
+
 ## [0.2.22] - 2026-11-14
 
 ### Fixed
@@ -26,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Edge Slide usable.** Cursor is pinned during the gesture (`ClipCursor`), pre-roll 8 mm, band 16%/28% adjustable via `HKCU\Software\MiControl\Touchpad`, one haptic tick per step.
 - **Stability.** Blocking `recv_timeout` inside async removed (no more runtime starvation), watchdog waits for port 4000 before relaunching, battery WMI circuit breaker, log noise cut by ~95 % on the noisiest paths, installer shell deploy v2 with a per-step log and a network-free bootstrap self-heal.
 - **Signing.** The setup shell is Authenticode-signed (self-signed certificate; SmartScreen will still warn until a CA certificate is installed — the pipeline is ready for one) and the updater payload is minisign-signed.
-
 
 ### Fixed
 
