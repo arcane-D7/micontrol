@@ -1110,16 +1110,26 @@ mod pipe_server {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{
+        CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{
+        GetTokenInformation, RevertToSelf, TokenUser, PSID, TOKEN_QUERY, TOKEN_USER,
+    };
     use windows::Win32::Storage::FileSystem::{
         FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe,
-        PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, ImpersonateNamedPipeClient,
+        PeekNamedPipe, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES,
+        PIPE_WAIT,
     };
-    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::System::Threading::{
+        CreateEventW, GetCurrentThread, OpenThreadToken, WaitForSingleObject,
+    };
     use windows::Win32::System::IO::CancelIoEx;
 
     const PIPE_NAME: &str = r"\\.\pipe\ecram_service";
@@ -1174,21 +1184,35 @@ mod pipe_server {
         }
     }
 
-    /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
-    /// access to the named pipe.
+    /// DACL applied to every pipe instance.
     ///
-    /// When the service runs as `NT AUTHORITY\SYSTEM`, pipes created without
-    /// explicit security inherit a DACL that only SYSTEM can access — the
-    /// unprivileged MiControl app would then fail to open
-    /// `\\.\pipe\ecram_service` (ERROR_ACCESS_DENIED). Granting Everyone
-    /// access mirrors what the original Xiaomi IoTService does and is safe
-    /// because the pipe payloads are opaque EC commands with their own
-    /// authentication at the app layer.
+    /// The service runs as `NT AUTHORITY\SYSTEM`; pipes created without an
+    /// explicit security descriptor inherit a SYSTEM-only DACL, which the
+    /// unprivileged MiControl app cannot open (`ERROR_ACCESS_DENIED`). The
+    /// client that must keep working is the interactively logged-on user, so
+    /// the DACL grants:
     ///
-    /// Implementation: build the DACL from the canonical SDDL string
-    /// `D:(A;;GA;;;WD)` (Everyone/World → Generic All) via
-    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`. This is the
-    /// deterministic way to grant Everyone access and works identically
+    ///   * `SY` — `NT AUTHORITY\SYSTEM`, full control (the service account;
+    ///     also covers the SYSTEM bridge/watchdog clients),
+    ///   * `IU` — `INTERACTIVE`, generic read + generic write (the app).
+    ///
+    /// SEC-01: this was `D:(A;;GA;;;WD)` — Everyone, generic all — so *any*
+    /// local process could talk to the SYSTEM service. The write gate below
+    /// is the second half of the fix; this constant is the first.
+    const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GRGW;;;IU)";
+
+    /// SID string of `NT AUTHORITY\SYSTEM`.
+    const SYSTEM_SID: &str = "S-1-5-18";
+
+    /// Response for a mutating request whose client is neither SYSTEM nor the
+    /// user signed in on the console.
+    const WRITE_DENIED_RESPONSE: &str =
+        r#"{"ok":false,"error":"permission denied: pipe write requires the signed-in user"}"#;
+
+    /// Build a SECURITY_ATTRIBUTES holding the DACL from [`PIPE_SDDL`].
+    ///
+    /// Implementation: `ConvertStringSecurityDescriptorToSecurityDescriptorW`
+    /// parses the SDDL into a real SECURITY_DESCRIPTOR and works identically
     /// whether the process runs as the interactive user or as SYSTEM.
     ///
     /// Previous iterations used `BuildExplicitAccessWithNameW` +
@@ -1213,10 +1237,7 @@ mod pipe_server {
         };
 
         unsafe {
-            let sddl: Vec<u16> = "D:(A;;GA;;;WD)"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain(std::iter::once(0)).collect();
             let mut psd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
 
             let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -1242,6 +1263,183 @@ mod pipe_server {
                 bInheritHandle: false.into(),
             })
         }
+    }
+
+    /// Ops that change hardware or device state.
+    ///
+    /// Everything else this pipe accepts is a read: `read`, `read_region`,
+    /// `ping` and the `iot_get …` queries. Only these require the
+    /// write-authorization gate (SEC-01).
+    fn op_is_mutating(op: &str) -> bool {
+        matches!(
+            op,
+            "write"
+                | "iot_reset_device"
+                | "iot_empty_wifi"
+                | "iot_connect_wifi"
+                | "iot_send_laptop_status"
+                | "iot_write_wifi_item"
+                | "iot_delete_wifi_item"
+                | "iot_set_device_status"
+                | "iot_set_charging_threshold"
+        )
+    }
+
+    /// True when this request must pass the write-authorization gate.
+    /// Unparseable requests are not mutating — `process_request` answers them
+    /// with a JSON error and touches no hardware.
+    fn request_needs_write_auth(request: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(request.trim())
+            .ok()
+            .and_then(|v| v.get("op").and_then(|o| o.as_str()).map(op_is_mutating))
+            .unwrap_or(false)
+    }
+
+    /// SEC-01 policy: a mutating pipe operation is allowed for SYSTEM and for
+    /// the user signed in on the console, and for nobody else.
+    ///
+    /// Kept pure so the decision is unit-testable without a live pipe and a
+    /// second logon: [`current_thread_sid`] and [`console_user_sid`] resolve
+    /// the SIDs, this function owns the rule.
+    fn write_allowed_for(user_sid: &str, console_sid: &str, is_system: bool) -> bool {
+        if is_system || user_sid.eq_ignore_ascii_case(SYSTEM_SID) {
+            return true;
+        }
+        !console_sid.is_empty() && user_sid.eq_ignore_ascii_case(console_sid)
+    }
+
+    /// Impersonation of the connected pipe client, reverted on drop.
+    ///
+    /// Every early return in [`client_may_write`] and every panic must leave
+    /// the handler thread running as the service account again: a leaked
+    /// impersonation token would run the rest of the request — and the next
+    /// request served by this thread — as the client.
+    struct ImpersonationGuard;
+
+    impl Drop for ImpersonationGuard {
+        fn drop(&mut self) {
+            let _ = unsafe { RevertToSelf() };
+        }
+    }
+
+    /// Swap the handler thread's token for the connected client's.
+    fn impersonate_pipe_client(handle: HANDLE) -> Result<ImpersonationGuard, String> {
+        unsafe { ImpersonateNamedPipeClient(handle) }
+            .map_err(|e| format!("ImpersonateNamedPipeClient: {e}"))?;
+        Ok(ImpersonationGuard)
+    }
+
+    /// `S-1-5-…` string of the user that owns `token` (`TokenUser`).
+    fn token_user_sid(token: HANDLE) -> Result<String, String> {
+        unsafe {
+            let mut needed = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+            if needed == 0 {
+                return Err(format!(
+                    "GetTokenInformation(TokenUser) size probe failed: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            // u64 buffer: TOKEN_USER and the SID it points at are pointer-aligned.
+            let mut buf = vec![0u64; (needed as usize).div_ceil(std::mem::size_of::<u64>())];
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            )
+            .map_err(|e| format!("GetTokenInformation(TokenUser): {e}"))?;
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            sid_to_string(user.User.Sid)
+        }
+    }
+
+    /// Render a SID as its `S-1-5-…` string.
+    fn sid_to_string(sid: PSID) -> Result<String, String> {
+        unsafe {
+            let mut raw = PWSTR::null();
+            ConvertSidToStringSidW(sid, &mut raw)
+                .map_err(|e| format!("ConvertSidToStringSidW: {e}"))?;
+            let text = raw.to_string().map_err(|e| format!("SID text: {e}"));
+            LocalFree(HLOCAL(raw.0.cast()));
+            text
+        }
+    }
+
+    /// SID of the user signed in on the physical console, if any.
+    ///
+    /// `WTSQueryUserToken` needs SYSTEM with `SeTcbPrivilege`, which the
+    /// service has. When it cannot answer (nobody logged on, or the binary
+    /// runs in console mode as a normal user) the caller fails closed.
+    fn console_user_sid() -> Option<String> {
+        unsafe {
+            let session_id = WTSGetActiveConsoleSessionId();
+            if session_id == u32::MAX {
+                return None;
+            }
+            let mut token = HANDLE::default();
+            if WTSQueryUserToken(session_id, &mut token).is_err() {
+                return None;
+            }
+            let sid = token_user_sid(token);
+            CloseHandle(token).ok();
+            sid.ok()
+        }
+    }
+
+    /// SID of the current user of this thread — the impersonated client while
+    /// an [`ImpersonationGuard`] is alive.
+    fn current_thread_sid() -> Result<String, String> {
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, false, &mut token)
+                .map_err(|e| format!("OpenThreadToken: {e}"))?;
+            let sid = token_user_sid(token);
+            CloseHandle(token).ok();
+            sid
+        }
+    }
+
+    /// SEC-01: may the connected client mutate hardware state?
+    ///
+    /// Runs on the client handler thread while the client is still connected.
+    /// Denies on every failure path (cannot impersonate, cannot read the
+    /// token, no resolvable console user): an unauthenticated client must
+    /// never fall through to `write_ecram` or an `iot_*` mutator.
+    fn client_may_write(handle: HANDLE) -> bool {
+        // Resolve the console user BEFORE impersonating: WTSQueryUserToken
+        // needs SeTcbPrivilege, which the impersonated client does not have —
+        // resolving it inside the impersonation would fail and wrongly deny
+        // the signed-in user.
+        let console_sid = console_user_sid().unwrap_or_default();
+        let guard = match impersonate_pipe_client(handle) {
+            Ok(guard) => guard,
+            Err(e) => {
+                super::service_log(&format!("write auth: {e}"));
+                return false;
+            }
+        };
+        let user_sid = match current_thread_sid() {
+            Ok(sid) => sid,
+            Err(e) => {
+                super::service_log(&format!("write auth: cannot read client token: {e}"));
+                return false;
+            }
+        };
+        let is_system = user_sid.eq_ignore_ascii_case(SYSTEM_SID);
+        let allowed = write_allowed_for(&user_sid, &console_sid, is_system);
+        // RevertToSelf before the request runs: the EC IOCTLs must execute as
+        // the service account, never as the (possibly restricted) client.
+        drop(guard);
+        if allowed {
+            super::service_log(&format!("write auth: allowed for {user_sid}"));
+        } else {
+            super::service_log(&format!(
+                "write auth: denied client {user_sid} (console user '{console_sid}')"
+            ));
+        }
+        allowed
     }
 
     /// Run the named pipe server. Blocks until `shutdown` is set.
@@ -1471,17 +1669,27 @@ mod pipe_server {
                 }
             }
             ClientRead::Request(request) => {
-                let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    process_request(&request)
-                })) {
-                    Ok(response) => response,
-                    Err(payload) => {
-                        let msg = panic_payload_message(&payload);
-                        super::service_log(&format!(
-                            "PANIC in process_request (request len {}): {msg}",
-                            request.len()
-                        ));
-                        r#"{"ok":false,"error":"internal error processing request"}"#.to_string()
+                // SEC-01: mutating ops (EC writes, IoT resets/wifi/charge) are
+                // authenticated before the request reaches `process_request`.
+                // Reads stay open to Interactive Users, which is what the app
+                // needs; a write from anyone but SYSTEM or the signed-in user
+                // is answered (not dropped) so the client can report why.
+                let response = if request_needs_write_auth(&request) && !client_may_write(handle) {
+                    WRITE_DENIED_RESPONSE.to_string()
+                } else {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        process_request(&request)
+                    })) {
+                        Ok(response) => response,
+                        Err(payload) => {
+                            let msg = panic_payload_message(&payload);
+                            super::service_log(&format!(
+                                "PANIC in process_request (request len {}): {msg}",
+                                request.len()
+                            ));
+                            r#"{"ok":false,"error":"internal error processing request"}"#
+                                .to_string()
+                        }
                     }
                 };
                 write_response(handle, &response);
@@ -1904,6 +2112,238 @@ mod pipe_server {
             let response = process_request("not json");
             assert!(response.contains(r#""ok":false"#), "{response}");
             assert!(response.contains("invalid JSON"), "{response}");
+        }
+
+        /// SEC-01: the pipe DACL must not contain an ACE for Everyone, and
+        /// must keep SYSTEM (service account) and INTERACTIVE (the app's
+        /// logged-on user) so the app keeps working.
+        #[test]
+        fn pipe_dacl_excludes_everyone_and_keeps_system_and_interactive() {
+            assert!(
+                !PIPE_SDDL.contains(";;;WD"),
+                "SEC-01: pipe DACL still grants Everyone (WD): {PIPE_SDDL}"
+            );
+            assert!(
+                !PIPE_SDDL.contains(";;;AN"),
+                "SEC-01: pipe DACL must not grant Anonymous (AN): {PIPE_SDDL}"
+            );
+            assert!(
+                PIPE_SDDL.contains(";;;SY"),
+                "SEC-01: pipe DACL must grant NT AUTHORITY\\SYSTEM (SY): {PIPE_SDDL}"
+            );
+            assert!(
+                PIPE_SDDL.contains(";;;IU"),
+                "SEC-01: pipe DACL must grant INTERACTIVE (IU): {PIPE_SDDL}"
+            );
+        }
+
+        /// SEC-01: round-trip the SECURITY_DESCRIPTOR the service actually
+        /// hands to `CreateNamedPipeW` and assert on the DACL Win32 renders
+        /// back — the object, not just the constant.
+        #[test]
+        fn built_pipe_security_descriptor_has_no_everyone_ace() {
+            let sa = build_pipe_security_attributes().expect("pipe SDDL must parse");
+            let text = security_descriptor_to_sddl(sa.lpSecurityDescriptor)
+                .expect("pipe security descriptor must convert back to SDDL");
+            assert!(
+                !text.contains(";;;WD"),
+                "SEC-01: the built pipe DACL grants Everyone: {text}"
+            );
+            assert!(
+                text.contains(";;;SY"),
+                "SEC-01: the built pipe DACL must grant SYSTEM: {text}"
+            );
+            assert!(
+                text.contains(";;;IU"),
+                "SEC-01: the built pipe DACL must grant INTERACTIVE: {text}"
+            );
+        }
+
+        /// SEC-01: a pipe instance created with the service's own
+        /// SECURITY_ATTRIBUTES must have a DACL with no Everyone ACE. This
+        /// creates a REAL kernel pipe object under a unique test-only name
+        /// (never the production name) and reads its DACL back.
+        #[test]
+        fn pipe_instance_created_with_service_dacl_excludes_everyone() {
+            // leak-check: test-only — the server instance and the client handle
+            // are both closed explicitly before the test returns (no OwnedHandle:
+            // GetSecurityInfo needs the raw server handle in between).
+            use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+            use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+            use windows::Win32::Security::{ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+            use windows::Win32::System::Pipes::{
+                CreateNamedPipeW, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+            };
+
+            let name = format!(r"\\.\pipe\ecram_service_sec01_test_{}", std::process::id());
+            let name_w: Vec<u16> = OsStr::new(&name).encode_wide().chain(Some(0)).collect();
+            let sa = build_pipe_security_attributes().expect("pipe SDDL must parse");
+
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(name_w.as_ptr()),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                    1,
+                    PIPE_BUF_SIZE,
+                    PIPE_BUF_SIZE,
+                    0,
+                    Some(&sa as *const _),
+                )
+            };
+            assert_ne!(
+                handle,
+                INVALID_HANDLE_VALUE,
+                "CreateNamedPipeW for the test instance failed: {}",
+                io::Error::last_os_error()
+            );
+
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+            let rc = unsafe {
+                GetSecurityInfo(
+                    handle,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    Some(&mut dacl),
+                    None,
+                    Some(&mut sd),
+                )
+            };
+            let text = if rc == ERROR_SUCCESS && !sd.0.is_null() {
+                security_descriptor_to_sddl(sd.0)
+            } else {
+                None
+            };
+            if !sd.0.is_null() {
+                unsafe {
+                    LocalFree(HLOCAL(sd.0));
+                }
+            }
+
+            let text = text.expect("pipe DACL must be readable");
+            println!("pipe instance created with the service DACL: {text}");
+            assert!(
+                !text.contains(";;;WD"),
+                "SEC-01: created pipe DACL grants Everyone: {text}"
+            );
+            assert!(
+                text.contains(";;;SY"),
+                "SEC-01: created pipe DACL must grant SYSTEM: {text}"
+            );
+            assert!(
+                text.contains(";;;IU"),
+                "SEC-01: created pipe DACL must grant INTERACTIVE: {text}"
+            );
+
+            // Compatibility: the signed-in user must still be able to OPEN the
+            // pipe for read+write, exactly as the app does. A DACL that locks
+            // the app out is as broken as the old Everyone grant.
+            use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+            use windows::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                OPEN_EXISTING,
+            };
+            let client = unsafe {
+                CreateFileW(
+                    PCWSTR(name_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            }
+            .unwrap_or(INVALID_HANDLE_VALUE);
+            assert_ne!(
+                client,
+                INVALID_HANDLE_VALUE,
+                "the interactive user must be able to open the pipe: {}",
+                io::Error::last_os_error()
+            );
+            unsafe {
+                CloseHandle(client).ok();
+                CloseHandle(handle).ok();
+            }
+        }
+
+        /// Render the DACL of a security descriptor as SDDL.
+        fn security_descriptor_to_sddl(sd: *mut core::ffi::c_void) -> Option<String> {
+            use windows::core::PWSTR;
+            use windows::Win32::Foundation::{LocalFree, HLOCAL};
+            use windows::Win32::Security::Authorization::{
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+            };
+            use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+            unsafe {
+                let mut raw = PWSTR::null();
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    PSECURITY_DESCRIPTOR(sd),
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut raw,
+                    None,
+                )
+                .ok()?;
+                let text = raw.to_string().ok();
+                LocalFree(HLOCAL(raw.0.cast()));
+                text
+            }
+        }
+
+        /// SEC-01: only SYSTEM and the console user may mutate hardware state.
+        #[test]
+        fn write_allowed_only_for_system_and_console_user() {
+            let console = "S-1-5-21-1111-2222-3333-1001";
+
+            assert!(
+                write_allowed_for("S-1-5-18", console, true),
+                "SYSTEM must be allowed"
+            );
+            assert!(
+                write_allowed_for(console, console, false),
+                "the signed-in console user must be allowed"
+            );
+            assert!(
+                !write_allowed_for("S-1-5-21-1111-2222-3333-1002", console, false),
+                "another local user must be refused"
+            );
+            assert!(
+                !write_allowed_for(console, "", false),
+                "no resolvable console user must refuse (fail closed)"
+            );
+            assert!(
+                !write_allowed_for("S-1-1-0", console, false),
+                "Everyone is not a user"
+            );
+        }
+
+        /// SEC-01: mutating ops must be recognised so the gate runs for them
+        /// and only them (reads stay free for INTERACTIVE clients).
+        #[test]
+        fn mutating_ops_require_the_write_gate() {
+            assert!(request_needs_write_auth(
+                r#"{"op":"write","addr":"0xFE0B0300","data":"01"}"#
+            ));
+            assert!(request_needs_write_auth(
+                r#"{"op":"iot_set_charging_threshold","threshold":80}"#
+            ));
+            assert!(request_needs_write_auth(r#"{"op":"iot_reset_device"}"#));
+            assert!(!request_needs_write_auth(
+                r#"{"op":"read_region","region":"SMA2"}"#
+            ));
+            assert!(!request_needs_write_auth(
+                r#"{"op":"read","addr":"0x1","size":1}"#
+            ));
+            assert!(!request_needs_write_auth(r#"{"op":"ping"}"#));
+            assert!(!request_needs_write_auth(
+                r#"{"op":"iot_get","cmd":"model"}"#
+            ));
+            assert!(!request_needs_write_auth("not json"));
         }
     }
 }
