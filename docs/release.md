@@ -294,5 +294,5 @@ node scripts/extract-changelog.mjs <versao> body.md
 gh release create v<versao> --repo arcane-D7/micontrol --title "..." --notes-file body.md <artefactos>
 ```
 - Alternativa: `scripts/publish-release.ps1 -Version <versao>` faz tudo (carrega a chave sozinho; a password vem da env var — "no prompt" confirmado em 0.1.20).
-- **Depois do tag push, o `release.yml` do CI arranca e NÃO consegue compilar** (runner de 2 vCPU): cancelar com `gh run cancel <id> --repo arcane-D7/micontrol`.
+- **O `release.yml` já não compila**: é um verificador. Com o tag push, o CI descarrega a release publicada e valida o contrato (instalador + `.sig` + `latest.json` com a versão e a assinatura minisign corretas) em ~1 minuto. Um release mal publicado falha aí. O build assinado continua a ser local (`publish-release.ps1`).
 - Produção local usa `--config build-local-nosign.json` (sem certificado Authenticode); o `TAURI_SIGNING_PRIVATE_KEY` trata apenas do artefacto do updater.
