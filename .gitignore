@@ -72,3 +72,6 @@ test-results/
 playwright-report/
 playwright/.cache/
 coverage/
+
+# full-app audit evidence (large, local only)
+audits/
