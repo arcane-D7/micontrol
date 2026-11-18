@@ -48,6 +48,22 @@ function FieldRow({
   );
 }
 
+/**
+ * True only for OpenAI's own endpoints. Substring matching
+ * (`url.includes('openai.com')`) is unsafe: `https://openai.com.evil.tld`
+ * contains the substring but is an attacker host. Parse the URL and compare
+ * the HOSTNAME exactly (or a subdomain of it); an unparsable value is not
+ * OpenAI and therefore keeps the privacy warning visible.
+ */
+function isOpenAiEndpoint(raw: string): boolean {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === 'openai.com' || host.endsWith('.openai.com');
+  } catch {
+    return false;
+  }
+}
+
 export default function AiConfigForm({ settings, onUpdate, onTestConnection }: AiConfigFormProps) {
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [showKey, setShowKey] = useState(false);
@@ -176,7 +192,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
       </FieldRow>
 
       {/* Custom endpoint privacy warning */}
-      {!draft.openai_base_url.includes('openai.com') && draft.openai_base_url && (
+      {draft.openai_base_url && !isOpenAiEndpoint(draft.openai_base_url) && (
         <div className="warning-banner" role="alert">
           <p>{t('settings.customEndpointWarning')}</p>
         </div>
