@@ -193,6 +193,9 @@
     ; Candidate destination: the package dir's IoTService.exe.
     StrCpy $R4 "$R0\IoTService.exe"
     ; Backup existing binary (once) if present — gives a rollback point.
+    ; NOTE: on an ACL-clean machine this CopyFiles fails too ("Copy failed"):
+    ; the package dir is SYSTEM-writable only, so there is no backup to make.
+    ; That is non-fatal by design — the .bak is a convenience, not a guard.
     ${If} ${FileExists} "$R4"
       ${IfNot} ${FileExists} "$R4.bak"
         CopyFiles /SILENT "$R4" "$R4.bak"
@@ -200,11 +203,132 @@
     ${EndIf}
     ; Replace it with ours.
     CopyFiles /SILENT "$INSTDIR\ecram_service.exe" "$R4"
-    ; CopyFiles never returns an error code — verify the file landed AND that
-    ; it is the file we just copied (not the locked old binary CopyFiles kept).
-    ${IfNot} ${FileExists} "$R4"
-      DetailPrint "  ERROR: failed to copy ecram_service.exe to $R4 (destination file still absent)."
-      Abort "Could not replace IoTService.exe in the DriverStore. The IoTSvc service was NOT modified."
+    ; ── VERIFY the copy byte-for-byte (`fc /b`) ───────────────────────────
+    ; CopyFiles NEVER reports an error and, when the write is DENIED, it
+    ; silently leaves the destination untouched. On a CLEAN machine the
+    ; DriverStore package dir carries the DEFAULT ACL: only SYSTEM /
+    ; TrustedInstaller may write there — an elevated Administrator cannot —
+    ; so every CopyFiles on this path fails ("Copy failed" in the log) and
+    ; $R4 keeps the OEM Xiaomi IoTService.exe. The old `${FileExists}` test
+    ; therefore PASSED on exactly the machines where nothing had been
+    ; replaced, the installer printed "ecram_service deployed" (a lie) and
+    ; `install-service` then ran against the OEM binary, which cannot run
+    ; standalone → exit 0xC0000135 (STATUS_DLL_NOT_FOUND, "-1073741515")
+    ; and the whole installation Aborted.
+    ; This dev machine's DriverStore dir has an explicit `MAFSC\mafsc:(F)`
+    ; ACE, which is why the bug never reproduced here.
+    ; `fc /b` exit code: 0 = identical, 1 = different, 2 = file missing.
+    ; Its output goes to NUL: two 1-3 MB binaries that differ produce a
+    ; multi-hundred-line diff and the nsExec capture truncates at 1 KB
+    ; anyway — only the exit code matters. This `cmd /c "..." > NUL 2>&1`
+    ; form is the same pattern as the sc|findstr calls below and was
+    ; verified on this host: 0 identical, 1 different, 2 missing.
+    StrCpy $R7 0            ; 0 = destination NOT proven identical to ours
+    nsExec::ExecToStack '"$SYSDIR\cmd.exe" /c ""$SYSDIR\fc.exe" /b "$INSTDIR\ecram_service.exe" "$R4" > NUL 2>&1"'
+    Pop $R3                 ; fc exit code
+    Pop $R6                 ; drain (empty by construction)
+    ${If} $R3 = 0
+      StrCpy $R7 1
+    ${EndIf}
+    !if 0
+      ; TEST HOOK — compiled out (never shipped). Flip to `!if 1` for a
+      ; throwaway build to force the ACL fallback on ANY machine: the first
+      ; `fc /b` result is discarded, so the code must take the SYSTEM copy
+      ; path and still end with the IoTSvc service RUNNING. Verify the
+      ; DetailPrint line "retrying as SYSTEM" in the install log, then
+      ; revert (`!if 0`) before committing.
+      StrCpy $R7 0
+    !endif
+    ${If} $R7 = 0
+      ; ── ACL fallback: copy as SYSTEM via a one-shot scheduled task ──────
+      ; The copy is the ONLY step that needs SYSTEM; stop/kill/SCM all work
+      ; from an elevated admin. A .cmd in $SYSDIR (no spaces in the path)
+      ; keeps quoting trivial and returns the real errorlevel through
+      ; `exit /b %ERRORLEVEL%` — a scheduled task does not propagate the
+      ; batch errorlevel by itself, so the poll below uses `fc /b` as the
+      ; only source of truth.
+      DetailPrint "  Copy did not land (fc /b mismatch) - retrying as SYSTEM (DriverStore ACL)..."
+      ClearErrors
+      FileOpen $R9 "$SYSDIR\MCIoTSvcCopy.cmd" w
+      ${If} ${Errors}
+        DetailPrint "  WARNING: cannot write $SYSDIR\MCIoTSvcCopy.cmd (access denied)."
+      ${Else}
+        FileWrite $R9 "@echo off$\r$\n"
+        FileWrite $R9 "copy /y $\"$INSTDIR\ecram_service.exe$\" $\"$R4$\" > NUL 2>&1$\r$\n"
+        FileWrite $R9 "exit /b %ERRORLEVEL%$\r$\n"
+        FileClose $R9
+        ; Task XML: SYSTEM principal + disabled trigger driven by /run (the
+        ; same proven pattern as MiControlElevated above); NO xml prolog.
+        ; `LogonType` MUST be omitted for S-1-5-18 — on Win11 26200 a
+        ; `ServiceAccount` logon type is rejected with "The task XML
+        ; contains a value which is incorrectly formatted or out of range
+        ; (1,293):LogonType:ServiceAccount" (verified), while the same XML
+        ; without LogonType parses and creates fine.
+        ; ExecutionTimeLimit PT60S: the copy takes well under a second, but
+        ; a hung task must never linger on the machine.
+        FileOpen $R9 "$TEMP\MCIoTSvcFix.xml" w
+        FileWrite $R9 '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT60S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>$SYSDIR\cmd.exe</Command><Arguments>/c "$SYSDIR\MCIoTSvcCopy.cmd"</Arguments></Exec></Actions></Task>'
+        FileClose $R9
+        nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /create /tn "MiControlIoTSvcFix" /xml "$TEMP\MCIoTSvcFix.xml" /f'
+        Pop $R3
+        Delete "$TEMP\MCIoTSvcFix.xml"
+        ${If} $R3 = 0
+          nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /run /tn "MiControlIoTSvcFix"'
+          Pop $R3
+          ; Poll the REAL result (`fc /b` every 1 s, 15 attempts ≈ 15 s).
+          StrCpy $R8 0
+          iot_acl_copy_wait:
+            nsExec::ExecToStack '"$SYSDIR\cmd.exe" /c ""$SYSDIR\fc.exe" /b "$INSTDIR\ecram_service.exe" "$R4" > NUL 2>&1"'
+            Pop $R3
+            Pop $R6
+            ${If} $R3 = 0
+              StrCpy $R7 1
+              Goto iot_acl_copy_done
+            ${EndIf}
+            Sleep 1000
+            IntOp $R8 $R8 + 1
+            ${If} $R8 < 15
+              Goto iot_acl_copy_wait
+            ${EndIf}
+          iot_acl_copy_done:
+          ${If} $R7 = 1
+            DetailPrint "  ecram_service copied as SYSTEM (fc /b verified)."
+          ${Else}
+            DetailPrint "  WARNING: SYSTEM copy did not land either (fc /b still differs)."
+          ${EndIf}
+        ${Else}
+          DetailPrint "  WARNING: could not register the one-shot SYSTEM copy task (code $R3)."
+        ${EndIf}
+        ; Cleanup: neither the task nor the .cmd may outlive this block.
+        nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "MiControlIoTSvcFix" /f'
+        Pop $R3
+        Delete "$SYSDIR\MCIoTSvcCopy.cmd"
+        ${If} ${FileExists} "$SYSDIR\MCIoTSvcCopy.cmd"
+          Sleep 500
+          Delete "$SYSDIR\MCIoTSvcCopy.cmd"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+    ; ── NEVER run install-service over the OEM binary ─────────────────────
+    ; EC RAM is a BONUS: without it the app still installs and runs (charge
+    ; limit + EC sensors degrade to "unavailable"). Aborting here left a
+    ; clean-machine user with NO app at all, which is strictly worse than a
+    ; degraded install. The elevated helper's ensure_service_running()
+    ; re-attempts this copy (bridge service = LocalSystem, which HAS write
+    ; access to the DriverStore) on the first app start, so a failure here
+    ; is a deferred repair, not a permanent loss.
+    ${If} $R7 = 0
+      DetailPrint "  ERROR: EC RAM indisponivel: nao foi possivel substituir o IoTService.exe no DriverStore (ACL); a app tenta auto-corrigir no arranque via servico elevado."
+      ; Leave the machine no worse than we found it: this block already
+      ; stopped the service and cleared its crash-restart actions. Re-arm
+      ; them (no-op when the entry is absent) so a surviving service can
+      ; still recover. Deliberately NO `sc start` here: the file we refused
+      ; to replace may be the OEM binary, and starting it would be the same
+      ; mistake as install-service over it. The app's watchdog starts the
+      ; service on first launch, after its SYSTEM copy has fixed the file.
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" failure IoTSvc reset= 86400 actions= restart/5000/restart/10000/restart/30000'
+      Pop $R3
+      Goto iot_deploy_done
     ${EndIf}
     DetailPrint "  ecram_service deployed -> $R4"
     ; Now recreate the service pointing to the deployed binary (idempotent:
@@ -228,8 +352,14 @@
       ${If} $R5 < 20      ; up to ~10 s
         Goto iot_delete_wait
       ${EndIf}
-      DetailPrint "  ERROR: IoTSvc was not removed from SCM (open handle / pending delete)."
-      Abort "Failed to recreate the IoTSvc service: the old entry was not removed from SCM."
+      DetailPrint "  ERROR: IoTSvc was not removed from SCM (open handle / pending delete) - service recreation skipped."
+      ; The binary is already OURS and verified, but this block disabled the
+      ; crash-restart actions above; re-arm them so the surviving entry can
+      ; still recover. The app's ensure_service_running() reconfigures the
+      ; service on the next start — no Abort: the app must install.
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" failure IoTSvc reset= 86400 actions= restart/5000/restart/10000/restart/30000'
+      Pop $R3
+      Goto iot_deploy_done
     iot_deleted:
     DetailPrint "  IoTSvc removed from SCM (confirmed)."
     ; CRITICAL: the IoTSvc service is created by the Rust binary
@@ -262,14 +392,20 @@
         DetailPrint "  ERROR: IoTSvc did not reach RUNNING after install-service. Checking binPath..."
         nsExec::ExecToLog '"$SYSDIR\sc.exe" qc IoTSvc'
         Pop $R3
-        Abort "Failed to start the IoTSvc service: not in RUNNING state. EC RAM access disabled."
+        ; install-service itself succeeded (exit 0) and the binary IS ours,
+        ; so this is a service-start failure, not an EC-RAM veto. Warn and
+        ; keep installing — the app's elevated helper starts it on next launch.
+        DetailPrint "  WARNING: EC RAM indisponivel (IoTSvc nao chegou a RUNNING); a app tenta auto-corrigir no arranque."
+        Goto iot_deploy_done
       iot_running:
         DetailPrint "  IoTSvc recreated and RUNNING with ecram_service (verified)."
     ${Else}
       DetailPrint "  ERROR: ecram_service install-service returned $R3 — service NOT recreated."
-      Abort "Failed to create the IoTSvc service (code $R3). EC RAM access could not be configured."
+      DetailPrint "  WARNING: EC RAM indisponivel (servico IoTSvc nao criado); a app tenta auto-corrigir no arranque."
+      Goto iot_deploy_done
     ${EndIf}
   ${EndIf}
+  iot_deploy_done:
   FindClose $R1
 
   ; ── Scheduled task for elevated hardware operations (no UAC on use) ────────
@@ -551,6 +687,18 @@
   nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "MiControlElevated" /f'
   Pop $0
   DetailPrint "MiControlElevated task removed: $0"
+
+  ; Remove the one-shot SYSTEM copy task + its .cmd (ACL fallback). Both are
+  ; normally deleted inside POSTINSTALL; this covers an install interrupted
+  ; mid-block. A SYSTEM task must not outlive the product, even an inert one
+  ; (its trigger is disabled and only /run could fire it).
+  nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /delete /tn "MiControlIoTSvcFix" /f'
+  Pop $0
+  Pop $1              ; drain output (noise-free when the task is absent)
+  ${If} $0 = 0
+    DetailPrint "MiControlIoTSvcFix task removed."
+  ${EndIf}
+  Delete "$SYSDIR\MCIoTSvcCopy.cmd"
 
   ; Remove the autonomous bridge service (if present)
   nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" uninstall'
