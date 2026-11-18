@@ -1605,9 +1605,34 @@ static CACHED_LIGHT_SENSOR: std::sync::OnceLock<
 /// Fallback ambient-light reader using the WinRT `Windows.Devices.Sensors.LightSensor` API.
 /// This works well in UWP/WinUI apps, but in an unpackaged desktop app it frequently
 /// returns `None` even when a HID ALS sensor is present in Device Manager.
+/// Kill switch for the ambient-light readers (diagnostics, CI and kiosks with a
+/// broken sensor stack). `MICONTROL_DISABLE_AMBIENT_SENSOR` accepts:
+///   "1" / "all"  → both readers off
+///   "com"        → only the classic ISensorManager path off
+///   "winrt"      → only the WinRT LightSensor path off
+/// `0` or empty leaves both enabled.
+#[cfg(windows)]
+fn ambient_sensor_disabled(path: &str) -> bool {
+    static DISABLED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let v = DISABLED.get_or_init(|| {
+        std::env::var("MICONTROL_DISABLE_AMBIENT_SENSOR")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    });
+    match v.as_str() {
+        "" | "0" => false,
+        "1" | "all" => true,
+        other => other == path,
+    }
+}
+
 #[cfg(windows)]
 fn get_ambient_lux_winrt() -> Option<f32> {
     use windows::Devices::Sensors::LightSensor;
+
+    if ambient_sensor_disabled("winrt") {
+        return None;
+    }
 
     // Check if a reset was requested (e.g., after sleep/wake)
     let needs_reset = SENSOR_RESET_REQUESTED.swap(false, Ordering::SeqCst);
@@ -1748,6 +1773,10 @@ impl ComSensorStack {
 fn get_ambient_lux_com() -> Option<f32> {
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
+    if ambient_sensor_disabled("com") {
+        return None;
+    }
+
     // S32-003 rationale (sensor selection) lives in `select_responsive_sensor`.
     //
     // S26-006: The manager+enumerator are cached per-thread (this runs on the
@@ -1879,14 +1908,87 @@ fn select_responsive_sensor_impl(readings: &[Option<f32>]) -> Option<f32> {
     None
 }
 
+/// Which ambient-light backend this process has committed to.
+///
+/// 2026-11-18 (AV in the display tests): calling the classic COM
+/// `ISensorManager` and then the WinRT `LightSensor` in the SAME poll crashed
+/// the process with STATUS_ACCESS_VIOLATION right after the COM stack
+/// returned "no usable reading" — reproduced twice, and each path in
+/// isolation passed. Mixing the two sensor stacks (the WinRT activation
+/// re-enters the same sensorservice singleton the COM manager just created)
+/// is the trigger. The fix is to commit to ONE backend per process: the first
+/// backend that yields a reading wins, and the other is never touched again.
+/// A backend that fails to produce a reading is simply not adopted, so a
+/// machine where WinRT is unavailable still ends up on COM.
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LuxBackend {
+    Winrt,
+    Com,
+}
+
+#[cfg(windows)]
+fn lux_backend_override() -> Option<LuxBackend> {
+    static FORCED: std::sync::OnceLock<Option<LuxBackend>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        match std::env::var("MICONTROL_AMBIENT_SENSOR_BACKEND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "winrt" => Some(LuxBackend::Winrt),
+            "com" => Some(LuxBackend::Com),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(windows)]
+fn run_lux_backend(b: LuxBackend) -> Option<f32> {
+    match b {
+        LuxBackend::Winrt => get_ambient_lux_winrt(),
+        LuxBackend::Com => get_ambient_lux_com(),
+    }
+}
+
+/// True when the classic COM sensor stack can be created on this thread
+/// (manager + at least one ambient-light sensor). Probed ONCE per process.
+#[cfg(windows)]
+fn com_sensor_stack_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        COM_SENSOR_MANAGER.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            if borrow.is_none() {
+                *borrow = ComSensorStack::new();
+            }
+            borrow.is_some()
+        })
+    })
+}
+
 #[cfg(windows)]
 fn get_ambient_lux() -> Option<f32> {
-    // Try the classic COM Sensor API first: it works for unpackaged desktop apps.
-    if let Some(lux) = get_ambient_lux_com() {
-        return Some(lux);
-    }
-    // Fall back to WinRT, which works on some systems depending on the sensor driver.
-    get_ambient_lux_winrt()
+    static BACKEND: std::sync::OnceLock<LuxBackend> = std::sync::OnceLock::new();
+
+    // The backend is decided ONCE per process and never revisited: COM's
+    // ISensorManager and WinRT's LightSensor both reach the same sensorservice
+    // singleton, and initializing both in one process crashed with
+    // STATUS_ACCESS_VIOLATION in the display tests (each backend alone is
+    // fine). An explicit MICONTROL_AMBIENT_SENSOR_BACKEND wins; otherwise the
+    // classic COM stack is adopted when it enumerates, with WinRT as the
+    // fallback for machines where it does not.
+    let chosen = *BACKEND.get_or_init(|| {
+        if let Some(forced) = lux_backend_override() {
+            return forced;
+        }
+        if com_sensor_stack_available() {
+            LuxBackend::Com
+        } else {
+            LuxBackend::Winrt
+        }
+    });
+    run_lux_backend(chosen)
 }
 
 #[cfg(not(windows))]
