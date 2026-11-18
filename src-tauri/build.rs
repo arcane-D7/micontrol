@@ -68,6 +68,14 @@ fn copy_aux_binary(
     let src = target_dir.join(profile).join(name);
     let dst = dst_dir.join(name);
 
+    // 2026-11-18: ALWAYS watch the source. Previously this was only emitted
+    // when the copy succeeded, so a clean `target/` (src missing → 0-byte
+    // placeholder written here) NEVER re-ran the build script after the real
+    // binary appeared — the bundle then shipped 0-byte ecram_service.exe /
+    // micontrol_bridge.exe (reproduced during the f9 installer work).
+    // A missing path counts as "changed" for cargo, which re-runs this script
+    // until the real binary lands.
+    println!("cargo:rerun-if-changed={}", src.display());
     if src.exists() {
         // The source binary may be locked by a running service (e.g. the
         // bridge service running from target\debug in dev mode). In that
@@ -76,8 +84,6 @@ fn copy_aux_binary(
             println!(
                 "cargo:warning=Could not copy {name} to bin/ ({e}); keeping existing bin/ copy if present"
             );
-        } else {
-            println!("cargo:rerun-if-changed={}", src.display());
         }
     } else {
         if !dst.exists() {

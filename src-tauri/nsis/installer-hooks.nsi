@@ -158,6 +158,21 @@
   ; with error 87 → IoTSvc was DELETED and never recreated. This rewrites the
   ; whole block with deterministic exe discovery + status-aware handling.
   DetailPrint "Deploying ecram_service into the DriverStore..."
+  ; Guard (2026-11-18): a cold `target/` can leave a 0-byte placeholder in
+  ; bin/ when build.rs did not re-run after the real binary appeared — that
+  ; placeholder was then bundled. Never deploy one into the DriverStore: the
+  ; resulting service cannot start and looks like a driver fault. Refuse and
+  ; say so; the app degrades honestly.
+  FileOpen $9 "$INSTDIR\ecram_service.exe" r
+  ${If} $9 == ""
+    StrCpy $8 0
+  ${Else}
+    FileSeek $9 0 END $8
+    FileClose $9
+  ${EndIf}
+  ${If} $8 < 500000
+    DetailPrint "  ERROR: ecram_service.exe is only $8 bytes (missing or placeholder) — refusing to deploy. EC RAM unavailable; reinstall with a complete build."
+  ${Else}
   ; Locate the IoTDriver package dir deterministically.
   StrCpy $R0 ""
   FindFirst $R1 $R2 "$SYSDIR\DriverStore\FileRepository\iotdriver.inf_*"
@@ -407,6 +422,7 @@
   ${EndIf}
   iot_deploy_done:
   FindClose $R1
+  ${EndIf}
 
   ; ── Scheduled task for elevated hardware operations (no UAC on use) ────────
   ; Registered via XML so we can set MultipleInstancesPolicy=StopExisting and
