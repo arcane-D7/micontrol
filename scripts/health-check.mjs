@@ -64,6 +64,14 @@ const STEPS = [
     cmd: 'node',
     args: ['scripts/check-handle-leaks.mjs'],
   },
+  {
+    // B7 / RNF-14: no console window may flash. Ratchet: the baseline lists
+    // today's offenders; any NEW spawn without CREATE_NO_WINDOW fails here.
+    id: 'windowless-spawn',
+    name: 'Windowless spawn gate (no console flash)',
+    cmd: 'node',
+    args: ['scripts/check-windowless-spawns.mjs'],
+  },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];
 
