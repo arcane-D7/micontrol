@@ -31,6 +31,7 @@ import {
   OverviewMemoryStorage,
 } from '../../components/overview/OverviewHardware';
 import { OverviewJump } from '../../components/overview/OverviewJump';
+import { OverviewLive } from '../../components/overview/OverviewLive';
 import { OverviewNow } from '../../components/overview/OverviewNow';
 import { OverviewSystem } from '../../components/overview/OverviewSystem';
 import { OverviewThermal } from '../../components/overview/OverviewThermal';
@@ -66,6 +67,15 @@ function OverviewTab({ hw, ai, onOpenSettings, onNavigate }: Props) {
       <PageHeader title={t('overview.title')} subtitle={t('overview.subtitle')} />
 
       <div className="mc-hairline mc-overview">
+        {/* Consumo vivo — o primeiro bloco (CPU/GPU/RAM/temperaturas/bateria). */}
+        <OverviewLive
+          systemInfo={hw.systemInfo}
+          fan={hw.fan}
+          battery={hw.battery}
+          loading={hw.loading}
+          refreshSystem={hw.refreshSystem}
+        />
+
         {failed && (
           <p className="mc-note mc-note--warning" role="status">
             <Icon name="alert-triangle" size={14} />

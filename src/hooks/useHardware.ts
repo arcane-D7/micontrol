@@ -1206,6 +1206,10 @@ export function useHardware() {
       performanceMode: fanState.performanceMode,
       lastPerfResult: fanState.lastPerfResult,
       chargingThreshold: fanState.chargingThreshold,
+      // A perna rápida de sistema (CPU/GPU/RAM) exposta para refresco a pedido
+      // (ex.: o bloco "Consumo vivo" do Overview). Tem as mesmas guardas de
+      // in-flight/stall da perna — chamar isto nunca abre uma segunda sampler.
+      refreshSystem: fastPollSystem,
       perfApplying,
       loading,
       error,
@@ -1262,6 +1266,7 @@ export function useHardware() {
       batteryState,
       displayState,
       touchpadState,
+      fastPollSystem,
       perfApplying,
       loading,
       error,

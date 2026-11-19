@@ -564,6 +564,42 @@ body {
   color: var(--text-muted);
 }
 
+/* Rodapé da sidebar — linha de estado discreta: nota de leitura à esquerda e
+   o botão "System log" (32 px) à direita. O erro vive no painel, nunca aqui. */
+.sidebar-statusrow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 4px;
+}
+
+.sidebar-statusrow__note {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-statusrow__spacer {
+  flex: 1 1 auto;
+}
+
+.sidebar-logbtn {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.sidebar-logbtn--active {
+  color: var(--warning);
+}
+
+.sidebar-logbtn .mc-iconbtn {
+  color: inherit;
+}
+
 /* ── Content area ────────────────────────────────────────────────────────── */
 .content-area {
   flex: 1;

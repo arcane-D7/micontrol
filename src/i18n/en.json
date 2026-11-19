@@ -267,6 +267,16 @@
     "jump": {
       "title": "Go to…",
       "hint": "Each block is edited in its own tab."
+    },
+    "live": {
+      "title": "Live usage",
+      "cpu": "CPU",
+      "gpu": "GPU",
+      "ram": "Memory",
+      "battery": "Battery",
+      "charging": "Charging",
+      "ac": "On AC",
+      "discharging": "On battery"
     }
   },
   "taskmgr": {
@@ -2200,5 +2210,12 @@
   },
   "aiConfig": {
     "modelPlaceholder": "e.g. llama3, mistral, gpt-4-vision-preview"
+  },
+  "systemLog": {
+    "title": "System log",
+    "empty": "No errors recorded.",
+    "copy": "Copy",
+    "copied": "Copied",
+    "now": "Now"
   }
 }

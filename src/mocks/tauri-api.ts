@@ -359,6 +359,9 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         ram_used_gb: Math.round(drift(8.3, 0.8) * 10) / 10,
       } as T;
 
+    case 'read_error_log':
+      return '' as T;
+
     case 'get_overview_snapshot':
       return {
         ...OVERVIEW_SNAPSHOT,
