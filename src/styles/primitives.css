@@ -1297,3 +1297,168 @@
     transition: none;
   }
 }
+
+/* ═══ Dialog ═══════════════════════════════════════════════════════════════ */
+/* ui/dialog.tsx — véu da própria cor do fundo (sem blur), painel sobe de
+   6 px, 1 px hairline, raio 12, ZERO sombra. Fallbacks como no `.mc-card`:
+   o diálogo vive fora do scope `.mc-hairline` (portal em `document.body`). */
+.mc-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: var(--s-5);
+  background: color-mix(in oklab, var(--surface-2, var(--surface)) 72%, transparent);
+}
+
+.mc-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 100%);
+  max-height: min(80vh, 640px);
+  background: var(--surface);
+  border: var(--hair, 1px) solid var(--hairline, var(--border));
+  border-radius: var(--r-card, 12px);
+  box-shadow: none;
+  outline: none;
+  animation: mc-dialog-in 160ms var(--ease-out, ease-out) both;
+}
+
+.mc-dialog--sm {
+  width: min(420px, 100%);
+}
+
+.mc-dialog--lg {
+  width: min(680px, 100%);
+}
+
+@keyframes mc-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mc-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-4) var(--s-5) var(--s-3);
+  border-bottom: var(--hair, 1px) solid var(--hairline, var(--border));
+}
+
+.mc-dialog__title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-body);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+}
+
+.mc-dialog__body {
+  padding: var(--s-4) var(--s-5);
+  overflow-y: auto;
+}
+
+.mc-dialog__foot {
+  padding: var(--s-3) var(--s-5) var(--s-4);
+  border-top: var(--hair, 1px) solid var(--hairline, var(--border));
+}
+
+/* ═══ System log (painel de erros) ═════════════════════════════════════════ */
+.mc-loglist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mc-logrow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  padding: var(--s-2) 0;
+}
+
+.mc-logrow + .mc-logrow {
+  border-top: var(--hair, 1px) solid var(--hairline, var(--border));
+}
+
+.mc-logrow__time {
+  flex: none;
+  min-width: 130px;
+  padding-top: 4px;
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Code', monospace);
+  font-size: var(--t-label);
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mc-logrow__msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--t-meta);
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.mc-logrow__action {
+  flex: none;
+}
+
+/* ═══ Overview — tiles do consumo vivo ═════════════════════════════════════ */
+.mc-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--s-2) var(--s-3);
+  background: var(--surface-2);
+  border: var(--hair, 1px) solid var(--hairline, var(--border));
+  border-radius: var(--r-control, 8px);
+}
+
+.mc-tile__label {
+  font-size: var(--t-label);
+  color: var(--ink-dim);
+  letter-spacing: 0;
+}
+
+.mc-tile__value {
+  font-size: var(--t-body-lg);
+  font-weight: var(--w-strong);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mc-tile__value--wide {
+  font-size: var(--t-body);
+}
+
+.mc-tile__unit {
+  font-size: 0.85em;
+  font-weight: var(--w-body);
+  color: var(--ink-dim);
+  margin-left: 2px;
+}
+
+.mc-tile__sub {
+  font-size: var(--t-label);
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-dialog {
+    animation: none;
+  }
+}

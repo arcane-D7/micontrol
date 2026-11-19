@@ -267,6 +267,16 @@
     "jump": {
       "title": "Ir a…",
       "hint": "Cada bloque se cambia en su propia pestaña."
+    },
+    "live": {
+      "title": "Consumo en tiempo real",
+      "cpu": "CPU",
+      "gpu": "GPU",
+      "ram": "Memoria",
+      "battery": "Batería",
+      "charging": "Cargando",
+      "ac": "En corriente",
+      "discharging": "En batería"
     }
   },
   "taskmgr": {
@@ -2200,5 +2210,12 @@
   },
   "aiConfig": {
     "modelPlaceholder": "p. ej. llama3, mistral, gpt-4-vision-preview"
+  },
+  "systemLog": {
+    "title": "Registro del sistema",
+    "empty": "Sin errores registrados.",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "now": "Ahora"
   }
 }

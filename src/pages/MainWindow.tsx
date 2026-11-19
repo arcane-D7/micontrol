@@ -10,9 +10,11 @@ import { useAutoUpdate } from '../hooks/useAutoUpdate';
 import { ConsentDialog } from '../components/ConsentDialog';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { MiControlIcon } from '../components/MiControlIcon';
+import { SystemLogPanel } from '../components/SystemLogPanel';
 import OnboardingWizard from '../components/OnboardingWizard';
 import PrivacyPolicy from './PrivacyPolicy';
 import { Icon, type IconName } from '../components/ui/icons';
+import { IconButton } from '../components/ui/icon-button';
 
 // ── Lazy-loaded tab content ──────────────────────────────────────────────────
 const OverviewTab = lazy(() => import('./tabs/overview'));
@@ -203,6 +205,8 @@ interface SidebarProps {
   toggleTheme: () => void;
   hardware: Hardware;
   setShowTrayPreview: (v: boolean) => void;
+  /** Abre o painel "System log" — o erro vive lá, nunca nesta navegação. */
+  onOpenSystemLog: () => void;
 }
 
 const Sidebar = memo(function Sidebar({
@@ -212,6 +216,7 @@ const Sidebar = memo(function Sidebar({
   toggleTheme,
   hardware,
   setShowTrayPreview,
+  onOpenSystemLog,
 }: SidebarProps) {
   const [query, setQuery] = useState('');
   const activeRef = useRef<HTMLButtonElement | null>(null);
@@ -317,23 +322,22 @@ const Sidebar = memo(function Sidebar({
       )}
 
       <div className="sidebar-footer">
-        {hardware.error && (
-          <div
-            style={{
-              padding: '4px 8px',
-              fontSize: 11,
-              color: 'var(--error)',
-              wordBreak: 'break-word',
-            }}
-          >
-            <Icon name="alert-triangle" size={16} /> {hardware.error}
-          </div>
-        )}
-        {hardware.loading && (
-          <div style={{ padding: '4px 8px', fontSize: 11, color: 'var(--text-muted)' }}>
-            {t('common.loading')}
-          </div>
-        )}
+        {/* Estado discreto: o erro vive no painel "System log" (regra do dono:
+            a sidebar não é um log). Botão de 32 px em tinta neutra; só ganha a
+            tinta de aviso quando há um erro vivo. */}
+        <div className="sidebar-statusrow">
+          {hardware.loading && (
+            <span className="sidebar-statusrow__note">{t('common.loading')}</span>
+          )}
+          <span className="sidebar-statusrow__spacer" />
+          <span className={`sidebar-logbtn${hardware.error ? ' sidebar-logbtn--active' : ''}`}>
+            <IconButton
+              icon="alert-triangle"
+              label={t('systemLog.title')}
+              onClick={onOpenSystemLog}
+            />
+          </span>
+        </div>
         <div
           style={{
             padding: '4px 8px',
@@ -398,6 +402,7 @@ export default function MainWindow({
   const appUpdate = useAutoUpdate();
   const { onboardingCompleted } = aiSettings.settings;
   const [showTrayPreview, setShowTrayPreview] = useState(false);
+  const [showSystemLog, setShowSystemLog] = useState(false);
   const [showConsentDialog, setShowConsentDialog] = useState(false);
   const [consentChecked, setConsentChecked] = useState(false);
 
@@ -551,6 +556,7 @@ export default function MainWindow({
         toggleTheme={toggleTheme}
         hardware={hardware}
         setShowTrayPreview={setShowTrayPreview}
+        onOpenSystemLog={() => setShowSystemLog(true)}
       />
 
       <main className="content-area">
@@ -658,6 +664,13 @@ export default function MainWindow({
 
       {/* First-run onboarding wizard */}
       {!onboardingCompleted && <OnboardingWizard onFinish={handleFinishOnboarding} />}
+
+      {/* System log — o sítio próprio dos erros (aberto pelo botão da sidebar). */}
+      <SystemLogPanel
+        open={showSystemLog}
+        onClose={() => setShowSystemLog(false)}
+        currentError={hardware.error}
+      />
 
       {/* Telemetry consent dialog */}
       {showConsentDialog && (
