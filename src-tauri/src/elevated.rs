@@ -14,17 +14,62 @@
 
 use crate::util::auth;
 use crate::util::panic::lock_or_recover;
+use crate::util::process_spawn;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+// ── Spawn timeouts (contract: UNIVERSAL-CONTRACTS.md sections 1 and 4) ──────
+//
+// Every child in this file waits through `process_spawn`, which enforces a
+// mandatory timeout and kills the whole tree on expiry. The budgets below are
+// sized on the real cost of each operation, never tuned to make failures
+// pass.
+
+/// Allowlisted PowerShell diagnostic/registry scripts. PowerShell cold start
+/// costs 1-3 s and the scripts are short registry/service reads; 30 s caps a
+/// wedged PowerShell without ever killing a legitimate run.
+const PS_SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `taskkill /IM <image> /T /F` after a failed graceful service stop. A force
+/// kill completes well under a second; 10 s is headroom, not a target.
+#[cfg(windows)]
+const TASKKILL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Service `install` subcommands (bridge / face svc): the known long
+/// operation in this file. Each removes the old SCM entry (its stop wait is
+/// bounded at 15 s), deletes and re-creates it. Under a slow SCM (this
+/// machine has already seen multi-minute resource stalls) a shorter budget
+/// would kill the child mid-reconfigure and leave a half-deleted service
+/// behind, hence 60 s rather than the 30 s default.
+#[cfg(windows)]
+const SVC_INSTALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Format a spawn failure for the legacy `Result<Value, String>` wire while
+/// registering a timeout against the catalog: a timed-out child must never
+/// leave the command pending in the ledger, so the timeout is logged with
+/// its stable catalog id (`spawn.timeout`) and returned as a plain error.
+fn spawn_error_string(context: &str, err: process_spawn::SpawnError) -> String {
+    match &err {
+        process_spawn::SpawnError::Timeout { program, elapsed } => {
+            let id = crate::errors::ErrorCode::SpawnTimeout.spec().id;
+            log::warn!(
+                "[elevated] {context}: {id} timeout after {elapsed:?} for {program} (tree killed)"
+            );
+            format!("{context}: {id} timeout after {elapsed:?} for {program} (tree killed)")
+        }
+        _ => format!("{context}: {err}"),
+    }
+}
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -885,20 +930,12 @@ fn dispatch(cmd: ElevCmd) -> Value {
             if !ALLOWED_DIAG_SCRIPTS.contains(&script) {
                 return make_err("diag_ps rejected: script is not in the allowlist".to_string());
             }
+            // Bounded wait (PS_SPAWN_TIMEOUT): the old unbounded wait could
+            // hang the elevated helper forever on a wedged PowerShell.
             let output = {
-                #[cfg(windows)]
-                {
-                    std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output()
-                }
-                #[cfg(not(windows))]
-                {
-                    std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                        .output()
-                }
+                let mut c = std::process::Command::new("powershell");
+                c.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+                process_spawn::run_capture(&mut c, PS_SPAWN_TIMEOUT)
             };
             match output {
                 Ok(out) => {
@@ -910,7 +947,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
                         "exit_code": out.status.code().unwrap_or(-1),
                     }))
                 }
-                Err(e) => make_err(format!("Failed to run PowerShell: {e}")),
+                Err(e) => make_err(spawn_error_string("Failed to run PowerShell", e)),
             }
         }
 
@@ -976,22 +1013,13 @@ fn dispatch(cmd: ElevCmd) -> Value {
                             }
                         }
                     "#;
-                    let output = {
-                        #[cfg(windows)]
-                        {
-                            std::process::Command::new("powershell")
-                                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                                .creation_flags(CREATE_NO_WINDOW)
-                                .output()
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            std::process::Command::new("powershell")
-                                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                                .output()
-                        }
-                    };
-                    return match output {
+                    // Bounded wait (PS_SPAWN_TIMEOUT): the removal script is
+                    // a single registry write; a wedged PowerShell is killed
+                    // and the failure reported instead of hanging the helper.
+                    let mut ps = std::process::Command::new("powershell");
+                    ps.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+                    let out = process_spawn::run_capture(&mut ps, PS_SPAWN_TIMEOUT);
+                    return match out {
                         Ok(out) => {
                             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -1001,7 +1029,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
                                 "exit_code": out.status.code().unwrap_or(-1),
                             }))
                         }
-                        Err(e) => make_err(format!("Failed to remove Scancode Map: {e}")),
+                        Err(e) => make_err(spawn_error_string("Failed to remove Scancode Map", e)),
                     };
                 }
 
@@ -1210,44 +1238,36 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 "#
                 );
 
-                let output = {
-                    #[cfg(windows)]
-                    {
-                        std::process::Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .output()
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        std::process::Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                            .output()
+                // Bounded wait (PS_SPAWN_TIMEOUT): a wedged PowerShell must
+                // never park the elevated helper; the timeout is surfaced
+                // through spawn_error_string and reported to the caller.
+                let mut ps = std::process::Command::new("powershell");
+                ps.args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()]);
+                let out = process_spawn::run_capture(&mut ps, PS_SPAWN_TIMEOUT);
+                let out = match out {
+                    Ok(o) => o,
+                    Err(e) => {
+                        return make_err(spawn_error_string("Failed to set Copilot policies", e))
                     }
                 };
 
-                match output {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                        let exit_code = out.status.code().unwrap_or(-1);
-                        log::info!(
-                            "[elevated] disable_copilot_key: exit={}, stdout={}",
-                            exit_code,
-                            stdout
-                        );
-                        if !stderr.is_empty() {
-                            log::warn!("[elevated] disable_copilot_key stderr: {}", stderr);
-                        }
-                        make_ok(serde_json::json!({
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "exit_code": exit_code,
-                            "enabled": enabled,
-                        }))
-                    }
-                    Err(e) => make_err(format!("Failed to set Copilot policies: {e}")),
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let exit_code = out.status.code().unwrap_or(-1);
+                log::info!(
+                    "[elevated] disable_copilot_key: exit={}, stdout={}",
+                    exit_code,
+                    stdout
+                );
+                if !stderr.is_empty() {
+                    log::warn!("[elevated] disable_copilot_key stderr: {}", stderr);
                 }
+                make_ok(serde_json::json!({
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": exit_code,
+                    "enabled": enabled,
+                }))
             }
             #[cfg(not(windows))]
             make_err("Copilot key policies only available on Windows".to_string())
@@ -1904,7 +1924,6 @@ pub fn dispatch_cmd(cmd: &str, args: Value) -> Value {
 /// Returns a status object describing the outcome.
 #[cfg(windows)]
 fn install_bridge_service() -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
     use std::process::Command;
 
     // ── S68 (bridge hot-upgrade): a NEWER bridge in %LOCALAPPDATA% wins ────
@@ -1959,11 +1978,17 @@ fn install_bridge_service() -> Result<Value, String> {
                 )
                 .is_ok();
                 if !stopped {
-                    // Not stopped (locked): kill the process so the copy can proceed.
-                    let _ = Command::new("taskkill.exe")
-                        .args(["/IM", "micontrol_bridge.exe", "/T", "/F"])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output();
+                    // Not stopped (locked): kill the process so the copy can
+                    // proceed. Best-effort as before, but the wait is now
+                    // bounded (TASKKILL_TIMEOUT) and a spawn failure,
+                    // timeout included, is logged instead of swallowed.
+                    let mut kill = Command::new("taskkill.exe");
+                    kill.args(["/IM", "micontrol_bridge.exe", "/T", "/F"]);
+                    if let Err(e) = process_spawn::run_capture(&mut kill, TASKKILL_TIMEOUT) {
+                        log::warn!(
+                            "install_bridge_service: taskkill micontrol_bridge.exe failed: {e}"
+                        );
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
                 match std::fs::copy(cand, inst) {
@@ -2072,11 +2097,14 @@ fn install_bridge_service() -> Result<Value, String> {
     // at a stable path.
     let install_exe = find_deployed_bridge_exe().unwrap_or(bridge_exe);
 
-    let output = Command::new(&install_exe)
-        .arg("install")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run micontrol_bridge install: {e}"))?;
+    let mut install = Command::new(&install_exe);
+    install.arg("install");
+    // Known long operation (SVC_INSTALL_TIMEOUT): `install` stops and deletes
+    // the old SCM entry (stop wait bounded at 15 s) before re-creating it; on
+    // expiry the child tree dies and the timeout reaches the ledger with its
+    // catalog id instead of leaving the command pending forever.
+    let output = process_spawn::run_capture(&mut install, SVC_INSTALL_TIMEOUT)
+        .map_err(|e| spawn_error_string("Failed to run micontrol_bridge install", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2264,7 +2292,8 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
     //       upgrade (creates no new desktop icon, keeps autostart).
     // /R   relaunch the app (as the interactive user) after install.
     //
-    // NOTE: we must NOT `.wait()` or `.output()` here. The installer's own
+    // NOTE: we must NOT wait for the installer here, and we must not capture
+    // its output. The installer's own
     // KillAppProcess / KillBridgeProcess sections terminate this elevated
     // helper (the bridge service) and the running MiControl process while the
     // setup runs. Waiting would kill our own reply before the app UI sees it.
@@ -2305,7 +2334,6 @@ fn install_update(_installer: Option<Value>, _paths: Option<Value>) -> Result<Va
 /// before registering the SCM service so the record points at a stable path.
 #[cfg(windows)]
 fn install_face_service() -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
     use std::process::Command;
 
     let svc_exe = find_face_svc_exe().ok_or_else(|| {
@@ -2336,11 +2364,13 @@ fn install_face_service() -> Result<Value, String> {
 
     let install_exe = find_deployed_face_svc_exe().unwrap_or(svc_exe);
 
-    let output = Command::new(&install_exe)
-        .arg("install")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run micontrol_face_svc install: {e}"))?;
+    let mut install = Command::new(&install_exe);
+    install.arg("install");
+    // Known long operation (SVC_INSTALL_TIMEOUT), same reasoning as the
+    // bridge install: SCM stop/delete/create with bounded internal waits; on
+    // expiry the child dies and the timeout is reported, never left pending.
+    let output = process_spawn::run_capture(&mut install, SVC_INSTALL_TIMEOUT)
+        .map_err(|e| spawn_error_string("Failed to run micontrol_face_svc install", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2458,7 +2488,6 @@ fn ensure_face_service() -> Result<Value, String> {
 /// 120×/hour).
 #[cfg(windows)]
 fn ensure_face_service_reinstall(state: &str) -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2497,11 +2526,17 @@ fn ensure_face_service_reinstall(state: &str) -> Result<Value, String> {
         "[ensure_face_service] S66-003: SCM entry missing but binary present ({}) — reinstalling",
         svc_exe.display()
     );
-    let output = std::process::Command::new(&svc_exe)
-        .arg("install")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("reinstall: failed to run {}: {e}", svc_exe.display()))?;
+    let mut reinstall = std::process::Command::new(&svc_exe);
+    reinstall.arg("install");
+    // Known long operation (SVC_INSTALL_TIMEOUT), same SCM stop/delete/create
+    // shape as the other service installs; a timeout kills the child and is
+    // reported with the catalog id.
+    let output = process_spawn::run_capture(&mut reinstall, SVC_INSTALL_TIMEOUT).map_err(|e| {
+        spawn_error_string(
+            &format!("reinstall: failed to run {}", svc_exe.display()),
+            e,
+        )
+    })?;
 
     let exit_ok = output.status.success();
     let out_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -3200,5 +3235,103 @@ mod install_update_name_tests {
             payload_version_from_name("MiControl_0.2.20_x64-setup.exe"),
             None
         );
+    }
+}
+
+// ── C2a: bounded spawn tests ─────────────────────────────────────────────────
+//
+// The migrated call sites wait exclusively through `process_spawn`, whose
+// timeout kills the whole child tree. These tests pin that contract in the
+// exact shape the elevated helper depends on: a sleeping child answers
+// SpawnError::Timeout and is really dead, the timeout reaches the caller
+// tagged with its catalog id, and no direct child-wait calls remain in this
+// file.
+
+#[cfg(all(test, windows))]
+mod spawn_timeout_tests {
+    use super::spawn_error_string;
+    use crate::util::process_spawn::{self, SpawnError};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// A child that sleeps past its budget answers SpawnError::Timeout and
+    /// the whole tree is dead: no ping.exe may survive the timed-out wait.
+    #[test]
+    fn elevated_timeout_kills_sleeping_child() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let start = Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, Duration::from_millis(500))
+            .expect_err("a sleeping child must hit the timeout");
+        assert!(
+            matches!(err, SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill took too long: {:?}",
+            start.elapsed()
+        );
+
+        // The child (and its tree) must be gone, not orphaned behind the
+        // timed-out wait.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        let text = out.stdout_str();
+        assert!(
+            !text.contains("ping.exe"),
+            "ping.exe still alive after timeout kill: {text}"
+        );
+    }
+
+    /// A timeout maps onto the catalog (`spawn.timeout`) and names the
+    /// program, so the ledger entry records why the command died; other
+    /// spawn failures keep the plain legacy wording.
+    #[test]
+    fn elevated_timeout_maps_to_catalog_code() {
+        let msg = spawn_error_string(
+            "Failed to run micontrol_bridge install",
+            SpawnError::Timeout {
+                program: "micontrol_bridge.exe".to_string(),
+                elapsed: Duration::from_secs(60),
+            },
+        );
+        let id = crate::errors::ErrorCode::SpawnTimeout.spec().id;
+        assert!(msg.contains(id), "catalog id missing: {msg}");
+        assert!(
+            msg.contains("micontrol_bridge.exe"),
+            "program missing: {msg}"
+        );
+
+        let io = spawn_error_string(
+            "Failed to run PowerShell",
+            SpawnError::Io(std::io::Error::other("boom")),
+        );
+        assert!(!io.contains(id), "non-timeout must not carry the id: {io}");
+        assert!(io.contains("boom"));
+    }
+
+    /// The migrated sites must spawn exclusively through process_spawn: no
+    /// direct child-wait calls remain anywhere in this file (the static
+    /// spawn-timeout gate holds the same invariant at build time).
+    #[test]
+    fn elevated_sites_use_no_direct_child_waits() {
+        let src = include_str!("elevated.rs");
+        // Assembled from parts so this test's own source text cannot match
+        // the tokens it forbids.
+        let direct_waits = [
+            format!(".{}{}{}", "out", "put", "()"),
+            format!(".{}{}{}", "sta", "tus", "()"),
+            format!(".{}{}", "wait", "()"),
+        ];
+        for token in &direct_waits {
+            assert!(
+                !src.contains(token.as_str()),
+                "direct child wait present: {token}"
+            );
+        }
     }
 }

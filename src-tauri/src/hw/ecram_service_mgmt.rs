@@ -13,12 +13,24 @@ use std::path::PathBuf;
 const SERVICE_NAME: &str = "IoTSvc";
 const SERVICE_EXE: &str = "ecram_service.exe";
 
-/// Prevent console window flash when spawning subprocesses.
+/// `taskkill /F /IM` inside the destructive recreation path. A force kill
+/// completes well under a second; 10 s is headroom for a slow kill without
+/// wedging the recreation (contract: UNIVERSAL-CONTRACTS.md section 4, every
+/// child wait is bounded).
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const TASKKILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Kill every process of one image name (best-effort `taskkill /F /IM`)
+/// through the canonical spawn helper: bounded wait, tree kill on timeout,
+/// CREATE_NO_WINDOW applied by the helper itself. The callers already treat
+/// a missing process as fine, so failures stay best-effort there but are
+/// logged.
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+fn kill_process_image(image: &str) -> Result<(), crate::util::process_spawn::SpawnError> {
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/F", "/IM", image]);
+    crate::util::process_spawn::run_capture(&mut cmd, TASKKILL_TIMEOUT).map(|_| ())
+}
 
 /// Status of the ecram_service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,14 +166,14 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             );
             let _ = crate::util::win_service::stop_request(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "IoTService.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "ecram_service.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // Best-effort as before, but bounded: a spawn failure (timeout
+            // included) is logged and the child tree dies on expiry.
+            if let Err(e) = kill_process_image("IoTService.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill IoTService.exe failed: {e}");
+            }
+            if let Err(e) = kill_process_image("ecram_service.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill ecram_service.exe failed: {e}");
+            }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
 
@@ -225,14 +237,14 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             // Kill any lingering process
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "IoTService.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "ecram_service.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // Best-effort as before, but bounded: a spawn failure (timeout
+            // included) is logged and the child tree dies on expiry.
+            if let Err(e) = kill_process_image("IoTService.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill IoTService.exe failed: {e}");
+            }
+            if let Err(e) = kill_process_image("ecram_service.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill ecram_service.exe failed: {e}");
+            }
             std::thread::sleep(std::time::Duration::from_secs(1));
 
             // Delete and recreate the service with the correct path.
@@ -533,4 +545,69 @@ fn start_service(name: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 fn start_service(_name: &str) -> Result<(), String> {
     Err("Service management is only supported on Windows".to_string())
+}
+
+// ── C2a: bounded spawn tests ─────────────────────────────────────────────────
+
+#[cfg(all(test, windows))]
+mod ecram_service_mgmt_spawn_tests {
+    use crate::util::process_spawn::{self, SpawnError};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// A child sleeping past its budget answers SpawnError::Timeout and the
+    /// process is really dead, not orphaned behind the timed-out wait. This
+    /// pins the contract every taskkill in the recreation path now relies on.
+    #[test]
+    fn ecram_service_mgmt_timeout_kills_sleeping_child() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let start = Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, Duration::from_millis(500))
+            .expect_err("a sleeping child must hit the timeout");
+        assert!(
+            matches!(err, SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill took too long: {:?}",
+            start.elapsed()
+        );
+
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        assert!(
+            !out.stdout_str().contains("ping.exe"),
+            "ping.exe still alive after timeout kill: {}",
+            out.stdout_str()
+        );
+    }
+
+    /// The kill helper stays best-effort for a missing image (taskkill's
+    /// nonzero exit is a result, not a spawn error), and no direct child-wait
+    /// calls remain in this file: every spawn goes through process_spawn.
+    #[test]
+    fn ecram_service_mgmt_no_direct_child_waits() {
+        super::kill_process_image("mi_control_no_such_image_xyz")
+            .expect("taskkill on a missing image is not a spawn failure");
+
+        let src = include_str!("ecram_service_mgmt.rs");
+        // Assembled from parts so this test's own source text cannot match
+        // the tokens it forbids.
+        let direct_waits = [
+            format!(".{}{}{}", "out", "put", "()"),
+            format!(".{}{}{}", "sta", "tus", "()"),
+            format!(".{}{}", "wait", "()"),
+        ];
+        for token in &direct_waits {
+            assert!(
+                !src.contains(token.as_str()),
+                "direct child wait present: {token}"
+            );
+        }
+    }
 }
