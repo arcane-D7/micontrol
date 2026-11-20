@@ -68,10 +68,12 @@ fn catalog_holds_one_entry_per_code() {
             spec.code
         );
     }
-    // Pins the catalog size: adding a variant without a row (or a row
-    // without a variant) breaks this count. The JS gate cross-checks the
-    // same parity from the source text.
-    assert_eq!(CATALOG.len(), 31);
+    // No magic number: two branches adding codes at once made a pinned size
+    // fail after a clean union. The variant/row parity is enforced from the
+    // source text by `scripts/check-error-catalog.mjs` (it parses the enum and
+    // the CATALOG and fails when they disagree); this test only proves the
+    // no-duplicates invariant above.
+    assert!(!CATALOG.is_empty(), "CATALOG must not be empty");
 }
 
 /// One sample per `HardwareError` variant. `HardwareError::code()` is an
