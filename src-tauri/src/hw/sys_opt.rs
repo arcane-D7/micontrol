@@ -417,17 +417,17 @@ fn restore_telemetry_level() -> HardwareResult<()> {
 /// there directly (equivalent and persistent) and stop/start via `sc`.
 #[cfg(windows)]
 fn apply_diagtrack(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const SVC_PATH: &str = r"SYSTEM\CurrentControlSet\Services\DiagTrack";
     let prev_start = read_hklm_dword(SVC_PATH, "Start");
     let start_val: u32 = if disable { 4 } else { 2 };
     write_hklm_dword(SVC_PATH, "Start", start_val)?;
-    let verb = if disable { "stop" } else { "start" };
-    let _ = std::process::Command::new("sc.exe")
-        .args([verb, "DiagTrack"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    // Fire-and-forget exactly like the old `sc stop` / `sc start`: the
+    // request goes to the SCM, which applies it in its own time.
+    if disable {
+        let _ = crate::util::win_service::stop_request("DiagTrack");
+    } else {
+        let _ = crate::util::win_service::start("DiagTrack");
+    }
     if disable {
         mark_applied("diagtrack_service", Some((SVC_PATH, prev_start)))?;
     } else {
@@ -1156,8 +1156,6 @@ fn apply_cortana_relics(disable: bool) -> HardwareResult<()> {
 /// same persistent change; `sc stop` still works (SYSTEM has that right).
 #[cfg(windows)]
 fn apply_unused_services(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut failures = Vec::new();
     for svc in UNUSED_SERVICES {
         let svc_path = format!(r"SYSTEM\CurrentControlSet\Services\{svc}");
@@ -1168,10 +1166,8 @@ fn apply_unused_services(disable: bool) -> HardwareResult<()> {
                 failures.push(format!("{svc}: {e}"));
                 continue;
             }
-            let _ = std::process::Command::new("sc.exe")
-                .args(["stop", svc])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // Fire-and-forget stop, exactly like the old `sc stop`.
+            let _ = crate::util::win_service::stop_request(svc);
             mark_applied("services_unused", Some((&svc_path, prev)))?;
         }
     }

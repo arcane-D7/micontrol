@@ -119,6 +119,17 @@ pub enum ErrorCode {
     PolicyInvalid,
     /// The watchdog refused an action (health gate or restart policy).
     WatchdogRejected,
+    // Catalog-only codes: Windows Service Control Manager operations
+    // (util::win_service). Query = reading state/config; Control =
+    // start/stop/delete; Config = create/binary path/failure actions.
+    /// Reading service state or config from the SCM failed.
+    ServiceQueryFailed,
+    /// Starting, stopping or deleting a service failed.
+    ServiceControlFailed,
+    /// Creating or reconfiguring a service (binPath, failure actions) failed.
+    ServiceConfigFailed,
+    /// The SCM refused the operation: access denied, needs elevation.
+    ServiceAccessDenied,
 }
 
 impl ErrorCode {
@@ -157,6 +168,10 @@ impl ErrorCode {
             Self::StoreCorrupt => "store_corrupt",
             Self::PolicyInvalid => "policy_invalid",
             Self::WatchdogRejected => "watchdog_rejected",
+            Self::ServiceQueryFailed => "service_query_failed",
+            Self::ServiceControlFailed => "service_control_failed",
+            Self::ServiceConfigFailed => "service_config_failed",
+            Self::ServiceAccessDenied => "service_access_denied",
         }
     }
 
@@ -479,6 +494,44 @@ pub const CATALOG: &[ErrorSpec] = &[
         severity: Severity::Fatal,
         retry: RetryPolicy::Never,
         user_action: UserAction::ContactSupport,
+    },
+    ErrorSpec {
+        code: ErrorCode::ServiceQueryFailed,
+        id: "service.query_failed",
+        i18n_key: "errors.service.query_failed",
+        severity: Severity::Warning,
+        retry: RetryPolicy::Backoff {
+            base_ms: 200,
+            max_ms: 5000,
+        },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::ServiceControlFailed,
+        id: "service.control_failed",
+        i18n_key: "errors.service.control_failed",
+        severity: Severity::Error,
+        retry: RetryPolicy::Backoff {
+            base_ms: 1000,
+            max_ms: 15000,
+        },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::ServiceConfigFailed,
+        id: "service.config_failed",
+        i18n_key: "errors.service.config_failed",
+        severity: Severity::Error,
+        retry: RetryPolicy::Never,
+        user_action: UserAction::Reinstall,
+    },
+    ErrorSpec {
+        code: ErrorCode::ServiceAccessDenied,
+        id: "service.access_denied",
+        i18n_key: "errors.service.access_denied",
+        severity: Severity::Error,
+        retry: RetryPolicy::Never,
+        user_action: UserAction::Elevate,
     },
 ];
 

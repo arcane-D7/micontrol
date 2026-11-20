@@ -917,6 +917,12 @@
     "registry": {
       "failure": "Une opération du registre Windows a échoué."
     },
+    "service": {
+      "access_denied": "L'opération de contrôle du service nécessite des droits administrateur.",
+      "config_failed": "Une modification de la configuration du service a échoué.",
+      "control_failed": "Une opération de démarrage ou d'arrêt du service a échoué.",
+      "query_failed": "Impossible de lire l'état du service."
+    },
     "spawn": {
       "timeout": "Un processus a dépassé sa limite de temps et a été arrêté."
     },

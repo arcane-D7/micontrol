@@ -917,6 +917,12 @@
     "registry": {
       "failure": "A registry operation failed."
     },
+    "service": {
+      "access_denied": "The service control operation needs administrator rights.",
+      "config_failed": "A service configuration change failed.",
+      "control_failed": "A service start or stop operation failed.",
+      "query_failed": "The service status could not be read."
+    },
     "spawn": {
       "timeout": "A process exceeded its time limit and was stopped."
     },

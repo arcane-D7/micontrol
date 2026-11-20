@@ -90,6 +90,16 @@ const STEPS = [
     cmd: 'node',
     args: ['scripts/check-state-writes.mjs'],
   },
+  {
+    // C1a / U3 (architecture governor D3): every Windows service operation
+    // goes through the native SCM API in src-tauri/src/util/win_service.rs.
+    // Ratchet: the baseline holds ZERO entries — service ops were migrated
+    // off sc.exe wholesale, any new spawn fails here immediately.
+    id: 'service-calls',
+    name: 'Service calls gate (no sc.exe spawns)',
+    cmd: 'node',
+    args: ['scripts/check-service-calls.mjs'],
+  },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];
 
