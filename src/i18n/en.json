@@ -935,6 +935,10 @@
       "corrupt": "Saved data is corrupt and will be recreated."
     },
     "task": {
+      "access_denied": "The scheduled task operation needs administrator rights.",
+      "config_failed": "Registering or deleting the scheduled task failed.",
+      "control_failed": "Starting or stopping the scheduled task failed.",
+      "query_failed": "The scheduled task status could not be read.",
       "join_failed": "A background task failed or was cancelled."
     },
     "touchpad": {

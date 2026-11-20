@@ -8,7 +8,7 @@
     "src-tauri/src/commands/privacy.rs": 1,
     "src-tauri/src/commands/system.rs": 1,
     "src-tauri/src/debug_log.rs": 2,
-    "src-tauri/src/elev_bridge.rs": 3,
+    "src-tauri/src/elev_bridge.rs": 2,
     "src-tauri/src/elevated.rs": 4,
     "src-tauri/src/hw/crash_recovery.rs": 5,
     "src-tauri/src/hw/discovery.rs": 2,
@@ -26,6 +26,7 @@
     "src-tauri/src/util/consent_audit.rs": 2,
     "src-tauri/src/util/crash_report.rs": 1,
     "src-tauri/src/util/error_log.rs": 1,
+    "src-tauri/src/util/schtasks.rs": 1,
     "src-tauri/src/util/session_marker.rs": 1,
     "src-tauri/src/util/state_store.rs": 1
   }

@@ -163,21 +163,6 @@
       "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
     },
     {
-      "file": "src-tauri/src/hw/sys_opt.rs",
-      "line": 454,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/hw/sys_opt.rs",
-      "line": 581,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/hw/sys_opt.rs",
-      "line": 775,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
       "file": "src-tauri/src/hw/update.rs",
       "line": 156,
       "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
@@ -206,6 +191,11 @@
       "file": "src-tauri/src/util/firewall.rs",
       "line": 167,
       "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+    },
+    {
+      "file": "src-tauri/src/hw/sys_opt.rs",
+      "line": 743,
+      "reason": "regenerated 2026-11-20 after C1b/U4 line shifts (run_ps; schtasks sites migrated to util/schtasks.rs; gate own scan)"
     }
   ]
 }

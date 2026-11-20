@@ -57,14 +57,19 @@
 
 use crate::util::auth;
 use crate::util::rate_limit::MessageRateLimiter;
+use crate::util::schtasks::{self, TaskDecision};
 use crate::util::win_service::{self, ServiceState};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// Name of the scheduled task registered by the NSIS installer.
-const TASK_NAME: &str = "MiControlElevated";
+///
+/// Single definition lives in [`crate::util::schtasks`]; this alias keeps
+/// every existing log line and command in this file readable.
+const TASK_NAME: &str = schtasks::ELEVATED_TASK_NAME;
 /// SCM name of the autonomous elevated service installed at install time.
 const BRIDGE_SERVICE_NAME: &str = "MiControlBridge";
 /// Named pipe of the autonomous elevated service installed at install time.
@@ -478,6 +483,141 @@ enum TaskHealResult {
     Healed,
     /// Healing was attempted but failed (not admin, UAC declined, etc.).
     Failed,
+}
+
+// ── L-01: the scheduled-task path is a gated fallback ───────────────────────
+//
+// Before the gate, EVERY elevated command that reached the task path spawned
+// `schtasks /run`, and when the task was missing re-ran `/query /xml` +
+// `/delete` + `/create` (which fails unelevated) and emitted 3 WARN lines.
+// With `MiControlElevated` absent (standard-user session) that produced 146
+// log lines in 2.5 h. The rules now are:
+//   (a) `exists` is consulted at most once per 60 s window (the gate cache);
+//   (b) a re-create (heal) is attempted at most once per exponential backoff
+//       window (1 min, 5 min, 30 min), never per command;
+//   (c) when the bridge service is RUNNING, the task is a fallback and is
+//       not attempted at all (the pipe is the primary elevated path);
+//   (d) a missing task logs ONE WARN per episode, with the accumulated
+//       command count attached.
+
+/// Process-wide L-01 gate for the scheduled-task path.
+static TASK_GATE: OnceLock<StdMutex<schtasks::TaskGate>> = OnceLock::new();
+
+/// Run `f` against the process-wide task gate, recovering a poisoned lock.
+fn with_task_gate<T>(f: impl FnOnce(&mut schtasks::TaskGate) -> T) -> T {
+    let lock = TASK_GATE.get_or_init(|| StdMutex::new(schtasks::TaskGate::default()));
+    let mut guard = match lock.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    f(&mut guard)
+}
+
+/// Why the scheduled-task path was or was not taken for one command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TaskPathPlan {
+    /// Dispatch through the scheduled task (it exists and the service is not
+    /// already the healthy primary).
+    Attempt,
+    /// The service pipe already answered: the task fallback is never even
+    /// consulted (structural L-01 rule; nothing to test here beyond the
+    /// decision table).
+    NotNeeded,
+    /// The bridge service is RUNNING: a healthy service owns elevation, so
+    /// the task is a fallback and is not attempted (rule c).
+    ServiceHealthy,
+    /// The task is missing: fail toward the pipe/UAC policy; `emit_warn` is
+    /// true exactly once per episode and `missing_total` is the running
+    /// command count to log with it (rule d).
+    TaskMissing { emit_warn: bool, missing_total: u64 },
+}
+
+/// Pure decision table for the task path (L-01 rules).
+///
+/// `pipe_ok` is true when the primary path answered, `service_running` when
+/// the SCM reports the bridge service Running, and `gate` carries the cached
+/// `exists` answer (refreshed by the caller before this call when due).
+fn task_path_plan(
+    pipe_ok: bool,
+    service_running: bool,
+    gate: &mut schtasks::TaskGate,
+    now_ms: u64,
+) -> TaskPathPlan {
+    if pipe_ok {
+        return TaskPathPlan::NotNeeded;
+    }
+    if service_running {
+        return TaskPathPlan::ServiceHealthy;
+    }
+    match gate.decide(now_ms) {
+        TaskDecision::Attempt => TaskPathPlan::Attempt,
+        TaskDecision::Missing {
+            emit_warn,
+            missing_total,
+        } => TaskPathPlan::TaskMissing {
+            emit_warn,
+            missing_total,
+        },
+    }
+}
+
+/// Refresh the gate's `exists` cache when the window is due, then produce the
+/// task-path plan. Called only AFTER the pipe path failed, so the scheduling
+/// cost lands on commands that need the fallback, never on healthy ones.
+async fn plan_task_path() -> TaskPathPlan {
+    let service_running = bridge_service_state() == BridgeServiceState::Running;
+    let now = auth::now_ms();
+    if with_task_gate(|g| g.exists_refresh_due(now)) {
+        // One spawn-bounded probe per window, on the fixed blocking pool.
+        let exists = match crate::util::fixed_pool::run_blocking_timeout(
+            Duration::from_secs(10),
+            || schtasks::exists(schtasks::ELEVATED_TASK_NAME),
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                log::debug!(target: "elev_bridge", "scheduled-task existence probe failed: {e}");
+                false
+            }
+        };
+        with_task_gate(|g| g.set_exists(now, exists));
+    }
+    with_task_gate(|g| task_path_plan(false, service_running, g, now))
+}
+
+/// Run `schtasks /run <task>` once through the port, bounded by `budget`.
+/// All outcomes log at DEBUG: the per-episode WARN is the gate's job.
+async fn run_task_once(budget: Duration) -> bool {
+    match crate::util::fixed_pool::run_blocking_timeout(budget, || {
+        schtasks::run(schtasks::ELEVATED_TASK_NAME)
+    })
+    .await
+    {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            log::debug!(target: "elev_bridge", "schtasks /run '{}' failed: {e}", schtasks::ELEVATED_TASK_NAME);
+            false
+        }
+        Err(e) => {
+            log::debug!(target: "elev_bridge", "schtasks /run blocking task failed: {e}");
+            false
+        }
+    }
+}
+
+/// Fail a no-prompt command cleanly: drop the command file and return the
+/// reason string (the caller wraps it in `Err`, so this file keeps its
+/// legacy error-signature ratchet count unchanged). No WARN here: the
+/// per-command canonical failure line (P8) and the per-episode missing-task
+/// WARN (L-01 d) cover both signals already.
+async fn no_uac(cmd_path: &std::path::Path) -> String {
+    let _ = tokio::fs::remove_file(cmd_path).await;
+    format!(
+        "Elevated command not executed: scheduled task '{}' is unavailable \
+         and UAC fallback is disabled for this operation.",
+        TASK_NAME
+    )
 }
 
 /// Timeout for slow commands that do WMI/IOCTL probes or driver installs.
@@ -1217,6 +1357,91 @@ async fn run_elevated_inner(
         ));
     }
 
+    // ── L-01: plan the task path ONCE, before any file IO or spawn ───────
+    // The pipe path above already failed, so this only runs for commands that
+    // genuinely need the fallback. When the plan skips the task (missing task
+    // or healthy service), NO `schtasks` spawn happens for this command; a
+    // missing task additionally counts one WARN per episode (rule d).
+    let plan = plan_task_path().await;
+    if let TaskPathPlan::TaskMissing {
+        emit_warn,
+        missing_total,
+    } = &plan
+    {
+        if *emit_warn {
+            log::warn!(
+                target: "elev_bridge",
+                "Scheduled task '{TASK_NAME}' is missing; {missing_total} elevated commands \
+                 have needed the fallback this session. The MiControlBridge service pipe \
+                 remains the primary elevated path. Reinstall MiControl or run \
+                 'micontrol_bridge.exe install' to re-register the task."
+            );
+        }
+        log::debug!(
+            target: "elev_bridge",
+            "Task path skipped for '{cmd}': task missing ({missing_total} commands affected this session)"
+        );
+    } else if matches!(plan, TaskPathPlan::ServiceHealthy) {
+        log::debug!(
+            target: "elev_bridge",
+            "Task path skipped for '{cmd}': MiControlBridge service is RUNNING (pipe is the primary elevated path)"
+        );
+    }
+    let mut task_planned = matches!(plan, TaskPathPlan::Attempt);
+    let task_missing = matches!(plan, TaskPathPlan::TaskMissing { .. });
+
+    // A missing task still gets its ONE heal attempt per backoff window
+    // (rule b), decoupled from this command's own dispatch: when the create
+    // succeeds, this command proceeds through the task like any other. A
+    // blocked window skips the heal entirely (never per command).
+    if task_missing {
+        let heal_now = auth::now_ms();
+        let heal_allowed = with_task_gate(|g| g.heal_attempt_allowed(heal_now));
+        let healed = if heal_allowed {
+            match crate::util::fixed_pool::run_blocking_timeout(
+                remaining(hard_deadline).min(Duration::from_secs(30)),
+                ensure_task_correct_path,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    log::debug!(target: "elev_bridge", "task heal task failed: {e}");
+                    TaskHealResult::Failed
+                }
+            }
+        } else {
+            TaskHealResult::Failed
+        };
+        match healed {
+            TaskHealResult::AlreadyCorrect | TaskHealResult::Healed => {
+                with_task_gate(|g| g.note_healed(auth::now_ms()));
+                task_planned = true;
+            }
+            TaskHealResult::Failed => {
+                with_task_gate(|g| g.note_heal_failed(auth::now_ms()));
+            }
+        }
+    }
+
+    // Background commands never prompt (P8/MIOT-38): when the task path is
+    // still unavailable there is no way to run them, so fail immediately
+    // WITHOUT the stale-file sweep, the command file or any further spawn.
+    // User-initiated commands (allow_uac) continue below: the command file
+    // is still written so the UAC helper can pick it up.
+    if !task_planned && !allow_uac {
+        if task_missing {
+            // Pipe absent + task missing = both paths unavailable this
+            // session: count it so later no-prompt calls fail fast (S51).
+            note_elevated_failure();
+        }
+        return Err(format!(
+            "Elevated command not executed: scheduled task '{TASK_NAME}' is unavailable \
+             and UAC fallback is disabled for this operation (the MiControlBridge service \
+             pipe is the primary elevated path)."
+        ));
+    }
+
     let dir = crate::elevated::elev_dir();
     // S26-006: run on a blocking thread — cleanup_stale_elev_files() uses
     // std::fs::read_dir. S69: FIXED pool (no tokio blocking-pool churn).
@@ -1297,9 +1522,13 @@ async fn run_elevated_inner(
     }
 
     // Launch the scheduled task (returns immediately; task runs asynchronously).
-    // CREATE_NO_WINDOW prevents the flash of a console window on every call.
+    // Only when the L-01 plan says Attempt; skipped plans never spawn.
     set_phase(ElevPhase::Dispatch);
-    let task_ok = run_schtasks_run().await;
+    let task_ok = if task_planned {
+        run_task_once(remaining(hard_deadline).min(Duration::from_secs(30))).await
+    } else {
+        false
+    };
 
     // S37-001: Release the serialization lock BEFORE the result-poll loop.
     // Holding ELEV_REQUEST_LOCK across the 15 s poll serializes every
@@ -1311,71 +1540,85 @@ async fn run_elevated_inner(
     drop(_guard);
 
     if !task_ok {
-        // Self-healing: try to re-register the scheduled task with the correct
-        // path. This fixes the case where the task was registered during
-        // `cargo tauri dev` and points to the debug exe.
-        // S69: FIXED pool (no tokio blocking-pool churn).
-        let healed = crate::util::fixed_pool::run_blocking_timeout(
-            remaining(hard_deadline).min(Duration::from_secs(30)),
-            ensure_task_correct_path,
-        )
-        .await
-        .map_err(|e| format!("task heal task failed: {e}"))?;
+        if task_planned {
+            // Self-heal ONLY when the gate's backoff window allows it (rule
+            // b): at most one re-create per 1 min / 5 min / 30 min step,
+            // never per command. The old 900 s cooldown lived inside
+            // `ensure_task_correct_path`; the gate owns the schedule now.
+            let heal_now = auth::now_ms();
+            let heal_allowed = with_task_gate(|g| g.heal_attempt_allowed(heal_now));
+            let healed = if heal_allowed {
+                match crate::util::fixed_pool::run_blocking_timeout(
+                    remaining(hard_deadline).min(Duration::from_secs(30)),
+                    ensure_task_correct_path,
+                )
+                .await
+                {
+                    Ok(TaskHealResult::Healed) => {
+                        with_task_gate(|g| g.note_healed(auth::now_ms()));
+                        TaskHealResult::Healed
+                    }
+                    Ok(TaskHealResult::Failed) => {
+                        with_task_gate(|g| g.note_heal_failed(auth::now_ms()));
+                        TaskHealResult::Failed
+                    }
+                    Ok(other) => other,
+                    Err(e) => {
+                        log::debug!(target: "elev_bridge", "task heal task failed: {e}");
+                        TaskHealResult::Failed
+                    }
+                }
+            } else {
+                TaskHealResult::Failed
+            };
 
-        let no_uac = || async {
-            log::warn!(
-                "Scheduled task unavailable and UAC prompts are disabled for this \
-                 command — returning error instead"
-            );
-            let _ = tokio::fs::remove_file(&cmd_path).await;
-            Err(format!(
-                "Elevated command not executed: scheduled task '{}' is unavailable \
-                 and UAC fallback is disabled for this operation.",
-                TASK_NAME
-            ))
-        };
-
-        match healed {
-            TaskHealResult::AlreadyCorrect => {
-                // Task was fine — the original /run failure was transient.
-                // Retry once before falling back.
-                let retry_ok = run_schtasks_run().await;
-                if !retry_ok {
+            match healed {
+                TaskHealResult::AlreadyCorrect => {
+                    // Task was fine: the original /run failure was transient.
+                    // Retry once before falling back.
+                    if !run_task_once(remaining(hard_deadline).min(Duration::from_secs(30))).await {
+                        if allow_uac {
+                            log::debug!(
+                                "Scheduled task still failing after AlreadyCorrect, falling back to UAC"
+                            );
+                            launch_uac_fallback(&request_id, &cmd_path).await?;
+                        } else {
+                            return Err(no_uac(&cmd_path).await);
+                        }
+                    }
+                }
+                TaskHealResult::Healed => {
+                    if !run_task_once(remaining(hard_deadline).min(Duration::from_secs(30))).await {
+                        if allow_uac {
+                            log::debug!(
+                                "Scheduled task still failed after self-healing, falling back to UAC"
+                            );
+                            launch_uac_fallback(&request_id, &cmd_path).await?;
+                        } else {
+                            return Err(no_uac(&cmd_path).await);
+                        }
+                    }
+                }
+                TaskHealResult::Failed => {
                     if allow_uac {
-                        log::warn!(
-                            "Scheduled task still failing after AlreadyCorrect, falling back to UAC"
-                        );
                         launch_uac_fallback(&request_id, &cmd_path).await?;
                     } else {
-                        no_uac().await?;
+                        return Err(no_uac(&cmd_path).await);
                     }
                 }
             }
-            TaskHealResult::Healed => {
-                let retry_ok = run_schtasks_run().await;
-                if !retry_ok {
-                    if allow_uac {
-                        log::warn!(
-                            "Scheduled task still failed after self-healing, falling back to UAC"
-                        );
-                        launch_uac_fallback(&request_id, &cmd_path).await?;
-                    } else {
-                        no_uac().await?;
-                    }
-                }
-            }
-            TaskHealResult::Failed => {
-                if allow_uac {
-                    launch_uac_fallback(&request_id, &cmd_path).await?;
-                } else {
-                    no_uac().await?;
-                }
-            }
+        } else {
+            // Task path skipped by the plan: straight to UAC (user-initiated
+            // commands only: background commands already returned above).
+            launch_uac_fallback(&request_id, &cmd_path).await?;
         }
         // S51: pipe + task both failed without UAC — the infrastructure is
         // degraded this session. Count it so later no-prompt calls fail fast
-        // instead of repeating the whole spawn/heal chain.
-        note_elevated_failure();
+        // instead of repeating the whole spawn/heal chain. A healthy-service
+        // skip does NOT count: the pipe is fine, only this command lost.
+        if !matches!(plan, TaskPathPlan::ServiceHealthy) {
+            note_elevated_failure();
+        }
     }
 
     // Poll for the result file (check every 150 ms) until the command's total
@@ -1878,36 +2121,8 @@ fn pipe_request(body: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&response_buf[..total_read]).to_string())
 }
 
-/// Run `schtasks /run /tn MiControlElevated` with CREATE_NO_WINDOW to avoid
-/// flashing a console window on every elevated operation.
-async fn run_schtasks_run() -> bool {
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let status = tokio::process::Command::new("schtasks")
-            .args(["/run", "/tn", TASK_NAME])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .await;
-        match status {
-            Ok(s) if s.success() => true,
-            Ok(s) => {
-                log::warn!("schtasks /run MiControlElevated failed with exit {s}");
-                false
-            }
-            Err(e) => {
-                log::warn!("schtasks /run MiControlElevated failed to spawn: {e}");
-                false
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
+// `run_schtasks_run` was the old inline `tokio::process::Command` spawn;
+// `run_task_once` above dispatches through `util::schtasks::run` now.
 
 /// UAC fallback: launch the current binary as administrator via ShellExecuteExW
 /// "runas" so that a single UAC prompt lets us run `micontrol.exe --elevated`.
@@ -2180,33 +2395,6 @@ fn cleanup_stale_elev_files(dir: &std::path::Path) {
 /// Returns the outcome of the self-healing attempt.
 #[cfg(windows)]
 fn ensure_task_correct_path() -> TaskHealResult {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    // S64: throttle the self-heal. This runs on the elevated dispatch chain,
-    // which background polls (thermal/battery) trigger every few seconds. When
-    // the task is genuinely missing and the non-elevated re-register keeps
-    // failing (standard user session), every call re-ran `schtasks /query`
-    // plus a failed `/create` and emitted 4 WARN lines — observed 2823
-    // repetitions in one log. A cooldown keeps the diagnostic value (we retry
-    // eventually, e.g. after a reinstall) without spamming.
-    const HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(900);
-    static LAST_HEAL_ATTEMPT: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
-        std::sync::OnceLock::new();
-    {
-        let lock = LAST_HEAL_ATTEMPT.get_or_init(|| std::sync::Mutex::new(None));
-        let mut guard = match lock.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        match *guard {
-            Some(last) if last.elapsed() < HEAL_COOLDOWN => {
-                return TaskHealResult::AlreadyCorrect;
-            }
-            _ => *guard = Some(std::time::Instant::now()),
-        }
-    }
-
     // Get the current executable path.
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -2217,108 +2405,65 @@ fn ensure_task_correct_path() -> TaskHealResult {
     };
     let current_path = current_exe.to_string_lossy().to_string();
 
-    // Query the existing task's action path.
-    let output = std::process::Command::new("schtasks")
-        .args(["/query", "/tn", TASK_NAME, "/xml"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    let need_reregister = match output {
-        Ok(out) => {
-            let xml = String::from_utf8_lossy(&out.stdout);
-            // Check if the task points to the current exe. The task XML
-            // stores the <Command> WITH quotes around the path
-            // ("C:\...\micontrol.exe") and may use forward slashes — match
-            // on all forms. MIOT-38: comparing against the UNQUOTED path made
-            // a correct task always look "wrong", so the self-heal
-            // re-registered an identical task on every elevated call and
-            // looped UAC prompts.
-            let path_quoted = format!("\"{current_path}\"");
-            let path_quoted_fwd = format!("\"{}\"", current_path.replace('\\', "/"));
-            let path_matches = xml.contains(&current_path)
-                || xml.contains(&current_path.replace('\\', "/"))
-                || xml.contains(&path_quoted)
-                || xml.contains(&path_quoted_fwd);
-            if path_matches {
-                false
-            } else {
-                log::info!(
-                    "Scheduled task points to wrong path, re-registering with: {current_path}"
-                );
-                true
-            }
-        }
-        Err(_) => {
-            log::info!("Scheduled task not found, registering with: {current_path}");
-            true
+    // Query the existing task's action path through the port
+    // (`schtasks /query /tn <name> /xml`). Every spawn, every console flag
+    // and every timeout lives in `util::schtasks` now.
+    let registered_xml = match schtasks::query_xml(TASK_NAME) {
+        Ok(xml) => Some(xml),
+        Err(e) => {
+            log::info!(
+                "Scheduled task '{TASK_NAME}' query failed ({e}); registering with: {current_path}"
+            );
+            None
         }
     };
 
-    if !need_reregister {
-        return TaskHealResult::AlreadyCorrect;
+    // Check if the task points to the current exe. The task XML stores the
+    // <Command> WITH quotes around the path ("C:\...\micontrol.exe") and may
+    // use forward slashes; match on all forms. MIOT-38: comparing against
+    // only the unquoted path made a correct task always look "wrong", so the
+    // self-heal re-registered an identical task on every elevated call and
+    // looped UAC prompts.
+    if let Some(xml) = &registered_xml {
+        if schtasks::xml_targets_path(xml, &current_path) {
+            return TaskHealResult::AlreadyCorrect;
+        }
+        log::info!("Scheduled task points to wrong path, re-registering with: {current_path}");
     }
 
-    // Build the task XML with the correct path.
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT120S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>"{current_path}"</Command><Arguments>--elevated</Arguments></Exec></Actions></Task>"#
-    );
+    // Build the task XML with the correct path: the single definition the
+    // installer also writes (same name, same document, byte-stable).
+    let task_xml = schtasks::elevated_task_xml(&current_path);
 
-    let temp_dir = std::env::temp_dir();
-    let xml_path = temp_dir.join("MCElev_heal.xml");
-    if let Err(e) = std::fs::write(&xml_path, &xml) {
-        log::warn!("Cannot write task XML for healing: {e}");
-        return TaskHealResult::Failed;
-    }
-    let xml_str = xml_path.to_string_lossy().to_string();
+    // Try 1: non-elevated schtasks (works if the user has rights or is
+    // already admin). Delete any mis-pointed registration first, then create
+    // from XML (the port writes the temp XML file and cleans it up).
+    let _ = schtasks::delete(TASK_NAME);
 
-    // Try 1: non-elevated schtasks (works if user has rights or is already admin)
-    let _ = std::process::Command::new("schtasks")
-        .args(["/delete", "/tn", TASK_NAME, "/f"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .status();
-
-    let create_ok = std::process::Command::new("schtasks")
-        .args(["/create", "/tn", TASK_NAME, "/xml", &xml_str, "/f"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    let success = match create_ok {
-        Ok(out) if out.status.success() => true,
-        _ => {
+    match schtasks::create_from_xml(TASK_NAME, &task_xml) {
+        Ok(()) => {
+            log::info!("Scheduled task re-registered successfully with correct path");
+            TaskHealResult::Healed
+        }
+        Err(e) => {
             // MIOT-38: NO UAC prompt here. The non-elevated create failed
-            // (access denied on a standard user session) and the previous
-            // code elevated via ShellExecuteExW "runas" → wrote
-            // MCElev_heal.bat → popped a consent dialog from a BACKGROUND
-            // dispatch chain (thermal/battery polls fire this loop every few
-            // seconds) — the prompt storm the user reported. The scheduled
-            // task is only a fallback: the MiControlBridge service (installed
-            // post-install as SYSTEM, no UAC) is the primary elevated path.
-            // Task missing → return a clean failure; reinstall repairs it
-            // (or the service path is used instead).
-            log::warn!(
-                "Non-elevated schtasks re-register of '{TASK_NAME}' failed — NOT \
+            // (access denied on a standard user session) and elevating via
+            // ShellExecuteExW "runas" popped a consent dialog from a
+            // BACKGROUND dispatch chain (thermal/battery polls fire this loop
+            // every few seconds), the prompt storm the user reported. The
+            // scheduled task is only a fallback: the MiControlBridge service
+            // (installed post-install as SYSTEM, no UAC) is the primary
+            // elevated path. Reinstall repairs it (or the service path is
+            // used instead). INFO, not WARN: the gate's per-episode WARN
+            // (L-01 d) is the single missing-task signal.
+            log::info!(
+                "Non-elevated schtasks re-register of '{TASK_NAME}' failed ({e}); NOT \
                  prompting UAC (scheduled task is a fallback; the MiControlBridge \
                  service is the primary elevated path). Reinstall MiControl or run \
                  'micontrol_bridge.exe install' to repair."
             );
-            false
+            TaskHealResult::Failed
         }
-    };
-
-    let _ = std::fs::remove_file(&xml_path);
-
-    if success {
-        log::info!("Scheduled task re-registered successfully with correct path");
-        TaskHealResult::Healed
-    } else {
-        log::warn!("Failed to re-register scheduled task (UAC may have been declined)");
-        TaskHealResult::Failed
     }
 }
 
@@ -2348,6 +2493,131 @@ mod tests {
         assert!(sweep_is_due(1_000_000, 1_000_000 + SWEEP_MIN_INTERVAL_MS));
         // A clock that jumps backwards must not stall the sweep forever.
         assert!(sweep_is_due(5_000_000, 1_000));
+    }
+
+    // ── L-01: the task path is a gated fallback (decision table) ───────────
+
+    /// Simulated session helper: one elevated command reaches the task path.
+    /// `now` drives the gate; a missing task fails `/run` and triggers the
+    /// heal chain exactly like `run_elevated_inner` does (heal only when the
+    /// gate allows, from both the Attempt and the Missing state). Returns
+    /// whether a CREATE (heal) attempt happened.
+    fn sim_command(
+        gate: &mut schtasks::TaskGate,
+        now: u64,
+        task_exists: bool,
+        heal_always_fails: bool,
+    ) -> bool {
+        // The caller refreshes the cache when the window is due.
+        if gate.exists_refresh_due(now) {
+            gate.set_exists(now, task_exists);
+        }
+        let plan = task_path_plan(false, false, gate, now);
+        if matches!(plan, TaskPathPlan::TaskMissing { .. }) {
+            // Heal-from-missing: one attempt per backoff window.
+            if !gate.heal_attempt_allowed(now) {
+                return false;
+            }
+            if heal_always_fails {
+                gate.note_heal_failed(now);
+            } else {
+                gate.note_healed(now);
+            }
+            return true;
+        }
+        if !matches!(plan, TaskPathPlan::Attempt) {
+            return false;
+        }
+        // /run "fails" while the task vanished between the refresh and now.
+        if task_exists {
+            return false;
+        }
+        if !gate.heal_attempt_allowed(now) {
+            return false;
+        }
+        if heal_always_fails {
+            gate.note_heal_failed(now);
+        } else {
+            gate.note_healed(now);
+        }
+        true
+    }
+
+    /// THE L-01 REGRESSION: with the task missing, every command used to
+    /// re-run the query+delete+create heal chain (3 WARN lines per command,
+    /// 146 lines in 2.5 h). Now there is at most ONE create attempt per
+    /// backoff window, no matter how many commands arrive.
+    #[test]
+    fn missing_task_yields_one_create_attempt_per_window_not_per_command() {
+        let mut gate = schtasks::TaskGate::default();
+        // 10 commands in the first minute (service down, pipe failing):
+        // exactly ONE create attempt, at the first command.
+        let mut creates = 0;
+        for sec in 0..10u64 {
+            if sim_command(&mut gate, sec * 1_000, false, true) {
+                creates += 1;
+            }
+        }
+        assert_eq!(creates, 1, "one create attempt per backoff window");
+        assert_eq!(gate.missing_total(), 10, "every command is still counted");
+        // Still blocked at t = 59 s, allowed again at t = 60 s.
+        assert!(!sim_command(&mut gate, 59_000, false, true));
+        assert!(sim_command(&mut gate, 60_000, false, true));
+    }
+
+    /// Over a full 2.5 h outage the heal chain runs a bounded number of
+    /// times (1 min, 5 min, 30 min backoff, capped at 30 min), not ~150
+    /// times like before.
+    #[test]
+    fn missing_task_creates_are_bounded_over_hours() {
+        let mut gate = schtasks::TaskGate::default();
+        let two_and_a_half_hours_ms = 150 * 60 * 1_000;
+        let mut creates = 0;
+        // One command every 10 s for 2.5 h.
+        let mut t = 0u64;
+        while t <= two_and_a_half_hours_ms {
+            if sim_command(&mut gate, t, false, true) {
+                creates += 1;
+            }
+            t += 10_000;
+        }
+        // Windows at 0, 1 min, 6 min, 36 min, then every 30 min:
+        // 0 + 60s + 6m + 36m + 66m + 96m + 126m = 7 attempts max.
+        assert!(
+            creates <= 7,
+            "backoff bounds the heal chain (got {creates} creates in 2.5 h)"
+        );
+    }
+
+    /// When the pipe answers, the task fallback is never consulted: zero
+    /// gate touches, zero creates, even with the task missing.
+    #[test]
+    fn pipe_success_means_zero_task_path_activity() {
+        let mut gate = schtasks::TaskGate::default();
+        gate.set_exists(0, false); // task missing AND
+        for sec in 0..20u64 {
+            let plan = task_path_plan(true, false, &mut gate, sec * 1_000);
+            assert_eq!(plan, TaskPathPlan::NotNeeded, "pipe ok => task untouched");
+        }
+        assert_eq!(gate.missing_total(), 0, "the gate never even counted");
+        // The heal schedule is untouched: no create was even considered.
+        assert!(gate.heal_attempt_allowed(5_000));
+        // And a healthy service likewise skips the task entirely.
+        let plan = task_path_plan(false, true, &mut gate, 1_000);
+        assert_eq!(plan, TaskPathPlan::ServiceHealthy);
+        assert_eq!(gate.missing_total(), 0);
+    }
+
+    /// A healthy service never lets the task path count as degraded (S51
+    /// must not open the circuit when the pipe path is fine).
+    #[test]
+    fn service_healthy_skip_does_not_count_as_missing() {
+        let mut gate = schtasks::TaskGate::default();
+        for sec in 0..5u64 {
+            let plan = task_path_plan(false, true, &mut gate, sec * 1_000);
+            assert_eq!(plan, TaskPathPlan::ServiceHealthy);
+        }
+        assert_eq!(gate.missing_total(), 0);
     }
 
     // ── P1: SCM-based availability decision ────────────────────────────────

@@ -441,33 +441,18 @@ fn apply_diagtrack(disable: bool) -> HardwareResult<()> {
 }
 
 /// Disable/enable the CEIP + diagnostics scheduled tasks.
+///
+/// All spawns go through the single `util::schtasks` port (timeout,
+/// `CREATE_NO_WINDOW`, catalogued errors); "task not present on this build"
+/// is a successful no-op, exactly like the S55 fix established.
 #[cfg(windows)]
 fn apply_ceip_tasks(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut failures = Vec::new();
     for task in CEIP_TASKS {
-        let verb = if disable { "/DISABLE" } else { "/ENABLE" };
-        let out = std::process::Command::new("schtasks")
-            .args(["/Change", verb, "/TN", task])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                // S55 FIX: schtasks/sc write errors to STDOUT, not stderr.
-                let text = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                if text.to_lowercase().contains("does not exist")
-                    || text.to_lowercase().contains("não existe")
-                {
-                    log::info!("[sys_opt] CEIP task {task} not present on this build — skipped");
-                } else {
-                    failures.push(format!("{task}: {}", text.trim()));
-                }
+        match crate::util::schtasks::set_enabled(task, !disable) {
+            Ok(()) => {}
+            Err(e) if crate::util::schtasks::is_not_found(&e) => {
+                log::info!("[sys_opt] CEIP task {task} not present on this build - skipped");
             }
             Err(e) => failures.push(format!("{task}: {e}")),
         }
@@ -563,46 +548,29 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
             "ceip_tasks" => apply_ceip_tasks(enabled),
             "compat_appraiser" => {
                 // The Compatibility Appraiser is inside CEIP tasks; standalone
-                // control via its own task.
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                // control via its own task, through the single `util::schtasks`
+                // port (timeout, CREATE_NO_WINDOW, catalogued errors).
                 // S55 FIX: on several 24H2 builds this task no longer exists —
                 // "task not found" is a successful no-op, not an error.
                 const APPRAISER_TASK: &str =
                     r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser";
-                let out = std::process::Command::new("schtasks")
-                    .args([
-                        "/Change",
-                        if enabled { "/DISABLE" } else { "/ENABLE" },
-                        "/TN",
-                        APPRAISER_TASK,
-                    ])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-                    .map_err(|e| HardwareError::Other(format!("schtasks: {e}")))?;
-                let combined = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                if !out.status.success()
-                    && !combined.to_lowercase().contains("does not exist")
-                    && !combined.to_lowercase().contains("não existe")
-                {
-                    return Err(HardwareError::Other(format!(
-                        "Compatibility Appraiser task: {}",
-                        combined.trim()
-                    )));
-                }
-                if out.status.success() {
-                    log::info!(
-                        "[sys_opt] Compatibility Appraiser task {}",
-                        if enabled { "enabled" } else { "disabled" }
-                    );
-                } else {
-                    log::info!(
-                        "[sys_opt] Compatibility Appraiser task not present on this build — no-op"
-                    );
+                match crate::util::schtasks::set_enabled(APPRAISER_TASK, !enabled) {
+                    Ok(()) => {
+                        log::info!(
+                            "[sys_opt] Compatibility Appraiser task {}",
+                            if enabled { "enabled" } else { "disabled" }
+                        );
+                    }
+                    Err(e) if crate::util::schtasks::is_not_found(&e) => {
+                        log::info!(
+                            "[sys_opt] Compatibility Appraiser task not present on this build - no-op"
+                        );
+                    }
+                    Err(e) => {
+                        return Err(HardwareError::Other(format!(
+                            "Compatibility Appraiser task: {e}"
+                        )));
+                    }
                 }
                 if enabled {
                     mark_applied("compat_appraiser", None)

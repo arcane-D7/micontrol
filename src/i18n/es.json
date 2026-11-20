@@ -935,6 +935,10 @@
       "corrupt": "Los datos guardados están dañados y se volverán a crear."
     },
     "task": {
+      "access_denied": "La operación sobre la tarea programada necesita permisos de administrador.",
+      "config_failed": "Falló el registro o la eliminación de la tarea programada.",
+      "control_failed": "Falló el inicio o la detención de la tarea programada.",
+      "query_failed": "No se pudo leer el estado de la tarea programada.",
       "join_failed": "Una tarea en segundo plano falló o se canceló."
     },
     "touchpad": {
