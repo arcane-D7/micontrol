@@ -4,14 +4,11 @@
 //! functionality by parsing `netsh wlan` command output.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use crate::util::xml;
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(windows)]
 use windows::core::GUID;
@@ -490,6 +487,12 @@ pub fn get_status() -> HardwareResult<WifiStatus> {
 const ASSOCIATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Poll interval while waiting for the association.
 const ASSOCIATION_POLL: Duration = Duration::from_millis(400);
+/// Budget for the `netsh wlan connect` request itself. It returns as soon as
+/// the request is queued; if it has not exited in 15 s the WLAN service is
+/// wedged and the tree must die instead of hanging the caller.
+const NETSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Budget for `netsh wlan disconnect` (a local radio call, sub-second).
+const NETSH_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Authentication/encryption written into the WLAN profile.
 ///
@@ -726,15 +729,13 @@ fn request_association(ssid: &str) -> HardwareResult<()> {
     // stay intact (the process is spawned directly, never through cmd.exe, so
     // '&' is not reinterpreted).
     cmd.args(["wlan", "connect"]).arg(format!("name={ssid}"));
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
+    // run_capture applies CREATE_NO_WINDOW and kills the tree on timeout.
+    let output = process_spawn::run_capture(&mut cmd, NETSH_CONNECT_TIMEOUT)
         .map_err(|e| HardwareError::Wifi(format!("Failed to connect: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.success() {
+        let stderr = output.stderr_str();
+        let stdout = output.stdout_str();
         return Err(HardwareError::Wifi(format!(
             "Failed to connect to '{ssid}': {}",
             if stderr.trim().is_empty() {
@@ -913,14 +914,12 @@ pub fn connect(ssid: &str, password: Option<&str>, security: Option<&str>) -> Ha
 pub fn disconnect() -> HardwareResult<()> {
     let mut cmd = Command::new("netsh");
     cmd.args(["wlan", "disconnect"]);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
+    // run_capture applies CREATE_NO_WINDOW and kills the tree on timeout.
+    let output = process_spawn::run_capture(&mut cmd, NETSH_DISCONNECT_TIMEOUT)
         .map_err(|e| HardwareError::Wifi(format!("Failed to disconnect: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.success() {
+        let stderr = output.stderr_str();
         return Err(HardwareError::Wifi(format!(
             "Failed to disconnect: {stderr}"
         )));
@@ -1327,5 +1326,38 @@ mod tests {
         )
         .expect_err("status errors must not be reported as success");
         assert!(format!("{err}").contains("not confirmed"));
+    }
+
+    /// The netsh child waits are bounded: a child that sleeps past the budget
+    /// must return `SpawnError::Timeout` and the whole tree must be dead
+    /// (no orphan process left behind).
+    #[test]
+    fn netsh_child_wait_is_bounded_and_kills_tree() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let started = Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, Duration::from_millis(500))
+            .expect_err("sleeping child must hit the timeout");
+        assert!(
+            matches!(err, process_spawn::SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout path took too long: {:?}",
+            started.elapsed()
+        );
+
+        // No orphan ping.exe may survive the tree kill.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        assert!(
+            !out.stdout_str().contains("ping.exe"),
+            "ping.exe survived the tree kill: {}",
+            out.stdout_str()
+        );
     }
 }

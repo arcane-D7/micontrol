@@ -5,197 +5,172 @@
     {
       "file": "src-tauri/src/commands/face.rs",
       "line": 319,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/commands/face.rs",
       "line": 322,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 894,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 900,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 985,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 991,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 1219,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 1225,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 2078,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 2342,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/elevated.rs",
       "line": 2503,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elev_bridge.rs",
-      "line": 2282,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elev_bridge.rs",
-      "line": 2289,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/color_calibration.rs",
       "line": 359,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/discovery.rs",
       "line": 161,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/discovery.rs",
       "line": 831,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/display.rs",
       "line": 2504,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/display.rs",
       "line": 2537,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/display.rs",
       "line": 2543,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/event_log.rs",
       "line": 358,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/localsend.rs",
       "line": 378,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/os_turbo.rs",
       "line": 666,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/os_turbo.rs",
       "line": 2357,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/phone_link.rs",
       "line": 46,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/screen_cast.rs",
       "line": 235,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/security_scan.rs",
       "line": 159,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/security_scan.rs",
       "line": 410,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/security_scan.rs",
       "line": 476,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     },
     {
       "file": "src-tauri/src/hw/syncthing.rs",
       "line": 195,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "not a child wait: reqwest HTTP response status read; REST client carries a 5 s total timeout; spawn-gate regex false positive"
     },
     {
       "file": "src-tauri/src/hw/syncthing.rs",
       "line": 196,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "not a child wait: reqwest HTTP response status read; REST client carries a 5 s total timeout; spawn-gate regex false positive"
     },
     {
       "file": "src-tauri/src/hw/syncthing.rs",
       "line": 210,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "not a child wait: reqwest HTTP response status read; REST client carries a 5 s total timeout; spawn-gate regex false positive"
     },
     {
       "file": "src-tauri/src/hw/syncthing.rs",
       "line": 211,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/hw/update.rs",
-      "line": 156,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/hw/update.rs",
-      "line": 308,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/hw/wifi.rs",
-      "line": 732,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/util/crash_report.rs",
-      "line": 196,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/util/crash_report.rs",
-      "line": 202,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/util/firewall.rs",
-      "line": 167,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
+      "reason": "not a child wait: reqwest HTTP response status read; REST client carries a 5 s total timeout; spawn-gate regex false positive"
     },
     {
       "file": "src-tauri/src/hw/sys_opt.rs",
       "line": 743,
-      "reason": "regenerated 2026-11-20 after C1b/U4 line shifts (run_ps; schtasks sites migrated to util/schtasks.rs; gate own scan)"
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
+    },
+    {
+      "file": "src-tauri/src/util/crash_report.rs",
+      "line": 196,
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
+    },
+    {
+      "file": "src-tauri/src/util/crash_report.rs",
+      "line": 202,
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
+    },
+    {
+      "file": "src-tauri/src/util/firewall.rs",
+      "line": 167,
+      "reason": "regenerated 2026-11-20 after C2b migration (gate own scan)"
     }
   ]
 }

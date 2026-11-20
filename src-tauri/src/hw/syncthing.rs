@@ -280,4 +280,43 @@ mod tests {
         assert!(st.error.is_some());
         assert!(st.folders.is_empty());
     }
+
+    /// This module spawns no child processes; its bounded-wait contract is
+    /// the REST client timeout. A TCP endpoint that accepts and never
+    /// answers must surface as an Err within that budget, never hang.
+    #[test]
+    fn hung_server_returns_within_client_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        // Accept and hold the socket open without ever answering.
+        std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            drop(stream);
+        });
+        let cfg = SyncthingConfig {
+            address: addr.to_string(),
+            api_key: "k".into(),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let result = rt.block_on(fetch_system_status(&cfg));
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "a hung server must not look like success");
+        // The client carries a 5 s total timeout: the call must end near it,
+        // not immediately (which would mean no request left) and not never.
+        assert!(
+            elapsed >= std::time::Duration::from_secs(4),
+            "returned before the timeout could have fired: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "hung server exceeded the client budget: {elapsed:?}"
+        );
+    }
 }

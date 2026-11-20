@@ -10,9 +10,11 @@
 /// It avoids generic Windows Update drivers by reading from XPM's registry cache
 /// and, when available, triggering XPM's update checker component directly.
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
@@ -87,6 +89,13 @@ pub struct UpdateStatus {
 const XPM_BASE: &str = r"C:\Program Files\MI\XiaomiPCManager";
 const DRIVER_REG_KEY: &str = r"SOFTWARE\MI\Driver";
 
+/// Budget for `pnputil /enum-drivers`: typically under 5 s; 60 s covers a
+/// cold disk with hundreds of driver-store entries.
+const PNPUTIL_ENUM_TIMEOUT: Duration = Duration::from_secs(60);
+/// Budget for `pnputil /scan-devices`: a full PnP re-enumeration can take
+/// tens of seconds; 120 s is the ceiling before the registry-flag fallback.
+const PNPUTIL_SCAN_TIMEOUT: Duration = Duration::from_secs(120);
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /// Collect full update / version status.
@@ -151,11 +160,12 @@ pub fn trigger_driver_scan() -> HardwareResult<String> {
     }
 
     // ── Strategy 2: pnputil /scan-devices (always available on Win10+) ───
-    match no_window_command("pnputil")
-        .args(["/scan-devices"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
+    // Bounded wait: on timeout (or any spawn failure) the tree dies and the
+    // registry-flag fallback below still runs, same as the old Err path.
+    let mut scan = no_window_command("pnputil");
+    scan.args(["/scan-devices"]);
+    match process_spawn::run_capture(&mut scan, PNPUTIL_SCAN_TIMEOUT) {
+        Ok(out) if out.success() => {
             return Ok("PnP device scan triggered (pnputil /scan-devices). \
                  Windows will check for updated official drivers."
                 .to_string());
@@ -164,7 +174,7 @@ pub fn trigger_driver_scan() -> HardwareResult<String> {
             log::warn!("pnputil /scan-devices exit: {}", out.status);
         }
         Err(e) => {
-            log::warn!("pnputil not found: {e}");
+            log::warn!("pnputil /scan-devices unavailable: {e}");
         }
     }
 
@@ -303,11 +313,11 @@ fn get_bios_info() -> anyhow::Result<BiosInfo> {
 // ── Installed Xiaomi drivers (pnputil) ───────────────────────────────────────
 
 fn get_xiaomi_drivers() -> anyhow::Result<Vec<XiaomiDriverInfo>> {
-    let output = no_window_command("pnputil")
-        .args(["/enum-drivers"])
-        .output()
+    let mut cmd = no_window_command("pnputil");
+    cmd.args(["/enum-drivers"]);
+    let output = process_spawn::run_capture(&mut cmd, PNPUTIL_ENUM_TIMEOUT)
         .context("pnputil /enum-drivers failed")?;
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = output.stdout_str();
     parse_pnputil_drivers(&text)
 }
 
@@ -612,6 +622,39 @@ Signer Name:        Microsoft Windows\r\n";
         assert_eq!(
             normalize_device_id(r"PCI\VEN_8086&DEV_7E28"),
             r"PCI\VEN_8086&DEV_7E28"
+        );
+    }
+
+    /// The pnputil child waits are bounded: a child that sleeps past the
+    /// budget must return `SpawnError::Timeout` and the whole tree must be
+    /// dead (no orphan process left behind).
+    #[test]
+    fn pnputil_child_wait_is_bounded_and_kills_tree() {
+        let mut cmd = no_window_command("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let started = std::time::Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, std::time::Duration::from_millis(500))
+            .expect_err("sleeping child must hit the timeout");
+        assert!(
+            matches!(err, process_spawn::SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "timeout path took too long: {:?}",
+            started.elapsed()
+        );
+
+        // No orphan ping.exe may survive the tree kill.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut probe = no_window_command("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, std::time::Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        assert!(
+            !out.stdout_str().contains("ping.exe"),
+            "ping.exe survived the tree kill: {}",
+            out.stdout_str()
         );
     }
 }
