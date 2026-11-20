@@ -4,7 +4,12 @@
 //! `Windows.Media.Casting` and `Windows.Devices.Enumeration` APIs.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use serde::{Deserialize, Serialize};
+
+/// A hung PowerShell must not hold the stop-casting command forever; the
+/// helper tree-kills the child on expiry.
+const PS_CLOSE_PANEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A Miracast/WiDi receiver device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,13 +206,10 @@ pub fn start_casting(_device_id: &str) -> HardwareResult<CastResult> {
 /// claiming the projection was stopped.
 #[cfg(windows)]
 pub fn stop_casting() -> HardwareResult<CastResult> {
-    use std::os::windows::process::CommandExt;
-
     log::info!("[screen_cast] Closing the Windows Connect panel (if open)");
 
     // Use PowerShell to close only the Connect panel window by sending WM_CLOSE.
     // This avoids killing all SystemSettings.exe processes.
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let ps_script = r#"
         Add-Type @"
         using System;
@@ -230,14 +232,12 @@ pub fn stop_casting() -> HardwareResult<CastResult> {
 
     let mut cmd = std::process::Command::new("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_script]);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
+    let output = process_spawn::run_capture(&mut cmd, PS_CLOSE_PANEL_TIMEOUT)
         .map_err(|e| HardwareError::Cast(format!("Failed to close the Connect panel: {e}")))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = output.stdout_str();
     let closed = parse_closed_count(&stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = output.stderr_str();
 
     log::info!(
         "[screen_cast] stop_casting exit_ok={} panels_closed={closed} stderr={}",

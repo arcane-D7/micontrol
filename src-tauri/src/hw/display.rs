@@ -4,6 +4,7 @@
 //! for display info queries on Windows.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicU8, Ordering};
@@ -2486,26 +2487,27 @@ fn get_brightness_wmi() -> HardwareResult<u8> {
 fn set_brightness_wmi(level: u8) -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // The spawn helper applies CREATE_NO_WINDOW itself; the timeout
+        // bounds a hung PowerShell WMI call (tree-killed on expiry).
+        const WMI_SET_BRIGHTNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         // WmiSetBrightness requires:
         //  1. Targeting a specific CIM *instance* (not just the class name)
         //  2. Brightness typed as [byte] (UInt8), Timeout as [uint32]
         // Using -ClassName without -InputObject returns "Invalid method Parameter(s)".
-        let cmd = format!(
+        let script = format!(
             "$i=Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods; \
              Invoke-CimMethod -InputObject $i -MethodName WmiSetBrightness \
              -Arguments @{{Timeout=[uint32]1;Brightness=[byte]{}}}",
             level
         );
-        let status = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .context("PowerShell spawn for WmiSetBrightness")?;
-        if !status.success() {
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        let output = process_spawn::run_capture(&mut cmd, WMI_SET_BRIGHTNESS_TIMEOUT)
+            .map_err(|e| HardwareError::Display(format!("WmiSetBrightness spawn failed: {e}")))?;
+        if !output.success() {
             return Err(HardwareError::Display(format!(
-                "WmiSetBrightness exited with {status}"
+                "WmiSetBrightness exited with {}",
+                output.status
             )));
         }
     }
@@ -2526,21 +2528,25 @@ fn set_brightness_wmi(level: u8) -> HardwareResult<()> {
 fn disable_windows_adaptive_brightness() {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        // Best-effort: errors are logged, never propagated. The helper
+        // applies CREATE_NO_WINDOW and bounds the child wait (tree-kill).
+        const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let scheme = "SCHEME_CURRENT";
         let sub = "SUB_VIDEO";
         let guid = "ADAPTBRIGHT";
         for flag in ["/SETACVALUEINDEX", "/SETDCVALUEINDEX"] {
-            let _ = std::process::Command::new("powercfg")
-                .args([flag, scheme, sub, guid, "0"])
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                .output();
+            let mut cmd = std::process::Command::new("powercfg");
+            cmd.args([flag, scheme, sub, guid, "0"]);
+            if let Err(e) = process_spawn::run_capture(&mut cmd, POWERCFG_TIMEOUT) {
+                log::warn!("adaptive_brightness: powercfg {flag} failed: {e}");
+            }
         }
         // Activate the scheme so the change takes effect immediately.
-        let _ = std::process::Command::new("powercfg")
-            .args(["/setactive", scheme])
-            .creation_flags(0x08000000)
-            .output();
+        let mut cmd = std::process::Command::new("powercfg");
+        cmd.args(["/setactive", scheme]);
+        if let Err(e) = process_spawn::run_capture(&mut cmd, POWERCFG_TIMEOUT) {
+            log::warn!("adaptive_brightness: powercfg /setactive failed: {e}");
+        }
         log::info!("adaptive_brightness: disabled Windows ADAPTBRIGHT (power plan)");
     }
 }

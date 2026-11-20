@@ -45,7 +45,9 @@
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::util::process_spawn;
 
 /// The only event-log channel this module may touch.
 pub const CHANNEL: &str = "Application";
@@ -346,22 +348,19 @@ pub struct SystemRunner;
 
 impl CmdRunner for SystemRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CmdOutput, String> {
+        // wevtutil is a fast local tool, but a wedged EventLog service must
+        // not hang the caller: the helper bounds the wait and kills the
+        // child tree on expiry (no console window either).
+        const WEVT_TIMEOUT: Duration = Duration::from_secs(10);
         let mut cmd = std::process::Command::new(program);
         cmd.args(args);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let out = cmd
-            .output()
+        let out = process_spawn::run_capture(&mut cmd, WEVT_TIMEOUT)
             .map_err(|e| format!("cannot run {program}: {e}"))?;
         Ok(CmdOutput {
             success: out.status.success(),
             code: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            stdout: out.stdout_str(),
+            stderr: out.stderr_str(),
         })
     }
 }

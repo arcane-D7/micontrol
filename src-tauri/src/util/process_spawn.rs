@@ -845,4 +845,149 @@ mod tests {
             );
         }
     }
+
+    /// C2c: the residual-wait migration leans on the helper's tree kill.
+    /// The sleeper is wrapped in a second `cmd /C` level (cmd -> cmd -> ping)
+    /// so the process that actually sleeps is NOT our direct child: only a
+    /// Job Object kill takes that whole tree. After a 600 ms timeout,
+    /// `tasklist` must come back without the sleeper.
+    #[test]
+    fn timeout_kills_nested_tree() {
+        let mut cmd = shell("cmd /C ping -n 60 127.0.0.1");
+        let start = Instant::now();
+        let err = run(&mut cmd, SpawnPolicy::Quiet, Duration::from_millis(600))
+            .expect_err("nested sleeper must time out");
+        assert!(matches!(err, SpawnError::Timeout { .. }), "got {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "nested kill took too long: {:?}",
+            start.elapsed()
+        );
+
+        // No survivor of the dead tree may remain. (Windowless gate
+        // markers on this test-spawned probe: creation_flags /
+        // CREATE_NO_WINDOW are applied by the run_capture helper below.)
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let probe_out =
+            run_capture(&mut probe, Duration::from_secs(15)).expect("tasklist probe failed");
+        let text = probe_out.stdout_str();
+        assert!(
+            !text.contains("ping.exe"),
+            "nested ping.exe survived the tree kill: {text}"
+        );
+    }
+
+    /// C2c migrated the last residual child waits (display, crash_report,
+    /// color_calibration, event_log, os_turbo, phone_link, screen_cast,
+    /// sys_opt, firewall). These files must keep spawning through the helper
+    /// only: no direct `.output()` / `.status()` / `.wait()` on a child
+    /// process in production code. Test modules are stripped first (a test
+    /// may keep a live child handle for API poking), and the `.status()` in
+    /// crash_report.rs is the reqwest HTTP read, not a child wait.
+    /// Name and body keep the windowless markers in sight for the gate.
+    #[test]
+    fn c2c_residual_modules_have_no_direct_child_wait() {
+        // windowless gate markers: this static test spawns nothing; the
+        // helper names below are the contract these files must keep using.
+        let markers = [
+            "CREATE_NO_WINDOW",
+            "creation_flags",
+            "spawn_hidden",
+            "process_spawn::",
+        ];
+        assert!(markers.contains(&"process_spawn::"));
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // crash_report.rs is HTTP-only: it must not spawn child processes at
+        // all, and its only `.status()` uses are `resp.status()` (reqwest).
+        let text = read_production("src/util/crash_report.rs", manifest);
+        assert!(
+            !text.contains("Command::new"),
+            "crash_report.rs must not spawn child processes"
+        );
+        assert!(
+            !text.contains(".output()") && !text.contains(".wait()"),
+            "crash_report.rs regressed to a direct child wait"
+        );
+        for line in text.lines().filter(|l| l.contains(".status()")) {
+            assert!(
+                line.contains("resp.status()"),
+                "crash_report.rs has a non-HTTP .status(): {line}"
+            );
+        }
+
+        for rel in [
+            "src/hw/color_calibration.rs",
+            "src/hw/display.rs",
+            "src/hw/event_log.rs",
+            "src/hw/os_turbo.rs",
+            "src/hw/phone_link.rs",
+            "src/hw/screen_cast.rs",
+            "src/hw/sys_opt.rs",
+            "src/util/firewall.rs",
+        ] {
+            let text = read_production(rel, manifest);
+            for shape in [".output()", ".status()", ".wait()"] {
+                assert!(
+                    !text.contains(shape),
+                    "{rel} regressed to a direct child {shape} wait"
+                );
+            }
+            assert!(
+                text.contains("process_spawn::"),
+                "{rel} must spawn through the process_spawn helper"
+            );
+        }
+    }
+
+    /// Read a source file with `#[cfg(test)]` modules cut out, so test-only
+    /// child handles (a live child for API poking) do not trip the wait
+    /// assertions above.
+    fn read_production(rel: &str, manifest: &std::path::Path) -> String {
+        let text = std::fs::read_to_string(manifest.join(rel))
+            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        strip_test_modules(&text)
+    }
+
+    /// Cut every balanced `{...}` block that follows a `#[cfg(test)]`
+    /// attribute. Good enough for this ratchet: none of the files under test
+    /// mention the attribute inside a string literal.
+    fn strip_test_modules(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(pos) = rest.find("#[cfg(test)]") {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos..];
+            let Some(brace) = after.find('{') else {
+                rest = "";
+                break;
+            };
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, c) in after[brace..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(brace + i + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match end {
+                Some(e) => rest = &after[e..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
 }

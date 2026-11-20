@@ -10,7 +10,12 @@
 //! - PowerShell `Get-AppxPackage` to detect installation
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use serde::{Deserialize, Serialize};
+
+/// PowerShell AppX queries can take seconds on a cold AppX service; the
+/// bound catches a hung child (tree-killed on expiry).
+const POWERSHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
@@ -35,19 +40,18 @@ pub fn detect_phone_link() -> bool {
     #[cfg(windows)]
     {
         // Check via PowerShell Get-AppxPackage
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Get-AppxPackage *YourPhone* | Select-Object -ExpandProperty Name",
-            ])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .output();
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-AppxPackage *YourPhone* | Select-Object -ExpandProperty Name",
+        ]);
+        let output = process_spawn::run_capture(&mut cmd, POWERSHELL_TIMEOUT);
 
         match output {
             Ok(out) => {
-                let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let name = out.stdout_str().trim().to_string();
                 !name.is_empty()
             }
             Err(_) => {
@@ -486,18 +490,17 @@ fn get_package_version() -> Option<String> {
     // → empty stdout → `package_version: null` in the UI. Positional wildcard
     // matching (with the Microsoft.PhoneExperience fallback for newer builds)
     // is valid on every build.
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$p = Get-AppxPackage *YourPhone*; if (-not $p) { $p = Get-AppxPackage *PhoneExperience* }; $p | Select-Object -First 1 -ExpandProperty Version",
-        ])
-        .creation_flags(0x0800_0000)
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$p = Get-AppxPackage *YourPhone*; if (-not $p) { $p = Get-AppxPackage *PhoneExperience* }; $p | Select-Object -First 1 -ExpandProperty Version",
+    ]);
+    // Spawn/timeout errors keep the old `.ok()?` semantics: no version.
+    let output = process_spawn::run_capture(&mut cmd, POWERSHELL_TIMEOUT).ok()?;
 
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let version = output.stdout_str().trim().to_string();
     if version.is_empty() {
         None
     } else {
