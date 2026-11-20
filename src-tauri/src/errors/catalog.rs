@@ -119,6 +119,13 @@ pub enum ErrorCode {
     PolicyInvalid,
     /// The watchdog refused an action (health gate or restart policy).
     WatchdogRejected,
+    /// A PDH query could not be opened or closed (performance counters).
+    PdhQueryFailed,
+    /// A PDH counter sample could not be collected or formatted.
+    PdhSampleFailed,
+    /// A PDH counter object or counter is not present on this platform
+    /// (expected on machines without the provider; renders calm).
+    PdhCounterUnavailable,
 }
 
 impl ErrorCode {
@@ -157,6 +164,9 @@ impl ErrorCode {
             Self::StoreCorrupt => "store_corrupt",
             Self::PolicyInvalid => "policy_invalid",
             Self::WatchdogRejected => "watchdog_rejected",
+            Self::PdhQueryFailed => "pdh_query_failed",
+            Self::PdhSampleFailed => "pdh_sample_failed",
+            Self::PdhCounterUnavailable => "pdh_counter_unavailable",
         }
     }
 
@@ -479,6 +489,36 @@ pub const CATALOG: &[ErrorSpec] = &[
         severity: Severity::Fatal,
         retry: RetryPolicy::Never,
         user_action: UserAction::ContactSupport,
+    },
+    ErrorSpec {
+        code: ErrorCode::PdhQueryFailed,
+        id: "pdh.query_failed",
+        i18n_key: "errors.pdh.query_failed",
+        severity: Severity::Warning,
+        retry: RetryPolicy::Backoff {
+            base_ms: 500,
+            max_ms: 10000,
+        },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::PdhSampleFailed,
+        id: "pdh.sample_failed",
+        i18n_key: "errors.pdh.sample_failed",
+        severity: Severity::Warning,
+        retry: RetryPolicy::Backoff {
+            base_ms: 200,
+            max_ms: 5000,
+        },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::PdhCounterUnavailable,
+        id: "pdh.counter_unavailable",
+        i18n_key: "errors.pdh.counter_unavailable",
+        severity: Severity::Info,
+        retry: RetryPolicy::Never,
+        user_action: UserAction::None,
     },
 ];
 

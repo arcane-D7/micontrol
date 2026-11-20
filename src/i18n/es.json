@@ -914,6 +914,11 @@
     "policy": {
       "invalid": "Una política guardada no es válida y se ignoró."
     },
+    "pdh": {
+      "counter_unavailable": "Este contador de rendimiento no está disponible en este dispositivo.",
+      "query_failed": "No se pudo abrir la consulta de contadores de rendimiento.",
+      "sample_failed": "Error al muestrear los contadores de rendimiento."
+    },
     "registry": {
       "failure": "Falló una operación del registro de Windows."
     },

@@ -914,6 +914,11 @@
     "policy": {
       "invalid": "Une stratégie enregistrée n'est pas valide et a été ignorée."
     },
+    "pdh": {
+      "counter_unavailable": "Ce compteur de performance n'est pas disponible sur cet appareil.",
+      "query_failed": "Impossible d'ouvrir la requête de compteurs de performance.",
+      "sample_failed": "Échec de l'échantillonnage des compteurs de performance."
+    },
     "registry": {
       "failure": "Une opération du registre Windows a échoué."
     },

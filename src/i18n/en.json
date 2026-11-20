@@ -914,6 +914,11 @@
     "policy": {
       "invalid": "A stored policy is invalid and was ignored."
     },
+    "pdh": {
+      "counter_unavailable": "This performance counter is not available on this device.",
+      "query_failed": "A performance counter query could not be opened.",
+      "sample_failed": "Performance counter sampling failed."
+    },
     "registry": {
       "failure": "A registry operation failed."
     },
