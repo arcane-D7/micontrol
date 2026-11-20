@@ -100,6 +100,12 @@ const STEPS = [
     cmd: 'node',
     args: ['scripts/check-service-calls.mjs'],
   },
+  {
+    id: 'schtasks-calls',
+    name: 'Single schtasks port gate',
+    cmd: 'node',
+    args: ['scripts/check-schtasks-calls.mjs'],
+  },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];
 
