@@ -20,6 +20,7 @@ pub mod log_ratelimit;
 pub mod log_rotation;
 pub mod mcp_config;
 pub mod panic;
+pub mod process_spawn;
 pub mod rate_limit;
 pub mod registry;
 pub mod retry;

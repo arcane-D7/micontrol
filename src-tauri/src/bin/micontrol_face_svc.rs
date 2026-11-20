@@ -585,9 +585,12 @@ fn main() {
                     // catching processes that respawned in between.
                     if !stopped {
                         eprintln!("MiControlFace did not stop within 10 s — proceeding anyway");
-                        let _ = std::process::Command::new("taskkill.exe")
-                            .args(["/IM", "micontrol_face_svc.exe", "/T", "/F"])
-                            .output();
+                        let mut kill = std::process::Command::new("taskkill.exe");
+                        kill.args(["/IM", "micontrol_face_svc.exe", "/T", "/F"]);
+                        let _ = micontrol_lib::util::process_spawn::run_capture(
+                            &mut kill,
+                            std::time::Duration::from_secs(15),
+                        );
                         // Give taskkill a beat to reap the process.
                         std::thread::sleep(std::time::Duration::from_millis(1000));
                     }
@@ -735,16 +738,19 @@ fn main() {
 /// Errors are non-fatal: the service is already started at this point; failure
 /// actions are best-effort self-heal hardening.
 fn configure_failure_actions() {
-    let output = std::process::Command::new("sc.exe")
-        .args([
-            "failure",
-            "MiControlFace",
-            "reset=",
-            "86400",
-            "actions=",
-            "restart/5000/restart/10000/restart/30000",
-        ])
-        .output();
+    let mut cmd = std::process::Command::new("sc.exe");
+    cmd.args([
+        "failure",
+        "MiControlFace",
+        "reset=",
+        "86400",
+        "actions=",
+        "restart/5000/restart/10000/restart/30000",
+    ]);
+    let output = micontrol_lib::util::process_spawn::run_capture(
+        &mut cmd,
+        std::time::Duration::from_secs(15),
+    );
     match output {
         Ok(o) if o.status.success() => {
             println!("MiControlFace failure actions configured (restart 5/10/30s).");
@@ -752,7 +758,7 @@ fn configure_failure_actions() {
         Ok(o) => {
             eprintln!(
                 "warning: could not configure failure actions: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
+                o.stderr_str().trim()
             );
         }
         Err(e) => {

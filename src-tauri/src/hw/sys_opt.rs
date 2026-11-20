@@ -21,7 +21,14 @@
 //!   capturing the exact previous state for faithful restore.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Spawn timeout for the best-effort reg.exe writes: they are one-key writes
+/// that answer in milliseconds; 10 s covers a cold disk without hanging the
+/// toggle (B7/D2: no child without a bounded wait).
+const REG_SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One optimization toggle: what it changes, how to apply/restore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1036,33 +1043,33 @@ fn apply_widgets(disable: bool) -> HardwareResult<()> {
             }
         }
         // Best-effort taskbar setting (works on builds without UCPD guard).
-        let _ = std::process::Command::new("reg.exe")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                "/v",
-                "TaskbarDa",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
+        let mut cmd = std::process::Command::new("reg.exe");
+        cmd.args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+            "/v",
+            "TaskbarDa",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ]);
+        let _ = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
         // Best-effort policy (service tokens are denied on some builds).
-        let _ = std::process::Command::new("reg.exe")
-            .args([
-                "add",
-                r"HKLM\SOFTWARE\Policies\Microsoft\Dsh",
-                "/v",
-                "AllowNewsAndInterests",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
+        let mut cmd = std::process::Command::new("reg.exe");
+        cmd.args([
+            "add",
+            r"HKLM\SOFTWARE\Policies\Microsoft\Dsh",
+            "/v",
+            "AllowNewsAndInterests",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ]);
+        let _ = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
         mark_applied("red_widgets", None)?;
         log::info!("[sys_opt] Widgets disabled");
     } else {
@@ -1072,19 +1079,19 @@ fn apply_widgets(disable: bool) -> HardwareResult<()> {
         ) {
             log::warn!("[sys_opt] Widgets restore via winget failed (install manually from Store): {e}");
         }
-        let _ = std::process::Command::new("reg.exe")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                "/v",
-                "TaskbarDa",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "1",
-                "/f",
-            ])
-            .output();
+        let mut cmd = std::process::Command::new("reg.exe");
+        cmd.args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+            "/v",
+            "TaskbarDa",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "1",
+            "/f",
+        ]);
+        let _ = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
         mark_restored("red_widgets")?;
         log::info!("[sys_opt] Widgets restored");
     }
