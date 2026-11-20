@@ -10,6 +10,7 @@ mod commands;
 pub mod debug_log;
 pub mod elev_bridge;
 pub mod elevated;
+pub mod errors;
 mod health_supervisor;
 pub mod hw;
 mod state;

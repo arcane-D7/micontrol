@@ -872,6 +872,74 @@
     "githubRepo": "Dépôt GitHub"
   },
   "errors": {
+    "ai": {
+      "request_failed": "La requête IA a échoué."
+    },
+    "battery": {
+      "failure": "Une opération de la batterie a échoué."
+    },
+    "cast": {
+      "failure": "La projection d'écran a échoué."
+    },
+    "config": {
+      "invalid": "Un réglage enregistré n'est pas valide et n'a pas été appliqué."
+    },
+    "display": {
+      "failure": "Une opération d'affichage a échoué."
+    },
+    "ecram": {
+      "access_failed": "Une lecture mémoire du contrôleur embarqué a échoué.",
+      "driver_blocked": "Cette plage de capteurs est bloquée par le pilote IoT sur ce modèle.",
+      "service_unavailable": "Le service du contrôleur embarqué ne répond pas.",
+      "unknown": "La lecture du contrôleur embarqué a échoué pour une raison inconnue."
+    },
+    "elevated": {
+      "bridge_failed": "Le pont élevé n'a pas terminé l'opération."
+    },
+    "hardware": {
+      "other": "Une erreur matérielle inattendue s'est produite.",
+      "timeout": "L'opération a pris trop de temps et a été annulée.",
+      "unsupported": "Cette fonctionnalité n'est pas disponible sur cet appareil."
+    },
+    "hid": {
+      "failure": "La communication avec un périphérique HID a échoué."
+    },
+    "hotkey": {
+      "config_invalid": "La configuration des raccourcis clavier n'est pas valide et n'a pas été appliquée.",
+      "failure": "Une opération de raccourci clavier a échoué."
+    },
+    "io": {
+      "failure": "Une opération de fichier ou de périphérique a échoué."
+    },
+    "policy": {
+      "invalid": "Une stratégie enregistrée n'est pas valide et a été ignorée."
+    },
+    "registry": {
+      "failure": "Une opération du registre Windows a échoué."
+    },
+    "spawn": {
+      "timeout": "Un processus a dépassé sa limite de temps et a été arrêté."
+    },
+    "store": {
+      "corrupt": "Les données enregistrées sont corrompues et seront recréées."
+    },
+    "task": {
+      "join_failed": "Une tâche en arrière-plan a échoué ou a été annulée."
+    },
+    "touchpad": {
+      "failure": "Une opération du pavé tactile a échoué."
+    },
+    "watchdog": {
+      "rejected": "Le chien de garde a refusé l'action."
+    },
+    "wifi": {
+      "failure": "Une opération Wi-Fi a échoué."
+    },
+    "wmi": {
+      "connection_failed": "Impossible de joindre le service d'informations matérielles.",
+      "operation_failed": "Une opération matérielle a échoué.",
+      "query_failed": "Une requête matérielle a échoué. Le système est peut-être occupé."
+    },
     "hardwareNotAvailable": "Interface matérielle non disponible",
     "driverNotLoaded": "Pilote non chargé",
     "permissionDenied": "Permission refusée — essayez d'exécuter en tant qu'administrateur",

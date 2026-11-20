@@ -872,6 +872,74 @@
     "githubRepo": "Repositório GitHub"
   },
   "errors": {
+    "ai": {
+      "request_failed": "O pedido de IA falhou."
+    },
+    "battery": {
+      "failure": "Uma operação da bateria falhou."
+    },
+    "cast": {
+      "failure": "A projeção do ecrã falhou."
+    },
+    "config": {
+      "invalid": "Uma definição guardada é inválida e não foi aplicada."
+    },
+    "display": {
+      "failure": "Uma operação do ecrã falhou."
+    },
+    "ecram": {
+      "access_failed": "Uma leitura da memória do controlador incorporado falhou.",
+      "driver_blocked": "Esta gama de sensores está bloqueada pelo controlador IoT neste modelo.",
+      "service_unavailable": "O serviço do controlador incorporado não responde.",
+      "unknown": "A leitura do controlador incorporado falhou por razão desconhecida."
+    },
+    "elevated": {
+      "bridge_failed": "A ponte elevada não concluiu a operação."
+    },
+    "hardware": {
+      "other": "Ocorreu um erro de hardware inesperado.",
+      "timeout": "A operação demorou demasiado e foi cancelada.",
+      "unsupported": "Esta funcionalidade não está disponível neste dispositivo."
+    },
+    "hid": {
+      "failure": "A comunicação com um dispositivo HID falhou."
+    },
+    "hotkey": {
+      "config_invalid": "A configuração dos atalhos de teclado é inválida e não foi aplicada.",
+      "failure": "Uma operação de atalho de teclado falhou."
+    },
+    "io": {
+      "failure": "Uma operação de ficheiro ou dispositivo falhou."
+    },
+    "policy": {
+      "invalid": "Uma política guardada é inválida e foi ignorada."
+    },
+    "registry": {
+      "failure": "Uma operação de registo do Windows falhou."
+    },
+    "spawn": {
+      "timeout": "Um processo excedeu o limite de tempo e foi parado."
+    },
+    "store": {
+      "corrupt": "Os dados guardados estão corrompidos e serão recriados."
+    },
+    "task": {
+      "join_failed": "Uma tarefa em segundo plano falhou ou foi cancelada."
+    },
+    "touchpad": {
+      "failure": "Uma operação do touchpad falhou."
+    },
+    "watchdog": {
+      "rejected": "O watchdog recusou a ação."
+    },
+    "wifi": {
+      "failure": "Uma operação Wi-Fi falhou."
+    },
+    "wmi": {
+      "connection_failed": "Não foi possível contactar o serviço de informação de hardware.",
+      "operation_failed": "Uma operação de hardware falhou.",
+      "query_failed": "Uma consulta de hardware falhou. O sistema pode estar ocupado."
+    },
     "hardwareNotAvailable": "Interface de hardware não disponível",
     "driverNotLoaded": "Driver não carregado",
     "permissionDenied": "Permissão negada — tente executar como administrador",
