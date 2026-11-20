@@ -152,10 +152,7 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             log::info!(
                 "[ecram_service_mgmt] Pipe unusable — stopping & killing stale IoTService process"
             );
-            let _ = std::process::Command::new("sc")
-                .args(["stop", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            let _ = crate::util::win_service::stop_request(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
             let _ = std::process::Command::new("taskkill")
                 .args(["/F", "/IM", "IoTService.exe"])
@@ -170,10 +167,7 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
 
         if need_copy {
             // Stop the service before replacing the file
-            let _ = std::process::Command::new("sc")
-                .args(["stop", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            let _ = crate::util::win_service::stop_request(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             // Backup original if not already backed up
@@ -227,10 +221,7 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
 
         if !matches {
             // Stop and reconfigure
-            let _ = std::process::Command::new("sc")
-                .args(["stop", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            let _ = crate::util::win_service::stop_request(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             // Kill any lingering process
@@ -246,11 +237,11 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
 
             // Delete and recreate the service with the correct path.
             // Using `sc config binPath=` with quoted paths is unreliable;
-            // deleting and recreating is more robust.
-            let _ = std::process::Command::new("sc")
-                .args(["delete", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // deleting and recreating is more robust. DeleteService is
+            // asynchronous in the SCM: the sleeps below let a marked-for-
+            // delete entry settle before the recreate (the install path is
+            // the only user of this branch and runs elevated).
+            let _ = crate::util::win_service::delete(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             install_service(SERVICE_NAME, &target_exe)?;
@@ -446,17 +437,14 @@ fn find_driverstore_iot_service_exe() -> Option<String> {
     None
 }
 
-/// Check if a Windows service exists.
+/// Check if a Windows service exists: the SCM is the authority (`P1`: the
+/// named pipe is only evidence about the data path).
 fn service_exists(name: &str) -> bool {
     #[cfg(windows)]
     {
-        use std::process::Command;
-        let output = Command::new("sc")
-            .args(["query", name])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match output {
-            Ok(o) => o.status.success(),
+        match crate::util::win_service::query(name) {
+            // 1060 is the SCM's own answer; any other failure is NOT absence.
+            Ok(info) => info.state != crate::util::win_service::ServiceState::Absent,
             Err(_) => false,
         }
     }
@@ -467,34 +455,15 @@ fn service_exists(name: &str) -> bool {
     }
 }
 
-/// Get the binary path of a Windows service (from `sc qc`).
+/// Get the binary path of a Windows service (the stored BINARY_PATH_NAME,
+/// verbatim: quotes and trailing arguments kept).
 #[cfg(windows)]
 fn get_service_bin_path(name: &str) -> Option<String> {
-    use std::process::Command;
-    let output = Command::new("sc")
-        .args(["qc", name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Parse line: "        BINARY_PATH_NAME   : C:\path\to\exe.exe"
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("BINARY_PATH_NAME") {
-            if let Some(idx) = trimmed.rfind(':') {
-                let path = trimmed[idx + 1..].trim();
-                if !path.is_empty() {
-                    return Some(path.to_string());
-                }
-            }
-        }
-    }
-    None
+    // On error fall back to None exactly like the old parse did: the caller
+    // treats "unknown" as "does not match" and repairs the service.
+    crate::util::win_service::query(name)
+        .ok()
+        .and_then(|info| info.bin_path)
 }
 
 #[cfg(not(windows))]
@@ -502,56 +471,42 @@ fn get_service_bin_path(_name: &str) -> Option<String> {
     None
 }
 
-/// Install a Windows service.
+/// Install a Windows service (elevated; runs from the bridge service or the
+/// installer hook).
 #[cfg(windows)]
 fn install_service(name: &str, exe_path: &str) -> Result<(), String> {
-    use std::process::Command;
+    use crate::util::win_service::{self, CreateSpec, ServiceErrorControl, ServiceStartType};
 
     // Create the service. binPath MUST be the QUOTED path + `service` token —
     // empirically required on the live machine: a bare binPath (`X.exe`)
-    // makes `sc start` fail with error 2 "cannot find the file specified"
+    // makes the start fail with error 2 "cannot find the file specified"
     // even when the file exists. The quotes + token are the only form that
     // reliably reaches RUNNING (verified across installs/repairs).
     let bin_path = format!("\"{}\" service", exe_path);
-    let output = Command::new("sc")
-        .args([
-            "create",
-            name,
-            "binPath=",
-            &bin_path,
-            "start=",
-            "auto",
-            "DisplayName=",
-            "MiControl IoT Bridge Service",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to create service: {e}"))?;
+    win_service::create(
+        name,
+        &CreateSpec {
+            binary_path: bin_path,
+            display_name: "MiControl IoT Bridge Service".to_string(),
+            start_type: ServiceStartType::Auto,
+            error_control: ServiceErrorControl::Normal,
+            deps: Vec::new(),
+        },
+    )
+    // LocalSystem is the CreateServiceW default account: the old
+    // `sc config obj= LocalSystem` re-statement was redundant and is gone.
+    .map_err(|e| format!("Failed to create service: {e}"))?;
 
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let out = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("sc create failed: {err} {out}"));
+    // Failure actions to auto-restart (`sc failure reset= 86400 actions=
+    // restart/5000/restart/10000/restart/30000`); best-effort like before.
+    let actions = [
+        win_service::FailureAction::restart(5000),
+        win_service::FailureAction::restart(10000),
+        win_service::FailureAction::restart(30000),
+    ];
+    if let Err(e) = win_service::set_failure_actions(name, &actions, 86400) {
+        log::warn!("[ecram_service_mgmt] failure actions not set for {name}: {e}");
     }
-
-    // Set the service to run as LocalSystem
-    let _ = Command::new("sc")
-        .args(["config", name, "obj=", "LocalSystem"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    // Set failure actions to auto-restart
-    let _ = Command::new("sc")
-        .args([
-            "failure",
-            name,
-            "reset=",
-            "86400",
-            "actions=",
-            "restart/5000/restart/10000/restart/30000",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
 
     log::info!(
         "[ecram_service_mgmt] Service '{}' installed at {}",
@@ -566,27 +521,11 @@ fn install_service(_name: &str, _exe_path: &str) -> Result<(), String> {
     Err("Service installation is only supported on Windows".to_string())
 }
 
-/// Start a Windows service.
+/// Start a Windows service. `start` tolerates ERROR_SERVICE_ALREADY_RUNNING
+/// (1056) like the old `sc start` + text check did.
 #[cfg(windows)]
 fn start_service(name: &str) -> Result<(), String> {
-    use std::process::Command;
-
-    let output = Command::new("sc")
-        .args(["start", name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to start service: {e}"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let out = String::from_utf8_lossy(&output.stdout);
-        // Service may already be running — check
-        if out.contains("already running") || out.contains("1056") || err.contains("1056") {
-            return Ok(());
-        }
-        return Err(format!("sc start failed: {err} {out}"));
-    }
-
+    crate::util::win_service::start(name).map_err(|e| format!("Failed to start service: {e}"))?;
     log::info!("[ecram_service_mgmt] Service '{}' started", name);
     Ok(())
 }

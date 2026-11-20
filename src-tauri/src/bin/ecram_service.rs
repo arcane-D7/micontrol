@@ -23,7 +23,6 @@
 
 #![cfg(windows)]
 
-use std::os::windows::process::CommandExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -2797,19 +2796,20 @@ fn cli_mode(args: &[String]) -> i32 {
         }
         // Install/repair the IoTSvc Windows service pointing at the given
         // binary path. This exists because the NSIS installer CANNOT produce
-        // the binPath that starts successfully:
-        //   `sc create ... binPath= "C:\...\IoTService.exe" service`
-        // with the quotes + `service` token EMBEDDED IN THE VALUE. NSIS's
+        // the binPath that starts successfully: the SCM must store the
+        // QUOTED path + `service` token EMBEDDED IN THE VALUE. NSIS's
         // ExecToLog passes the command line through CommandLineToArgvW, which
-        // strips outer quotes, so the SCM stores a BARE path and `sc start`
-        // fails with error 2 ("cannot find the file") even when the file
-        // exists (verified empirically across installs — only the quoted
-        // form reaches RUNNING). std::process::Command escapes the embedded
-        // quotes correctly (`\"` → literal quote in the token), exactly like
-        // hw::ecram_service_mgmt::install_service does.
+        // strips outer quotes, so the SCM would store a BARE path and the
+        // start fails with error 2 ("cannot find the file") even when the
+        // file exists (verified empirically across installs — only the quoted
+        // form reaches RUNNING). CreateSpec::binary_path stores the string
+        // VERBATIM, exactly what the old escaped Command arg produced.
         // Deletes any existing entry (async-safe via SCM semantics: delete is
         // synchronous when no handles are open) and recreates + starts.
         "install-service" => {
+            use micontrol_lib::util::win_service::{
+                self, CreateSpec, FailureAction, ServiceErrorControl, ServiceStartType,
+            };
             if args.len() < 2 {
                 eprintln!("Usage: install-service <path-to-IoTService.exe>");
                 return 1;
@@ -2821,108 +2821,64 @@ fn cli_mode(args: &[String]) -> i32 {
             }
             let bin_path = format!("\"{target}\" service");
             // Stop + delete any existing IoTSvc (ignore errors).
-            let _ = std::process::Command::new("sc")
-                .args(["stop", "IoTSvc"])
-                .creation_flags(0x08000000)
-                .output();
+            let _ = win_service::stop_request("IoTSvc");
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            let _ = std::process::Command::new("sc")
-                .args(["delete", "IoTSvc"])
-                .creation_flags(0x08000000)
-                .output();
-            // DeleteService is async; wait until `sc query` reports gone.
+            let _ = win_service::delete("IoTSvc");
+            // DeleteService is async; wait until the SCM reports the entry gone.
             for _ in 0..20 {
-                let out = std::process::Command::new("sc")
-                    .args(["query", "IoTSvc"])
-                    .creation_flags(0x08000000)
-                    .output();
-                let gone = match out {
-                    Ok(o) => !o.status.success(),
-                    Err(_) => true,
-                };
-                if gone {
-                    break;
+                match win_service::query("IoTSvc") {
+                    Ok(info) if info.state == win_service::ServiceState::Absent => break,
+                    Ok(_) => {}
+                    // Query failed: the entry cannot be observed either way —
+                    // let the create retry logic deal with 1072 below.
+                    Err(_) => break,
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             // Create with the QUOTED binPath + `service` token (the proven form).
-            let create = std::process::Command::new("sc")
-                .args([
-                    "create",
-                    "IoTSvc",
-                    "binPath=",
-                    &bin_path,
-                    "start=",
-                    "auto",
-                    "DisplayName=",
-                    "MiControl IoT Bridge Service",
-                ])
-                .creation_flags(0x08000000)
-                .output();
-            match create {
-                Ok(o) if o.status.success() => {
-                    let _ = std::process::Command::new("sc")
-                        .args(["config", "IoTSvc", "obj=", "LocalSystem"])
-                        .creation_flags(0x08000000)
-                        .output();
-                    let _ = std::process::Command::new("sc")
-                        .args([
-                            "failure",
-                            "IoTSvc",
-                            "reset=",
-                            "86400",
-                            "actions=",
-                            "restart/5000/restart/10000/restart/30000",
-                        ])
-                        .creation_flags(0x08000000)
-                        .output();
-                    // Start + poll for RUNNING (StartService returns at START_PENDING).
-                    let start = std::process::Command::new("sc")
-                        .args(["start", "IoTSvc"])
-                        .creation_flags(0x08000000)
-                        .output();
-                    let start_err = match &start {
-                        Ok(o) => {
-                            String::from_utf8_lossy(&o.stdout).to_string()
-                                + &String::from_utf8_lossy(&o.stderr)
-                        }
-                        Err(e) => e.to_string(),
-                    };
-                    if let Ok(o) = &start {
-                        if !o.status.success() && !start_err.contains("1056") {
-                            eprintln!("ERROR: sc start IoTSvc failed: {start_err}");
-                            return 1;
-                        }
+            let spec = CreateSpec {
+                binary_path: bin_path.clone(),
+                display_name: "MiControl IoT Bridge Service".to_string(),
+                start_type: ServiceStartType::Auto,
+                error_control: ServiceErrorControl::Normal,
+                deps: Vec::new(),
+            };
+            match win_service::create("IoTSvc", &spec) {
+                Ok(()) => {
+                    // LocalSystem + own-process + auto start are properties of
+                    // CreateServiceW above; only failure actions remain.
+                    let actions = [
+                        FailureAction::restart(5000),
+                        FailureAction::restart(10000),
+                        FailureAction::restart(30000),
+                    ];
+                    if let Err(e) = win_service::set_failure_actions("IoTSvc", &actions, 86400) {
+                        eprintln!("warning: IoTSvc failure actions not set: {e}");
+                    }
+                    // Start (already-running 1056 tolerated inside start()).
+                    if let Err(e) = win_service::start("IoTSvc") {
+                        eprintln!("ERROR: start IoTSvc failed: {e}");
+                        return 1;
                     }
                     // Poll RUNNING (up to ~15 s).
                     for _ in 0..30 {
-                        let q = std::process::Command::new("sc")
-                            .args(["query", "IoTSvc"])
-                            .creation_flags(0x08000000)
-                            .output();
-                        let text = match &q {
-                            Ok(o) => String::from_utf8_lossy(&o.stdout),
-                            Err(_) => std::borrow::Cow::Borrowed(""),
-                        };
-                        if text.contains("RUNNING") {
-                            println!("OK: IoTSvc is RUNNING (binPath={bin_path})");
-                            return 0;
+                        match win_service::query("IoTSvc") {
+                            Ok(info) if info.state == win_service::ServiceState::Running => {
+                                println!("OK: IoTSvc is RUNNING (binPath={bin_path})");
+                                return 0;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!("warning: IoTSvc query during start poll: {e}");
+                            }
                         }
                         std::thread::sleep(std::time::Duration::from_millis(500));
                     }
                     eprintln!("ERROR: IoTSvc did not reach RUNNING within 15s");
                     1
                 }
-                Ok(o) => {
-                    eprintln!(
-                        "ERROR: sc create IoTSvc failed: {}{}",
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    );
-                    1
-                }
                 Err(e) => {
-                    eprintln!("ERROR: could not run sc.exe: {e}");
+                    eprintln!("ERROR: create IoTSvc failed: {e}");
                     1
                 }
             }

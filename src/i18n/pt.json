@@ -917,6 +917,12 @@
     "registry": {
       "failure": "Uma operação de registo do Windows falhou."
     },
+    "service": {
+      "access_denied": "A operação de controlo do serviço precisa de direitos de administrador.",
+      "config_failed": "Uma alteração de configuração do serviço falhou.",
+      "control_failed": "Uma operação de arranque ou paragem do serviço falhou.",
+      "query_failed": "Não foi possível ler o estado do serviço."
+    },
     "spawn": {
       "timeout": "Um processo excedeu o limite de tempo e foi parado."
     },

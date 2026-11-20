@@ -738,31 +738,29 @@ fn main() {
 /// Errors are non-fatal: the service is already started at this point; failure
 /// actions are best-effort self-heal hardening.
 fn configure_failure_actions() {
-    let mut cmd = std::process::Command::new("sc.exe");
-    cmd.args([
-        "failure",
-        "MiControlFace",
-        "reset=",
-        "86400",
-        "actions=",
-        "restart/5000/restart/10000/restart/30000",
-    ]);
-    let output = micontrol_lib::util::process_spawn::run_capture(
-        &mut cmd,
-        std::time::Duration::from_secs(15),
-    );
-    match output {
-        Ok(o) if o.status.success() => {
-            println!("MiControlFace failure actions configured (restart 5/10/30s).");
+    use micontrol_lib::util::win_service::FailureAction;
+    // Restart 5/10/30 s with a 24 h reset — identical to the old
+    // `sc failure MiControlFace reset= 86400 actions= restart/5000/...`.
+    let actions = [
+        FailureAction::restart(5000),
+        FailureAction::restart(10000),
+        FailureAction::restart(30000),
+    ];
+    match micontrol_lib::util::win_service::set_failure_actions("MiControlFace", &actions, 86400) {
+        Ok(()) => {
+            // Readback: prove the SCM stored the actions instead of assuming.
+            match micontrol_lib::util::win_service::failure_actions("MiControlFace") {
+                Ok(fa) if fa.actions.len() == actions.len() => {
+                    println!("MiControlFace failure actions configured (restart 5/10/30s).");
+                }
+                Ok(fa) => eprintln!(
+                    "warning: failure actions readback mismatch (reset={}s, {} actions)",
+                    fa.reset_period_secs,
+                    fa.actions.len()
+                ),
+                Err(e) => eprintln!("warning: failure actions readback failed: {e}"),
+            }
         }
-        Ok(o) => {
-            eprintln!(
-                "warning: could not configure failure actions: {}",
-                o.stderr_str().trim()
-            );
-        }
-        Err(e) => {
-            eprintln!("warning: could not run sc failure: {e}");
-        }
+        Err(e) => eprintln!("warning: could not configure failure actions: {e}"),
     }
 }

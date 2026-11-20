@@ -1947,27 +1947,17 @@ fn install_bridge_service() -> Result<Value, String> {
                     "install_bridge_service: newer bridge in LOCALAPPDATA — hot-upgrading ({:?} > {:?})",
                     cand, inst
                 );
-                // Stop (best-effort; a stopped service is fine too).
-                let _ = Command::new("sc.exe")
-                    .args(["stop", "MiControlBridge"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
-                // Wait for STOPPED (bounded) so the file is not locked.
-                let mut stopped = false;
-                for _ in 0..30 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let q = Command::new("sc.exe")
-                        .args(["query", "MiControlBridge"])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output();
-                    if let Ok(q) = q {
-                        let text = String::from_utf8_lossy(&q.stdout).to_string();
-                        if !text.contains("RUNNING") && !text.contains("STOP_PENDING") {
-                            stopped = true;
-                            break;
-                        }
-                    }
-                }
+                // Stop (best-effort; a stopped service is fine too), then
+                // wait for STOPPED (bounded, 15 s) so the file is not locked
+                // — the exact loop the old `sc stop` + 30 x `sc query` poll
+                // performed.
+                let _ = crate::util::win_service::stop_request("MiControlBridge");
+                let stopped = crate::util::win_service::wait_for_state(
+                    "MiControlBridge",
+                    crate::util::win_service::ServiceState::Stopped,
+                    std::time::Duration::from_millis(15_000),
+                )
+                .is_ok();
                 if !stopped {
                     // Not stopped (locked): kill the process so the copy can proceed.
                     let _ = Command::new("taskkill.exe")
@@ -1980,10 +1970,7 @@ fn install_bridge_service() -> Result<Value, String> {
                     Ok(_) => {
                         log::info!("install_bridge_service: hot-upgrade copy OK");
                         // Start (or let `install` below do a full re-create).
-                        let _ = Command::new("sc.exe")
-                            .args(["start", "MiControlBridge"])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .output();
+                        let _ = crate::util::win_service::start("MiControlBridge");
                         let out = "bridge hot-upgraded from LOCALAPPDATA (newer binary)";
                         return Ok(json!({
                             "service_installed": true,
@@ -2386,24 +2373,25 @@ fn install_face_service() -> Result<Value, String> {
 ///   3. Return a status object (service_installed / running / action taken).
 #[cfg(windows)]
 fn ensure_face_service() -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use crate::util::win_service::{self, ServiceState};
 
-    // ── 1. Query SCM state via `sc query` (robust parsing, no win32 structs).
-    let query = Command::new("sc.exe")
-        .args(["query", "MiControlFace"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("sc query MiControlFace failed: {e}"))?;
-    let query_text = String::from_utf8_lossy(&query.stdout).to_string();
-    let state = query_text
-        .lines()
-        .find(|l| l.contains("STATE"))
-        .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // Label for the status JSON / reinstall path, from the SCM's own answer.
+    let state_label = |state: ServiceState| match state {
+        ServiceState::Running => "RUNNING",
+        ServiceState::Stopped => "STOPPED",
+        ServiceState::Pending => "PENDING",
+        ServiceState::Paused => "PAUSED",
+        ServiceState::Absent => "ABSENT",
+        ServiceState::Unknown => "UNKNOWN",
+    };
 
-    if query_text.contains("does not exist") || query_text.contains("service has not been started")
-    {
+    // ── 1. Query the SCM directly (QueryServiceStatusEx + QueryServiceConfigW;
+    // no more text parsing).
+    let info = win_service::query("MiControlFace")
+        .map_err(|e| format!("query MiControlFace failed: {e}"))?;
+    let state = state_label(info.state).to_string();
+
+    if info.state == ServiceState::Absent {
         // ── S66-003: the SCM entry vanished (observed 2026-10-23 16:48:
         // stop → start → stop, then 1060 forever) while the deployed binary
         // is still in Program Files. The old behavior returned `not_installed`
@@ -2415,45 +2403,34 @@ fn ensure_face_service() -> Result<Value, String> {
         return ensure_face_service_reinstall(&state);
     }
 
-    let running = state.contains("RUNNING");
-    let stopped = state.contains("STOPPED");
-    let start_pending = state.contains("START_PENDING");
+    let running = info.state == ServiceState::Running;
+    let stopped = info.state == ServiceState::Stopped;
+    // Pending covers START_PENDING (start attempt settles it) and the rare
+    // STOP_PENDING window (the attempt fails benignly and is reported as
+    // start_failed; the next supervisor cycle starts the service).
+    let start_pending = info.state == ServiceState::Pending;
 
-    // ── 2. Configure failure actions (idempotent; `sc failure` overwrites).
-    let failure = Command::new("sc.exe")
-        .args([
-            "failure",
-            "MiControlFace",
-            "reset=",
-            "86400",
-            "actions=",
-            "restart/5000/restart/10000/restart/30000",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("sc failure MiControlFace failed: {e}"))?;
-    let failure_ok = failure.status.success();
-    if !failure_ok {
-        log::warn!(
-            "[ensure_face_service] sc failure action failed: {}",
-            String::from_utf8_lossy(&failure.stderr).trim()
-        );
-    }
+    // ── 2. Configure failure actions (idempotent; replaces the whole list —
+    // the old `sc failure reset= 86400 actions= restart/5000/...`).
+    let actions = [
+        win_service::FailureAction::restart(5000),
+        win_service::FailureAction::restart(10000),
+        win_service::FailureAction::restart(30000),
+    ];
+    let failure_ok = match win_service::set_failure_actions("MiControlFace", &actions, 86400) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("[ensure_face_service] failure actions could not be set: {e}");
+            false
+        }
+    };
 
     // ── 3. Start if stopped (or pending — let it settle, report as started).
     let mut action = "already_running".to_string();
     if stopped || start_pending {
-        let start = Command::new("sc.exe")
-            .args(["start", "MiControlFace"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("sc start MiControlFace failed: {e}"))?;
-        let start_text = String::from_utf8_lossy(&start.stdout).to_string();
-        // 1056 = ERROR_SERVICE_ALREADY_RUNNING (benign), 1058 = DISABLED.
-        let started = start.status.success()
-            || start_text.contains("1056")
-            || start_text.contains("ALREADY_RUNNING");
-        action = if started {
+        // 1056 = ERROR_SERVICE_ALREADY_RUNNING (benign), tolerated inside
+        // start(); 1058 = DISABLED surfaces as a real failure.
+        action = if win_service::start("MiControlFace").is_ok() {
             "started".to_string()
         } else {
             "start_failed".to_string()
