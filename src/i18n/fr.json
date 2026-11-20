@@ -935,6 +935,10 @@
       "corrupt": "Les données enregistrées sont corrompues et seront recréées."
     },
     "task": {
+      "access_denied": "L'opération sur la tâche planifiée nécessite des droits administrateur.",
+      "config_failed": "L'enregistrement ou la suppression de la tâche planifiée a échoué.",
+      "control_failed": "Le démarrage ou l'arrêt de la tâche planifiée a échoué.",
+      "query_failed": "Impossible de lire l'état de la tâche planifiée.",
       "join_failed": "Une tâche en arrière-plan a échoué ou a été annulée."
     },
     "touchpad": {

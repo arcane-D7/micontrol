@@ -25,6 +25,7 @@ pub mod process_spawn;
 pub mod rate_limit;
 pub mod registry;
 pub mod retry;
+pub mod schtasks;
 pub mod session_marker;
 pub mod state_store;
 pub mod webview_retry;

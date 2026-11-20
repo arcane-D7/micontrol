@@ -137,6 +137,17 @@ pub enum ErrorCode {
     /// A PDH counter object or counter is not present on this platform
     /// (expected on machines without the provider; renders calm).
     PdhCounterUnavailable,
+    // Catalog-only codes: Windows Task Scheduler operations
+    // (util::schtasks). Query = reading state/XML; Control = run/end/
+    // disable/enable; Config = create/delete (re)register.
+    /// Reading task state, XML or existence from the scheduler failed.
+    TaskQueryFailed,
+    /// Running, ending, enabling or disabling a task failed.
+    TaskControlFailed,
+    /// Creating or deleting a task registration failed.
+    TaskConfigFailed,
+    /// The scheduler refused the operation: access denied, needs elevation.
+    TaskAccessDenied,
 }
 
 impl ErrorCode {
@@ -182,6 +193,10 @@ impl ErrorCode {
             Self::PdhQueryFailed => "pdh_query_failed",
             Self::PdhSampleFailed => "pdh_sample_failed",
             Self::PdhCounterUnavailable => "pdh_counter_unavailable",
+            Self::TaskQueryFailed => "task_query_failed",
+            Self::TaskControlFailed => "task_control_failed",
+            Self::TaskConfigFailed => "task_config_failed",
+            Self::TaskAccessDenied => "task_access_denied",
         }
     }
 
@@ -572,6 +587,47 @@ pub const CATALOG: &[ErrorSpec] = &[
         severity: Severity::Info,
         retry: RetryPolicy::Never,
         user_action: UserAction::None,
+    },
+    // Scheduled-task (schtasks) codes: the Task Scheduler is a trusted
+    // system component, so failures are environmental (task missing on a
+    // foreign build, access denied for a standard user, scheduler busy).
+    ErrorSpec {
+        code: ErrorCode::TaskQueryFailed,
+        id: "task.query_failed",
+        i18n_key: "errors.task.query_failed",
+        severity: Severity::Warning,
+        retry: RetryPolicy::Backoff {
+            base_ms: 200,
+            max_ms: 5000,
+        },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::TaskControlFailed,
+        id: "task.control_failed",
+        i18n_key: "errors.task.control_failed",
+        severity: Severity::Warning,
+        retry: RetryPolicy::Backoff {
+            base_ms: 500,
+            max_ms: 10000,
+        },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::TaskConfigFailed,
+        id: "task.config_failed",
+        i18n_key: "errors.task.config_failed",
+        severity: Severity::Error,
+        retry: RetryPolicy::Never,
+        user_action: UserAction::Elevate,
+    },
+    ErrorSpec {
+        code: ErrorCode::TaskAccessDenied,
+        id: "task.access_denied",
+        i18n_key: "errors.task.access_denied",
+        severity: Severity::Error,
+        retry: RetryPolicy::Never,
+        user_action: UserAction::Elevate,
     },
 ];
 

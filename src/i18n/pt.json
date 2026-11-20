@@ -935,6 +935,10 @@
       "corrupt": "Os dados guardados estão corrompidos e serão recriados."
     },
     "task": {
+      "access_denied": "A operação na tarefa agendada precisa de direitos de administrador.",
+      "config_failed": "Falhou o registo ou a remoção da tarefa agendada.",
+      "control_failed": "Falhou o arranque ou a paragem da tarefa agendada.",
+      "query_failed": "Não foi possível ler o estado da tarefa agendada.",
       "join_failed": "Uma tarefa em segundo plano falhou ou foi cancelada."
     },
     "touchpad": {
