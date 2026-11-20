@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -188,7 +188,13 @@ impl CrashReporterBackend for HttpBackend {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let client = reqwest::Client::new();
+        // Bound the whole delivery: a hung collector must not keep this
+        // fire-and-forget panic-report task alive forever (10 s per
+        // request). Builder failure falls back to the default client.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let endpoint = self.endpoint.clone();
         let body = event.clone();
         handle.spawn(async move {

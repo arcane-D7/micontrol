@@ -26,6 +26,13 @@
 //! again. Callers decide whether to log a warning or fail.
 
 use std::path::Path;
+use std::time::Duration;
+
+use crate::util::process_spawn;
+
+/// One netsh step is a fast local IPC call; a wedged one must not hang an
+/// install/apply flow, so the wait is bounded and the child tree killed.
+const NETSH_RUN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Installed main binary the rules are scoped to.
 pub const MAIN_EXE: &str = "micontrol.exe";
@@ -154,21 +161,19 @@ pub fn netsh_steps(exe: &str) -> Vec<Vec<String>> {
 }
 
 /// Run one `netsh` invocation, returning `(exit_code, combined_output)`.
+///
+/// Bounded by `NETSH_RUN_TIMEOUT`: the caller is best-effort and a wedged
+/// netsh must only cost the timeout, not an unbounded wait.
 fn run_netsh(args: &[String]) -> (i32, String) {
     use std::process::Command;
 
     let mut cmd = Command::new("netsh.exe");
     cmd.args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
-    }
-    match cmd.output() {
+    match process_spawn::run_capture(&mut cmd, NETSH_RUN_TIMEOUT) {
         Ok(out) => {
             let code = out.status.code().unwrap_or(-1);
-            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-            let err = String::from_utf8_lossy(&out.stderr);
+            let mut text = out.stdout_str();
+            let err = out.stderr_str();
             if !err.trim().is_empty() {
                 if !text.trim().is_empty() {
                     text.push(' ');

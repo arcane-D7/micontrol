@@ -653,17 +653,18 @@ fn set_power_plan_best_performance() -> HardwareResult<String> {
 
 #[cfg(windows)]
 fn set_active_power_scheme(target: windows::core::GUID) -> HardwareResult<windows::core::GUID> {
-    use std::os::windows::process::CommandExt;
     use windows::Win32::System::Power::PowerSetActiveScheme;
 
     let result = unsafe { PowerSetActiveScheme(None, Some(&target)) };
     if result.0 != 0 {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Fallback for the rare PowerSetActiveScheme failure. The spawn
+        // helper applies CREATE_NO_WINDOW and bounds the child wait
+        // (tree-killed on expiry).
+        const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         let target_text = format!("{target:?}");
-        let output = std::process::Command::new("powercfg")
-            .args(["/setactive", target_text.as_str()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
+        let mut cmd = std::process::Command::new("powercfg");
+        cmd.args(["/setactive", target_text.as_str()]);
+        let output = crate::util::process_spawn::run_capture(&mut cmd, POWERCFG_TIMEOUT)
             .map_err(|_| HardwareError::Other("Power scheme write failed".into()))?;
         if !output.status.success() {
             return Err(HardwareError::Other(format!(
@@ -2354,7 +2355,13 @@ mod tests {
         })();
 
         let _ = child.kill();
-        let _ = child.wait();
+        // Bounded reap: the spawn contract forbids unbounded Child::wait.
+        // Same try_wait + deadline pattern the helper uses after a kill; on
+        // Windows the killed child is also reaped when the handle drops.
+        let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < reap_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         result.expect("public process-power API should update disposable child");
     }
 

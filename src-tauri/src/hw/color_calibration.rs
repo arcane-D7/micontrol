@@ -22,6 +22,7 @@ use crate::hw::icc_catalog;
 use crate::hw::icc_catalog::CatalogEntryView;
 #[cfg(windows)]
 use crate::hw::panel_edid::{self, MonitorIdentity};
+use crate::util::process_spawn;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::collections::HashMap;
@@ -295,8 +296,6 @@ pub fn open_color_management_settings() -> HardwareResult<()> {
 pub fn launch_color_calibration_wizard() -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-
         // Refuse instead of opening a wizard whose calibration Windows would
         // throw away (HDR on) or that has nothing to calibrate. The UI disables
         // the button with the same reason; this guard covers races and any
@@ -333,10 +332,6 @@ pub fn launch_color_calibration_wizard() -> HardwareResult<()> {
             let _ = crate::hw::eye_protection::set_eye_protection(false, None);
         }
 
-        let spawned = std::process::Command::new(&dccw)
-            .creation_flags(0x0800_0000)
-            .spawn();
-
         let target = wizard_target(&devices)
             .map(|d| format!("{} ({})", d.device, d.label))
             .unwrap_or_else(|| "unknown".to_string());
@@ -347,16 +342,21 @@ pub fn launch_color_calibration_wizard() -> HardwareResult<()> {
         // Spawn a watcher thread that waits for the wizard to exit, then
         // restores our display state. Runs detached from the caller.
         std::thread::spawn(move || {
-            let mut child = match spawned {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("[color] failed to launch the calibration wizard: {e}");
-                    restore_after_calibration(eye_was_on, eye_intensity);
-                    return;
-                }
-            };
-            // Block this thread until the wizard process exits.
-            let _ = child.wait();
+            let mut cmd = std::process::Command::new(&dccw);
+            // A real wizard run takes minutes of user interaction; the bound
+            // is a runaway guard against a hung dccw (the spawn contract
+            // forbids unbounded child waits), not a functional limit. On
+            // expiry the helper kills the wizard tree and the display state
+            // is still restored below.
+            const WIZARD_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+            let spawned = process_spawn::run(
+                &mut cmd,
+                process_spawn::SpawnPolicy::Quiet,
+                WIZARD_WAIT_TIMEOUT,
+            );
+            if let Err(e) = spawned {
+                log::warn!("[color] calibration wizard ended abnormally: {e}");
+            }
             restore_after_calibration(eye_was_on, eye_intensity);
         });
 

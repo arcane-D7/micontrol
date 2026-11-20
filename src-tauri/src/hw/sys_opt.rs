@@ -29,6 +29,9 @@ use std::time::Duration;
 /// that answer in milliseconds; 10 s covers a cold disk without hanging the
 /// toggle (B7/D2: no child without a bounded wait).
 const REG_SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// `run_ps` scripts remove Appx packages and toggle services, which can be
+/// slow; 15 s bounds a hung PowerShell (tree-killed on expiry).
+const PS_SPAWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One optimization toggle: what it changes, how to apply/restore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -735,20 +738,17 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
 /// Run a PowerShell command hidden and return stdout (or an error with stderr).
 #[cfg(windows)]
 fn run_ps(script: &str) -> HardwareResult<String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    let out = process_spawn::run_capture(&mut cmd, PS_SPAWN_TIMEOUT)
         .map_err(|e| HardwareError::Other(format!("powershell spawn: {e}")))?;
-    if !out.status.success() {
+    if !out.success() {
         return Err(HardwareError::Other(format!(
             "powershell failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            out.stderr_str().trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout_str())
 }
 
 /// Guard: a package name must not be in the protected list. Each protected
@@ -1075,30 +1075,32 @@ fn apply_widgets(disable: bool) -> HardwareResult<()> {
 /// logged, not fatal.
 #[cfg(windows)]
 fn apply_cortana_relics(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let v: u32 = if disable { 0 } else { 1 };
-    let policy = std::process::Command::new("reg.exe")
-        .args([
-            "add",
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search",
-            "/v",
-            "AllowCortana",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            &v.to_string(),
-            "/f",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    if let Ok(o) = &policy {
-        if !o.status.success() {
+    let mut cmd = std::process::Command::new("reg.exe");
+    cmd.args([
+        "add",
+        r"HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search",
+        "/v",
+        "AllowCortana",
+        "/t",
+        "REG_DWORD",
+        "/d",
+        &v.to_string(),
+        "/f",
+    ]);
+    let policy = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
+    match &policy {
+        Ok(o) if !o.success() => {
             log::warn!(
                 "[sys_opt] Cortana policy write denied (best-effort skipped): {}",
-                String::from_utf8_lossy(&o.stdout).trim()
+                o.stdout_str().trim()
             );
         }
+        // Spawn/timeout failures stay best-effort too, but they are logged.
+        Err(e) => {
+            log::warn!("[sys_opt] Cortana policy write failed (best-effort skipped): {e}");
+        }
+        Ok(_) => {}
     }
     let _ = run_ps(
         "Get-AppxPackage -Name 'Microsoft.549981C3F5F10' | Remove-AppxPackage -ErrorAction SilentlyContinue",
