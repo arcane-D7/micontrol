@@ -434,4 +434,37 @@ mod tests {
         assert!(!s.model_ready || s.model_dir.is_some());
         assert!(!s.install_hint.is_empty());
     }
+
+    /// Every spawn in this module goes through `run_capture` with a timeout
+    /// constant; a child that sleeps past the budget must return
+    /// `SpawnError::Timeout` and leave no process behind.
+    #[test]
+    fn child_wait_is_bounded_and_kills_tree() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let started = std::time::Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, Duration::from_millis(500))
+            .expect_err("sleeping child must hit the timeout");
+        assert!(
+            matches!(err, process_spawn::SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout path took too long: {:?}",
+            started.elapsed()
+        );
+
+        // No orphan ping.exe may survive the tree kill.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        assert!(
+            !out.stdout_str().contains("ping.exe"),
+            "ping.exe survived the tree kill: {}",
+            out.stdout_str()
+        );
+    }
 }

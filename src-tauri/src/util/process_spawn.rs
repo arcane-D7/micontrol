@@ -807,4 +807,42 @@ mod tests {
             start.elapsed()
         );
     }
+
+    /// C2b migrated these modules off direct child waits; the source must
+    /// not regress. `.status()` on a reqwest response is an HTTP status
+    /// read, not a child wait, so only the child-wait shapes are asserted.
+    #[test]
+    fn c2b_modules_have_no_direct_child_wait() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // syncthing.rs is HTTP-only: it must not spawn children at all.
+        let text = std::fs::read_to_string(manifest.join("src/hw/syncthing.rs"))
+            .expect("read syncthing.rs");
+        assert!(
+            !text.contains("Command::new"),
+            "syncthing.rs must not spawn child processes"
+        );
+
+        // The migrated modules must spawn through the helper only.
+        for rel in [
+            "src/hw/update.rs",
+            "src/hw/wifi.rs",
+            "src/hw/transcription.rs",
+        ] {
+            let text = std::fs::read_to_string(manifest.join(rel))
+                .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            assert!(
+                !text.contains(".output()"),
+                "{rel} regressed to a direct unbounded output wait"
+            );
+            assert!(
+                !text.contains(".wait()"),
+                "{rel} regressed to a direct unbounded child wait"
+            );
+            assert!(
+                text.contains("process_spawn::"),
+                "{rel} must spawn through the process_spawn helper"
+            );
+        }
+    }
 }

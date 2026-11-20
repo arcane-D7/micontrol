@@ -51,6 +51,14 @@ const usesHelper = (before) => /process_spawn::(run|run_capture|run_checked|run_
 const hasTimeout = (window) =>
   /wait_timeout|tokio::time::timeout|Duration::from_(secs|millis|micros)|spawn_timeout|TIMEOUT/.test(window);
 
+/** True when the text around the wait actually belongs to a child process.
+ * `.status()` is ALSO `reqwest::Response::status()`, which has nothing to do
+ * with spawning: syncthing/transcription were baselined as offenders for
+ * reading an HTTP status. Require a spawn marker in the same block.
+ */
+const isChildProcessWait = (window) =>
+  /Command::new|\.spawn\s*\(|process_spawn::|Child\b|child\b/.test(window);
+
 const offenders = [];
 for (const file of walk(SRC)) {
   const text = fs.readFileSync(file, 'utf8');
@@ -67,6 +75,7 @@ for (const file of walk(SRC)) {
     const before = text.slice(Math.max(0, idx - 3000), idx);
     const window = text.slice(Math.max(0, idx - 3000), Math.min(text.length, idx + 1200));
     if (usesHelper(before)) continue;
+    if (!isChildProcessWait(window)) continue;
     if (hasTimeout(window)) continue;
     const line = text.slice(0, idx).split('\n').length;
     offenders.push({ file: path.relative(ROOT, file).replace(/\\/g, '/'), line });
