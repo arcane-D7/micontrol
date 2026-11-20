@@ -3,6 +3,7 @@
 //! Replaces opaque `anyhow::Error` → `String` conversions with typed errors
 //! that carry machine-readable codes for frontend error handling.
 
+use crate::errors::ErrorCode;
 use serde::{Deserialize, Serialize};
 
 /// Why an ECRAM region could not be read.
@@ -200,34 +201,41 @@ impl std::fmt::Debug for HardwareError {
 }
 
 impl HardwareError {
-    /// Returns the stable machine-readable error code for this error variant.
+    /// Returns the catalog `ErrorCode` for this error variant.
     ///
-    /// The frontend uses this to switch on error types instead of
-    /// string-matching human-readable messages.
-    pub fn code(&self) -> &'static str {
+    /// Every variant is classified in the central catalog
+    /// (`crate::errors::catalog`); `EcramBlocked` dispatches on its
+    /// `RegionBlockKind` into the three `ecram.*` codes. The legacy flat
+    /// wire string the frontend matches stays available through
+    /// `ErrorCode::as_str` / `Display` (e.g. `"ecram_driver_blocked"`).
+    pub fn code(&self) -> ErrorCode {
         match self {
-            Self::WmiQuery { .. } => "wmi_query",
-            Self::WmiConnection(_) => "wmi_connection",
-            Self::Io(_) => "io",
-            Self::Hid(_) => "hid",
-            Self::InvalidConfig(_) => "invalid_config",
-            Self::Timeout(_) => "timeout",
-            Self::NotSupported(_) => "not_supported",
-            Self::Ecram(_) => "ecram",
-            Self::EcramBlocked { kind, .. } => kind.code(),
-            Self::Wifi(_) => "wifi",
-            Self::Cast(_) => "cast",
-            Self::Display(_) => "display",
-            Self::Touchpad(_) => "touchpad",
-            Self::Battery(_) => "battery",
-            Self::Hotkey(_) => "hotkey",
-            Self::Registry(_) => "registry",
-            Self::ElevatedBridge(_) => "elevated_bridge",
-            Self::AiRequest(_) => "ai_request",
-            Self::HotkeyConfig(_) => "hotkey_config",
-            Self::TaskJoin(_) => "task_join",
-            Self::Other(_) => "other",
-            Self::Wmi(_) => "wmi",
+            Self::WmiQuery { .. } => ErrorCode::WmiQuery,
+            Self::WmiConnection(_) => ErrorCode::WmiConnection,
+            Self::Io(_) => ErrorCode::Io,
+            Self::Hid(_) => ErrorCode::Hid,
+            Self::InvalidConfig(_) => ErrorCode::InvalidConfig,
+            Self::Timeout(_) => ErrorCode::Timeout,
+            Self::NotSupported(_) => ErrorCode::NotSupported,
+            Self::Ecram(_) => ErrorCode::Ecram,
+            Self::EcramBlocked { kind, .. } => match kind {
+                RegionBlockKind::DriverBlocked => ErrorCode::EcramDriverBlocked,
+                RegionBlockKind::ServiceUnavailable => ErrorCode::EcramServiceUnavailable,
+                RegionBlockKind::Unknown => ErrorCode::EcramUnknown,
+            },
+            Self::Wifi(_) => ErrorCode::Wifi,
+            Self::Cast(_) => ErrorCode::Cast,
+            Self::Display(_) => ErrorCode::Display,
+            Self::Touchpad(_) => ErrorCode::Touchpad,
+            Self::Battery(_) => ErrorCode::Battery,
+            Self::Hotkey(_) => ErrorCode::Hotkey,
+            Self::Registry(_) => ErrorCode::Registry,
+            Self::ElevatedBridge(_) => ErrorCode::ElevatedBridge,
+            Self::AiRequest(_) => ErrorCode::AiRequest,
+            Self::HotkeyConfig(_) => ErrorCode::HotkeyConfig,
+            Self::TaskJoin(_) => ErrorCode::TaskJoin,
+            Self::Wmi(_) => ErrorCode::Wmi,
+            Self::Other(_) => ErrorCode::Other,
         }
     }
 }
@@ -352,7 +360,7 @@ mod tests {
             query: "SELECT * FROM Win32_Battery".to_string(),
             source: "COM error".into(),
         };
-        assert_eq!(e.code(), "wmi_query");
+        assert_eq!(e.code().as_str(), "wmi_query");
     }
 
     #[test]
@@ -390,31 +398,31 @@ mod tests {
     #[test]
     fn test_io_error_code() {
         let e = HardwareError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "file"));
-        assert_eq!(e.code(), "io");
+        assert_eq!(e.code().as_str(), "io");
     }
 
     #[test]
     fn test_wifi_error_code() {
         let e = HardwareError::Wifi("Invalid SSID".to_string());
-        assert_eq!(e.code(), "wifi");
+        assert_eq!(e.code().as_str(), "wifi");
     }
 
     #[test]
     fn test_timeout_error_code() {
         let e = HardwareError::Timeout("Elevated bridge".to_string());
-        assert_eq!(e.code(), "timeout");
+        assert_eq!(e.code().as_str(), "timeout");
     }
 
     #[test]
     fn test_not_supported_code() {
         let e = HardwareError::NotSupported("No ambient light sensor".to_string());
-        assert_eq!(e.code(), "not_supported");
+        assert_eq!(e.code().as_str(), "not_supported");
     }
 
     #[test]
     fn test_ecram_error_code() {
         let e = HardwareError::Ecram("Offset out of bounds".to_string());
-        assert_eq!(e.code(), "ecram");
+        assert_eq!(e.code().as_str(), "ecram");
     }
 
     #[test]
@@ -440,7 +448,7 @@ mod tests {
     fn test_hardware_error_from_string() {
         // S19-03: blanket From<String> removed — use Other() directly.
         let e = HardwareError::Other("custom error".to_string());
-        assert_eq!(e.code(), "other");
+        assert_eq!(e.code().as_str(), "other");
         assert!(e.to_string().contains("custom error"));
     }
 
@@ -448,7 +456,7 @@ mod tests {
     fn test_hardware_error_from_anyhow() {
         let anyhow_err = anyhow::anyhow!("something failed");
         let e: HardwareError = anyhow_err.into();
-        assert_eq!(e.code(), "other");
+        assert_eq!(e.code().as_str(), "other");
     }
 
     #[test]
@@ -461,30 +469,31 @@ mod tests {
 
     #[test]
     fn test_all_variants_have_codes() {
-        // Ensure every variant has a non-empty code
+        // Ensure every variant maps to a non-empty legacy wire code
         let codes = [
             HardwareError::WmiQuery {
                 query: String::new(),
                 source: "".into(),
             }
-            .code(),
-            HardwareError::Io(std::io::Error::other("")).code(),
-            HardwareError::Hid("".into()).code(),
-            HardwareError::InvalidConfig("".into()).code(),
-            HardwareError::Timeout("".into()).code(),
-            HardwareError::NotSupported("".into()).code(),
-            HardwareError::Ecram("".into()).code(),
-            HardwareError::Wifi("".into()).code(),
-            HardwareError::Display("".into()).code(),
-            HardwareError::Touchpad("".into()).code(),
-            HardwareError::Battery("".into()).code(),
-            HardwareError::Hotkey("".into()).code(),
-            HardwareError::Registry("".into()).code(),
-            HardwareError::ElevatedBridge("".into()).code(),
-            HardwareError::AiRequest("".into()).code(),
-            HardwareError::HotkeyConfig("".into()).code(),
-            HardwareError::TaskJoin("".into()).code(),
-            HardwareError::Other("".into()).code(),
+            .code()
+            .as_str(),
+            HardwareError::Io(std::io::Error::other("")).code().as_str(),
+            HardwareError::Hid("".into()).code().as_str(),
+            HardwareError::InvalidConfig("".into()).code().as_str(),
+            HardwareError::Timeout("".into()).code().as_str(),
+            HardwareError::NotSupported("".into()).code().as_str(),
+            HardwareError::Ecram("".into()).code().as_str(),
+            HardwareError::Wifi("".into()).code().as_str(),
+            HardwareError::Display("".into()).code().as_str(),
+            HardwareError::Touchpad("".into()).code().as_str(),
+            HardwareError::Battery("".into()).code().as_str(),
+            HardwareError::Hotkey("".into()).code().as_str(),
+            HardwareError::Registry("".into()).code().as_str(),
+            HardwareError::ElevatedBridge("".into()).code().as_str(),
+            HardwareError::AiRequest("".into()).code().as_str(),
+            HardwareError::HotkeyConfig("".into()).code().as_str(),
+            HardwareError::TaskJoin("".into()).code().as_str(),
+            HardwareError::Other("".into()).code().as_str(),
         ];
         for code in &codes {
             assert!(!code.is_empty(), "Error code should not be empty");

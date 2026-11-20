@@ -872,6 +872,74 @@
     "githubRepo": "GitHub Repository"
   },
   "errors": {
+    "ai": {
+      "request_failed": "The AI request failed."
+    },
+    "battery": {
+      "failure": "A battery operation failed."
+    },
+    "cast": {
+      "failure": "Screen casting failed."
+    },
+    "config": {
+      "invalid": "A stored setting is invalid and was not applied."
+    },
+    "display": {
+      "failure": "A display operation failed."
+    },
+    "ecram": {
+      "access_failed": "An embedded controller memory read failed.",
+      "driver_blocked": "This sensor range is blocked by the IoT driver on this model.",
+      "service_unavailable": "The embedded controller service is not answering.",
+      "unknown": "The embedded controller read failed for an unknown reason."
+    },
+    "elevated": {
+      "bridge_failed": "The elevated bridge did not complete the operation."
+    },
+    "hardware": {
+      "other": "An unexpected hardware error occurred.",
+      "timeout": "The operation took too long and was cancelled.",
+      "unsupported": "This feature is not available on this device."
+    },
+    "hid": {
+      "failure": "Communication with a HID device failed."
+    },
+    "hotkey": {
+      "config_invalid": "The hotkey configuration is invalid and was not applied.",
+      "failure": "A hotkey operation failed."
+    },
+    "io": {
+      "failure": "A file or device operation failed."
+    },
+    "policy": {
+      "invalid": "A stored policy is invalid and was ignored."
+    },
+    "registry": {
+      "failure": "A registry operation failed."
+    },
+    "spawn": {
+      "timeout": "A process exceeded its time limit and was stopped."
+    },
+    "store": {
+      "corrupt": "Saved data is corrupt and will be recreated."
+    },
+    "task": {
+      "join_failed": "A background task failed or was cancelled."
+    },
+    "touchpad": {
+      "failure": "A touchpad operation failed."
+    },
+    "watchdog": {
+      "rejected": "The watchdog refused the action."
+    },
+    "wifi": {
+      "failure": "A Wi-Fi operation failed."
+    },
+    "wmi": {
+      "connection_failed": "Could not reach the hardware information service.",
+      "operation_failed": "A hardware operation failed.",
+      "query_failed": "A hardware query failed. The system may be busy."
+    },
     "hardwareNotAvailable": "Hardware interface not available",
     "driverNotLoaded": "Driver not loaded",
     "permissionDenied": "Permission denied — try running as administrator",
