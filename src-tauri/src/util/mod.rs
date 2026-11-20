@@ -24,6 +24,7 @@ pub mod rate_limit;
 pub mod registry;
 pub mod retry;
 pub mod session_marker;
+pub mod state_store;
 pub mod webview_retry;
 pub mod win_handle;
 pub mod win_service;
