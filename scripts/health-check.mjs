@@ -72,6 +72,24 @@ const STEPS = [
     cmd: 'node',
     args: ['scripts/check-windowless-spawns.mjs'],
   },
+  {
+    id: 'spawn-timeout',
+    name: 'Spawn timeout gate (no unbounded child)',
+    cmd: 'node',
+    args: ['scripts/check-spawn-timeout.mjs'],
+  },
+  {
+    id: 'error-catalog',
+    name: 'Central error catalog gate',
+    cmd: 'node',
+    args: ['scripts/check-error-catalog.mjs'],
+  },
+  {
+    id: 'state-writes',
+    name: 'State writes gate (state_store only)',
+    cmd: 'node',
+    args: ['scripts/check-state-writes.mjs'],
+  },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];
 

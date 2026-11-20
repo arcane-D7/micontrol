@@ -74,7 +74,7 @@ jobs:
       # broken bundle or a new unguarded kernel handle.
       - name: Health check (static)
         shell: pwsh
-        run: node scripts/health-check.mjs --step=version,fmt,clippy,tsc,lint,format,build,i18n,handle-leaks,windowless-spawn,toolchain
+        run: node scripts/health-check.mjs --step=version,fmt,clippy,tsc,lint,format,build,i18n,handle-leaks,windowless-spawn,spawn-timeout,error-catalog,state-writes,toolchain
 
   test:
     name: Tests + coverage

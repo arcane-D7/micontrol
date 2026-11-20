@@ -52,6 +52,21 @@ function collectRustFiles(dir) {
   return out;
 }
 
+/**
+ * True when `index` sits inside a `#[cfg(test)]` module: tests may create
+ * temp files freely (they are not production state), and counting them made
+ * the ratchet fire on util/process_spawn.rs's own truncation test.
+ */
+function isTestContext(text, index) {
+  const before = text.slice(0, index);
+  const last = before.lastIndexOf('#[cfg(test)]');
+  if (last === -1) return false;
+  const after = before.slice(last);
+  const opens = (after.match(/\{/g) ?? []).length;
+  const closes = (after.match(/\}/g) ?? []).length;
+  return opens > closes;
+}
+
 /** Count gate-pattern matches per file, keyed by repo-relative path. */
 function inventory() {
   const counts = {};
@@ -59,7 +74,11 @@ function inventory() {
     const text = readFileSync(file, 'utf8');
     let n = 0;
     for (const pattern of PATTERNS) {
-      n += (text.match(pattern) ?? []).length;
+      pattern.lastIndex = 0;
+      let m;
+      while ((m = pattern.exec(text)) !== null) {
+        if (!isTestContext(text, m.index)) n += 1;
+      }
     }
     if (n > 0) {
       counts[path.relative(ROOT, file).replaceAll('\\', '/')] = n;
