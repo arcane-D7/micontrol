@@ -10,7 +10,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::hw::errors::HardwareResult;
+use crate::util::process_spawn;
 use tauri::Manager;
+
+/// Best-effort ACL/whoami helpers answer in milliseconds; 10 s covers a cold
+/// disk without stalling crash recovery (D2/D12: no unbounded child).
+const ACL_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Registry key for tracking clean vs abnormal shutdowns.
 #[cfg(windows)]
@@ -394,21 +399,21 @@ fn register_wer() -> bool {
         // user listing). icacls grants the current user modify rights; best
         // effort — failure is logged, not fatal.
         {
-            let whoami = std::process::Command::new("whoami.exe")
-                .output()
+            let mut cmd = std::process::Command::new("whoami.exe");
+            let whoami = process_spawn::run_capture(&mut cmd, ACL_SPAWN_TIMEOUT)
                 .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .map(|o| o.stdout_str().trim().to_string())
                 .unwrap_or_default();
             if !whoami.is_empty() {
                 let dir = dump_dir.display().to_string();
-                let out = std::process::Command::new("icacls.exe")
-                    .args([&dir, "/grant", &format!("{whoami}:(OI)(CI)M"), "/Q"])
-                    .output();
-                if let Some(o) = out.ok().filter(|o| !o.status.success()) {
+                let mut cmd = std::process::Command::new("icacls.exe");
+                cmd.args([&dir, "/grant", &format!("{whoami}:(OI)(CI)M"), "/Q"]);
+                let outcome = process_spawn::run_capture(&mut cmd, ACL_SPAWN_TIMEOUT).ok();
+                if let Some(o) = outcome.filter(|o| !o.status.success()) {
                     log::warn!(
                         target: "hw::crash_recovery",
                         "icacls grant on dump dir failed: {}",
-                        String::from_utf8_lossy(&o.stderr).trim()
+                        o.stderr_str().trim()
                     );
                 }
             }

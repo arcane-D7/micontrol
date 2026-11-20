@@ -1,0 +1,266 @@
+{
+  "generated": "2026-11-20",
+  "note": "baseline do gate D12 (ratchet): cada entrada e para remover; qualquer .output()/.status()/.wait() sem timeout novo fora desta lista falha o build",
+  "entries": [
+    {
+      "file": "src-tauri/src/commands/face.rs",
+      "line": 319,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/commands/face.rs",
+      "line": 322,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 894,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 900,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 985,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 991,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 1219,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 1225,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 2091,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 2355,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 2396,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 2433,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 2449,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elevated.rs",
+      "line": 2526,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elev_bridge.rs",
+      "line": 2282,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/elev_bridge.rs",
+      "line": 2289,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/color_calibration.rs",
+      "line": 359,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/discovery.rs",
+      "line": 161,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/discovery.rs",
+      "line": 831,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/display.rs",
+      "line": 2504,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/display.rs",
+      "line": 2537,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/display.rs",
+      "line": 2543,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/ecram_service_mgmt.rs",
+      "line": 457,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/ecram_service_mgmt.rs",
+      "line": 477,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/ecram_service_mgmt.rs",
+      "line": 528,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/ecram_service_mgmt.rs",
+      "line": 541,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/ecram_service_mgmt.rs",
+      "line": 554,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/ecram_service_mgmt.rs",
+      "line": 577,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/event_log.rs",
+      "line": 358,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/localsend.rs",
+      "line": 378,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/os_turbo.rs",
+      "line": 666,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/os_turbo.rs",
+      "line": 2357,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/phone_link.rs",
+      "line": 46,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/screen_cast.rs",
+      "line": 235,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/security_scan.rs",
+      "line": 159,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/security_scan.rs",
+      "line": 410,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/security_scan.rs",
+      "line": 476,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/syncthing.rs",
+      "line": 195,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/syncthing.rs",
+      "line": 196,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/syncthing.rs",
+      "line": 210,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/syncthing.rs",
+      "line": 211,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/sys_opt.rs",
+      "line": 430,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/sys_opt.rs",
+      "line": 454,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/sys_opt.rs",
+      "line": 581,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/sys_opt.rs",
+      "line": 775,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/sys_opt.rs",
+      "line": 1174,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/update.rs",
+      "line": 156,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/update.rs",
+      "line": 308,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/hw/wifi.rs",
+      "line": 732,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/util/crash_report.rs",
+      "line": 196,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/util/crash_report.rs",
+      "line": 202,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    },
+    {
+      "file": "src-tauri/src/util/firewall.rs",
+      "line": 167,
+      "reason": "baseline 2026-11-20 (ratchet C2: migrate per module)"
+    }
+  ]
+}

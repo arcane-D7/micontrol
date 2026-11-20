@@ -31,7 +31,7 @@ function walk(dir, out = []) {
 }
 
 const isTestContext = (text, index) => {
-  const before = text.slice(Math.max(0, index - 4000), index);
+  const before = text.slice(Math.max(0, index - 8000), index);
   const lastTest = before.lastIndexOf('#[cfg(test)]');
   if (lastTest === -1) return false;
   // crude but effective: the `#[cfg(test)]` module must still be open (no closing brace at column 0 after it)
@@ -50,7 +50,7 @@ for (const file of walk(SRC)) {
     const idx = m.index;
     if (isTestContext(text, idx)) continue;
     const window = text.slice(Math.max(0, idx - 600), Math.min(text.length, idx + 900));
-    const guarded = window.includes('CREATE_NO_WINDOW') || window.includes('creation_flags') || window.includes('spawn_hidden');
+    const guarded = window.includes('CREATE_NO_WINDOW') || window.includes('creation_flags') || window.includes('spawn_hidden') || window.includes('process_spawn::');
     if (!guarded) {
       const line = text.slice(0, idx).split('\n').length;
       offenders.push({ file: path.relative(ROOT, file).replace(/\\/g, '/'), line });

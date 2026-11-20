@@ -19,8 +19,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
+use std::time::Duration;
 
+use crate::util::process_spawn;
 use serde::Serialize;
+
+/// tasklist/taskkill budget: these tools answer in tens of milliseconds;
+/// 10 s covers a loaded system without stalling camera start/stop.
+const TOOL_SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 const APP_DATA_SUBDIR: &str = "scrcpy";
 const PID_FILE: &str = "scrcpy.pid";
@@ -152,11 +158,11 @@ fn is_process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         // `tasklist /FI "PID eq <pid>" /NH` lists the row when it is alive.
-        let out = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output();
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, TOOL_SPAWN_TIMEOUT);
         match out {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()),
+            Ok(o) => o.stdout_str().contains(&pid.to_string()),
             Err(_) => false,
         }
     }
@@ -222,18 +228,20 @@ pub fn stop_camera() -> Result<(), String> {
         return Ok(());
     };
     let out = if cfg!(windows) {
-        Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output()
+        let mut kill = Command::new("taskkill");
+        kill.args(["/PID", &pid.to_string(), "/F"]);
+        process_spawn::run_capture(&mut kill, TOOL_SPAWN_TIMEOUT)
     } else {
-        Command::new("kill").arg(pid.to_string()).output()
+        let mut kill = Command::new("kill");
+        kill.arg(pid.to_string());
+        process_spawn::run_capture(&mut kill, TOOL_SPAWN_TIMEOUT)
     }
     .map_err(|e| format!("failed to stop scrcpy (pid {pid}): {e}"))?;
     if !out.status.success() {
         // TaskKill fails if the process already exited — treat as stopped.
         return Err(format!(
             "scrcpy termination returned nonzero (pid {pid}): {}",
-            String::from_utf8_lossy(&out.stderr)
+            out.stderr_str()
         ));
     }
     clear_pid_file();

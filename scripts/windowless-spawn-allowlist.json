@@ -1,121 +1,46 @@
 {
-  "generated": "2026-11-19",
-  "note": "baseline do gate B7 (ratchet): cada entrada e para remover; qualquer spawn novo fora desta lista falha o build",
+  "generated": "2026-11-20",
+  "note": "baseline do gate B7 (ratchet): cada entrada e para remover; qualquer spawn novo fora desta lista falha o build. Os 16 flashes C0a migrados para util/process_spawn sairam.",
   "entries": [
-    {
-      "file": "src-tauri/src/bin/micontrol_face_svc.rs",
-      "line": 588,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/bin/micontrol_face_svc.rs",
-      "line": 738,
-      "reason": "baseline 2026-11-19"
-    },
     {
       "file": "src-tauri/src/commands/ai_logs.rs",
       "line": 154,
-      "reason": "baseline 2026-11-19"
+      "reason": "baseline 2026-11-20"
     },
     {
       "file": "src-tauri/src/commands/face.rs",
       "line": 181,
-      "reason": "baseline 2026-11-19"
+      "reason": "baseline 2026-11-20"
     },
     {
       "file": "src-tauri/src/commands/privacy.rs",
       "line": 174,
-      "reason": "baseline 2026-11-19"
+      "reason": "baseline 2026-11-20"
     },
     {
       "file": "src-tauri/src/commands/privacy.rs",
       "line": 214,
-      "reason": "baseline 2026-11-19"
+      "reason": "baseline 2026-11-20"
     },
     {
       "file": "src-tauri/src/commands/privacy.rs",
       "line": 222,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/debug_log.rs",
-      "line": 456,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/crash_recovery.rs",
-      "line": 397,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/crash_recovery.rs",
-      "line": 404,
-      "reason": "baseline 2026-11-19"
+      "reason": "baseline 2026-11-20"
     },
     {
       "file": "src-tauri/src/hw/icc_catalog.rs",
       "line": 833,
-      "reason": "baseline 2026-11-19"
+      "reason": "baseline 2026-11-20"
     },
     {
       "file": "src-tauri/src/hw/scrcpy_bridge.rs",
-      "line": 66,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/scrcpy_bridge.rs",
-      "line": 81,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/scrcpy_bridge.rs",
-      "line": 155,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/scrcpy_bridge.rs",
-      "line": 170,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/sys_opt.rs",
-      "line": 1039,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/sys_opt.rs",
-      "line": 1053,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/sys_opt.rs",
-      "line": 1075,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/transcription.rs",
       "line": 72,
-      "reason": "baseline 2026-11-19"
+      "reason": "baseline 2026-11-20"
     },
     {
-      "file": "src-tauri/src/hw/transcription.rs",
-      "line": 83,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/transcription.rs",
-      "line": 168,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/transcription.rs",
-      "line": 238,
-      "reason": "baseline 2026-11-19"
-    },
-    {
-      "file": "src-tauri/src/hw/transcription.rs",
-      "line": 306,
-      "reason": "baseline 2026-11-19"
+      "file": "src-tauri/src/hw/scrcpy_bridge.rs",
+      "line": 87,
+      "reason": "baseline 2026-11-20"
     }
   ]
 }

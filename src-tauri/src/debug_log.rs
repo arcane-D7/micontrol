@@ -450,16 +450,18 @@ fn ensure_log_dir_writable(log_dir: &std::path::Path) -> bool {
 /// are elevated or own the folder — otherwise we report failure and the
 /// caller falls back to console-only logging.
 fn repair_log_dir_acl(log_dir: &std::path::Path) -> bool {
+    use crate::util::process_spawn;
     use std::process::Command;
+    use std::time::Duration;
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "Users".into());
     // icacls "dir" /grant "<user>:(OI)(CI)F" /T
-    Command::new("icacls")
-        .arg(log_dir)
+    let mut cmd = Command::new("icacls");
+    cmd.arg(log_dir)
         .arg("/grant")
         .arg(format!("{user}:(OI)(CI)F"))
         .arg("/T")
-        .arg("/Q")
-        .output()
+        .arg("/Q");
+    process_spawn::run_capture(&mut cmd, Duration::from_secs(10))
         .is_ok_and(|out| out.status.success())
 }
 
