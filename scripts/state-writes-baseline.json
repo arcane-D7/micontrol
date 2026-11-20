@@ -12,7 +12,7 @@
     "src-tauri/src/elevated.rs": 4,
     "src-tauri/src/hw/crash_recovery.rs": 5,
     "src-tauri/src/hw/discovery.rs": 2,
-    "src-tauri/src/hw/display.rs": 4,
+    "src-tauri/src/hw/display.rs": 2,
     "src-tauri/src/hw/event_log.rs": 1,
     "src-tauri/src/hw/face/store.rs": 1,
     "src-tauri/src/hw/hotkeys/mod.rs": 1,
@@ -28,6 +28,6 @@
     "src-tauri/src/util/error_log.rs": 1,
     "src-tauri/src/util/schtasks.rs": 1,
     "src-tauri/src/util/session_marker.rs": 1,
-    "src-tauri/src/util/state_store.rs": 1
+    "src-tauri/src/util/state_store.rs": 3
   }
 }

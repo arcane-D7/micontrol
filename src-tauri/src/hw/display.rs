@@ -5,6 +5,7 @@
 
 use crate::hw::errors::{HardwareError, HardwareResult};
 use crate::util::process_spawn;
+use crate::util::state_store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicU8, Ordering};
@@ -616,18 +617,14 @@ const AI_BRIGHTNESS_SMTH_VALUE: &str = "AiBrightnessSmoothing";
 /// 0 = "curve" (fixed min/max formula), 1 = "smart" (learned user preference curve).
 const AI_BRIGHTNESS_MODE_VALUE: &str = "AiBrightnessMode";
 
-/// Smart-mode persistence file: `%LOCALAPPDATA%\MiControl\smart_brightness.json`.
-///
-/// Tests override this via `MICONTROL_SMART_MODEL_PATH` so unit tests never
-/// clobber the user's real learned model.
-fn smart_model_path() -> std::path::PathBuf {
-    if let Ok(override_path) = std::env::var("MICONTROL_SMART_MODEL_PATH") {
-        return std::path::PathBuf::from(override_path);
-    }
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(base)
-        .join("MiControl")
-        .join("smart_brightness.json")
+/// Smart-mode persistence: `%LOCALAPPDATA%\MiControl\state\smart_model.json`
+/// through the `smart_model` state store (schema 1, user scope). The path is
+/// resolved by the store registry; tests redirect the whole state root via
+/// `MICONTROL_STATE_ROOT`, and the legacy `smart_brightness.json` (still read
+/// once for migration) can be pointed anywhere via `MICONTROL_SMART_MODEL_PATH`
+/// so unit tests never clobber the user's real learned model.
+fn smart_model_store() -> Result<state_store::Store<SmartModel>, state_store::StoreError> {
+    Ok(state_store::Store::new(state_store::smart_model_spec()?))
 }
 
 /// Sensitivity / range configuration for our own adaptive brightness loop.
@@ -968,71 +965,58 @@ pub fn clear_user_brightness_override() {
 // as its baseline via seeding, BUT it keeps recomputing the curve and writing
 // over the user's value 2 s later (the "app steals my brightness" regression).
 //
-// Fix: persist {last_manual_ms (epoch abs), offset, offset_active} to
-// `%LOCALAPPDATA%\MiControl\brightness_override.json` on every manual change
+// Fix: persist {last_manual_ms (epoch abs), offset, offset_active} through
+// the brightness state store (C3: `util::state_store`) on every manual change
 // and restore it when the adaptive loop starts in a new process. As long as
 // the user's manual change happened < MANUAL_OVERRIDE_GRACE_MS ago, the
-// relaunched loop stays hands-off.
+// relaunched loop stays hands-off. The store's declared migration imports the
+// legacy `brightness_override.json` (kept until the first store save, which
+// retires it), so the migration here is the same code the store tests cover.
 
-/// Persistence file under `%LOCALAPPDATA%\MiControl`.
-fn brightness_override_path() -> std::path::PathBuf {
-    if let Ok(override_path) = std::env::var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH") {
-        return std::path::PathBuf::from(override_path);
-    }
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("MiControl").join("brightness_override.json")
-}
-
-#[derive(Serialize, Deserialize, Default, Clone, Copy)]
-struct OverrideState {
-    /// Wall-clock ms (since UNIX epoch) of the last manual brightness change.
-    last_manual_ms: u64,
-    /// Signed curve offset the user's manual value implies.
-    offset: i16,
-    /// Whether the offset is active (user has expressed a preference).
-    offset_active: bool,
-    /// Where the offset came from — decides the clamp applied on restore.
-    /// Absent in files written before the user/captured split; those only ever
-    /// held captured offsets, so the default (`Captured`, ±30 pp) is correct.
-    #[serde(default)]
-    origin: OffsetOrigin,
-}
-
-/// Persist the current manual-override statics to disk (crash survival).
+/// Persist the current manual-override statics through the brightness store
+/// (crash survival). Store failures downgrade to the same warn the direct
+/// write produced; the in-memory statics remain authoritative.
 fn persist_override_state() {
-    let state = OverrideState {
+    let state = state_store::BrightnessOverrideState {
         last_manual_ms: AUTO_LAST_MANUAL_MS.load(Ordering::Relaxed),
         offset: AUTO_OFFSET.load(Ordering::Relaxed),
         offset_active: AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed),
-        origin: OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed)),
+        origin: match OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed)) {
+            OffsetOrigin::Captured => state_store::BrightnessOffsetOrigin::Captured,
+            OffsetOrigin::User => state_store::BrightnessOffsetOrigin::User,
+        },
     };
-    let path = brightness_override_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match serde_json::to_string(&state) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                log::warn!("[display] Failed to persist brightness override: {e}");
-            }
-        }
-        Err(e) => log::warn!("[display] Failed to serialize brightness override: {e}"),
+    if let Err(e) = state_store::save_brightness_override(&state) {
+        log::warn!("[display] Failed to persist brightness override: {e}");
     }
 }
 
-/// Restore the manual-override statics from disk (new process after crash).
-/// Stale entries (> grace window) restore nothing so a fresh boot never gets
-/// stuck in a perpetual hands-off state.
+/// Restore the manual-override statics (new process after crash). Stale
+/// entries (> grace window) restore nothing so a fresh boot never gets stuck
+/// in a perpetual hands-off state. Corrupt state or store IO failure logs and
+/// starts clean; it never panics and never leaves the statics half-set.
+///
+/// On the first call after the C3 migration this also CONSUMES the legacy
+/// `brightness_override.json` (import into the store), and the next
+/// [`persist_override_state`] save retires the legacy file.
 pub fn restore_override_state() {
-    let path = brightness_override_path();
-    let Ok(data) = std::fs::read_to_string(&path) else {
-        return;
+    // One-time legacy import. Importing before load means the first restore
+    // already sees the migrated payload; the legacy file is only removed by
+    // the next successful save (store contract), never here.
+    if let Err(e) = state_store::migrate_legacy_brightness_override() {
+        log::warn!("[display] brightness override legacy migration skipped: {e}");
+    }
+    let loaded = match state_store::brightness_store().and_then(|store| store.load()) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            // Corrupt state or IO failure: start clean rather than wedging
+            // the adaptive loop (a bad state file must not take brightness
+            // control down with it).
+            log::warn!("[display] brightness override state unreadable, starting clean: {e}");
+            return;
+        }
     };
-    let Ok(state) = serde_json::from_str::<OverrideState>(&data) else {
-        return;
-    };
+    let Some(state) = loaded else { return };
     if state.last_manual_ms == 0 {
         return;
     }
@@ -1042,6 +1026,7 @@ pub fn restore_override_state() {
         log::debug!("[adaptive_brightness] persisted override too old ({age}ms) — ignoring");
         return;
     }
+    let origin = OffsetOrigin::from_u8(state.origin.as_u8());
     AUTO_LAST_MANUAL_MS.store(state.last_manual_ms, Ordering::Relaxed);
     // Clamp on restore with the bound of the offset's ORIGIN: a user-intent
     // offset may legitimately be ±100 pp (the slider's full range), while a
@@ -1049,15 +1034,15 @@ pub fn restore_override_state() {
     // carry no origin and came from the capture path → ±30 pp, exactly as the
     // old build did. Never apply an offset unclamped: the historical `54` in
     // production came from the capture feedback loop and pinned the curve.
-    let offset = clamp_offset_for(state.offset, state.origin);
+    let offset = clamp_offset_for(state.offset, origin);
     AUTO_OFFSET.store(offset, Ordering::Relaxed);
-    AUTO_OFFSET_ORIGIN.store(state.origin.as_u8(), Ordering::Relaxed);
+    AUTO_OFFSET_ORIGIN.store(origin.as_u8(), Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(state.offset_active, Ordering::Relaxed);
     log::info!(
         "[adaptive_brightness] restored manual override from crash \
          (age={age}ms, offset={}, origin={}, active={}) — grace window until manual change",
         offset,
-        state.origin.label(),
+        origin.label(),
         state.offset_active
     );
 }
@@ -1404,36 +1389,79 @@ static SMART_MODEL_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<SmartModel
     std::sync::OnceLock::new();
 
 fn load_smart_model() -> SmartModel {
-    let path = smart_model_path();
-    if let Ok(data) = std::fs::read_to_string(&path) {
-        if let Ok(mut model) = serde_json::from_str::<SmartModel>(&data) {
-            // Migration: an unbounded file (1.3 M samples in production) is
+    let store = match smart_model_store() {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!("[display] smart model store unavailable, starting empty: {e}");
+            return SmartModel::new();
+        }
+    };
+    match store.load() {
+        Err(e) => {
+            // Corrupt store file: fall back to the default model and keep
+            // going. Startup must never die on a state file.
+            log::warn!("[display] smart model state unreadable, starting empty: {e}");
+            SmartModel::new()
+        }
+        Ok(Some(mut model)) => {
+            // Migration: an unbounded model (1.3 M samples in production) is
             // trimmed on load and written back once, so every subsequent start
             // reads the small version.
             if prune_smart_model(&mut model) {
                 persist_smart_model(&model);
             }
-            return model;
+            model
+        }
+        Ok(None) => {
+            // One-time legacy import: the pre-store `smart_brightness.json`.
+            // Pruned BEFORE the store save so an oversized pre-C3 model still
+            // fits the store's declared ceiling; the legacy file is retired
+            // only after that save succeeded.
+            let legacy_path = state_store::legacy_smart_model_path();
+            let Ok(data) = std::fs::read_to_string(&legacy_path) else {
+                return SmartModel::new();
+            };
+            match serde_json::from_str::<SmartModel>(&data) {
+                Ok(mut model) => {
+                    prune_smart_model(&mut model);
+                    if let Err(e) = store.save(&model) {
+                        // Keep the pruned model for this session and leave the
+                        // legacy file in place (it is still the only copy).
+                        log::warn!("[display] smart model legacy import failed: {e}");
+                        return model;
+                    }
+                    state_store::retire_legacy_smart_model();
+                    log::info!(
+                        "[display] migrated legacy smart_brightness.json into the state store"
+                    );
+                    model
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[display] legacy smart_brightness.json unreadable, starting empty: {e}"
+                    );
+                    SmartModel::new()
+                }
+            }
         }
     }
-    SmartModel::new()
 }
 
 fn persist_smart_model(model: &SmartModel) {
-    let path = smart_model_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match serde_json::to_string_pretty(model) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                log::warn!("[display] Failed to persist smart model: {e}");
-            } else if let Err(e) = crate::util::auth::restrict_file_acl(&path) {
-                log::warn!("[display] Failed to restrict ACL on smart_brightness.json: {e}");
-            }
+    let store = match smart_model_store() {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!("[display] smart model store unavailable: {e}");
+            return;
         }
-        Err(e) => log::warn!("[display] Failed to serialize smart model: {e}"),
+    };
+    if let Err(e) = store.save(model) {
+        log::warn!("[display] Failed to persist smart model: {e}");
+        return;
     }
+    // Retire the legacy file only after a successful store save, so a crash
+    // mid-migration always leaves one valid copy behind.
+    state_store::retire_legacy_smart_model();
 }
 
 /// Access to the smart model (locked).  Loads from disk on first access.
@@ -1465,8 +1493,17 @@ pub fn get_smart_model() -> SmartModel {
 
 /// Clear the entire smart model (user clicked "Reset learning").
 pub fn reset_smart_model() {
-    let path = smart_model_path();
-    let _ = std::fs::remove_file(path);
+    // Purge through the store (data + tmp + lock); the legacy
+    // `smart_brightness.json` is gone for good on a reset, so remove it too.
+    match smart_model_store() {
+        Ok(store) => {
+            if let Err(e) = store.purge() {
+                log::warn!("[display] smart model purge failed: {e}");
+            }
+        }
+        Err(e) => log::warn!("[display] smart model store unavailable on reset: {e}"),
+    }
+    let _ = std::fs::remove_file(state_store::legacy_smart_model_path());
     if let Some(cache) = SMART_MODEL_CACHE.get() {
         if let Ok(mut guard) = cache.lock() {
             *guard = Some(SmartModel::new());
@@ -3677,6 +3714,20 @@ mod tests {
         let override_temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
         std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &override_temp);
         let _ = std::fs::remove_file(&override_temp);
+        // C3: persistence goes through the state store. Redirect the whole
+        // user state root to a fresh scratch dir per call. The variable is
+        // set and never removed (a parallel test may be reading it); every
+        // store is one file under `<root>\MiControl\state\`, so concurrent
+        // tests never collide with each other's payloads.
+        static STATE_ROOT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = STATE_ROOT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let state_root = std::env::temp_dir().join(format!(
+            "micontrol_test_state_root_{}_{}",
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        std::env::set_var("MICONTROL_STATE_ROOT", &state_root);
         // Also isolate any already-cached model so `reset_smart_model()` starts
         // from the (empty) file at the new path.
         if let Some(cache) = SMART_MODEL_CACHE.get() {
@@ -3685,6 +3736,19 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&temp);
+    }
+
+    /// The scratch state root `isolate_smart_model` redirected the store to.
+    fn isolated_state_root() -> std::path::PathBuf {
+        std::env::var_os("MICONTROL_STATE_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("isolate_smart_model must run before this assertion")
+    }
+
+    /// Remove a scratch state root at the end of a test (the env var stays
+    /// set; the next isolate call hands out a fresh root anyway).
+    fn cleanup_state_root(root: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]
@@ -4058,15 +4122,18 @@ mod tests {
     fn restore_override_state_clamps_legacy_captured_offset() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         isolate_smart_model();
-        // Point the override state at a temp file — never the production one.
-        let temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
-        std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &temp);
+        // C3: the override state lives in the store under the redirected
+        // root; the exact-but-legacy pre-store wire is written as the LEGACY
+        // file so this test also covers the migration path.
+        let state_root = isolated_state_root();
+        let legacy = state_store::legacy_brightness_override_path();
         // The exact shape found in production: offset 54, still inside the
         // 120 s grace window, and NO origin field (written before the
         // user/captured split). Every offset those builds persisted came from
         // the capture loop, so it must keep the ±30 pp bound.
+        std::fs::create_dir_all(legacy.parent().expect("legacy parent dir")).unwrap();
         std::fs::write(
-            &temp,
+            &legacy,
             format!(
                 "{{\"last_manual_ms\":{},\"offset\":54,\"offset_active\":true}}",
                 now_ms()
@@ -4093,26 +4160,26 @@ mod tests {
         assert!(user_override_in_grace());
 
         clear_user_brightness_override();
-        let _ = std::fs::remove_file(&temp);
-        std::env::remove_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH");
+        cleanup_state_root(&state_root);
     }
 
     #[test]
     fn restore_override_state_keeps_persisted_user_offset() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         isolate_smart_model();
-        let temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
-        std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &temp);
-        // A user-intent offset (+74 pp = 100 % at 29 lux) must survive a
-        // crash/relaunch: the relaunched loop may not trim it back to +30.
-        std::fs::write(
-            &temp,
-            format!(
-                "{{\"last_manual_ms\":{},\"offset\":74,\"offset_active\":true,\"origin\":\"user\"}}",
-                now_ms()
-            ),
-        )
-        .unwrap();
+        let state_root = isolated_state_root();
+        // C3: seed the STORE (post-migration shape) directly. A user-intent
+        // offset (+74 pp = 100 % at 29 lux) must survive a crash/relaunch:
+        // the relaunched loop may not trim it back to +30.
+        let store = state_store::brightness_store().expect("store from redirected root");
+        store
+            .save(&state_store::BrightnessOverrideState {
+                last_manual_ms: now_ms(),
+                offset: 74,
+                offset_active: true,
+                origin: state_store::BrightnessOffsetOrigin::User,
+            })
+            .expect("seed store with user offset");
 
         AUTO_OFFSET.store(0, Ordering::Relaxed);
         AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
@@ -4133,8 +4200,41 @@ mod tests {
         assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
 
         clear_user_brightness_override();
-        let _ = std::fs::remove_file(&temp);
-        std::env::remove_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH");
+        cleanup_state_root(&state_root);
+    }
+
+    /// C3a: a corrupt store file must not take brightness down with it. The
+    /// restore logs, starts clean (no offset restored) and the next persist
+    /// overwrites the bad file.
+    #[test]
+    fn restore_override_state_survives_corrupt_store_file() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        let state_root = isolated_state_root();
+        let store = state_store::brightness_store().expect("store from redirected root");
+        std::fs::create_dir_all(store.path().parent().expect("state dir")).unwrap();
+        std::fs::write(store.path(), b"not json at all").unwrap();
+
+        AUTO_OFFSET.store(9, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        // Must not panic; must restore nothing (fresh offset state).
+        restore_override_state();
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), 9);
+        assert!(!AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+        assert_eq!(AUTO_LAST_MANUAL_MS.load(Ordering::Relaxed), 0);
+
+        // The next save overwrites the corrupt file and succeeds.
+        record_user_brightness_override(80);
+        let loaded = store
+            .load()
+            .expect("reload after overwrite")
+            .expect("state present");
+        assert!(loaded.offset_active, "corrupt file replaced by valid state");
+
+        clear_user_brightness_override();
+        cleanup_state_root(&state_root);
     }
 
     // ── smart-model prune (audit: 1_315_938 samples) ────────────────────────
@@ -4269,13 +4369,25 @@ mod tests {
             "hot buckets must actually decay"
         );
 
-        // The trimmed model was written back, so the next start reads it small.
-        let rewritten = std::fs::read_to_string(&path).unwrap();
-        let on_disk: SmartModel = serde_json::from_str(&rewritten).unwrap();
+        // The trimmed model was written back through the store, so the next
+        // start reads it small (from the store, not the retired legacy file).
+        let store = state_store::Store::<SmartModel>::new(state_store::smart_model_spec_in(
+            &isolated_state_root(),
+        ));
+        let on_disk = store
+            .load()
+            .expect("store load after prune")
+            .expect("pruned model persisted in the store");
         let disk_total = on_disk.bins.values().map(|b| b.n).sum::<u32>();
         assert!(
             disk_total <= SMART_MAX_TOTAL_SAMPLES,
             "file was not rewritten with the pruned model ({disk_total} samples)"
+        );
+        // The legacy file (same path this test seeded) was retired by the
+        // store's save.
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "legacy smart_brightness.json must be retired after the store save"
         );
 
         reset_smart_model();

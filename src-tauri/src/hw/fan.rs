@@ -1101,7 +1101,19 @@ pub fn get_fan_info_seeded(
     // Fan RPM: WMI first, then EC RAM via pipe. `None` means "no sensor".
     let speed_rpm = wmi_rpm.or_else(|| ecram.as_ref().and_then(|e| e.rpm));
 
-    let (mode, requested_speed_percent) = get_fan_mode_registry().unwrap_or((FanMode::Auto, 50));
+    // The registry is the source of truth for the fan preference; when it
+    // cannot be read, fall back to the state store's last-known-good snapshot
+    // before giving up and reporting the Auto/50 default.
+    let (mode, requested_speed_percent) = match get_fan_mode_registry() {
+        Ok(found) => found,
+        Err(e) => {
+            log::debug!(
+                target: "hw::fan",
+                "fan mode registry unreadable ({e}); using the state-store last-known-good"
+            );
+            fan_last_known_good().unwrap_or((FanMode::Auto, 50))
+        }
+    };
 
     // WORKING FORM — DO NOT MODIFY: EC performance mode is read via WMI
     // MiInterface (ACPI WMAA method), NOT via IoTDriver or ECRAM.
@@ -1176,6 +1188,11 @@ pub fn set_fan_mode(mode: FanMode, speed_percent: u8) -> HardwareResult<FanModeR
         FanMode::Off => crate::hw::wmi_ec::EcPerformanceMode::SuperQuiet,
     };
     let ec_profile = ec_profile_label(ec_mode);
+
+    // C3: after a successful registry persist, snapshot the applied
+    // preference as the state store's last-known-good (registry stays the
+    // source of truth).
+    persist_fan_last_known_good(&mode, speed_percent, ec_profile);
 
     // Runs inside the elevated helper, so the in-process WMAA read works here.
     let before = crate::hw::wmi_ec::read_active_mode()
@@ -1394,6 +1411,99 @@ fn get_fan_rpm_wmi() -> HardwareResult<Option<u32>> {
     #[cfg(not(windows))]
     {
         Ok(None)
+    }
+}
+
+// ── Last-known-good state (C3: util::state_store) ────────────────────────────
+//
+// The user's fan preference lives in the Windows registry (`persist_fan_registry`
+// below); that stays the source of truth and is unchanged. The `fan` state
+// store (`%LOCALAPPDATA%\MiControl\state\fan.json`) carries the
+// last-known-good snapshot of the last successfully applied mode, so
+// `get_fan_info` can still report the last applied preference when the
+// registry cannot be read. A store failure never fails a fan operation: it
+// degrades to the pre-store behavior (defaults).
+
+/// Registry codes for [`FanMode`] (the `persist_fan_registry` wire format).
+fn fan_mode_code(mode: &FanMode) -> u8 {
+    match mode {
+        FanMode::Auto => 0,
+        FanMode::Fixed => 1,
+        FanMode::Off => 2,
+    }
+}
+
+fn fan_mode_from_code(code: u8) -> FanMode {
+    match code {
+        1 => FanMode::Fixed,
+        2 => FanMode::Off,
+        _ => FanMode::Auto,
+    }
+}
+
+/// Save the last-known-good snapshot through the given store. Split from
+/// [`persist_fan_last_known_good`] so tests exercise the exact production
+/// save against an explicit-root store.
+fn persist_fan_last_known_good_in(
+    store: &crate::util::state_store::Store<crate::util::state_store::FanProfileState>,
+    mode: &FanMode,
+    speed_percent: u8,
+    profile: &str,
+) -> Result<(), crate::util::state_store::StoreError> {
+    let mut state = crate::util::state_store::FanProfileState::new(profile);
+    state.last_mode_code = Some(fan_mode_code(mode));
+    state.last_speed_percent = Some(speed_percent);
+    store.save(&state)
+}
+
+/// Snapshot the applied fan preference into the state store (best-effort).
+fn persist_fan_last_known_good(mode: &FanMode, speed_percent: u8, profile: &str) {
+    #[cfg(test)]
+    {
+        // Test hygiene: unit tests run on the developer machine and must not
+        // write the real user state. Tests exercise this path through the
+        // explicit-root helper; when a redirected root is already set by a
+        // parallel display test, writing there is harmless.
+        if std::env::var_os("MICONTROL_STATE_ROOT").is_none() {
+            return;
+        }
+    }
+    match crate::util::state_store::fan_store() {
+        Ok(store) => {
+            if let Err(e) = persist_fan_last_known_good_in(&store, mode, speed_percent, profile) {
+                log::warn!(target: "hw::fan", "fan last-known-good save failed: {e}");
+            }
+        }
+        Err(e) => log::warn!(target: "hw::fan", "fan state store unavailable: {e}"),
+    }
+}
+
+/// Read the last-known-good snapshot from the given store.
+fn fan_last_known_good_from(
+    store: &crate::util::state_store::Store<crate::util::state_store::FanProfileState>,
+) -> Option<(FanMode, u8)> {
+    match store.load() {
+        Ok(Some(state)) => {
+            let mode = state.last_mode_code.map(fan_mode_from_code)?;
+            let speed = state.last_speed_percent?;
+            Some((mode, speed.clamp(20, 100)))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            log::debug!(target: "hw::fan", "fan last-known-good unreadable: {e}");
+            None
+        }
+    }
+}
+
+/// Production read: last-known-good from the store registry root.
+fn fan_last_known_good() -> Option<(FanMode, u8)> {
+    match crate::util::state_store::fan_store() {
+        Ok(store) => fan_last_known_good_from(&store),
+        Err(e) => {
+            log::debug!(target: "hw::fan", "fan state store unavailable: {e}");
+            None
+        }
     }
 }
 
@@ -1714,6 +1824,73 @@ fn set_fan_fixed_igcl(speed_percent: u8) -> HardwareResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unique per-test scratch root for the state-store last-known-good
+    /// tests; safe under parallel test threads.
+    fn lkg_scratch_root(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "micontrol-fan-lkg-{}-{}-{}",
+            tag,
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// C3 (d): the `fan` store carries the last-known-good snapshot. The
+    /// registry (source of truth) is unchanged; this store is only the
+    /// fallback when the registry cannot be read.
+    #[test]
+    fn fan_last_known_good_roundtrips_through_the_store() {
+        let root = lkg_scratch_root("roundtrip");
+        let store = crate::util::state_store::fan_store_in(&root);
+        // No snapshot yet.
+        assert_eq!(fan_last_known_good_from(&store), None);
+
+        // Save, read back: mode + speed survive.
+        persist_fan_last_known_good_in(&store, &FanMode::Fixed, 65, "Balanced")
+            .expect("save last-known-good");
+        assert_eq!(fan_last_known_good_from(&store), Some((FanMode::Fixed, 65)));
+
+        // A second applied mode overwrites the snapshot (last-known-good).
+        persist_fan_last_known_good_in(&store, &FanMode::Off, 20, "SuperQuiet")
+            .expect("save second last-known-good");
+        assert_eq!(fan_last_known_good_from(&store), Some((FanMode::Off, 20)));
+
+        // Reads clamp the speed exactly like the registry read path.
+        persist_fan_last_known_good_in(&store, &FanMode::Auto, 5, "Quiet")
+            .expect("save out-of-band speed");
+        assert_eq!(fan_last_known_good_from(&store), Some((FanMode::Auto, 20)));
+
+        // A corrupt store file degrades to None instead of panicking.
+        std::fs::write(store.path(), b"not json at all").expect("write corrupt fixture");
+        assert_eq!(fan_last_known_good_from(&store), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C3 (d): the snapshot payload stays readable when only the older
+    /// profile-only shape is on disk (fields default to `None`, no mode is
+    /// invented).
+    #[test]
+    fn fan_last_known_good_tolerates_profile_only_payloads() {
+        let root = lkg_scratch_root("legacy");
+        let store = crate::util::state_store::fan_store_in(&root);
+        std::fs::create_dir_all(store.path().parent().expect("state dir"))
+            .expect("create state dir");
+        // Profile-only shape (pre-C3 pilot payload, no last-known-good
+        // fields): the store must load it with the new fields defaulted.
+        std::fs::write(
+            store.path(),
+            br#"{"schema":1,"value":{"profile":"silence","updated_at_ms":123}}"#,
+        )
+        .expect("write profile-only fixture");
+        assert_eq!(fan_last_known_good_from(&store), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// P15: with an injected short cooldown the circuit must actually block
     /// attempts for the whole window — the production bug was "opening circuit
