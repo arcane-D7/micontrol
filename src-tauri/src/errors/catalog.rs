@@ -130,6 +130,13 @@ pub enum ErrorCode {
     ServiceConfigFailed,
     /// The SCM refused the operation: access denied, needs elevation.
     ServiceAccessDenied,
+    /// A PDH query could not be opened or closed (performance counters).
+    PdhQueryFailed,
+    /// A PDH counter sample could not be collected or formatted.
+    PdhSampleFailed,
+    /// A PDH counter object or counter is not present on this platform
+    /// (expected on machines without the provider; renders calm).
+    PdhCounterUnavailable,
 }
 
 impl ErrorCode {
@@ -172,6 +179,9 @@ impl ErrorCode {
             Self::ServiceControlFailed => "service_control_failed",
             Self::ServiceConfigFailed => "service_config_failed",
             Self::ServiceAccessDenied => "service_access_denied",
+            Self::PdhQueryFailed => "pdh_query_failed",
+            Self::PdhSampleFailed => "pdh_sample_failed",
+            Self::PdhCounterUnavailable => "pdh_counter_unavailable",
         }
     }
 
@@ -500,10 +510,7 @@ pub const CATALOG: &[ErrorSpec] = &[
         id: "service.query_failed",
         i18n_key: "errors.service.query_failed",
         severity: Severity::Warning,
-        retry: RetryPolicy::Backoff {
-            base_ms: 200,
-            max_ms: 5000,
-        },
+        retry: RetryPolicy::Backoff { base_ms: 200, max_ms: 5000 },
         user_action: UserAction::Retry,
     },
     ErrorSpec {
@@ -511,10 +518,7 @@ pub const CATALOG: &[ErrorSpec] = &[
         id: "service.control_failed",
         i18n_key: "errors.service.control_failed",
         severity: Severity::Error,
-        retry: RetryPolicy::Backoff {
-            base_ms: 1000,
-            max_ms: 15000,
-        },
+        retry: RetryPolicy::Backoff { base_ms: 1000, max_ms: 15000 },
         user_action: UserAction::Retry,
     },
     ErrorSpec {
@@ -532,6 +536,30 @@ pub const CATALOG: &[ErrorSpec] = &[
         severity: Severity::Error,
         retry: RetryPolicy::Never,
         user_action: UserAction::Elevate,
+    },
+    ErrorSpec {
+        code: ErrorCode::PdhQueryFailed,
+        id: "pdh.query_failed",
+        i18n_key: "errors.pdh.query_failed",
+        severity: Severity::Warning,
+        retry: RetryPolicy::Backoff { base_ms: 500, max_ms: 10000 },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::PdhSampleFailed,
+        id: "pdh.sample_failed",
+        i18n_key: "errors.pdh.sample_failed",
+        severity: Severity::Warning,
+        retry: RetryPolicy::Backoff { base_ms: 200, max_ms: 5000 },
+        user_action: UserAction::Retry,
+    },
+    ErrorSpec {
+        code: ErrorCode::PdhCounterUnavailable,
+        id: "pdh.counter_unavailable",
+        i18n_key: "errors.pdh.counter_unavailable",
+        severity: Severity::Info,
+        retry: RetryPolicy::Never,
+        user_action: UserAction::None,
     },
 ];
 

@@ -71,7 +71,7 @@ fn catalog_holds_one_entry_per_code() {
     // Pins the catalog size: adding a variant without a row (or a row
     // without a variant) breaks this count. The JS gate cross-checks the
     // same parity from the source text.
-    assert_eq!(CATALOG.len(), 28);
+    assert_eq!(CATALOG.len(), 31);
 }
 
 /// One sample per `HardwareError` variant. `HardwareError::code()` is an
