@@ -808,7 +808,19 @@ pub struct StoreRegistry;
 
 impl StoreRegistry {
     /// Production root for a store class (read from the environment).
+    ///
+    /// The user root can be redirected wholesale through the
+    /// `MICONTROL_STATE_ROOT` environment variable. Production never sets it;
+    /// tests and support tooling use it to keep state files away from the
+    /// real user profile without touching each store's declared spec.
     pub fn root(kind: StoreRoot) -> Result<PathBuf, StoreError> {
+        if kind == StoreRoot::User {
+            if let Some(root) = std::env::var_os("MICONTROL_STATE_ROOT") {
+                if !root.is_empty() {
+                    return Ok(PathBuf::from(root));
+                }
+            }
+        }
         let var = match kind {
             StoreRoot::User => "LOCALAPPDATA",
             StoreRoot::ProgramData => "PROGRAMDATA",
@@ -922,6 +934,17 @@ pub enum BrightnessOffsetOrigin {
     User,
 }
 
+impl BrightnessOffsetOrigin {
+    /// Wire code for the origin (`0` captured, `1` user). Mirrors the
+    /// display module's `OffsetOrigin` numbering.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Captured => 0,
+            Self::User => 1,
+        }
+    }
+}
+
 /// Manual-override state persisted for crash/relaunch survival.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BrightnessOverrideState {
@@ -1031,6 +1054,17 @@ pub fn migrate_legacy_brightness_override() -> Result<bool, StoreError> {
     migrate_legacy_brightness_override_in(&root, &legacy)
 }
 
+/// Retire the legacy `brightness_override.json` after the store save
+/// succeeded ("keep the old file until the next save"). Best-effort: a
+/// removal failure only logs, the next save retries.
+fn retire_legacy_brightness_override_at(legacy: &Path) {
+    if legacy.exists() {
+        if let Err(e) = fs::remove_file(legacy) {
+            log::warn!(target: "util::state_store", "could not remove legacy brightness_override.json: {e}");
+        }
+    }
+}
+
 /// Save the brightness override through the store and retire the legacy
 /// file on success ("keep the old file until the next save").
 pub fn save_brightness_override_in(
@@ -1039,18 +1073,92 @@ pub fn save_brightness_override_in(
 ) -> Result<(), StoreError> {
     let store = brightness_store_in(root);
     store.save(value)?;
-    let legacy = legacy_brightness_override_path_in(root);
+    retire_legacy_brightness_override_at(&legacy_brightness_override_path_in(root));
+    Ok(())
+}
+
+/// Production convenience wrapper for the brightness save. Honors the same
+/// environment overrides as the load side (`MICONTROL_STATE_ROOT` for the
+/// store root, `MICONTROL_BRIGHTNESS_OVERRIDE_PATH` for the legacy file) so
+/// tests exercise exactly the production code path.
+pub fn save_brightness_override(value: &BrightnessOverrideState) -> Result<(), StoreError> {
+    let root = StoreRegistry::root(StoreRoot::User)?;
+    let store = brightness_store_in(&root);
+    store.save(value)?;
+    retire_legacy_brightness_override_at(&legacy_brightness_override_path());
+    Ok(())
+}
+
+// Pilot 4 (C3a): smart brightness learning model. The payload type
+// (`hw::display::SmartModel`) is owned by the display module; the store only
+// fixes the location, schema version and ceiling. The legacy-file migration
+// is driven by the owning module because the payload semantics (Welford
+// decay pruning) live there too.
+
+/// Production smart-model store spec:
+/// `%LOCALAPPDATA%\MiControl\state\smart_model.json`, schema 1, user ACL.
+pub fn smart_model_spec() -> Result<StoreSpec, StoreError> {
+    StoreRegistry::spec(
+        StoreRoot::User,
+        "smart_model",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    )
+}
+
+/// Smart-model store spec under an explicit user root (tests, services).
+pub fn smart_model_spec_in(root: &Path) -> StoreSpec {
+    StoreRegistry::spec_in(
+        StoreRoot::User,
+        root,
+        "smart_model",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    )
+}
+
+/// Legacy file written by `hw::display` before the state store existed (the
+/// learned smart brightness model). Consumed once by the display module's
+/// migration; retired by the next successful store save.
+pub fn legacy_smart_model_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MICONTROL_SMART_MODEL_PATH") {
+        return PathBuf::from(path);
+    }
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("MiControl").join("smart_brightness.json")
+}
+
+/// Legacy smart-model file for a given LOCALAPPDATA root (tests pin the
+/// resolution; the production read goes through `legacy_smart_model_path`).
+#[cfg(test)]
+fn legacy_smart_model_path_in(root: &Path) -> PathBuf {
+    root.join("MiControl").join("smart_brightness.json")
+}
+
+/// Remove the legacy `smart_brightness.json` after the store has taken over.
+/// Best-effort: a failure only logs; the next successful save retries the
+/// retirement.
+pub fn retire_legacy_smart_model() {
+    let legacy = legacy_smart_model_path();
     if legacy.exists() {
-        if let Err(e) = fs::remove_file(&legacy) {
-            log::warn!(target: "util::state_store", "could not remove legacy brightness_override.json: {e}");
+        if let Err(e) = fs::remove_file(legacy) {
+            log::warn!(target: "util::state_store", "could not remove legacy smart_brightness.json: {e}");
         }
     }
-    Ok(())
 }
 
 // Pilot 2: preferred fan profile (new; no UI yet).
 
 /// Preferred fan profile persisted across sessions.
+///
+/// The Windows registry (`hw::fan`'s HKLM values) remains the source of truth
+/// for the LIVE fan preference. This store carries the last-known-good
+/// snapshot of the last successfully applied mode so the fan tab can recover
+/// it when the registry cannot be read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FanProfileState {
     /// Preferred profile name (for example `silence`, `balance`, `turbo`,
@@ -1058,6 +1166,13 @@ pub struct FanProfileState {
     pub profile: String,
     /// Wall-clock ms (since UNIX epoch) of the last change.
     pub updated_at_ms: u64,
+    /// Last-known-good fan mode as its registry code (`0` auto, `1` fixed,
+    /// `2` off); `None` while the snapshot carries no mode.
+    #[serde(default)]
+    pub last_mode_code: Option<u8>,
+    /// Last-known-good requested speed percent (20-100); `None` while unset.
+    #[serde(default)]
+    pub last_speed_percent: Option<u8>,
 }
 
 impl FanProfileState {
@@ -1065,6 +1180,8 @@ impl FanProfileState {
         Self {
             profile: profile.into(),
             updated_at_ms: now_ms(),
+            last_mode_code: None,
+            last_speed_percent: None,
         }
     }
 }
@@ -1574,6 +1691,85 @@ mod tests {
         let reloaded = store.load().expect("reload").expect("state");
         assert_eq!(reloaded.profile, "turbo");
         cleanup(&root);
+    }
+
+    /// C3 static gate (e): the migrated persistence functions in `hw::display`
+    /// and `hw::fan` delegate to the state store; they never write the state
+    /// files directly. Only production code is inspected (tests write fixtures
+    /// freely and the state-writes gate ignores `#[cfg(test)]` sections).
+    #[test]
+    fn display_and_fan_state_writes_go_through_the_store() {
+        for (file, source, fns) in [
+            (
+                "hw/display.rs",
+                include_str!("../hw/display.rs"),
+                &[
+                    "persist_override_state(",
+                    "restore_override_state(",
+                    "load_smart_model(",
+                    "persist_smart_model(",
+                    "reset_smart_model(",
+                ] as &[&str],
+            ),
+            (
+                "hw/fan.rs",
+                include_str!("../hw/fan.rs"),
+                &[
+                    "persist_fan_registry(",
+                    "persist_fan_last_known_good(",
+                    "persist_fan_last_known_good_in(",
+                    "fan_last_known_good(",
+                    "fan_last_known_good_from(",
+                ],
+            ),
+        ] {
+            // Production code only: everything from the tests module on is
+            // test code, which may write fixtures freely. Split on the
+            // `#[cfg(test)] mod tests` marker so inline `#[cfg(test)]`
+            // hygiene guards inside production functions stay in scope.
+            let production = source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .expect("source text");
+            for signature in fns {
+                // Top-level definitions only (private `fn` or `pub fn`); a
+                // bare call site inside another function never matches.
+                let start = ["\nfn ", "\npub fn "]
+                    .iter()
+                    .find_map(|prefix| production.find(&format!("{prefix}{signature}")))
+                    .unwrap_or_else(|| panic!("{file}: expected fn {signature} to exist"));
+                let body = &production[start..];
+                let end = body.find("\n}").unwrap_or(body.len());
+                let body = &body[..end];
+                assert!(
+                    !body.contains("fs::write(") && !body.contains("File::create("),
+                    "{file}: {signature} must persist through the state store, not write the state file directly"
+                );
+            }
+        }
+    }
+
+    /// The C3a smart-model pilot resolves through the registry like the
+    /// brightness/fan pilots (same root, same extension rules).
+    #[test]
+    fn smart_model_store_resolves_registry_paths() {
+        let user_root = PathBuf::from("C:/fake-user-root");
+        let spec = smart_model_spec_in(&user_root);
+        assert_eq!(spec.name, "smart_model");
+        assert_eq!(spec.schema, 1);
+        assert_eq!(spec.acl, AclPolicy::User);
+        assert_eq!(
+            spec.path,
+            user_root
+                .join("MiControl")
+                .join("state")
+                .join("smart_model.json")
+        );
+        // The legacy file the display module imports from.
+        assert_eq!(
+            legacy_smart_model_path_in(&user_root),
+            user_root.join("MiControl").join("smart_brightness.json")
+        );
     }
 
     #[cfg(windows)]
