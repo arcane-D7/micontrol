@@ -1,6 +1,6 @@
 {
   "generated": "2026-11-20",
-  "note": "baseline do gate D12 (ratchet): cada entrada e para remover; qualquer .output()/.status()/.wait() sem timeout novo fora desta lista falha o build",
+  "note": "baseline do gate D12 (ratchet): cada entrada e para remover; qualquer .output()/.status()/.wait() sem timeout novo fora desta lista falha o build. C2a: 9 entradas de elevated.rs removidas (sites migrados para process_spawn::run_capture com timeout obrigatorio).",
   "entries": [
     {
       "file": "src-tauri/src/commands/face.rs",
@@ -10,51 +10,6 @@
     {
       "file": "src-tauri/src/commands/face.rs",
       "line": 322,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 894,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 900,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 985,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 991,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 1219,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 1225,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 2078,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 2342,
-      "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
-    },
-    {
-      "file": "src-tauri/src/elevated.rs",
-      "line": 2503,
       "reason": "regenerated 2026-11-20 after C1a/U3 line shifts (gate own scan)"
     },
     {
