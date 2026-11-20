@@ -510,7 +510,10 @@ pub const CATALOG: &[ErrorSpec] = &[
         id: "service.query_failed",
         i18n_key: "errors.service.query_failed",
         severity: Severity::Warning,
-        retry: RetryPolicy::Backoff { base_ms: 200, max_ms: 5000 },
+        retry: RetryPolicy::Backoff {
+            base_ms: 200,
+            max_ms: 5000,
+        },
         user_action: UserAction::Retry,
     },
     ErrorSpec {
@@ -518,7 +521,10 @@ pub const CATALOG: &[ErrorSpec] = &[
         id: "service.control_failed",
         i18n_key: "errors.service.control_failed",
         severity: Severity::Error,
-        retry: RetryPolicy::Backoff { base_ms: 1000, max_ms: 15000 },
+        retry: RetryPolicy::Backoff {
+            base_ms: 1000,
+            max_ms: 15000,
+        },
         user_action: UserAction::Retry,
     },
     ErrorSpec {
@@ -542,7 +548,10 @@ pub const CATALOG: &[ErrorSpec] = &[
         id: "pdh.query_failed",
         i18n_key: "errors.pdh.query_failed",
         severity: Severity::Warning,
-        retry: RetryPolicy::Backoff { base_ms: 500, max_ms: 10000 },
+        retry: RetryPolicy::Backoff {
+            base_ms: 500,
+            max_ms: 10000,
+        },
         user_action: UserAction::Retry,
     },
     ErrorSpec {
@@ -550,7 +559,10 @@ pub const CATALOG: &[ErrorSpec] = &[
         id: "pdh.sample_failed",
         i18n_key: "errors.pdh.sample_failed",
         severity: Severity::Warning,
-        retry: RetryPolicy::Backoff { base_ms: 200, max_ms: 5000 },
+        retry: RetryPolicy::Backoff {
+            base_ms: 200,
+            max_ms: 5000,
+        },
         user_action: UserAction::Retry,
     },
     ErrorSpec {
