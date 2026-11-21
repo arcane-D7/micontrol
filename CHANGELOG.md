@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Clean-machine installs no longer abort on the DriverStore ACL.** The installer replaced `…\DriverStore\FileRepository\iotdriver.inf_*\IoTService.exe` with `ecram_service.exe` via `CopyFiles`, which never reports an error: on a machine where the package dir keeps the default ACL (SYSTEM-only write, no explicit user ACE) the copy failed silently, the old `${FileExists}` check passed on the OEM binary anyway, and `install-service` then ran the OEM Xiaomi `IoTService.exe` — which cannot start on its own (exit `0xC0000135`, `STATUS_DLL_NOT_FOUND`) — aborting the whole installation. The hook now verifies the copy byte-for-byte (`fc /b`), retries it as SYSTEM through a one-shot scheduled task when the ACL denies the write, and never runs `install-service` over the OEM binary. Any remaining failure is a warning, not an abort: the app installs, EC RAM degrades to "unavailable", and the elevated helper re-attempts the replacement on the first start.
+
+## [0.2.22] - 2026-11-14
+
+### Fixed
+
+- **The performance-mode switch no longer reports success when the EC refuses the profile.** Live measurement on this firmware: `Turbo` (2) latches in `QFAN`, but `LongBattery` (11) is refused and `QFAN` keeps its previous value while the old code returned `success: true` and the UI showed "not nameable (raw 0)". `set_performance_mode` now reads `QFAN` back after the write: an unlatched value returns `success: false` with the requested/actual pair, and `LongBattery` falls back to the **Smart** profile (10) — the adaptive battery curve this EC does accept — reported as `hq_wmi+smart_fallback`.
+
+## [0.2.21] - 2026-11-14
+
+### Highlights
+
+- **New identity.** Grayscale-only brand (hairline-friendly): new app/tray icons, in-app mark, brand sheet in `docs/brand/`.
+- **Hairline theme.** Full UI migration to the gray-scale + pastel token system (24 tabs), 96 SVG icons replace every emoji, accessible InfoHints on non-obvious controls, touchpad help accordion for Edge Slide.
+- **Overview is a real system summary.** Hardware (CPU/GPU/NPU via ComputeAccelerator/RAM/disk/display), live temperatures with source badges, full battery block (health, capacity, voltage, limit state), system state and shortcuts — one 1 ms snapshot (`get_overview_snapshot`).
+- **Startup manager.** Every Windows startup entry (HKCU/HKLM Run, Startup folders, scheduled logon tasks) with real enable/disable via `StartupApproved`; machine-level toggles through the signed elevated bridge. MiControl's own switch moved to Settings.
+- **Color management, fixed for Windows 11.** `SetICMProfileW`/`GetICMProfileW` are no longer exported by mscms on current builds — profile loading now uses `AssociateColorProfileWithDeviceW` + `WcsGetDefaultColorProfile`. Panel detected by EDID, curated ICC catalog with size/`acsp`/SHA-256 validation, install via the elevated bridge; the Xiaomi D65P3 profile loads for real.
+- **Charging protection actually works.** The limit is applied with the firmware's own channel (`WMAA FUN2=0x1000`, level codes) and a supervisor holds the 78–80% band, re-applying on resume and AC-plug (the EC drops the setting across power transitions). Above the band the UI says so honestly; this firmware has no discharge channel.
+- **Performance modes tell the truth.** The active EC mode is read from the EC (`QFAN`, SmartAdaptive = raw 9) instead of echoing the registry; mode writes are verified before/after and fall back to the SSDB channel that latches.
+- **Fan with the lid closed is explained.** A lid listener (Windows power broadcast) logs `[lid] CLOSED/OPEN` with a thermal snapshot; the fan follows the EC's clamshell table by design and the UI now says so.
+- **Edge Slide usable.** Cursor is pinned during the gesture (`ClipCursor`), pre-roll 8 mm, band 16%/28% adjustable via `HKCU\Software\MiControl\Touchpad`, one haptic tick per step.
+- **Stability.** Blocking `recv_timeout` inside async removed (no more runtime starvation), watchdog waits for port 4000 before relaunching, battery WMI circuit breaker, log noise cut by ~95 % on the noisiest paths, installer shell deploy v2 with a per-step log and a network-free bootstrap self-heal.
+- **Signing.** The setup shell is Authenticode-signed (self-signed certificate; SmartScreen will still warn until a CA certificate is installed — the pipeline is ready for one) and the updater payload is minisign-signed.
+
+### Fixed
+
+- **Fan Control showed "0 RPM" and a 50 % gauge at the same time (audit P2-1).** `get_fan_info` reported `speed_rpm = 0` (no tachometer: `Win32_Fan.DesiredSpeed` is empty and every EC RAM read is denied, even as SYSTEM) while `speed_percent` fell back to the stored `FixedSpeed = 50`, so the card contradicted itself and the Performance tab said "no WMI sensor" about the same fan. RPM and percentage are now `Option`/`null`: absent means _unavailable_, never zero, and the gauge is only drawn when a real RPM reading exists. The requested percentage travels separately (`requested_speed_percent`) and drives the slider, not the gauge.
+- **`set_fan_mode` no longer claims fan control it does not have (audit P2-2).** It returned `Ok(())` unconditionally — including when IGCL enumerated no fans and the EC refused the write — and the UI toasted "Fan mode set". It now returns `FanModeResult { applied, method, rpm_control, warning }`: `Fixed Speed` reports that on this platform it applies an EC fan-profile band (`Quiet`/`Balanced`/`Performance`) instead of pinning RPM, and `Off` reports that it maps to `SuperQuiet` and the fan keeps running. The hardware writes are unchanged.
+- **The ACPI ambient zone could be shown as the CPU temperature (audit P2-8).** `TZ00` reads ~27.9 °C while the ESIF CPU hotspot reads ~57 °C; `get_elevated_thermal_readings` and `get_fan_info` both took the first ACPI zone and called it the CPU. Zones now carry a role (`TZ00` = ambient) and the CPU fallback skips them, so a failed ESIF read reports `cpu_temp_celsius: null` / `temp_source: unavailable` instead of the room temperature. `TZ00` is surfaced only as `ambient_temp_celsius`, and the GPU no longer inherits it either.
+- **Audio effects always showed as "off" (audit P1).** `set_mic_noise_canceling`, `set_speaker_noise_canceling` and `set_voice_focus` were dispatched through the elevated bridge, so their `HKEY_CURRENT_USER` writes landed in the SYSTEM profile hive (`HKU\S-1-5-18`) while `get_audio_effects` read the signed-in user's hive. The setters now run in-process; the values older builds stranded are migrated once into `HKCU` (an explicit user value always wins, so turning a toggle off can never be resurrected). The invented `HKCU\...\CurrentVersion\AudioControls\NoiseSuppression` write is gone.
+- **Audio-effects toggles no longer claim to change audio.** They are labelled as saved preferences (`applies_to_audio: false`) and the card copy was rewritten in all four locales. `PKEY_AudioEndpoint_Disable_SysFx` disables _every_ DSP on the endpoint (beamforming, AGC, Realtek/Dolby sAPO), and there is no public per-effect Win32 control, so no fake system write is performed.
+- **Voice Clarity detection was always false** — it checked `HKLM\...\AudioControls`, a key that does not exist. It now probes the OS build (≥ 22621) plus the presence of a `ComputeAccelerator` device instance and reports a reason (`detected` / `no-npu` / `os-unsupported` / `unknown-os`).
+- **"Set as Default" was unreachable** — `useHardware` defined `setDefaultAudioDevice` but never returned it (the name only appeared in the memo dependency list), and `audio.tsx` never passed `onSetDefaultDevice`, so every playback row rendered disabled. The hook now exposes it, the card wires it, the device list re-enumerates after the switch (the ✓ follows the device Windows actually selected), and failures surface as a retryable toast.
+- **The mic OSD lied on consumer mute keys.** Usage `0x00E2` is _output_ mute and no longer produces a microphone OSD; `0x00CF`/`0x0169` read the capture endpoint's real mute state, flip it, and display the state the endpoint reports back. The WMI Fn+F4 path also displays the read-back state instead of trusting the driver's reported value, and the OSD no longer keeps its own toggle boolean.
+
 ## [0.2.20] - 2026-10-25
 
 ### Fixed

@@ -38,12 +38,12 @@ Fan: ${fan?.mode ?? '?'} — ${fan?.speed_rpm ?? '?'}rpm  |  GPU temp: ${fan?.gp
 Display: brightness ${disp?.brightness ?? '?'}%  |  refresh ${disp?.refresh_rate_hz ?? '?'}Hz  |  HDR: ${disp?.hdr_enabled ?? false}
 
 == HARDWARE CAPABILITIES ==
-VHF performance control: ${cap?.has_vhf_performance ? '✓' : '✗ (registry fallback)'}
-IoT charging service: ${cap?.has_iot_charging ? '✓' : '✗ (registry fallback)'}
-Intel IGCL display: ${cap?.has_igcl ? '✓' : '✗'}
-Touchpad HID channel: ${cap?.has_touchpad_hid ? '✓' : '✗'}
-Touchscreen: ${cap?.has_touchscreen ? '✓' : '✗'}
-Stylus: ${cap?.has_stylus ? '✓' : '✗'}
+VHF performance control: ${cap?.has_vhf_performance ? 'yes' : 'no (registry fallback)'}
+IoT charging service: ${cap?.has_iot_charging ? 'yes' : 'no (registry fallback)'}
+Intel IGCL display: ${cap?.has_igcl ? 'yes' : 'no'}
+Touchpad HID channel: ${cap?.has_touchpad_hid ? 'yes' : 'no'}
+Touchscreen: ${cap?.has_touchscreen ? 'yes' : 'no'}
+Stylus: ${cap?.has_stylus ? 'yes' : 'no'}
 
 == REQUESTED ANALYSIS ==
 1. Battery health assessment — is the health/cycle count concerning? Recommend optimal charging threshold (values: 60, 70, 80, 100).

@@ -976,6 +976,60 @@ Function un.SkipIfPassive
   ${IfThen} $PassiveMode = 1  ${|} Abort ${|}
 FunctionEnd
 
+; ── Installer shutdown marker ────────────────────────────────────────────────
+; The app records a clean shutdown from its Tauri RunEvent::Exit handler. A
+; forcible kill (nsis_tauri_utils::KillProcess / taskkill) can never run that
+; handler, so the session marker stays at `state=running` and the next start
+; logged a phantom 'previous session ended without shutdown marker — possible
+; crash/kill' after every update/uninstall (audit 2026-11-08).
+;
+; Announce the intentional kill BEFORE terminating the process:
+;   • <user log dir>\session.marker  — read directly by the app
+;     (%LOCALAPPDATA%\MiControl\logs). Correct for a user-run installer, where
+;     UAC elevation keeps the user's profile.
+;   • %ProgramData%\MiControl\installer-shutdown.marker — machine-wide copy,
+;     needed when the SYSTEM bridge launches the installer (there
+;     %LOCALAPPDATA% is the system profile, not the user's log dir). The app
+;     only honours it when it is newer than the session marker and deletes it.
+;
+; Keep the two state strings/quotes in sync with
+; src-tauri/src/util/session_marker.rs (state=installer-shutdown).
+;
+; NOTE: NSIS has no $PROGRAMDATA / $COMMONAPPDATA constant (3.11 still warns
+; "unknown variable"); it must be read from the environment at runtime.
+Function WriteInstallerShutdownMarker
+  Push $9
+  Push $8
+  Push $7
+
+  ; 1) The user's log dir — read directly by the app at startup.
+  CreateDirectory "$LOCALAPPDATA\MiControl\logs"
+  ClearErrors
+  FileOpen $7 "$LOCALAPPDATA\MiControl\logs\session.marker" w
+  ${IfNot} ${Errors}
+    FileWrite $7 "state=installer-shutdown$\r$\n"
+    FileClose $7
+  ${EndIf}
+
+  ; 2) Machine-wide copy — the bridge launches this installer as SYSTEM, where
+  ;    $LOCALAPPDATA is the system profile, not the user's log dir.
+  ReadEnvStr $8 "ProgramData"
+  ${If} $8 == ""
+    StrCpy $8 "$WINDIR\..\ProgramData"
+  ${EndIf}
+  CreateDirectory "$8\MiControl"
+  ClearErrors
+  FileOpen $7 "$8\MiControl\installer-shutdown.marker" w
+  ${IfNot} ${Errors}
+    FileWrite $7 "state=installer-shutdown$\r$\n"
+    FileClose $7
+  ${EndIf}
+
+  Pop $7
+  Pop $8
+  Pop $9
+FunctionEnd
+
 ; ── Force-kill helper ─────────────────────────────────────────────────────────
 ; Kills ${MAINBINARYNAME}.exe with a retry loop (up to 5 attempts, 500ms apart).
 ; This ensures the exe file is not locked when the installer tries to overwrite it.
@@ -999,7 +1053,10 @@ Function KillAppProcess
       Call KillBridgeProcess
       Return  ; process not found — safe to proceed
     ${EndIf}
-    ; Process found — kill it
+    ; Process found — announce the intentional kill, then kill it.
+    ; Without the announcement the app's session marker stays at
+    ; `state=running` and the next start reports a phantom crash/kill.
+    Call WriteInstallerShutdownMarker
     !if "${INSTALLMODE}" == "currentUser"
       nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
     !else
@@ -1263,6 +1320,39 @@ Function MigrateOldCurrentUserInstall
   migration_done:
 FunctionEnd
 
+Function un.WriteInstallerShutdownMarker
+  Push $9
+  Push $8
+  Push $7
+
+  ; 1) The user's log dir — read directly by the app at startup.
+  CreateDirectory "$LOCALAPPDATA\MiControl\logs"
+  ClearErrors
+  FileOpen $7 "$LOCALAPPDATA\MiControl\logs\session.marker" w
+  ${IfNot} ${Errors}
+    FileWrite $7 "state=installer-shutdown$\r$\n"
+    FileClose $7
+  ${EndIf}
+
+  ; 2) Machine-wide copy — the bridge launches this installer as SYSTEM, where
+  ;    $LOCALAPPDATA is the system profile, not the user's log dir.
+  ReadEnvStr $8 "ProgramData"
+  ${If} $8 == ""
+    StrCpy $8 "$WINDIR\..\ProgramData"
+  ${EndIf}
+  CreateDirectory "$8\MiControl"
+  ClearErrors
+  FileOpen $7 "$8\MiControl\installer-shutdown.marker" w
+  ${IfNot} ${Errors}
+    FileWrite $7 "state=installer-shutdown$\r$\n"
+    FileClose $7
+  ${EndIf}
+
+  Pop $7
+  Pop $8
+  Pop $9
+FunctionEnd
+
 Function un.KillAppProcess
   StrCpy $0 0  ; retry counter
   un_kill_loop:
@@ -1277,7 +1367,9 @@ Function un.KillAppProcess
       Call un.KillBridgeProcess
       Return  ; process not found — safe to proceed
     ${EndIf}
-    ; Process found — kill it
+    ; Process found — announce the intentional kill, then kill it (same marker
+    ; as the install path, so an uninstall does not look like a crash either).
+    Call un.WriteInstallerShutdownMarker
     !if "${INSTALLMODE}" == "currentUser"
       nsis_tauri_utils::KillProcessCurrentUser "${MAINBINARYNAME}.exe"
     !else

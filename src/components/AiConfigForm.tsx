@@ -3,6 +3,9 @@ import { t } from '../hooks/useI18n';
 import type { StringKey } from '../hooks/useI18n';
 import type { AppSettings } from '../types/settings';
 import { DEFAULT_SETTINGS } from '../hooks/useSettings';
+import { Button } from './ui';
+import { IconButton } from './ui/icon-button';
+import { Icon } from './ui/icons';
 
 interface AiConfigFormProps {
   settings: AppSettings;
@@ -45,6 +48,22 @@ function FieldRow({
       )}
     </div>
   );
+}
+
+/**
+ * True only for OpenAI's own endpoints. Substring matching
+ * (`url.includes('openai.com')`) is unsafe: `https://openai.com.evil.tld`
+ * contains the substring but is an attacker host. Parse the URL and compare
+ * the HOSTNAME exactly (or a subdomain of it); an unparsable value is not
+ * OpenAI and therefore keeps the privacy warning visible.
+ */
+function isOpenAiEndpoint(raw: string): boolean {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === 'openai.com' || host.endsWith('.openai.com');
+  } catch {
+    return false;
+  }
 }
 
 export default function AiConfigForm({ settings, onUpdate, onTestConnection }: AiConfigFormProps) {
@@ -107,7 +126,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
 
   return (
     <div className="card">
-      <div className="card-title">{t('settings.aiTitle')}</div>
+      <h2 className="card-title">{t('settings.aiTitle')}</h2>
       <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 20 }}>
         {t('settings.aiSubtitle')}
       </p>
@@ -130,14 +149,11 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             autoComplete="off"
             style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
           />
-          <button
+          <IconButton
+            icon={showKey ? 'eye-off' : 'eye'}
+            label={showKey ? t('settings.hideKey') : t('settings.showKey')}
             onClick={() => setShowKey((v) => !v)}
-            className="btn-ghost btn-sm"
-            title={showKey ? t('settings.hideKey') : t('settings.showKey')}
-            aria-label={showKey ? t('settings.hideKey') : t('settings.showKey')}
-          >
-            {showKey ? '🙈' : '👁'}
-          </button>
+          />
         </div>
         {draft.openai_api_key && (
           <div
@@ -150,7 +166,9 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
               gap: 4,
             }}
           >
-            <span>✓</span>
+            <span>
+              <Icon name="check" size={16} />
+            </span>
             <span>{t('settings.keyIsSet')}</span>
           </div>
         )}
@@ -173,7 +191,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
       </FieldRow>
 
       {/* Custom endpoint privacy warning */}
-      {!draft.openai_base_url.includes('openai.com') && draft.openai_base_url && (
+      {draft.openai_base_url && !isOpenAiEndpoint(draft.openai_base_url) && (
         <div className="warning-banner" role="alert">
           <p>{t('settings.customEndpointWarning')}</p>
         </div>
@@ -194,13 +212,15 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
           }}
         >
           {PRESET_MODELS.map((m) => (
-            <button
+            <Button
               key={m.value}
+              size="sm"
+              variant={selectedPreset === m.value ? 'secondary' : 'ghost'}
+              aria-pressed={selectedPreset === m.value}
               onClick={() => handlePresetChange(m.value)}
-              className={`chip-btn ${selectedPreset === m.value ? 'active' : ''}`}
             >
               {t(m.labelKey)}
-            </button>
+            </Button>
           ))}
         </div>
         {selectedPreset === 'custom' && (
@@ -210,26 +230,26 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             type="text"
             value={customModel}
             onChange={(e) => handleCustomModelChange(e.target.value)}
-            placeholder="e.g. llama3, mistral, gpt-4-vision-preview"
+            placeholder={t('aiConfig.modelPlaceholder')}
           />
         )}
       </FieldRow>
 
       {/* Actions */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button className="btn-primary" disabled={!dirty} onClick={handleSave}>
+        <Button variant="primary" disabled={!dirty} onClick={handleSave}>
           {t('settings.save')}
-        </button>
-        <button
-          className="btn-ghost"
+        </Button>
+        <Button
+          variant="ghost"
           disabled={!draft.openai_api_key.trim() || testStatus === 'testing'}
           onClick={() => void handleTest()}
         >
           {testStatus === 'testing' ? t('settings.testing') : t('settings.testConnection')}
-        </button>
-        <button className="btn-ghost btn-sm" onClick={handleReset}>
+        </Button>
+        <Button variant="ghost" size="sm" onClick={handleReset}>
           {t('settings.reset')}
-        </button>
+        </Button>
       </div>
 
       {/* Test result */}
@@ -249,7 +269,7 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             border: `1px solid ${testStatus === 'ok' ? 'rgba(74,222,128,0.3)' : 'rgba(248,113,113,0.3)'}`,
           }}
         >
-          {testStatus === 'ok' ? '✓ ' : '✗ '}
+          {testStatus === 'ok' ? <Icon name="check" size={16} /> : <Icon name="x" size={16} />}{' '}
           {testMsg}
         </div>
       )}
@@ -259,12 +279,12 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
         className="text-xs"
         style={{ color: 'var(--color-text-muted)', marginTop: 16, marginBottom: 0 }}
       >
-        🔒 {t('settings.storageNote')}
+        <Icon name="lock" size={14} /> {t('settings.storageNote')}
       </p>
 
       {/* Documentation link */}
       <p className="text-xs" style={{ marginTop: 8, marginBottom: 0 }}>
-        📖{' '}
+        <Icon name="book-open" size={16} />{' '}
         <a
           href="https://github.com/Freitas-MA/miPC/blob/master/micontrol/docs/ai-features.md"
           target="_blank"

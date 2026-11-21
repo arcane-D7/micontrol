@@ -8,6 +8,8 @@ import {
 } from '../lib/brightnessPresets';
 import { useToast } from '../contexts/ToastContext';
 import ToggleRow from './ToggleRow';
+import { Icon } from './ui/icons';
+import { InfoHint } from './ui/info-hint';
 interface Props {
   display: DisplayInfo | null;
   capabilities?: HardwareCapabilities;
@@ -57,15 +59,34 @@ export default function DisplaySettings({
   if (!display) {
     return (
       <div className="card">
-        <div className="card-title">{t('display.title')}</div>
+        <h2 className="card-title">{t('display.title')}</h2>
         <div className="skeleton" style={{ height: 80 }} />
       </div>
     );
   }
 
+  // HDR is a per-display property in Windows: the toggle is only honest when the
+  // backend positively reports at least one advanced-color display (it refuses
+  // the write otherwise). An empty path list means the topology could not be
+  // read, which is *not* the same as "no display supports HDR".
+  const hdrPaths = display.hdr_displays ?? [];
+  const hdrSupported = display.hdr_supported === true;
+  const hdrKnown = hdrPaths.length > 0;
+  const hdrDesc = !hdrSupported
+    ? hdrKnown
+      ? t('display.hdrNotSupported')
+      : t('display.hdrUnknown')
+    : display.hdr_enabled
+      ? t('display.hdrEnabled')
+      : t('display.hdrDisabled');
+  const hdrSummary = hdrPaths
+    .filter((d) => d.supported)
+    .map((d) => d.label || d.device)
+    .join(' · ');
+
   return (
     <div className="card">
-      <div className="card-title">{t('display.title')}</div>
+      <h2 className="card-title">{t('display.title')}</h2>
       <div className="slider-row" style={{ marginBottom: 20 }}>
         <span className="slider-label">{t('display.brightness')}</span>
         <input
@@ -91,23 +112,51 @@ export default function DisplaySettings({
         />
         <span className="slider-value">{brightness}%</span>
       </div>
+      {display.brightness_source === 'wmi-fallback' && capabilities?.has_igcl === true && (
+        <div
+          style={{
+            fontSize: 12,
+            color: 'var(--color-text-muted)',
+            marginTop: -12,
+            marginBottom: 16,
+          }}
+        >
+          {t('display.brightnessSourceWmi')}
+        </div>
+      )}
       <ToggleRow
         label={t('display.hdr')}
-        desc={
-          capabilities != null && !capabilities.has_igcl
-            ? t('display.igclNotAvailable')
-            : display.hdr_enabled
-              ? t('display.hdrEnabled')
-              : t('display.hdrDisabled')
-        }
+        desc={hdrDesc}
+        hint={hdrSupported ? t('hint.displayHdr') : undefined}
+        hintLabel={t('hint.about', { name: t('display.hdr') })}
         checked={display.hdr_enabled}
+        disabled={!hdrSupported}
         onChange={(v) => void handleAsync('HDR', () => onHdrChange(v))}
       />
+      {hdrSupported && hdrPaths.length > 1 && (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--color-text-dim)',
+            marginTop: -8,
+            marginBottom: 12,
+            lineHeight: 1.4,
+          }}
+        >
+          {t('display.hdrPerDisplay', { list: hdrSummary })}
+        </div>
+      )}
       <ToggleRow
         label={t('display.aiAdaptiveBrightness')}
         desc={
           capabilities != null && !capabilities.has_igcl ? t('display.igclNotAvailable') : undefined
         }
+        hint={
+          capabilities == null || capabilities.has_igcl
+            ? t('hint.displayAdaptiveBrightness')
+            : undefined
+        }
+        hintLabel={t('hint.about', { name: t('display.aiAdaptiveBrightness') })}
         checked={display.ai_brightness}
         onChange={(v) => void handleAsync('Adaptive brightness', () => onAiBrightnessChange(v))}
       />
@@ -118,7 +167,12 @@ export default function DisplaySettings({
             style={{ fontSize: 12, color: 'var(--color-text-dim)' }}
             onClick={() => setSensitivityOpen((o) => !o)}
           >
-            {sensitivityOpen ? '▲' : '▼'} {t('display.sensitivityConfigure')}
+            {sensitivityOpen ? (
+              <Icon name="chevron-up" size={12} />
+            ) : (
+              <Icon name="chevron-down" size={12} />
+            )}{' '}
+            {t('display.sensitivityConfigure')}
           </button>
 
           {sensitivityOpen && (
@@ -143,7 +197,7 @@ export default function DisplaySettings({
                 }}
               >
                 <span style={{ fontSize: 12, color: 'var(--color-text-dim)' }}>
-                  ☀ {t('display.luxSensor')}
+                  <Icon name="sun" size={16} /> {t('display.luxSensor')}
                 </span>
                 <span style={{ fontSize: 12, fontWeight: 600 }}>
                   {display.ambient_lux != null
@@ -162,13 +216,13 @@ export default function DisplaySettings({
                     className={`chip-btn${editCfg.mode === 'curve' ? ' active' : ''}`}
                     onClick={() => setLocalCfg({ ...editCfg, mode: 'curve' })}
                   >
-                    📈 {t('display.modeCurve')}
+                    <Icon name="chart-line" size={16} /> {t('display.modeCurve')}
                   </button>
                   <button
                     className={`chip-btn${editCfg.mode === 'smart' ? ' active' : ''}`}
                     onClick={() => setLocalCfg({ ...editCfg, mode: 'smart' })}
                   >
-                    🧠 {t('display.modeSmart')}
+                    <Icon name="brain" size={16} /> {t('display.modeSmart')}
                   </button>
                 </div>
                 <div
@@ -198,10 +252,10 @@ export default function DisplaySettings({
                       <button
                         key={p.key}
                         className={`chip-btn${isActive ? ' active' : ''}`}
-                        title={p.hint}
+                        title={t(p.hintKey)}
                         onClick={() => setLocalCfg({ ...editCfg, ...p.config, mode: editCfg.mode })}
                       >
-                        {p.icon} {p.label}
+                        <Icon name={p.icon} size={16} /> {t(p.labelKey)}
                       </button>
                     );
                   })}
@@ -210,7 +264,7 @@ export default function DisplaySettings({
                       className="chip-btn active"
                       style={{ pointerEvents: 'none', opacity: 0.7 }}
                     >
-                      ✏️ {t('display.presetCustom')}
+                      <Icon name="pencil" size={16} /> {t('display.presetCustom')}
                     </span>
                   )}
                 </div>
@@ -327,7 +381,7 @@ export default function DisplaySettings({
                 }}
               >
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  ℹ {t('display.sensitivityHowItWorks')}
+                  <Icon name="info" size={16} /> {t('display.sensitivityHowItWorks')}
                 </div>
                 <div style={{ marginBottom: 2 }}>· {t('display.sensitivityHelpMin')}</div>
                 <div style={{ marginBottom: 2 }}>
@@ -362,7 +416,7 @@ export default function DisplaySettings({
                     void onAiBrightnessConfigChange(newCfg).then(() => setLocalCfg(null));
                   }}
                 >
-                  ↺ {t('display.resetDefault')}
+                  <Icon name="rotate-ccw" size={16} /> {t('display.resetDefault')}
                 </button>
               </div>
             </div>
@@ -372,7 +426,14 @@ export default function DisplaySettings({
       {/* Refresh rate selector */}
       {display.available_refresh_rates && display.available_refresh_rates.length > 1 ? (
         <div className="stat-row" style={{ marginTop: 8, alignItems: 'center' }}>
-          <span className="stat-label">{t('display.refreshRate')}</span>
+          <span className="stat-label mc-label-with-hint">
+            <span>{t('display.refreshRate')}</span>
+            <InfoHint
+              label={t('hint.displayRefreshRate')}
+              buttonLabel={t('hint.about', { name: t('display.refreshRate') })}
+              side="bottom"
+            />
+          </span>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             {display.available_refresh_rates.map((hz) => {
               const isActive = hz === display.refresh_rate_hz;
@@ -395,7 +456,8 @@ export default function DisplaySettings({
                   }}
                   style={{ minWidth: 52 }}
                 >
-                  {hz} Hz{isMax && display.dynamic_refresh_rate_capable && ' ★'}
+                  {hz} Hz
+                  {isMax && display.dynamic_refresh_rate_capable && <Icon name="star" size={12} />}
                 </button>
               );
             })}
@@ -413,8 +475,7 @@ export default function DisplaySettings({
         <div
           style={{ fontSize: 11, color: 'var(--color-text-dim)', marginTop: 4, lineHeight: 1.4 }}
         >
-          ★ Dynamic Refresh Rate active — Windows 11 automatically switches to lower Hz to save
-          power when high frame rate isn’t needed.
+          <Icon name="star" size={14} /> {t('display.drrActive')}
         </div>
       )}
       {/* Intel PSR2 DRRS toggle */}
@@ -422,11 +483,11 @@ export default function DisplaySettings({
         <ToggleRow
           label="Intel Adaptive Refresh Rate (PSR2 DRRS)"
           desc={
-            display.adaptive_refresh_rate
-              ? `Active — the Intel driver is switching the panel between ~48 Hz at idle and ${Math.max(...(display.available_refresh_rates ?? [120]))} Hz when content is moving. ` +
-                'Windows always reports the configured Hz (e.g. 120 Hz) — this is expected: PSR2 operates below the OS level.'
-              : `Disabled — panel locked at ${display.refresh_rate_hz} Hz. ` +
-                'Note: This is separate from Windows Dynamic Refresh Rate (DRR). PSR2 DRRS switches at the panel hardware level, invisible to Windows.'
+            display.adaptive_refresh_rate_pending_reboot
+              ? t('display.psr2Pending', { hz: display.refresh_rate_hz })
+              : display.adaptive_refresh_rate
+                ? t('display.psr2Enabled', { hz: display.refresh_rate_hz })
+                : t('display.psr2Disabled', { hz: display.refresh_rate_hz })
           }
           checked={display.adaptive_refresh_rate}
           onChange={(v) => {
@@ -434,13 +495,14 @@ export default function DisplaySettings({
               try {
                 await onAdaptiveRefreshRateChange(v);
                 addToast({
-                  message: v
-                    ? 'PSR2 DRRS enabled. Reboot required. Note: Windows will still report the configured Hz — PSR2 operates below the OS.'
-                    : 'PSR2 DRRS disabled. Reboot required.',
+                  message: v ? t('display.psr2ToastOn') : t('display.psr2ToastOff'),
                   type: 'info',
                 });
               } catch (e) {
-                addToast({ message: `Adaptive refresh rate: ${String(e)}`, type: 'error' });
+                addToast({
+                  message: t('display.psr2ToastError', { error: String(e) }),
+                  type: 'error',
+                });
               }
             })();
           }}
@@ -456,10 +518,8 @@ export default function DisplaySettings({
             paddingLeft: 2,
           }}
         >
-          💡 PSR2 DRRS ≠ Windows &ldquo;Dynamic Refresh Rate&rdquo;. Windows DRR requires a
-          VRR-capable display. PSR2 DRRS is an Intel driver feature that switches the panel refresh
-          rate internally — Windows always reports the max configured Hz (currently{' '}
-          {display.refresh_rate_hz} Hz), even when PSR2 is active.
+          <Icon name="lightbulb" size={16} />{' '}
+          {t('display.psr2Note', { hz: display.refresh_rate_hz })}
         </div>
       )}{' '}
     </div>
@@ -500,7 +560,10 @@ function SmartModelInfo() {
       setStats({ total: 0, buckets: 0 });
       addToast({ message: t('display.smartResetDone'), type: 'success' });
     } catch (e) {
-      addToast({ message: `Reset smart model: ${String(e)}`, type: 'error' });
+      addToast({
+        message: t('display.presetResetError', { error: String(e) }),
+        type: 'error',
+      });
     } finally {
       setResetting(false);
     }
@@ -518,7 +581,9 @@ function SmartModelInfo() {
         lineHeight: 1.5,
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>🧠 {t('display.smartModelTitle')}</div>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>
+        <Icon name="brain" size={16} /> {t('display.smartModelTitle')}
+      </div>
       <div>
         {t('display.smartSamples', {
           count: stats?.total ?? 0,
@@ -531,7 +596,13 @@ function SmartModelInfo() {
         onClick={handleReset}
         disabled={resetting}
       >
-        {resetting ? '…' : `🗑 ${t('display.smartReset')}`}
+        {resetting ? (
+          '…'
+        ) : (
+          <>
+            <Icon name="trash" size={16} /> {t('display.smartReset')}
+          </>
+        )}
       </button>
     </div>
   );

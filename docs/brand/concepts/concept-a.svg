@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Conceito A — Detente">
+  <!-- A · DETENTE — calha 176×30 + batente pendurado com folga hairline de 12 -->
+  <rect x="40" y="58" width="176" height="30" rx="4" fill="#111"/>
+  <path d="M105 100h46v96l-12 12h-22l-12-12z" fill="#111"/>
+</svg>

@@ -13,10 +13,16 @@ use crate::hw::display::{
     get_display_info as hw_get_display, set_hdr as hw_set_hdr, AiBrightnessConfig, DisplayInfo,
 };
 use crate::hw::errors::{ErrorResponse, HardwareError};
-use crate::hw::fan::{get_fan_info as hw_get_fan, FanInfo, FanMode};
+use crate::hw::fan::{get_fan_info as hw_get_fan, FanInfo, FanMode, FanModeResult};
+use crate::hw::overview::{get_overview_snapshot as hw_get_overview, OverviewSnapshot};
 use crate::hw::performance::get_performance_mode as hw_get_perf;
 use crate::hw::processes::{get_process_list as hw_get_processes, ProcessInfo};
 use crate::hw::startup::{get_autostart as hw_get_autostart, set_autostart as hw_set_autostart};
+use crate::hw::startup_manager::{
+    apply_local_toggle as hw_apply_startup_toggle, elevated_args as startup_toggle_args,
+    get_startup_items as hw_get_startup_items, invalidate_cache as invalidate_startup_cache,
+    plan_toggle as hw_plan_startup_toggle, StartupSnapshot, TogglePlan,
+};
 use crate::hw::system_info::{get_system_info as hw_get_sysinfo, SystemInfo};
 use crate::hw::taskmgr::{
     get_network_interfaces as hw_get_network, get_task_manager as hw_get_task_manager,
@@ -49,22 +55,32 @@ pub async fn get_battery_info() -> Result<BatteryInfo, ErrorResponse> {
     // local read inside get_battery_info came back None but the machine is
     // plugged in, re-probe via the elevated bridge so the UI gets a real
     // wattage instead of hiding the charging field.
+    //
+    // P2 (corrected): this goes through `hw::adapter_power`, which now uses a
+    // *time-bounded* gate instead of a permanent latch. `0x80041002` is a
+    // degraded-provider hiccup on this machine (18 451 successful reads on
+    // 2026-11-02…06), so a failure pauses the probe for 60 s and then retries —
+    // it never hides the wattage for the rest of the session.
     let mut result = result;
     if let Ok(info) = &mut result {
-        if info.is_plugged && info.ac_input_power_mw.is_none() {
-            match elev_bridge::run_elevated_no_prompt(
-                "wmi_ec_read_adapter_power",
-                serde_json::json!({}),
-            )
-            .await
-            {
-                Ok(v) => {
-                    if let Some(watts) = v.as_u64() {
-                        info.ac_input_power_mw = Some((watts.min(i32::MAX as u64)) as i32 * 1000);
+        if info.is_plugged
+            && info.ac_input_power_mw.is_none()
+            && !crate::hw::adapter_power::probe_deferred()
+        {
+            match crate::hw::adapter_power::read_via_bridge_no_prompt().await {
+                Ok(reading) => {
+                    if let Some(watts) = reading.watts {
+                        info.ac_input_power_mw = Some((watts.min(i32::MAX as u32) as i32) * 1000);
                         log::debug!(
                             target: "cmd::system",
                             "get_battery_info: elevated adapter-power fallback -> {} W",
                             watts
+                        );
+                    } else {
+                        log::debug!(
+                            target: "cmd::system",
+                            "get_battery_info: adapter power unavailable this poll ({})",
+                            reading.reason.as_deref().unwrap_or("unknown")
                         );
                     }
                 }
@@ -197,6 +213,12 @@ pub async fn get_fan_info() -> Result<FanInfo, ErrorResponse> {
     // temperatures come back empty AND the elevated bridge is available,
     // re-run with readings fetched from the bridge service (SYSTEM process,
     // which CAN read those WMI classes).
+    //
+    // The EC's active performance mode has the same restriction
+    // (`MICommonInterface` → "Access denied" for user-mode CIM), so it is read
+    // through the elevated bridge as well. It is the *only* honest source for
+    // "which mode is the machine in": the registry holds the user's preference
+    // and can disagree with the EC indefinitely.
     let local = run_blocking(crate::hw::fan::get_fan_info)
         .await
         .map_err(ErrorResponse::from)?;
@@ -205,24 +227,46 @@ pub async fn get_fan_info() -> Result<FanInfo, ErrorResponse> {
         let elevated = crate::hw::fan::get_elevated_thermal_readings().await;
         let has_thermal = elevated.cpu_temp.is_some() || elevated.gpu_temp.is_some();
         if has_thermal {
-            return run_blocking(move || crate::hw::fan::get_fan_info_seeded(elevated))
+            // The elevated round-trip just succeeded, so the same path can
+            // answer for the EC mode without risking a second stall.
+            let ec = crate::hw::fan::get_ec_active_mode().await;
+            return run_blocking(move || crate::hw::fan::get_fan_info_seeded(elevated, ec))
                 .await
                 .map_err(ErrorResponse::from);
         }
     }
 
-    Ok(local)
+    let mut info = local;
+    if info.ec_active.is_none() {
+        // No elevated thermal reading: only ask for the EC mode when the bridge
+        // is known to be running, so a missing service costs nothing per poll.
+        if crate::elev_bridge::is_bridge_service_available() {
+            let ec = crate::hw::fan::get_ec_active_mode().await;
+            info.ec_active = ec.map(|(_, mode)| mode);
+            info.ec_active_raw = ec.map(|(raw, _)| raw);
+        }
+    }
+    Ok(info)
 }
 
+/// Apply a fan mode and return what actually happened.
+///
+/// The reply is a [`FanModeResult`], not a bare success: on this platform
+/// "Fixed Speed" cannot pin RPM (IGCL enumerates no fans) and "Off" only
+/// selects the SuperQuiet EC profile, so the UI needs the real effect to avoid
+/// promising fan control it does not have.
 #[tauri::command]
-pub async fn set_fan_mode(mode: FanMode, speed_percent: u8) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
+pub async fn set_fan_mode(
+    mode: FanMode,
+    speed_percent: u8,
+) -> Result<FanModeResult, ErrorResponse> {
+    let data = elev_bridge::run_elevated(
         "set_fan_mode",
         serde_json::json!({ "mode": mode, "speed_percent": speed_percent }),
     )
     .await
-    .map(|_| ())
-    .map_err(ErrorResponse::from)
+    .map_err(ErrorResponse::from)?;
+    Ok(FanModeResult::from_bridge(&data))
 }
 
 #[tauri::command]
@@ -235,7 +279,11 @@ pub async fn get_touchpad_info() -> Result<TouchpadInfo, ErrorResponse> {
     // tasks (the battery/WMI contention), not that this read is slow — the
     // default 15 s budget only made the UI wait for a slot. A short budget
     // surfaces the real cause quickly and lets the next poll succeed.
-    const TOUCHPAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    //
+    // STAB-ROUND-1 (P2-f): 5 s still let a saturated pool park this leg for
+    // five seconds, five times in a session. The normal read is milliseconds;
+    // 2 s is already 100× the healthy path and fails fast.
+    const TOUCHPAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
     let result =
         crate::util::blocking::run_blocking_timeout(TOUCHPAD_READ_TIMEOUT, hw_get_touchpad)
             .await
@@ -314,6 +362,17 @@ pub async fn get_system_info() -> Result<SystemInfo, ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
+/// Hardware identity + specs for the Overview tab.
+///
+/// Static fields are read once per process and cached; the per-call work is a
+/// free-space query and the tick counter. See `hw::overview` for the costs.
+#[tauri::command]
+pub async fn get_overview_snapshot() -> Result<OverviewSnapshot, ErrorResponse> {
+    run_blocking(hw_get_overview)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
 #[tauri::command]
 pub async fn get_process_list() -> Result<Vec<ProcessInfo>, ErrorResponse> {
     run_blocking(move || Ok(hw_get_processes()))
@@ -361,14 +420,19 @@ pub async fn set_refresh_rate(hz: u32) -> Result<(), ErrorResponse> {
 #[tauri::command]
 pub async fn set_adaptive_refresh_rate(enabled: bool) -> Result<(), ErrorResponse> {
     // Writes HKLM registry key — requires elevation.
-    // The UI should inform the user that a driver restart / reboot is needed.
+    // The value only reaches the panel on the next boot (the Intel driver reads
+    // it at start-up), and there is no API to observe the switching, so record
+    // the write here (user hive, so the UI can say "applied — takes effect after
+    // reboot" until the machine restarts) instead of pretending it is live.
     elev_bridge::run_elevated(
         "set_adaptive_refresh_rate",
         serde_json::json!({ "enabled": enabled }),
     )
     .await
     .map(|_| ())
-    .map_err(ErrorResponse::from)
+    .map_err(ErrorResponse::from)?;
+    crate::hw::display::mark_drrs_applied();
+    Ok(())
 }
 
 #[tauri::command]
@@ -386,6 +450,80 @@ pub async fn set_autostart(enabled: bool) -> Result<(), ErrorResponse> {
     // S26-005b: Keep the SYSTEM bridge watchdog in sync with the user's
     // autostart preference — no autostart ⇒ no watchdog auto-relaunch.
     crate::hw::crash_recovery::set_watchdog_enabled(enabled);
+    Ok(())
+}
+
+// ── Windows startup manager ─────────────────────────────────────────────────
+
+/// Enumerate every startup entry Windows knows about.
+///
+/// `refresh` bypasses the 5-second cache (manual refresh button). The snapshot
+/// carries the task-scan status so the UI can say when scheduled tasks could
+/// not be read instead of silently showing a shorter list.
+#[tauri::command]
+pub async fn get_startup_items(refresh: Option<bool>) -> Result<StartupSnapshot, ErrorResponse> {
+    // STAB-ROUND-1 (P2-f): the registry + StartupApproved enumeration takes
+    // ~1.15 s (36 entries), and it used to sit in the pool with the default
+    // 15 s budget. A wedged pool then held a UI-open path for a quarter of a
+    // minute. 5 s is >4× the measured healthy time and bounds the slot; with
+    // the fixed pool now waiting asynchronously, this only costs a worker
+    // thread, never the Tokio runtime.
+    const STARTUP_ITEMS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    crate::util::blocking::run_blocking_timeout(STARTUP_ITEMS_TIMEOUT, move || {
+        hw_get_startup_items(refresh.unwrap_or(false))
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
+/// Enable/disable one startup entry.
+///
+/// Run keys and Startup-folder shortcuts are switched through the same
+/// `StartupApproved` blob Task Manager writes; scheduled tasks through the
+/// Task Scheduler API. Machine-wide entries go through the elevated bridge
+/// (`startup_toggle`) with an enum-only payload — no arbitrary paths.
+#[tauri::command]
+pub async fn set_startup_item(id: String, enabled: bool) -> Result<(), ErrorResponse> {
+    let plan = run_blocking(move || hw_plan_startup_toggle(&id))
+        .await
+        .map_err(ErrorResponse::from)?;
+
+    match &plan {
+        TogglePlan::ElevatedApproved { .. } => {
+            elev_bridge::run_elevated("startup_toggle", startup_toggle_args(&plan, enabled))
+                .await
+                .map_err(ErrorResponse::from)?;
+        }
+        TogglePlan::LocalApproved { .. } => {
+            let plan = plan.clone();
+            run_blocking(move || hw_apply_startup_toggle(&plan, enabled))
+                .await
+                .map_err(ErrorResponse::from)?;
+        }
+        TogglePlan::Task { .. } => {
+            let local_plan = plan.clone();
+            let local = run_blocking(move || hw_apply_startup_toggle(&local_plan, enabled)).await;
+            if let Err(local_err) = local {
+                // A rejection that is not a permissions problem (e.g. the task
+                // has no logon trigger) will not be fixed by elevation.
+                if matches!(&local_err, HardwareError::NotSupported(_)) {
+                    return Err(ErrorResponse::from(local_err));
+                }
+                // A user task normally flips in-process; protected folders
+                // only expose SetEnabled to an administrator. Escalate once
+                // and keep both failures in the message if that also fails.
+                elev_bridge::run_elevated("startup_toggle", startup_toggle_args(&plan, enabled))
+                    .await
+                    .map_err(|e| {
+                        ErrorResponse::from(anyhow::anyhow!(
+                            "{local_err}; elevated retry failed: {e}"
+                        ))
+                    })?;
+            }
+        }
+    }
+
+    invalidate_startup_cache();
     Ok(())
 }
 
@@ -619,46 +757,6 @@ pub async fn get_drivers_detail() -> Result<Vec<crate::hw::update::DriverDetail>
         .map_err(ErrorResponse::from)
 }
 
-// ── Official Driver Update Check ──────────────────────────────────────────────
-
-/// Check installed drivers against Xiaomi's official driver portal.
-#[tauri::command]
-pub async fn check_official_driver_updates(
-) -> Result<crate::hw::driver_update::DriverUpdateCheck, ErrorResponse> {
-    crate::hw::driver_update::check_driver_updates()
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Fetch the list of official drivers for a specific model code.
-#[tauri::command]
-pub async fn fetch_official_drivers(
-    model_code: Option<String>,
-) -> Result<Vec<crate::hw::driver_update::OfficialDriver>, ErrorResponse> {
-    let code = match model_code {
-        Some(c) => c,
-        None => crate::hw::driver_update::detect_model_code().map_err(ErrorResponse::from)?,
-    };
-    crate::hw::driver_update::fetch_official_drivers(&code)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Detect the laptop model code (e.g. "TM2424").
-#[tauri::command]
-pub async fn get_model_code() -> Result<String, ErrorResponse> {
-    crate::hw::driver_update::detect_model_code().map_err(ErrorResponse::from)
-}
-
-/// Download a driver package from Xiaomi's CDN.
-#[tauri::command]
-pub async fn download_driver_package(url: String) -> Result<String, ErrorResponse> {
-    let path = crate::hw::driver_update::download_driver_package(&url)
-        .await
-        .map_err(ErrorResponse::from)?;
-    Ok(path.to_string_lossy().to_string())
-}
-
 // ── Security Scan ────────────────────────────────────────────────────────────
 
 /// Run a quick security scan via Windows Defender.
@@ -708,12 +806,19 @@ pub async fn get_defender_status() -> Result<crate::hw::security_scan::DefenderS
 }
 
 /// Get threat detection history.
+///
+/// Runs a PowerShell child process (Defender cmdlets), which is slower than a
+/// WMI query — give it a wider budget than the 15 s default so a busy Defender
+/// does not turn into a spurious error in the UI.
 #[tauri::command]
 pub async fn get_threat_history() -> Result<crate::hw::security_scan::ThreatHistory, ErrorResponse>
 {
-    run_blocking(crate::hw::security_scan::get_threat_history)
-        .await
-        .map_err(ErrorResponse::from)
+    crate::util::blocking::run_blocking_timeout(
+        std::time::Duration::from_secs(45),
+        crate::hw::security_scan::get_threat_history,
+    )
+    .await
+    .map_err(ErrorResponse::from)
 }
 
 /// Open Windows Security app (Windows Defender).
@@ -822,6 +927,132 @@ pub async fn launch_color_calibration_wizard() -> Result<(), ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
+// ── ICC catalogue (curated profiles) ────────────────────────────────────────
+
+/// Download a catalogue profile into the staging directory, validating the ICC
+/// header and the pinned sha256/size. Nothing is applied here.
+#[tauri::command]
+pub async fn download_color_profile(
+    entry_id: String,
+) -> Result<crate::hw::icc_catalog::DownloadResult, ErrorResponse> {
+    crate::hw::icc_catalog::download_entry(&entry_id)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppliedColorProfile {
+    pub entry_id: String,
+    pub installed_path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    /// `local` — the file was already in the system directory;
+    /// `installed` — copied there by the elevated helper just now.
+    pub source: String,
+}
+
+/// Install (when needed) and apply a catalogue profile to one display.
+///
+/// Downloads are copied into the system colour directory by the authenticated
+/// bridge service (`install_icc_profile`) — never through a UAC prompt — and
+/// then applied by the unprivileged process via
+/// `AssociateColorProfileWithDeviceW` (`hw::color_calibration::load_icc_profile`).
+#[tauri::command]
+pub async fn apply_color_profile(
+    display: String,
+    entry_id: String,
+) -> Result<AppliedColorProfile, ErrorResponse> {
+    use crate::hw::icc_catalog::{self, IccKind};
+
+    let entry = icc_catalog::find_entry(&entry_id).map_err(ErrorResponse::from)?;
+    let (path, sha256, bytes, source) = match entry.kind {
+        IccKind::Local => {
+            let path = icc_catalog::system_profiles_dir().join(entry.file_name());
+            let info = icc_catalog::validate_local_profile(&path).map_err(ErrorResponse::from)?;
+            (path, info.sha256, info.bytes, "local".to_string())
+        }
+        IccKind::Download => {
+            // Already installed by a previous session? Re-use it when the bytes
+            // still match the pin — no pointless re-download.
+            let installed_path = icc_catalog::system_profiles_dir().join(entry.file_name());
+            if icc_catalog::installed_profile_matches(entry, &icc_catalog::system_profiles_dir()) {
+                let info = icc_catalog::validate_local_profile(&installed_path)
+                    .map_err(ErrorResponse::from)?;
+                (installed_path, info.sha256, info.bytes, "local".to_string())
+            } else {
+                let value = elev_bridge::run_elevated_bridge_only(
+                    "install_icc_profile",
+                    serde_json::json!({ "file_name": entry.file_name() }),
+                )
+                .await
+                .map_err(|e| {
+                    if e.contains("Unknown elevated command") {
+                        // The bridge is a separate SYSTEM binary installed with
+                        // the app; a dev/older build will not know this command.
+                        ErrorResponse::from(
+                            "the installed MiControl Bridge predates this build and does not \
+                             know install_icc_profile — update MiControl so the bridge matches \
+                             the app"
+                                .to_string(),
+                        )
+                    } else {
+                        ErrorResponse::from(format!(
+                            "installing a profile needs the MiControl Bridge service, and no UAC \
+                             prompt is used: {e}"
+                        ))
+                    }
+                })?;
+                let result: icc_catalog::InstallResult = serde_json::from_value(value)
+                    .map_err(|e| ErrorResponse::from(format!("unexpected install result: {e}")))?;
+                if let Some(expected) = entry.sha256.as_deref() {
+                    if !result.sha256.eq_ignore_ascii_case(expected) {
+                        return Err(ErrorResponse::from(format!(
+                            "installed profile does not match the catalogue hash ({} != {expected})",
+                            result.sha256
+                        )));
+                    }
+                }
+                (
+                    std::path::PathBuf::from(&result.installed_path),
+                    result.sha256,
+                    result.bytes,
+                    "installed".to_string(),
+                )
+            }
+        }
+    };
+
+    let profile_path = path.display().to_string();
+    let display_for_load = display;
+    run_blocking(move || {
+        crate::hw::color_calibration::load_icc_profile(&display_for_load, &profile_path)
+    })
+    .await
+    .map_err(ErrorResponse::from)?;
+
+    Ok(AppliedColorProfile {
+        entry_id,
+        installed_path: path.display().to_string(),
+        sha256,
+        bytes,
+        source,
+    })
+}
+
+/// Open a real panel-research search in the default browser.
+///
+/// `kind` is `notebookcheck` or `panelook`; the URL is built backend-side from a
+/// fixed template (the query is validated, never interpolated into a shell).
+#[tauri::command]
+pub async fn open_color_profile_search(kind: String, query: String) -> Result<(), ErrorResponse> {
+    run_blocking(move || {
+        crate::hw::icc_catalog::open_profile_search(&kind, &query)
+            .map_err(crate::hw::errors::HardwareError::Other)
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
 // ── AI Noise Cancellation ────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -832,33 +1063,39 @@ pub async fn get_audio_effects(
         .map_err(ErrorResponse::from)
 }
 
+// These three write a per-user preference under HKEY_CURRENT_USER. They must
+// NOT go through `elev_bridge::run_elevated`: its service runs as LocalSystem,
+// so an `HKCU` write lands in `HKU\S-1-5-18` while `get_audio_effects` reads the
+// signed-in user's hive — the toggle appeared to do nothing (always "off").
 #[tauri::command]
 pub async fn set_mic_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
-        "set_mic_noise_canceling",
-        serde_json::json!({ "enabled": enabled }),
-    )
-    .await?;
-    Ok(())
+    run_blocking(move || crate::hw::audio_effects::set_mic_noise_canceling(enabled))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
 pub async fn set_speaker_noise_canceling(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
-        "set_speaker_noise_canceling",
-        serde_json::json!({ "enabled": enabled }),
-    )
-    .await?;
-    Ok(())
+    run_blocking(move || crate::hw::audio_effects::set_speaker_noise_canceling(enabled))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 #[tauri::command]
 pub async fn set_voice_focus(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated("set_voice_focus", serde_json::json!({ "enabled": enabled })).await?;
-    Ok(())
+    run_blocking(move || crate::hw::audio_effects::set_voice_focus(enabled))
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 // ── System Cleanup ───────────────────────────────────────────────────────────
+
+/// Budget for the unprivileged half of a cleanup.
+///
+/// Deleting ~1.5 GB across 8k+ files legitimately exceeds the 15 s hardware
+/// query budget used elsewhere. The job is idempotent, so a timeout only means
+/// the UI stops waiting — never that the deletion is undone.
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 #[tauri::command]
 pub async fn scan_junk_files() -> Result<Vec<crate::hw::cleanup::CleanupItem>, ErrorResponse> {
@@ -867,20 +1104,64 @@ pub async fn scan_junk_files() -> Result<Vec<crate::hw::cleanup::CleanupItem>, E
         .map_err(ErrorResponse::from)
 }
 
+/// Clean the selected categories, each in the process context that matches it.
+///
+/// Audit F2.1: the previous implementation dispatched **every** category to
+/// `run_elevated`, which normally lands on the LocalSystem bridge. There
+/// `%TEMP%` is `C:\Windows\Temp` and `%LOCALAPPDATA%` is the system profile's,
+/// so the button freed ~91 MB of Windows logs and none of the 1.5 GB the scan
+/// had just shown. Now:
+///
+/// * user-owned categories (temp, browser caches, thumbnails, Recycle Bin) run
+///   **in this process**, as the interactive user, unprivileged;
+/// * the two machine-wide categories run **elevated**, by absolute path.
+///
+/// A failure on the elevated half is reported as a per-category error result
+/// instead of aborting the whole call: the user half may already have freed
+/// gigabytes and must not be thrown away.
 #[tauri::command]
 pub async fn clean_junk_files(
     categories: Vec<crate::hw::cleanup::CleanupCategory>,
 ) -> Result<Vec<crate::hw::cleanup::CleanupResult>, ErrorResponse> {
-    let result = elev_bridge::run_elevated(
-        "clean_junk_files",
-        serde_json::json!({ "categories": categories }),
-    )
-    .await?;
-    // The elevated dispatch returns the CleanupResult array as a JSON value
-    match serde_json::from_value::<Vec<crate::hw::cleanup::CleanupResult>>(result) {
-        Ok(results) => Ok(results),
-        Err(_) => Ok(Vec::new()),
+    use crate::hw::cleanup::{partition_context, CleanupResult};
+
+    let (user_categories, system_categories) = partition_context(categories);
+
+    let mut results: Vec<CleanupResult> = Vec::new();
+
+    if !user_categories.is_empty() {
+        let cleaned = crate::util::blocking::run_blocking_timeout(CLEANUP_TIMEOUT, move || {
+            crate::hw::cleanup::clean_user_junk(user_categories)
+        })
+        .await
+        .map_err(ErrorResponse::from)?;
+        results.extend(cleaned);
     }
+
+    if !system_categories.is_empty() {
+        let requested = system_categories.clone();
+        let reply = elev_bridge::run_elevated(
+            "clean_system_junk",
+            serde_json::json!({ "categories": system_categories }),
+        )
+        .await;
+
+        match reply.map(serde_json::from_value::<Vec<CleanupResult>>) {
+            Ok(Ok(cleaned)) => results.extend(cleaned),
+            // A contract change must never look like "nothing to clean".
+            Ok(Err(e)) => results.extend(requested.into_iter().map(|category| {
+                CleanupResult::failure(
+                    category,
+                    format!("elevated cleanup returned an unexpected payload: {e}"),
+                )
+            })),
+            Err(e) => results.extend(requested.into_iter().map(|category| {
+                CleanupResult::failure(category, format!("elevated cleanup unavailable: {e}"))
+            })),
+        }
+    }
+
+    Ok(results)
 }
 
 // ── Error Logging ────────────────────────────────────────────────────────────

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "updated": "2026-11-09",
+  "notes": [
+    "sha256 is enforced for every downloaded profile (kind = download). Local entries ship with Windows or the OEM and stay where they are; their bytes vary between Windows builds, so the hash observed on the reference machine is recorded in sha256_reference and is informational only — it is never used to reject a local file.",
+    "No entry here is a per-unit calibration. OEM panel profiles are colour-space baselines, not measurements of the individual panel. A review profile improves average accuracy; it does not replace a colorimeter.",
+    "Only profiles that were present on the reference machine, or downloadable from a public URL verified on 2026-11-09, are listed. No URL or hash in this file is guessed.",
+    "The OEM also ships EDO4503_HDR.icc, an MHC2/HDR profile with a 700 cd/m2 luminance tag. It is consumed by the HDR pipeline and is NOT offered here: applied as an SDR display profile it would distort SDR colours, and Windows ignores SDR ICC while HDR is on. Left in place, untouched."
+  ],
+  "entries": [
+    {
+      "id": "windows-srgb-iec61966-2-1",
+      "display_name": "sRGB IEC61966-2.1",
+      "profile_name": "sRGB Color Space Profile.icm",
+      "kind": "local",
+      "source": "Windows",
+      "source_url": "https://learn.microsoft.com/windows/win32/wcs/standard-color-profiles",
+      "license_note": "Microsoft Windows standard profile. MiControl uses the copy already installed on this machine and does not redistribute it.",
+      "sha256": null,
+      "bytes": null,
+      "sha256_reference": "2b3aa1645779a9e634744faf9b01e9102b0c9b88fd6deced7934df86b949af7e",
+      "bytes_reference": 3144,
+      "color_space": "sRGB",
+      "description": "The Windows reference sRGB profile. Correct baseline for SDR desktop content and the safe choice for any panel.",
+      "panel_match": {
+        "kind": "any"
+      }
+    },
+    {
+      "id": "oem-edo4503-d65p3",
+      "display_name": "OLED D65 P3 base (OEM)",
+      "profile_name": "xiaomi_D65P3_base.icc",
+      "kind": "local",
+      "source": "OEM (Xiaomi)",
+      "source_url": null,
+      "license_note": "Shipped by the OEM into the Windows colour directory. Its own description tag reads 'MSFT TEST: D65P3 base profile' — a colour-space baseline, not a measurement of this unit.",
+      "sha256": null,
+      "bytes": null,
+      "sha256_reference": "648344e52bf63283ce464de45c51f34537cb35cbacd9fd4d27807e0afb8e0e62",
+      "bytes_reference": 568,
+      "color_space": "Display P3 (D65)",
+      "description": "Maps the panel to Display P3 primaries at D65 (white point 0.9505, 1.0000, 1.0891). Wider than sRGB: only correct when the panel really covers P3 and the content is colour-managed.",
+      "panel_match": {
+        "kind": "panel",
+        "manufacturer": "EDO",
+        "product_codes": ["4503"]
+      }
+    },
+    {
+      "id": "icc-srgb2014",
+      "display_name": "sRGB v4 (ICC, 2014)",
+      "profile_name": "sRGB2014.icc",
+      "install_name": "MiControl-sRGB2014.icc",
+      "kind": "download",
+      "source": "International Color Consortium",
+      "source_url": "https://registry.color.org/rgb-registry/profiles/sRGB2014.icc",
+      "license_note": "ICC copyright. May be copied, distributed, embedded, made, used and sold without restriction; altered versions must remove the original identification. See registry.color.org/profile-library/#license.",
+      "sha256": "384b832de3412066743b52a75ee906b6fb9fb8d9e09e936fc2c43223815c6e0a",
+      "bytes": 3024,
+      "color_space": "sRGB",
+      "description": "The ICC's current sRGB v4 display profile. Mathematically cleaner than the Windows v2 profile and visually near-identical on a display that is actually close to sRGB.",
+      "panel_match": {
+        "kind": "any"
+      }
+    }
+  ]
+}

@@ -20,6 +20,7 @@ export type {
   AiBrightnessConfig,
   DisplayInfo,
   FanInfo,
+  FanModeResult,
   AiPerfLogEntry,
   TouchpadInfo,
   BiosInfo,
@@ -53,6 +54,7 @@ import type {
   AiBrightnessConfig,
   DisplayInfo,
   FanInfo,
+  FanModeResult,
   AiPerfLogEntry,
   TouchpadInfo,
   UpdateStatus,
@@ -65,11 +67,15 @@ import type {
   IotEvent,
   WmaaResponse,
   EcSensorData,
+  AdapterPowerReading,
   HqWmiResponse,
   ThermalZoneInfo,
   ProcessTaskInfo,
   NetworkInterfaceSample,
 } from '../types/hardware';
+
+import { createPollGuard, type PollGuard } from '../lib/pollGuard';
+import { runBounded } from '../lib/boundedPoll';
 
 // ── Hardware hook ────────────────────────────────────────────────────────────
 
@@ -114,6 +120,11 @@ export function useHardware() {
   const systemPollInFlightRef = useRef(false);
   const slowPollInFlightRef = useRef(false);
   const initialLoadInFlightRef = useRef(false);
+  // Cancellation for in-flight polls: React state must not be written after
+  // unmount, and a slow-poll batch that lost its race must not clobber a
+  // newer batch (STAB-ROUND-1, P1-c).
+  const mountedRef = useRef(true);
+  const slowPollEpochRef = useRef(0);
   // Watchdogs: if a poll leg hangs (e.g. WMI wedged after sleep), the in-flight
   // flag stays true forever and every later poll is skipped → CPU/GPU freeze in
   // the overview. Storing the start time lets the next tick detect the stall and
@@ -126,6 +137,25 @@ export function useHardware() {
   const FAST_POLL_LEG_MS = 6000;
   const STALL_MS = 8000;
 
+  // Fan leg guard (dogfood H-04). The old Promise.race abandoned the *result*
+  // but not the call: every 2 s a new get_fan_info piled on top of the still
+  // running one (2 221 abandoned calls / 74 min). The guard allows one call in
+  // flight and backs off 6 s → 12 s → … → 60 s after a timeout; a read that
+  // returns resets the backoff. Created once per hook instance.
+  const fanGuardRef = useRef<PollGuard | null>(null);
+  if (!fanGuardRef.current) {
+    fanGuardRef.current = createPollGuard({
+      timeoutMs: FAST_POLL_LEG_MS,
+      baseBackoffMs: FAST_POLL_LEG_MS,
+      maxBackoffMs: 60_000,
+      onTimeout: ({ streak, retryInMs }) =>
+        console.warn(
+          `[hardware] get_fan_info exceeded ${FAST_POLL_LEG_MS} ms — abandoned` +
+            ` (streak ${streak}, next attempt in ${retryInMs} ms)`,
+        ),
+    });
+  }
+
   // ── Tiered polling (S11-002) ─────────────────────────────────────────────
   // Fast tier: 2 s — CPU usage, GPU usage, RAM (get_system_info) + fan speed,
   // CPU temp, GPU temp, audio. get_system_info is polled on its OWN leg so a
@@ -135,6 +165,12 @@ export function useHardware() {
 
   const FAST_POLL_INTERVAL = 2000;
   const SLOW_POLL_INTERVAL = 15000;
+  // STAB-ROUND-1 (P1-c): five invokes used to hit the backend on the same
+  // tick every 15 s. Two in flight plus a staggered start is enough for the
+  // slow tier, and stops the batch from flooding the blocking pool exactly
+  // when a stalled battery query is already holding it.
+  const SLOW_POLL_CONCURRENCY = 2;
+  const SLOW_POLL_JITTER_MS = 400;
 
   // Safe wrapper: catches per-invoke failures so one failing query doesn't
   // abort the entire batch. Returns the fallback value on failure. If the
@@ -150,6 +186,17 @@ export function useHardware() {
         return fallback;
       }),
     [],
+  );
+
+  /** One bounded `get_fan_info`. `null` = skipped, timed out or failed. */
+  const pollFan = useCallback(
+    async (label: string): Promise<FanInfo | null> => {
+      const guard = fanGuardRef.current;
+      if (!guard) return null;
+      const outcome = await guard.run(() => safe(invoke<FanInfo>('get_fan_info'), null, label));
+      return outcome.status === 'ok' ? outcome.value : null;
+    },
+    [safe],
   );
 
   // System leg (CPU/GPU/RAM) — polled alone so a hung get_fan_info cannot
@@ -193,18 +240,9 @@ export function useHardware() {
     fastPollStartedAtRef.current = Date.now();
     try {
       const [fanResult, audioResult] = await Promise.all([
-        // Bounded fan leg: if get_fan_info exceeds FAST_POLL_LEG_MS, abandon it
-        // (the invoke keeps running in the background; the next poll reads the
-        // last value). Never let one slow query pin this poll forever.
-        Promise.race([
-          safe(invoke<FanInfo>('get_fan_info'), null, 'get_fan_info'),
-          new Promise<FanInfo | null>((resolve) =>
-            setTimeout(() => {
-              console.warn('[hardware] get_fan_info exceeded', FAST_POLL_LEG_MS, 'ms — abandoned');
-              resolve(null);
-            }, FAST_POLL_LEG_MS),
-          ),
-        ]),
+        // Bounded fan leg: one call in flight, exponential backoff after a
+        // timeout (see fanGuardRef). A skipped leg keeps the last value.
+        pollFan('get_fan_info'),
         safe(invoke<AudioVolumeResult>('get_audio_volume'), null, 'get_audio_volume'),
       ]);
       if (fanResult) setFan(fanResult);
@@ -215,7 +253,7 @@ export function useHardware() {
     } finally {
       fastPollInFlightRef.current = false;
     }
-  }, [safe]);
+  }, [safe, pollFan]);
 
   const slowPoll = useCallback(async () => {
     if (slowPollInFlightRef.current && slowPollStartedAtRef.current) {
@@ -228,15 +266,39 @@ export function useHardware() {
     if (slowPollInFlightRef.current || initialLoadInFlightRef.current) return;
     slowPollInFlightRef.current = true;
     slowPollStartedAtRef.current = Date.now();
+    const epoch = ++slowPollEpochRef.current;
+    const cancelled = () => !mountedRef.current || slowPollEpochRef.current !== epoch;
     try {
-      const [batteryResult, displayResult, touchpadResult, perfMode, chargeThreshold] =
-        await Promise.all([
-          safe(invoke<BatteryInfo>('get_battery_info'), null, 'get_battery_info'),
-          safe(invoke<DisplayInfo>('get_display_info'), null, 'get_display_info'),
-          safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'get_touchpad_info'),
-          safe(invoke<PerformanceMode>('get_performance_mode'), null, 'get_performance_mode'),
-          safe(invoke<number>('get_charging_threshold'), 80, 'get_charging_threshold'),
-        ]);
+      // P1-c: bounded concurrency + jitter instead of five simultaneous
+      // invokes. Each leg is already `safe()`-wrapped, so a rejected leg is a
+      // null value, not an exception; `skipped` (cancelled) is just ignored.
+      const outcomes = await runBounded<unknown>(
+        [
+          () => safe(invoke<BatteryInfo>('get_battery_info'), null, 'get_battery_info'),
+          () => safe(invoke<DisplayInfo>('get_display_info'), null, 'get_display_info'),
+          () => safe(invoke<TouchpadInfo>('get_touchpad_info'), null, 'get_touchpad_info'),
+          () => safe(invoke<PerformanceMode>('get_performance_mode'), null, 'get_performance_mode'),
+          () => safe(invoke<number>('get_charging_threshold'), 80, 'get_charging_threshold'),
+        ],
+        {
+          limit: SLOW_POLL_CONCURRENCY,
+          jitterMs: SLOW_POLL_JITTER_MS,
+          isCancelled: cancelled,
+        },
+      );
+      // No state writes after unmount, and no stale batch overwriting a newer
+      // one (the stall watchdog can release the in-flight flag while an old
+      // batch is still pending).
+      if (cancelled()) return;
+      const valueOf = <T>(index: number): T | null => {
+        const outcome = outcomes[index];
+        return outcome && outcome.status === 'fulfilled' ? (outcome.value as T) : null;
+      };
+      const batteryResult = valueOf<BatteryInfo>(0);
+      const displayResult = valueOf<DisplayInfo>(1);
+      const touchpadResult = valueOf<TouchpadInfo>(2);
+      const perfMode = valueOf<PerformanceMode>(3);
+      const chargeThreshold = valueOf<number>(4);
       if (batteryResult !== null) setBattery(batteryResult);
       if (displayResult !== null) setDisplay(displayResult);
       // Only update touchpad from poll when no user write is in flight.
@@ -248,7 +310,7 @@ export function useHardware() {
       if (perfMode && Date.now() >= perfWriteDirtyUntil.current) {
         setPerformanceModeState(perfMode);
       }
-      setChargingThresholdState(chargeThreshold);
+      if (chargeThreshold !== null) setChargingThresholdState(chargeThreshold);
       // Do NOT clear the error here (see fastPoll). Only the initial load with
       // full success or clearError() clears the error state.
     } finally {
@@ -259,6 +321,7 @@ export function useHardware() {
   const initialLoadRef = useRef(false);
 
   useEffect(() => {
+    mountedRef.current = true;
     const refreshIfVisible = (pollFn: () => Promise<void>) => {
       // The tray popup window is pre-created and often kept hidden.
       // Skip polling while hidden to avoid background WMI/query churn.
@@ -285,22 +348,11 @@ export function useHardware() {
             perfMode,
             chargeThreshold,
           ] = await Promise.all([
-            // Bounded fan leg at boot too: get_fan_info can hang when WMI is
-            // wedged — never let it pin initialLoadInFlightRef forever (which
-            // would block ALL later polls → frozen overview).
-            Promise.race([
-              safe(invoke<FanInfo>('get_fan_info'), null, 'init:get_fan_info'),
-              new Promise<FanInfo | null>((resolve) =>
-                setTimeout(() => {
-                  console.warn(
-                    '[hardware] init get_fan_info exceeded',
-                    FAST_POLL_LEG_MS,
-                    'ms — abandoned',
-                  );
-                  resolve(null);
-                }, FAST_POLL_LEG_MS),
-              ),
-            ]),
+            // Bounded fan leg at boot too, through the same guard: get_fan_info
+            // can hang when WMI is wedged — never let it pin
+            // initialLoadInFlightRef forever (which would block ALL later polls
+            // → frozen overview), and never stack a second boot read on it.
+            pollFan('init:get_fan_info'),
             safe(invoke<SystemInfo>('get_system_info'), null, 'init:get_system_info'),
             safe(invoke<BatteryInfo>('get_battery_info'), null, 'init:get_battery_info'),
             safe(invoke<DisplayInfo>('get_display_info'), null, 'init:get_display_info'),
@@ -397,13 +449,17 @@ export function useHardware() {
     window.addEventListener('focus', onWindowFocus);
 
     return () => {
+      // Cancel queued/in-flight slow-poll legs: the epoch check makes any
+      // result that lands after this point a no-op (P1-c).
+      mountedRef.current = false;
+      slowPollEpochRef.current += 1;
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('focus', onWindowFocus);
       clearInterval(systemInterval);
       clearInterval(fastInterval);
       clearInterval(slowInterval);
     };
-  }, [fastPoll, fastPollSystem, slowPoll, safe]);
+  }, [fastPoll, fastPollSystem, slowPoll, safe, pollFan]);
 
   const setPerformanceMode = useCallback(async (mode: PerformanceMode) => {
     const snap = performanceModeRef.current;
@@ -445,6 +501,20 @@ export function useHardware() {
       throw e;
     }
   }, []);
+
+  /** Re-read the battery once (stale-state retry button). Additive: no contract change. */
+  const refreshBattery = useCallback(async () => {
+    const result = await safe(
+      invoke<BatteryInfo>('get_battery_info'),
+      null,
+      'refresh:get_battery_info',
+    );
+    if (result !== null) {
+      setBattery(result);
+      setError(null);
+    }
+    return result;
+  }, [safe]);
 
   const setBrightness = useCallback(async (level: number) => {
     const snap = displayRef.current;
@@ -504,21 +574,47 @@ export function useHardware() {
     }
   }, []);
 
-  const setFanMode = useCallback(async (mode: 'auto' | 'fixed' | 'off', speedPercent?: number) => {
-    const snap = fanRef.current;
-    setFan((prev) =>
-      prev ? { ...prev, mode, speed_percent: speedPercent ?? prev.speed_percent } : null,
-    );
-    try {
-      await invoke('set_fan_mode', { mode, speed_percent: speedPercent ?? 50 });
-      setError(null);
-    } catch (e) {
-      setFan(snap);
-      console.error('[fan] set_fan_mode failed:', e);
-      setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
-      throw e;
-    }
-  }, []);
+  /**
+   * Apply a fan mode and return what actually happened.
+   *
+   * The optimistic update only touches `mode` and the *requested* percentage —
+   * measured RPM/percentage stay untouched, because they are readback values
+   * and only the next poll can change them.
+   */
+  const setFanMode = useCallback(
+    async (mode: 'auto' | 'fixed' | 'off', speedPercent?: number): Promise<FanModeResult> => {
+      const snap = fanRef.current;
+      setFan((prev) =>
+        prev
+          ? {
+              ...prev,
+              mode,
+              requested_speed_percent: speedPercent ?? prev.requested_speed_percent,
+            }
+          : null,
+      );
+      try {
+        // Tauri v2 converts snake_case Rust parameters to camelCase JS keys.
+        // The command declares `speed_percent: u8`, so the payload key MUST be
+        // `speedPercent` — `speed_percent` is silently unmatched and the whole
+        // call fails with "missing required key speedPercent" (dogfood: every
+        // fan mode/fixed-speed change failed this way). Pinned by
+        // useHardware.setFanMode tests.
+        const result = await invoke<FanModeResult>('set_fan_mode', {
+          mode,
+          speedPercent: speedPercent ?? 50,
+        });
+        setError(null);
+        return result;
+      } catch (e) {
+        setFan(snap);
+        console.error('[fan] set_fan_mode failed:', e);
+        setError(getUserFriendlyMessage(parseErrorResponse(e), translate));
+        throw e;
+      }
+    },
+    [],
+  );
 
   // Keep stable refs so error-revert closures (with empty deps) can restore
   // the previous snapshot of any state that supports optimistic updates.
@@ -996,15 +1092,11 @@ export function useHardware() {
   }, []);
 
   const wmiEcReadAdapterPower = useCallback(async () => {
-    return invoke<number>('wmi_ec_read_adapter_power');
+    return invoke<AdapterPowerReading>('wmi_ec_read_adapter_power');
   }, []);
 
   const wmiEcReadSensorData = useCallback(async () => {
     return invoke<EcSensorData>('wmi_ec_read_sensor_data');
-  }, []);
-
-  const wmiEcSetBrightnessData = useCallback(async (level: number) => {
-    await invoke('wmi_ec_set_brightness_data', { level });
   }, []);
 
   const wmiEcSetSagvMode = useCallback(async (mode: number) => {
@@ -1114,12 +1206,17 @@ export function useHardware() {
       performanceMode: fanState.performanceMode,
       lastPerfResult: fanState.lastPerfResult,
       chargingThreshold: fanState.chargingThreshold,
+      // A perna rápida de sistema (CPU/GPU/RAM) exposta para refresco a pedido
+      // (ex.: o bloco "Consumo vivo" do Overview). Tem as mesmas guardas de
+      // in-flight/stall da perna — chamar isto nunca abre uma segunda sampler.
+      refreshSystem: fastPollSystem,
       perfApplying,
       loading,
       error,
       clearError,
       setPerformanceMode,
       setChargingThreshold,
+      refreshBattery,
       setBrightness,
       setHdr,
       setAiBrightness,
@@ -1161,6 +1258,7 @@ export function useHardware() {
       getAudioState,
       setMasterVolume,
       setMasterMute,
+      setDefaultAudioDevice,
     }),
     [
       fanState,
@@ -1168,12 +1266,14 @@ export function useHardware() {
       batteryState,
       displayState,
       touchpadState,
+      fastPollSystem,
       perfApplying,
       loading,
       error,
       clearError,
       setPerformanceMode,
       setChargingThreshold,
+      refreshBattery,
       setBrightness,
       setHdr,
       setAiBrightness,
@@ -1224,7 +1324,6 @@ export function useHardware() {
       wmiEcReadBatteryHealth,
       wmiEcReadAdapterPower,
       wmiEcReadSensorData,
-      wmiEcSetBrightnessData,
       wmiEcSetSagvMode,
       wmiEcSetPl1Flag,
       wmiEcSetEpofFlag,

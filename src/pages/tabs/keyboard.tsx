@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import { useToast } from '../../contexts/ToastContext';
+import { Icon } from '../../components/ui/icons';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -207,9 +208,9 @@ function KeyBindingRow({
           <span className="toggle-knob" />
         </label>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="card-title" style={{ margin: 0, fontSize: 13.5 }}>
+          <h2 className="card-title" style={{ margin: 0, fontSize: 13.5 }}>
             {label}
-          </div>
+          </h2>
           <div
             style={{
               fontSize: 11.5,
@@ -244,7 +245,7 @@ function KeyBindingRow({
           onClick={handleDetect}
           disabled={detecting}
           style={{ fontSize: 11, padding: '3px 10px', flexShrink: 0 }}
-          title="Press the physical key to detect its VK code (up to 10 s)"
+          title={t('keyboard.detectKeyTitle')}
         >
           {detecting
             ? detectedVk === '…'
@@ -255,7 +256,7 @@ function KeyBindingRow({
         {hasAction && (
           <button
             onClick={handleClear}
-            title="Clear this key binding"
+            title={t('keyboard.clearBindingTitle')}
             style={{
               flexShrink: 0,
               background: 'none',
@@ -269,7 +270,7 @@ function KeyBindingRow({
               lineHeight: 1.4,
             }}
           >
-            ✕
+            <Icon name="x" size={16} />
           </button>
         )}
       </div>
@@ -622,7 +623,9 @@ export default function KeyboardTab() {
 
       {/* Fn Key Lock Card */}
       <div className="card" style={{ marginTop: 16 }}>
-        <h3>⌨️ {t('keyboard.fnKeyTitle')}</h3>
+        <h3>
+          <Icon name="keyboard" size={16} /> {t('keyboard.fnKeyTitle')}
+        </h3>
         <p className="text-muted" style={{ fontSize: 12, marginBottom: 12 }}>
           {t('keyboard.fnKeyDesc')}
         </p>
@@ -645,7 +648,7 @@ export default function KeyboardTab() {
               }}
               disabled={fnKeyToggling}
             >
-              🎵 {t('keyboard.fnKeyMultimedia')}
+              <Icon name="music" size={16} /> {t('keyboard.fnKeyMultimedia')}
             </button>
             <button
               className={fnKeyMode === 'function_key' ? 'btn btn-primary' : 'btn btn-secondary'}
@@ -662,7 +665,7 @@ export default function KeyboardTab() {
               }}
               disabled={fnKeyToggling}
             >
-              ⌨️ {t('keyboard.fnKeyFunction')}
+              <Icon name="keyboard" size={16} /> {t('keyboard.fnKeyFunction')}
             </button>
           </div>
         )}

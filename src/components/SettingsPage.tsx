@@ -4,6 +4,7 @@ import type { AppSettings } from '../types/settings';
 import { invoke } from '@tauri-apps/api/core';
 import AiConfigForm from './AiConfigForm';
 import PrivacyConsentSection from './PrivacyConsentSection';
+import { Button, Switch } from './ui';
 
 interface DeleteDataReport {
   logs_deleted: boolean;
@@ -22,6 +23,7 @@ interface Props {
   onGrantConsent: () => Promise<void>;
   onOpenPrivacyPolicy: () => void;
   onReplayOnboarding: () => void;
+  onOpenStartup: () => void;
 }
 
 export default function SettingsPage({
@@ -33,6 +35,7 @@ export default function SettingsPage({
   onGrantConsent,
   onOpenPrivacyPolicy,
   onReplayOnboarding,
+  onOpenStartup,
 }: Props) {
   const { locale, setLanguage, supported } = useLanguage();
   const [isDeleting, setIsDeleting] = useState(false);
@@ -43,6 +46,22 @@ export default function SettingsPage({
   const [errorLogContent, setErrorLogContent] = useState('');
   const [mcpEnabled, setMcpEnabled] = useState(false);
   const [mcpNotice, setMcpNotice] = useState<string | null>(null);
+  const [autostart, setAutostart] = useState(false);
+  const [autostartPending, setAutostartPending] = useState(false);
+  const [autostartError, setAutostartError] = useState<string | null>(null);
+
+  const handleToggleAutostart = useCallback(async (enabled: boolean) => {
+    setAutostartPending(true);
+    setAutostartError(null);
+    try {
+      await invoke('set_autostart', { enabled });
+      setAutostart(enabled);
+    } catch (e) {
+      setAutostartError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutostartPending(false);
+    }
+  }, []);
 
   // Fetch error log config on mount
   useEffect(() => {
@@ -57,6 +76,11 @@ export default function SettingsPage({
     // Fetch persisted MCP integration flag
     void invoke<boolean>('mcp_get_enabled')
       .then(setMcpEnabled)
+      .catch(() => {});
+    // MiControl's own autostart entry, the only startup switch that belongs
+    // to Settings; everything else is on the Startup tab.
+    void invoke<boolean>('get_autostart')
+      .then(setAutostart)
       .catch(() => {});
   }, []);
 
@@ -131,20 +155,44 @@ export default function SettingsPage({
     <>
       {/* Language selector */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.language')}</div>
+        <h2 className="card-title">{t('settings.language')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.languageDesc')}
         </p>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           {supported.map((loc) => (
-            <button
+            <Button
               key={loc.code}
-              className={`chip-btn ${locale === loc.code ? 'active' : ''}`}
+              size="sm"
+              variant={locale === loc.code ? 'secondary' : 'ghost'}
+              aria-pressed={locale === loc.code}
               onClick={() => setLanguage(loc.code)}
             >
               {loc.nativeLabel}
-            </button>
+            </Button>
           ))}
+        </div>
+      </div>
+
+      {/* General, MiControl's own behaviour */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h2 className="card-title">{t('settings.general')}</h2>
+        <Switch
+          label={t('settings.miControlAutostart')}
+          desc={t('settings.miControlAutostartDesc')}
+          checked={autostart}
+          pending={autostartPending}
+          onChange={(next) => void handleToggleAutostart(next)}
+        />
+        {autostartError && (
+          <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--color-error, #e53935)' }}>
+            {t('settings.startupError')} {autostartError}
+          </p>
+        )}
+        <div style={{ marginTop: 12 }}>
+          <Button variant="secondary" size="sm" icon="rocket" onClick={onOpenStartup}>
+            {t('settings.openStartupManager')}
+          </Button>
         </div>
       </div>
 
@@ -166,7 +214,7 @@ export default function SettingsPage({
 
       {/* Error Logging */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.errorLogging')}</div>
+        <h2 className="card-title">{t('settings.errorLogging')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.errorLoggingDesc')}
         </p>
@@ -195,12 +243,22 @@ export default function SettingsPage({
           </div>
         )}
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button className="btn btn-secondary" onClick={() => void handleViewErrorLog()}>
-            📋 {t('settings.errorLogView')}
-          </button>
-          <button className="btn btn-secondary" onClick={() => void handleClearErrorLog()}>
-            🗑 {t('settings.errorLogClear')}
-          </button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="clipboard"
+            onClick={() => void handleViewErrorLog()}
+          >
+            {t('settings.errorLogView')}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="trash"
+            onClick={() => void handleClearErrorLog()}
+          >
+            {t('settings.errorLogClear')}
+          </Button>
         </div>
         {showErrorLog && (
           <div style={{ marginTop: 12 }}>
@@ -221,20 +279,16 @@ export default function SettingsPage({
             >
               {errorLogContent}
             </pre>
-            <button
-              className="btn btn-secondary"
-              style={{ marginTop: 8 }}
-              onClick={() => setShowErrorLog(false)}
-            >
+            <Button variant="secondary" size="sm" onClick={() => setShowErrorLog(false)}>
               {t('common.close')}
-            </button>
+            </Button>
           </div>
         )}
       </div>
 
       {/* MCP Integration (DOM control for AI agents / debug tools) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.mcpIntegration')}</div>
+        <h2 className="card-title">{t('settings.mcpIntegration')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.mcpIntegrationDesc')}
         </p>
@@ -275,13 +329,13 @@ export default function SettingsPage({
 
       {/* Replay onboarding */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title">{t('settings.onboarding')}</div>
+        <h2 className="card-title">{t('settings.onboarding')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.onboardingDesc')}
         </p>
-        <button className="btn btn-secondary" onClick={onReplayOnboarding}>
+        <Button variant="secondary" size="sm" onClick={onReplayOnboarding}>
           {t('settings.replayOnboarding')}
-        </button>
+        </Button>
       </div>
     </>
   );

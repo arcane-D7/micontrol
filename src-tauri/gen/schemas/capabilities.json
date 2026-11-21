@@ -1,16 +1,1 @@
-{
-  "default": {
-    "identifier": "default",
-    "description": "Default capabilities for MiControl",
-    "local": true,
-    "windows": ["main"],
-    "permissions": [
-      "core:default",
-      "updater:default",
-      "process:default",
-      "shell:default",
-      "mcp-bridge:default",
-      "mcp:default"
-    ]
-  }
-}
+{"default":{"identifier":"default","description":"Default capabilities for MiControl","local":true,"windows":["main"],"permissions":["core:default","updater:default","process:default","shell:default","mcp-bridge:default","mcp:default"]}}

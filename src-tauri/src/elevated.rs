@@ -14,17 +14,62 @@
 
 use crate::util::auth;
 use crate::util::panic::lock_or_recover;
+use crate::util::process_spawn;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+// ── Spawn timeouts (contract: UNIVERSAL-CONTRACTS.md sections 1 and 4) ──────
+//
+// Every child in this file waits through `process_spawn`, which enforces a
+// mandatory timeout and kills the whole tree on expiry. The budgets below are
+// sized on the real cost of each operation, never tuned to make failures
+// pass.
+
+/// Allowlisted PowerShell diagnostic/registry scripts. PowerShell cold start
+/// costs 1-3 s and the scripts are short registry/service reads; 30 s caps a
+/// wedged PowerShell without ever killing a legitimate run.
+const PS_SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `taskkill /IM <image> /T /F` after a failed graceful service stop. A force
+/// kill completes well under a second; 10 s is headroom, not a target.
+#[cfg(windows)]
+const TASKKILL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Service `install` subcommands (bridge / face svc): the known long
+/// operation in this file. Each removes the old SCM entry (its stop wait is
+/// bounded at 15 s), deletes and re-creates it. Under a slow SCM (this
+/// machine has already seen multi-minute resource stalls) a shorter budget
+/// would kill the child mid-reconfigure and leave a half-deleted service
+/// behind, hence 60 s rather than the 30 s default.
+#[cfg(windows)]
+const SVC_INSTALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Format a spawn failure for the legacy `Result<Value, String>` wire while
+/// registering a timeout against the catalog: a timed-out child must never
+/// leave the command pending in the ledger, so the timeout is logged with
+/// its stable catalog id (`spawn.timeout`) and returned as a plain error.
+fn spawn_error_string(context: &str, err: process_spawn::SpawnError) -> String {
+    match &err {
+        process_spawn::SpawnError::Timeout { program, elapsed } => {
+            let id = crate::errors::ErrorCode::SpawnTimeout.spec().id;
+            log::warn!(
+                "[elevated] {context}: {id} timeout after {elapsed:?} for {program} (tree killed)"
+            );
+            format!("{context}: {id} timeout after {elapsed:?} for {program} (tree killed)")
+        }
+        _ => format!("{context}: {err}"),
+    }
+}
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -330,6 +375,7 @@ fn is_allowed_wmi_read(fun2: u16, fun3: u16) -> bool {
         (fun2, fun3),
         (0x0800, 0x00) // current performance mode
             | (0x1000, 0x01) // battery health
+            | (0x1000, 0x02) // charging limit (firmware level code, FRD1)
             | (0x1000, 0x06) // adapter power
             | (0x0A00, 0x05) // mi usage type
             | (0x0A00, 0x07) // wmid type
@@ -349,7 +395,7 @@ fn is_allowed_wmi_write(fun2: u16, fun3: u16) -> bool {
             | (0x0800, 8) // set performance mode (SuperQuiet)
             | (0x0800, 9) // set performance mode (UltraPerformance)
             | (0x0800, 10) // set performance mode (Extreme)
-            | (0x1000, 0x02) // set brightness data
+            | (0x1000, 0x02) // set charging limit (firmware level code, not brightness)
             | (0x0C00, 0x06) // set sagv mode
             | (0x0C00, 0x04) // set pl1 flag
             | (0x0C00, 0x05) // set epof flag
@@ -392,10 +438,26 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 Ok(v) => v,
                 Err(e) => return make_err(format!("Bad enabled arg: {e}")),
             };
-            match crate::hw::charging::set_battery_care(enabled) {
-                Ok(()) => make_ok(Value::Null),
+            // Care and limit are one firmware field: enable at the user's
+            // requested level (registry), disable → 100%.
+            let limit = crate::hw::charging::get_requested_threshold();
+            match crate::hw::charging::set_battery_care(enabled, limit) {
+                Ok(r) => make_ok(serde_json::to_value(r).unwrap_or(Value::Null)),
                 Err(e) => make_err(e.to_string()),
             }
+        }
+
+        // Real firmware state (read + readback) for the battery UI. Runs in
+        // the elevated helper because the MICommonInterface instance query is
+        // denied to non-admin callers (0x80041003).
+        "get_battery_care" => match crate::hw::charging::get_battery_care() {
+            Ok(v) => make_ok(serde_json::json!(v)),
+            Err(e) => make_err(e.to_string()),
+        },
+
+        "get_charge_limit_state" => {
+            let state = crate::hw::charging::get_charge_limit_state();
+            make_ok(serde_json::to_value(state).unwrap_or(Value::Null))
         }
 
         "set_eye_protection" => {
@@ -447,49 +509,6 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
-        // S55 FIX 9: re-apply every enabled tweak at boot. This used to run
-        // in the app process as the plain user — every HKLM write failed with
-        // ERROR_ACCESS_DENIED (a full WARN line per tweak per boot). The
-        // elevated context has the rights the tweaks need.
-        //
-        // S55 FIX 14: run fire-and-forget. restore_all() takes MINUTES (each
-        // appx group runs PowerShell; services run sc stop per service) and
-        // it used to run inline — holding this pipe connection busy while the
-        // app's pollers (battery/thermal/fan, all elevated) queued behind the
-        // same bridge: the UI showed "data stuck for minutes" after every
-        // boot. Spawning a thread returns the pipe immediately.
-        "restore_sys_opt_all" => {
-            static RESTORE_RUNNING: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if RESTORE_RUNNING
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                // S55 FIX 17: catch panics. A panic inside restore_all (Appx
-                // removal, PowerShell helpers, registry guards) previously
-                // unwound into the pipe-server thread and took the WHOLE
-                // SYSTEM service down, producing an endless crash/restart
-                // loop while the app kept re-dispatching. Now the panic is
-                // contained: the service survives, the flag resets, and the
-                // failure is reported on the next attempt.
-                std::thread::spawn(|| {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        crate::hw::sys_opt::restore_all();
-                    }));
-                    if result.is_err() {
-                        eprintln!("[sys_opt] restore_all PANICKED — service kept alive");
-                    }
-                    RESTORE_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
-                });
-            }
-            make_ok(Value::Null)
-        }
-
         "set_function_key" => {
             let mode: crate::hw::fn_key::FnKeyMode =
                 match serde_json::from_value(cmd.args["mode"].clone()) {
@@ -502,50 +521,50 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
-        "set_mic_noise_canceling" => {
-            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
-                Ok(v) => v,
-                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
-            };
-            match crate::hw::audio_effects::set_mic_noise_canceling(enabled) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
-        "set_speaker_noise_canceling" => {
-            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
-                Ok(v) => v,
-                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
-            };
-            match crate::hw::audio_effects::set_speaker_noise_canceling(enabled) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
-        "set_voice_focus" => {
-            let enabled: bool = match serde_json::from_value(cmd.args["enabled"].clone()) {
-                Ok(v) => v,
-                Err(e) => return make_err(format!("Bad enabled arg: {e}")),
-            };
-            match crate::hw::audio_effects::set_voice_focus(enabled) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
-        "clean_junk_files" => {
+        "clean_system_junk" => {
+            // Audit F2.1: ONLY the machine-wide categories may be cleaned from
+            // this process — it runs as LocalSystem, where TEMP/LOCALAPPDATA
+            // resolve to the service profile instead of the user's. The
+            // function itself refuses user-owned categories, so a bad/injected
+            // payload cannot turn this into a SYSTEM-profile cleanup.
             let categories: Vec<crate::hw::cleanup::CleanupCategory> =
                 match serde_json::from_value(cmd.args["categories"].clone()) {
                     Ok(v) => v,
                     Err(e) => return make_err(format!("Bad categories arg: {e}")),
                 };
-            match crate::hw::cleanup::clean_junk_files(categories) {
+            match crate::hw::cleanup::clean_system_junk(categories) {
                 Ok(results) => make_ok(serde_json::to_value(results).unwrap_or(Value::Null)),
                 Err(e) => make_err(e.to_string()),
             }
         }
+
+        // Event Log archival — the machine-wide `Application` channel has been
+        // at 100 % since 2026-10-22 and is dropping events. `wevtutil epl`
+        // (export) and `wevtutil cl` (clear) both need an administrator token:
+        // the channel ACL grants clear (0x4) only to BA / SY / SO. This
+        // dispatcher has it on both paths — `MiControlBridge` runs as
+        // LocalSystem (`sc qc` → SERVICE_START_NAME: LocalSystem) and
+        // `MiControlElevated` runs the interactive token at HighestAvailable
+        // (`schtasks /query /v` → Run As User: <user>, Logon Mode:
+        // Interactive only). The task path is therefore elevated-but-not-
+        // SYSTEM, so the implementation resolves paths from %PROGRAMDATA%
+        // only — never the caller's profile.
+        //
+        // Protections:
+        //   * the channel is a compile-time constant (`Application`) and this
+        //     arm reads NO args, so a forged payload cannot retarget the
+        //     export/clear at Security or System;
+        //   * at most one archival per hour per machine (latch at
+        //     %PROGRAMDATA%\MiControl\logs\.archive_latch) — a second call
+        //     returns an explicit `too soon` error instead of re-exporting;
+        //   * the archive keeps only the newest 5 `.evtx` files;
+        //   * returns { archived_to, cleared, size_bytes } (+ clear_error /
+        //     pruned when relevant); a failed export errors out and leaves no
+        //     latch, so the operator can retry immediately.
+        "archive_event_log" => match crate::hw::event_log::archive_event_log() {
+            Ok(outcome) => make_ok(serde_json::to_value(outcome).unwrap_or(Value::Null)),
+            Err(e) => make_err(e.to_string()),
+        },
 
         "set_brightness" => {
             let level: u8 = match serde_json::from_value(cmd.args["level"].clone()) {
@@ -604,7 +623,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 Err(e) => return make_err(format!("Bad speed_percent arg: {e}")),
             };
             match crate::hw::fan::set_fan_mode(mode, speed_percent) {
-                Ok(()) => make_ok(Value::Null),
+                Ok(result) => make_ok(serde_json::to_value(result).unwrap_or(Value::Null)),
                 Err(e) => make_err(e.to_string()),
             }
         }
@@ -911,20 +930,12 @@ fn dispatch(cmd: ElevCmd) -> Value {
             if !ALLOWED_DIAG_SCRIPTS.contains(&script) {
                 return make_err("diag_ps rejected: script is not in the allowlist".to_string());
             }
+            // Bounded wait (PS_SPAWN_TIMEOUT): the old unbounded wait could
+            // hang the elevated helper forever on a wedged PowerShell.
             let output = {
-                #[cfg(windows)]
-                {
-                    std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output()
-                }
-                #[cfg(not(windows))]
-                {
-                    std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                        .output()
-                }
+                let mut c = std::process::Command::new("powershell");
+                c.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+                process_spawn::run_capture(&mut c, PS_SPAWN_TIMEOUT)
             };
             match output {
                 Ok(out) => {
@@ -936,7 +947,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
                         "exit_code": out.status.code().unwrap_or(-1),
                     }))
                 }
-                Err(e) => make_err(format!("Failed to run PowerShell: {e}")),
+                Err(e) => make_err(spawn_error_string("Failed to run PowerShell", e)),
             }
         }
 
@@ -1002,22 +1013,13 @@ fn dispatch(cmd: ElevCmd) -> Value {
                             }
                         }
                     "#;
-                    let output = {
-                        #[cfg(windows)]
-                        {
-                            std::process::Command::new("powershell")
-                                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                                .creation_flags(CREATE_NO_WINDOW)
-                                .output()
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            std::process::Command::new("powershell")
-                                .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                                .output()
-                        }
-                    };
-                    return match output {
+                    // Bounded wait (PS_SPAWN_TIMEOUT): the removal script is
+                    // a single registry write; a wedged PowerShell is killed
+                    // and the failure reported instead of hanging the helper.
+                    let mut ps = std::process::Command::new("powershell");
+                    ps.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+                    let out = process_spawn::run_capture(&mut ps, PS_SPAWN_TIMEOUT);
+                    return match out {
                         Ok(out) => {
                             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -1027,7 +1029,7 @@ fn dispatch(cmd: ElevCmd) -> Value {
                                 "exit_code": out.status.code().unwrap_or(-1),
                             }))
                         }
-                        Err(e) => make_err(format!("Failed to remove Scancode Map: {e}")),
+                        Err(e) => make_err(spawn_error_string("Failed to remove Scancode Map", e)),
                     };
                 }
 
@@ -1236,44 +1238,36 @@ fn dispatch(cmd: ElevCmd) -> Value {
                 "#
                 );
 
-                let output = {
-                    #[cfg(windows)]
-                    {
-                        std::process::Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .output()
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        std::process::Command::new("powershell")
-                            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                            .output()
+                // Bounded wait (PS_SPAWN_TIMEOUT): a wedged PowerShell must
+                // never park the elevated helper; the timeout is surfaced
+                // through spawn_error_string and reported to the caller.
+                let mut ps = std::process::Command::new("powershell");
+                ps.args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()]);
+                let out = process_spawn::run_capture(&mut ps, PS_SPAWN_TIMEOUT);
+                let out = match out {
+                    Ok(o) => o,
+                    Err(e) => {
+                        return make_err(spawn_error_string("Failed to set Copilot policies", e))
                     }
                 };
 
-                match output {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                        let exit_code = out.status.code().unwrap_or(-1);
-                        log::info!(
-                            "[elevated] disable_copilot_key: exit={}, stdout={}",
-                            exit_code,
-                            stdout
-                        );
-                        if !stderr.is_empty() {
-                            log::warn!("[elevated] disable_copilot_key stderr: {}", stderr);
-                        }
-                        make_ok(serde_json::json!({
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "exit_code": exit_code,
-                            "enabled": enabled,
-                        }))
-                    }
-                    Err(e) => make_err(format!("Failed to set Copilot policies: {e}")),
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let exit_code = out.status.code().unwrap_or(-1);
+                log::info!(
+                    "[elevated] disable_copilot_key: exit={}, stdout={}",
+                    exit_code,
+                    stdout
+                );
+                if !stderr.is_empty() {
+                    log::warn!("[elevated] disable_copilot_key stderr: {}", stderr);
                 }
+                make_ok(serde_json::json!({
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": exit_code,
+                    "enabled": enabled,
+                }))
             }
             #[cfg(not(windows))]
             make_err("Copilot key policies only available on Windows".to_string())
@@ -1582,8 +1576,8 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
-        "wmi_ec_read_adapter_power" => match crate::hw::wmi_ec::read_adapter_power() {
-            Ok(val) => make_ok(serde_json::json!(val)),
+        "wmi_ec_read_adapter_power" => match crate::hw::wmi_ec::read_adapter_power_status() {
+            Ok(reading) => make_ok(serde_json::to_value(reading).unwrap_or(Value::Null)),
             Err(e) => make_err(e.to_string()),
         },
 
@@ -1592,14 +1586,11 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
-        "wmi_ec_set_brightness_data" => {
-            let level = cmd.args["level"].as_u64().unwrap_or(0) as u32;
-            match crate::hw::wmi_ec::set_brightness_data(level) {
-                Ok(()) => make_ok(Value::Null),
-                Err(e) => make_err(e.to_string()),
-            }
-        }
-
+        // `wmi_ec_set_brightness_data` was REMOVED: the pair it wrote
+        // (WMAA 0x1000/0x02, FUN4=level) is the charging-protection setter,
+        // not display brightness (see hw::charging and ssdt24.dsl WMAA).
+        // Writing a brightness level there silently rewrote the battery limit
+        // (FUN4=1 → 80%, 5 → 70%, 6 → 60%, 7 → 50%, 8 → 40%, 0 → no limit).
         "wmi_ec_set_sagv_mode" => {
             let mode = cmd.args["mode"].as_u64().unwrap_or(0) as u32;
             match crate::hw::wmi_ec::set_sagv_mode(mode) {
@@ -1819,6 +1810,16 @@ fn dispatch(cmd: ElevCmd) -> Value {
             Err(e) => make_err(e.to_string()),
         },
 
+        // Startup manager: flip one machine-wide `StartupApproved` blob or one
+        // scheduled task. The payload is enum-only (`kind`, `hive`, `key`) plus
+        // a bounded value/task path; `startup_manager::validate_toggle_args`
+        // rejects everything else, so this arm cannot be turned into an
+        // arbitrary registry-write primitive by a compromised webview.
+        "startup_toggle" => match crate::hw::startup_manager::apply_elevated_toggle(&cmd.args) {
+            Ok(()) => make_ok(Value::Null),
+            Err(e) => make_err(e),
+        },
+
         // S42-020: Install + start the MiControlFace auth service (LocalSystem).
         // Called from the Face Unlock tab when `service_installed` is false.
         // Uses the bundled micontrol_face_svc.exe `install` command. Runs via
@@ -1875,6 +1876,27 @@ fn dispatch(cmd: ElevCmd) -> Value {
             make_ok(serde_json::json!({ "configured": configured, "unknown": false }))
         }
 
+        // ICC catalogue install: copy a validated profile from the fixed
+        // staging directory (`%PROGRAMDATA%\MiControl\icc\downloads`) into
+        // `%SystemRoot%\System32\spool\drivers\color`.
+        //
+        // The file name is matched against the *bundled catalogue* — not merely
+        // sanitised — so a compromised webview cannot install an arbitrary ICC
+        // profile by dropping one into staging. The bytes are re-validated and
+        // the pinned sha256 re-checked here, and the result is verified by
+        // reading the destination back. Installation is separate from applying:
+        // the unelevated app associates it with the display afterwards.
+        "install_icc_profile" => {
+            let file_name = cmd.args["file_name"].as_str().unwrap_or_default();
+            if file_name.is_empty() {
+                return make_err("install_icc_profile: missing file_name".to_string());
+            }
+            match crate::hw::icc_catalog::install_staged_profile(file_name) {
+                Ok(result) => make_ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+                Err(e) => make_err(e),
+            }
+        }
+
         unknown => make_err(format!("Unknown elevated command: {unknown}")),
     }
 }
@@ -1902,7 +1924,6 @@ pub fn dispatch_cmd(cmd: &str, args: Value) -> Value {
 /// Returns a status object describing the outcome.
 #[cfg(windows)]
 fn install_bridge_service() -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
     use std::process::Command;
 
     // ── S68 (bridge hot-upgrade): a NEWER bridge in %LOCALAPPDATA% wins ────
@@ -1945,43 +1966,36 @@ fn install_bridge_service() -> Result<Value, String> {
                     "install_bridge_service: newer bridge in LOCALAPPDATA — hot-upgrading ({:?} > {:?})",
                     cand, inst
                 );
-                // Stop (best-effort; a stopped service is fine too).
-                let _ = Command::new("sc.exe")
-                    .args(["stop", "MiControlBridge"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
-                // Wait for STOPPED (bounded) so the file is not locked.
-                let mut stopped = false;
-                for _ in 0..30 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let q = Command::new("sc.exe")
-                        .args(["query", "MiControlBridge"])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output();
-                    if let Ok(q) = q {
-                        let text = String::from_utf8_lossy(&q.stdout).to_string();
-                        if !text.contains("RUNNING") && !text.contains("STOP_PENDING") {
-                            stopped = true;
-                            break;
-                        }
-                    }
-                }
+                // Stop (best-effort; a stopped service is fine too), then
+                // wait for STOPPED (bounded, 15 s) so the file is not locked
+                // — the exact loop the old `sc stop` + 30 x `sc query` poll
+                // performed.
+                let _ = crate::util::win_service::stop_request("MiControlBridge");
+                let stopped = crate::util::win_service::wait_for_state(
+                    "MiControlBridge",
+                    crate::util::win_service::ServiceState::Stopped,
+                    std::time::Duration::from_millis(15_000),
+                )
+                .is_ok();
                 if !stopped {
-                    // Not stopped (locked): kill the process so the copy can proceed.
-                    let _ = Command::new("taskkill.exe")
-                        .args(["/IM", "micontrol_bridge.exe", "/T", "/F"])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output();
+                    // Not stopped (locked): kill the process so the copy can
+                    // proceed. Best-effort as before, but the wait is now
+                    // bounded (TASKKILL_TIMEOUT) and a spawn failure,
+                    // timeout included, is logged instead of swallowed.
+                    let mut kill = Command::new("taskkill.exe");
+                    kill.args(["/IM", "micontrol_bridge.exe", "/T", "/F"]);
+                    if let Err(e) = process_spawn::run_capture(&mut kill, TASKKILL_TIMEOUT) {
+                        log::warn!(
+                            "install_bridge_service: taskkill micontrol_bridge.exe failed: {e}"
+                        );
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
                 match std::fs::copy(cand, inst) {
                     Ok(_) => {
                         log::info!("install_bridge_service: hot-upgrade copy OK");
                         // Start (or let `install` below do a full re-create).
-                        let _ = Command::new("sc.exe")
-                            .args(["start", "MiControlBridge"])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .output();
+                        let _ = crate::util::win_service::start("MiControlBridge");
                         let out = "bridge hot-upgraded from LOCALAPPDATA (newer binary)";
                         return Ok(json!({
                             "service_installed": true,
@@ -2000,8 +2014,10 @@ fn install_bridge_service() -> Result<Value, String> {
 
     // S55 FIX 25: if the bridge service is ALREADY installed and running, do
     // nothing. This command can arrive through the pipe itself (the app's
-    // thermal poller calls ensure_bridge_service whenever a transient
-    // ERROR_PIPE_BUSY makes `is_bridge_service_available` return false).
+    // health supervisor calls ensure_bridge_service when the pipe looks dead —
+    // including the C-01 case of a RUNNING service with a wedged accept loop,
+    // which is also why the client-side decision no longer treats the pipe as
+    // proof of absence: see elev_bridge::decide_bridge_action).
     // Without this guard the running service would run `micontrol_bridge.exe
     // install`, whose first step is remove_service_wait — stopping and
     // DELETING the very service executing it. The pipe dies mid-request, the
@@ -2081,11 +2097,14 @@ fn install_bridge_service() -> Result<Value, String> {
     // at a stable path.
     let install_exe = find_deployed_bridge_exe().unwrap_or(bridge_exe);
 
-    let output = Command::new(&install_exe)
-        .arg("install")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run micontrol_bridge install: {e}"))?;
+    let mut install = Command::new(&install_exe);
+    install.arg("install");
+    // Known long operation (SVC_INSTALL_TIMEOUT): `install` stops and deletes
+    // the old SCM entry (stop wait bounded at 15 s) before re-creating it; on
+    // expiry the child tree dies and the timeout reaches the ledger with its
+    // catalog id instead of leaving the command pending forever.
+    let output = process_spawn::run_capture(&mut install, SVC_INSTALL_TIMEOUT)
+        .map_err(|e| spawn_error_string("Failed to run micontrol_bridge install", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2176,12 +2195,29 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
         // the shell only re-applies install points (see bootstrap.rs docs).
         // The response includes `bootstrapped: true` and `sig_verified` so
         // the app UI can report the migration outcome to the user.
-        let boot_result = if !shell.is_file() {
+        //
+        // VAGA F4 (audit 2026-11-08 §8.1): the previous gate was
+        // `!shell.is_file()`, and a **0-byte** `setup\micontrol_setup.exe`
+        // deployed by a bad bundle resource IS a file — so the bootstrap was
+        // skipped, the 0-byte exe was spawned, and the update died with an
+        // opaque "Failed to launch setup shell" (ERROR_BAD_EXE_FORMAT) after
+        // the app had already begun shutting down. Validate the real size
+        // window instead, and if the shell cannot be restored, fail HERE,
+        // before spawning anything: the payload is never handed to a shell
+        // that cannot run and the installed app is left untouched.
+        let boot_result = if crate::bootstrap::is_valid_shell(&shell) {
+            None
+        } else {
+            log::warn!(
+                "[install_update] setup shell unusable ({}); attempting bootstrap",
+                crate::bootstrap::shell_problem(&shell)
+            );
             let result = crate::bootstrap::ensure_shell(&app_dir, None).map_err(|e| {
                 format!(
-                    "Bootstrap of the setup shell failed ({e}). \
-                     Legacy installation cannot apply the payload update. \
-                     Reinstall MiControl manually to deploy the decoupled installer."
+                    "Setup shell unusable: {}. The automatic re-download also failed ({e}). \
+                     The payload update was NOT started — MiControl is unchanged and still running. \
+                     Reinstall MiControl (NSIS installer) to restore the decoupled updater.",
+                    crate::bootstrap::shell_problem(&shell)
                 )
             })?;
             log::info!(
@@ -2191,9 +2227,26 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
                 result.sig_verified,
             );
             Some(result)
-        } else {
-            None
         };
+
+        // Hard gate: never spawn a shell that is still not a real binary.
+        if !crate::bootstrap::is_valid_shell(&shell) {
+            return Err(format!(
+                "Setup shell is still unusable after bootstrap: {}. \
+                 The payload update was NOT started — MiControl is unchanged.",
+                crate::bootstrap::shell_problem(&shell)
+            ));
+        }
+
+        // ── VAGA F4: Windows Firewall rules (best effort) ──────────────────
+        // The bridge runs as SYSTEM, so netsh needs no further elevation.
+        // This only suppresses the "Allow MiControl to communicate on these
+        // networks" dialog (allow on private/domain, block on public); a
+        // failure must NEVER block an update — the app still works, it may
+        // just prompt again.
+        if let Err(e) = crate::util::firewall::apply(&app_dir) {
+            log::warn!("[install_update] firewall rules not applied: {e}");
+        }
 
         let child = {
             // S65-004: hand the shell the version it should expect from the
@@ -2239,7 +2292,8 @@ fn install_update(installer: Option<Value>, paths: Option<Value>) -> Result<Valu
     //       upgrade (creates no new desktop icon, keeps autostart).
     // /R   relaunch the app (as the interactive user) after install.
     //
-    // NOTE: we must NOT `.wait()` or `.output()` here. The installer's own
+    // NOTE: we must NOT wait for the installer here, and we must not capture
+    // its output. The installer's own
     // KillAppProcess / KillBridgeProcess sections terminate this elevated
     // helper (the bridge service) and the running MiControl process while the
     // setup runs. Waiting would kill our own reply before the app UI sees it.
@@ -2280,7 +2334,6 @@ fn install_update(_installer: Option<Value>, _paths: Option<Value>) -> Result<Va
 /// before registering the SCM service so the record points at a stable path.
 #[cfg(windows)]
 fn install_face_service() -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
     use std::process::Command;
 
     let svc_exe = find_face_svc_exe().ok_or_else(|| {
@@ -2311,11 +2364,13 @@ fn install_face_service() -> Result<Value, String> {
 
     let install_exe = find_deployed_face_svc_exe().unwrap_or(svc_exe);
 
-    let output = Command::new(&install_exe)
-        .arg("install")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to run micontrol_face_svc install: {e}"))?;
+    let mut install = Command::new(&install_exe);
+    install.arg("install");
+    // Known long operation (SVC_INSTALL_TIMEOUT), same reasoning as the
+    // bridge install: SCM stop/delete/create with bounded internal waits; on
+    // expiry the child dies and the timeout is reported, never left pending.
+    let output = process_spawn::run_capture(&mut install, SVC_INSTALL_TIMEOUT)
+        .map_err(|e| spawn_error_string("Failed to run micontrol_face_svc install", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -2348,24 +2403,25 @@ fn install_face_service() -> Result<Value, String> {
 ///   3. Return a status object (service_installed / running / action taken).
 #[cfg(windows)]
 fn ensure_face_service() -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use crate::util::win_service::{self, ServiceState};
 
-    // ── 1. Query SCM state via `sc query` (robust parsing, no win32 structs).
-    let query = Command::new("sc.exe")
-        .args(["query", "MiControlFace"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("sc query MiControlFace failed: {e}"))?;
-    let query_text = String::from_utf8_lossy(&query.stdout).to_string();
-    let state = query_text
-        .lines()
-        .find(|l| l.contains("STATE"))
-        .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // Label for the status JSON / reinstall path, from the SCM's own answer.
+    let state_label = |state: ServiceState| match state {
+        ServiceState::Running => "RUNNING",
+        ServiceState::Stopped => "STOPPED",
+        ServiceState::Pending => "PENDING",
+        ServiceState::Paused => "PAUSED",
+        ServiceState::Absent => "ABSENT",
+        ServiceState::Unknown => "UNKNOWN",
+    };
 
-    if query_text.contains("does not exist") || query_text.contains("service has not been started")
-    {
+    // ── 1. Query the SCM directly (QueryServiceStatusEx + QueryServiceConfigW;
+    // no more text parsing).
+    let info = win_service::query("MiControlFace")
+        .map_err(|e| format!("query MiControlFace failed: {e}"))?;
+    let state = state_label(info.state).to_string();
+
+    if info.state == ServiceState::Absent {
         // ── S66-003: the SCM entry vanished (observed 2026-10-23 16:48:
         // stop → start → stop, then 1060 forever) while the deployed binary
         // is still in Program Files. The old behavior returned `not_installed`
@@ -2377,45 +2433,34 @@ fn ensure_face_service() -> Result<Value, String> {
         return ensure_face_service_reinstall(&state);
     }
 
-    let running = state.contains("RUNNING");
-    let stopped = state.contains("STOPPED");
-    let start_pending = state.contains("START_PENDING");
+    let running = info.state == ServiceState::Running;
+    let stopped = info.state == ServiceState::Stopped;
+    // Pending covers START_PENDING (start attempt settles it) and the rare
+    // STOP_PENDING window (the attempt fails benignly and is reported as
+    // start_failed; the next supervisor cycle starts the service).
+    let start_pending = info.state == ServiceState::Pending;
 
-    // ── 2. Configure failure actions (idempotent; `sc failure` overwrites).
-    let failure = Command::new("sc.exe")
-        .args([
-            "failure",
-            "MiControlFace",
-            "reset=",
-            "86400",
-            "actions=",
-            "restart/5000/restart/10000/restart/30000",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("sc failure MiControlFace failed: {e}"))?;
-    let failure_ok = failure.status.success();
-    if !failure_ok {
-        log::warn!(
-            "[ensure_face_service] sc failure action failed: {}",
-            String::from_utf8_lossy(&failure.stderr).trim()
-        );
-    }
+    // ── 2. Configure failure actions (idempotent; replaces the whole list —
+    // the old `sc failure reset= 86400 actions= restart/5000/...`).
+    let actions = [
+        win_service::FailureAction::restart(5000),
+        win_service::FailureAction::restart(10000),
+        win_service::FailureAction::restart(30000),
+    ];
+    let failure_ok = match win_service::set_failure_actions("MiControlFace", &actions, 86400) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("[ensure_face_service] failure actions could not be set: {e}");
+            false
+        }
+    };
 
     // ── 3. Start if stopped (or pending — let it settle, report as started).
     let mut action = "already_running".to_string();
     if stopped || start_pending {
-        let start = Command::new("sc.exe")
-            .args(["start", "MiControlFace"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("sc start MiControlFace failed: {e}"))?;
-        let start_text = String::from_utf8_lossy(&start.stdout).to_string();
-        // 1056 = ERROR_SERVICE_ALREADY_RUNNING (benign), 1058 = DISABLED.
-        let started = start.status.success()
-            || start_text.contains("1056")
-            || start_text.contains("ALREADY_RUNNING");
-        action = if started {
+        // 1056 = ERROR_SERVICE_ALREADY_RUNNING (benign), tolerated inside
+        // start(); 1058 = DISABLED surfaces as a real failure.
+        action = if win_service::start("MiControlFace").is_ok() {
             "started".to_string()
         } else {
             "start_failed".to_string()
@@ -2443,7 +2488,6 @@ fn ensure_face_service() -> Result<Value, String> {
 /// 120×/hour).
 #[cfg(windows)]
 fn ensure_face_service_reinstall(state: &str) -> Result<Value, String> {
-    use std::os::windows::process::CommandExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2482,11 +2526,17 @@ fn ensure_face_service_reinstall(state: &str) -> Result<Value, String> {
         "[ensure_face_service] S66-003: SCM entry missing but binary present ({}) — reinstalling",
         svc_exe.display()
     );
-    let output = std::process::Command::new(&svc_exe)
-        .arg("install")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("reinstall: failed to run {}: {e}", svc_exe.display()))?;
+    let mut reinstall = std::process::Command::new(&svc_exe);
+    reinstall.arg("install");
+    // Known long operation (SVC_INSTALL_TIMEOUT), same SCM stop/delete/create
+    // shape as the other service installs; a timeout kills the child and is
+    // reported with the catalog id.
+    let output = process_spawn::run_capture(&mut reinstall, SVC_INSTALL_TIMEOUT).map_err(|e| {
+        spawn_error_string(
+            &format!("reinstall: failed to run {}", svc_exe.display()),
+            e,
+        )
+    })?;
 
     let exit_ok = output.status.success();
     let out_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -3185,5 +3235,103 @@ mod install_update_name_tests {
             payload_version_from_name("MiControl_0.2.20_x64-setup.exe"),
             None
         );
+    }
+}
+
+// ── C2a: bounded spawn tests ─────────────────────────────────────────────────
+//
+// The migrated call sites wait exclusively through `process_spawn`, whose
+// timeout kills the whole child tree. These tests pin that contract in the
+// exact shape the elevated helper depends on: a sleeping child answers
+// SpawnError::Timeout and is really dead, the timeout reaches the caller
+// tagged with its catalog id, and no direct child-wait calls remain in this
+// file.
+
+#[cfg(all(test, windows))]
+mod spawn_timeout_tests {
+    use super::spawn_error_string;
+    use crate::util::process_spawn::{self, SpawnError};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// A child that sleeps past its budget answers SpawnError::Timeout and
+    /// the whole tree is dead: no ping.exe may survive the timed-out wait.
+    #[test]
+    fn elevated_timeout_kills_sleeping_child() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let start = Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, Duration::from_millis(500))
+            .expect_err("a sleeping child must hit the timeout");
+        assert!(
+            matches!(err, SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill took too long: {:?}",
+            start.elapsed()
+        );
+
+        // The child (and its tree) must be gone, not orphaned behind the
+        // timed-out wait.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        let text = out.stdout_str();
+        assert!(
+            !text.contains("ping.exe"),
+            "ping.exe still alive after timeout kill: {text}"
+        );
+    }
+
+    /// A timeout maps onto the catalog (`spawn.timeout`) and names the
+    /// program, so the ledger entry records why the command died; other
+    /// spawn failures keep the plain legacy wording.
+    #[test]
+    fn elevated_timeout_maps_to_catalog_code() {
+        let msg = spawn_error_string(
+            "Failed to run micontrol_bridge install",
+            SpawnError::Timeout {
+                program: "micontrol_bridge.exe".to_string(),
+                elapsed: Duration::from_secs(60),
+            },
+        );
+        let id = crate::errors::ErrorCode::SpawnTimeout.spec().id;
+        assert!(msg.contains(id), "catalog id missing: {msg}");
+        assert!(
+            msg.contains("micontrol_bridge.exe"),
+            "program missing: {msg}"
+        );
+
+        let io = spawn_error_string(
+            "Failed to run PowerShell",
+            SpawnError::Io(std::io::Error::other("boom")),
+        );
+        assert!(!io.contains(id), "non-timeout must not carry the id: {io}");
+        assert!(io.contains("boom"));
+    }
+
+    /// The migrated sites must spawn exclusively through process_spawn: no
+    /// direct child-wait calls remain anywhere in this file (the static
+    /// spawn-timeout gate holds the same invariant at build time).
+    #[test]
+    fn elevated_sites_use_no_direct_child_waits() {
+        let src = include_str!("elevated.rs");
+        // Assembled from parts so this test's own source text cannot match
+        // the tokens it forbids.
+        let direct_waits = [
+            format!(".{}{}{}", "out", "put", "()"),
+            format!(".{}{}{}", "sta", "tus", "()"),
+            format!(".{}{}", "wait", "()"),
+        ];
+        for token in &direct_waits {
+            assert!(
+                !src.contains(token.as_str()),
+                "direct child wait present: {token}"
+            );
+        }
     }
 }

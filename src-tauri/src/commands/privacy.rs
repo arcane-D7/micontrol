@@ -9,6 +9,8 @@ use tauri::{AppHandle, Manager};
 use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
+use crate::util::process_spawn::{self, SpawnPolicy};
+
 /// Files that contain user data and should be included in the GDPR export.
 ///
 /// S29-003: Added `ai_usage.json` — contains total_requests, token counts,
@@ -171,9 +173,11 @@ pub async fn reveal_in_explorer(app: AppHandle, path: String) -> Result<(), Stri
     #[cfg(windows)]
     {
         // S27-002: Pass canonical path to explorer.exe to prevent TOCTOU.
-        std::process::Command::new("explorer.exe")
-            .args(["/select,", &canonical.to_string_lossy()])
-            .spawn()
+        // B7: spawn through the windowless helper; Quiet never affects the
+        // Explorer window itself, only any child console.
+        let mut cmd = std::process::Command::new("explorer.exe");
+        cmd.args(["/select,", &canonical.to_string_lossy()]);
+        process_spawn::spawn_detached(&mut cmd, SpawnPolicy::Quiet)
             .map_err(|e| format!("Cannot open explorer: {e}"))?;
     }
 
@@ -211,17 +215,17 @@ pub async fn open_external_url(_app: AppHandle, url: String) -> Result<(), Strin
 
     #[cfg(windows)]
     {
-        std::process::Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", &url])
-            .spawn()
+        let mut cmd = std::process::Command::new("rundll32.exe");
+        cmd.args(["url.dll,FileProtocolHandler", &url]);
+        process_spawn::spawn_detached(&mut cmd, SpawnPolicy::Quiet)
             .map_err(|e| format!("Cannot open browser: {e}"))?;
     }
     #[cfg(not(windows))]
     {
         let _ = app;
-        std::process::Command::new("xdg-open")
-            .arg(&url)
-            .spawn()
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(&url);
+        process_spawn::spawn_detached(&mut cmd, SpawnPolicy::Quiet)
             .map_err(|e| format!("Cannot open browser: {e}"))?;
     }
 

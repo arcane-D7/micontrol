@@ -139,26 +139,25 @@ async fn bounded_recovery<T>(
 }
 
 async fn check_bridge() {
-    let available = crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
-        Ok(crate::elev_bridge::is_bridge_service_available())
-    })
-    .await
-    .unwrap_or(false);
+    let health = probe_bridge_health().await;
     let at = now_ms();
     // S51: keep the elev_bridge circuit breaker in sync — when the bridge
-    // service comes back (or goes away) the breaker must know.
-    if available {
+    // service comes back (or goes away) the breaker must know. Note that a
+    // RUNNING service with a wedged pipe still counts as "infrastructure
+    // present": the scheduled-task path may work, and P1 must not treat the
+    // busy pipe as proof that the service is missing.
+    if health.service_running() {
         crate::elev_bridge::note_elevated_recovery();
     }
     let should_recover = state()
         .lock()
         .map(|mut snapshot| {
             begin_check(&mut snapshot.bridge, at);
-            if available {
+            if health.is_healthy() {
                 mark_healthy(&mut snapshot.bridge, at);
                 false
             } else {
-                mark_failure(&mut snapshot.bridge, at, "bridge pipe unavailable".into())
+                mark_failure(&mut snapshot.bridge, at, health.describe().to_string())
             }
         })
         .unwrap_or(false);
@@ -169,8 +168,18 @@ async fn check_bridge() {
         }
         match bounded_recovery(crate::elev_bridge::ensure_bridge_service(), "bridge").await {
             Ok(_) => {
+                // Re-probe before declaring recovery: `ensure_bridge_service`
+                // answering "already_running" (P1, SCM-based) says nothing about
+                // the data path — C-01 leaves a RUNNING service with a dead pipe,
+                // and marking it healthy here would hide that forever.
+                let after = probe_bridge_health().await;
                 if let Ok(mut snapshot) = state().lock() {
-                    mark_healthy(&mut snapshot.bridge, now_ms());
+                    if after.is_healthy() {
+                        mark_healthy(&mut snapshot.bridge, now_ms());
+                    } else {
+                        snapshot.bridge.state = HealthState::Degraded;
+                        snapshot.bridge.last_error = Some(after.describe().to_string());
+                    }
                 }
             }
             Err(error) => {
@@ -181,6 +190,18 @@ async fn check_bridge() {
             }
         }
     }
+}
+
+/// Probe the bridge (SCM + pipe) off the async runtime.
+///
+/// `bridge_health()` performs two blocking Win32 calls (SCM query + a
+/// `CreateFileW` on the pipe), so it must not run on a runtime worker.
+async fn probe_bridge_health() -> crate::elev_bridge::BridgeHealth {
+    crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
+        Ok(crate::elev_bridge::bridge_health())
+    })
+    .await
+    .unwrap_or(crate::elev_bridge::BridgeHealth::ServiceUnknown)
 }
 
 async fn check_iot() {
@@ -309,7 +330,7 @@ async fn check_ambient_sensor() {
     }
 
     if !healthy {
-        crate::hw::display::request_sensor_reset();
+        crate::hw::display::request_sensor_reset("ambient sensor degraded");
     }
 }
 

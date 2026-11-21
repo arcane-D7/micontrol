@@ -13,7 +13,7 @@ strip = true
 
 [package]
 name = "micontrol"
-version = "0.2.20"
+version = "0.2.22"
 edition = "2021"
 default-run = "micontrol"
 
@@ -113,7 +113,9 @@ windows = { version = "0.58", features = [
   "Win32_System_Com_StructuredStorage",
   "Win32_Devices_PortableDevices",
   "Win32_System_Services",
+  "Win32_System_TaskScheduler",
   "Win32_System_Threading",
+  "Win32_System_JobObjects",
   "Win32_System_ProcessStatus",
   "Win32_System_Pipes",
   "Win32_Security",

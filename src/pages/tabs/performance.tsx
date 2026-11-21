@@ -4,44 +4,37 @@ import { t } from '../../hooks/useI18n';
 import { PageHeader } from './PageHeader';
 import PerformanceMonitor from '../../components/PerformanceMonitor';
 import PerformanceModeSelector from '../../components/PerformanceModeSelector';
+import EcModeReadout from '../../components/EcModeReadout';
 import FunctionExplain from '../../components/FunctionExplain';
 import { useToast } from '../../contexts/ToastContext';
+import {
+  OsTurboMeasuredBlock,
+  osTurboCounts,
+  type OsTurboMeasuredData,
+} from '../../components/OsTurboMeasured';
 import type { Hardware, AiSettings, PerfDebugInfo } from './shared';
+import type { PowerProfilesController } from '../../hooks/usePowerProfiles';
+import { Icon } from '../../components/ui/icons';
 
 interface Props {
   hw: Hardware;
   ai: AiSettings;
+  /**
+   * Power-profiles controller owned by the app shell (`MainWindow`).
+   *
+   * The AC/DC transition loop used to live in this component and died with the
+   * tab (`key={activeTab}` remounts). The tab is now a pure subscriber: it
+   * renders the persisted toggle and the backend's last application, and never
+   * owns a poll or an auto-switch effect.
+   */
+  pp: PowerProfilesController;
   onOpenSettings: () => void;
 }
 
-function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
+function PerformanceTab({ hw, ai, pp, onOpenSettings }: Props) {
   const { addToast } = useToast();
   const aiApiKeySet = !!ai.settings.openai_api_key;
   const isAiMode = hw.performanceMode === 'smart' || hw.performanceMode === 'smart_acceleration';
-
-  // ── Auto-switch performance mode on AC ↔ DC transition ───────────────────
-  const autoSwitchRef = useRef(ai.settings.auto_switch_perf);
-  const acModeRef = useRef(ai.settings.perf_mode_ac);
-  const dcModeRef = useRef(ai.settings.perf_mode_dc);
-  autoSwitchRef.current = ai.settings.auto_switch_perf;
-  acModeRef.current = ai.settings.perf_mode_ac;
-  dcModeRef.current = ai.settings.perf_mode_dc;
-
-  const prevPluggedRef = useRef<boolean | null>(null);
-  useEffect(() => {
-    const plugged = hw.battery?.is_plugged ?? null;
-    if (plugged === null) return;
-    if (prevPluggedRef.current === null) {
-      prevPluggedRef.current = plugged;
-      return;
-    }
-    if (prevPluggedRef.current === plugged) return;
-    prevPluggedRef.current = plugged;
-    if (!autoSwitchRef.current) return;
-    const targetMode = plugged ? acModeRef.current : dcModeRef.current;
-    if (targetMode) void hw.setPerformanceMode(targetMode);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hw.battery?.is_plugged]);
 
   // ── Background logger ────────────────────────────────────────────────────
   const fanRef = useRef(hw.fan);
@@ -117,6 +110,27 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
     if (showLogs) void loadLogs();
   }, [showLogs, loadLogs]);
 
+  // The backend reports the mode as its serialized id (`long_battery`, …);
+  // the status line must show the same label as the selects above it.
+  const modeLabel = (mode: string | null | undefined): string => {
+    if (!mode) return '—';
+    const keys: Record<string, string> = {
+      silence: 'performance.modes.silence',
+      long_battery: 'performance.modes.longBattery',
+      balance: 'performance.modes.balance',
+      turbo: 'performance.modes.turbo',
+      decepticon: 'performance.modes.decepticon',
+      overdrive: 'performance.modes.overdrive',
+      overdrive_high: 'performance.modes.overdriveHigh',
+      overdrive_max: 'performance.modes.overdriveMax',
+      smart_adaptive: 'performance.modes.smartAdaptive',
+      smart: 'performance.modes.smart',
+      smart_acceleration: 'performance.modes.smartAcceleration',
+    };
+    const key = keys[mode];
+    return key ? t(key as Parameters<typeof t>[0]) : mode;
+  };
+
   return (
     <>
       <PageHeader title={t('performance.title')} subtitle={t('performance.subtitle')} />
@@ -127,6 +141,10 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
         lastResult={hw.lastPerfResult}
       />
       <div className="card">
+        {/* The selector below is the STORED preference. This line is the
+            machine: the EC's own mode register, read back from the firmware.
+            They can disagree indefinitely — the registry is not evidence. */}
+        <EcModeReadout fan={hw.fan} />
         <PerformanceModeSelector
           current={hw.performanceMode}
           onChange={hw.setPerformanceMode}
@@ -140,7 +158,7 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
       {/* OS Turbo Card */}
       <OsTurboCard />
 
-      {/* Power Profiles */}
+      {/* Power Profiles — config + backend status, no local poll loop */}
       <div className="card">
         <div
           style={{
@@ -151,9 +169,9 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
           }}
         >
           <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
+            <h2 className="card-title" style={{ marginBottom: 2 }}>
               {t('performance.powerProfiles.title')}
-            </div>
+            </h2>
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               {t('performance.powerProfiles.subtitle')}
             </div>
@@ -161,14 +179,14 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
           <label className="toggle-switch">
             <input
               type="checkbox"
-              checked={ai.settings.auto_switch_perf}
-              onChange={(e) => ai.updateKey('auto_switch_perf', e.target.checked)}
+              checked={pp.enabled}
+              onChange={(e) => pp.setEnabled(e.target.checked)}
             />
             <span className="toggle-track" />
             <span className="toggle-knob" />
           </label>
         </div>
-        {ai.settings.auto_switch_perf && (
+        {pp.enabled && (
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div
               style={{
@@ -179,15 +197,14 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
               }}
             >
               <span style={{ fontSize: 13 }} aria-hidden="true">
-                🔌 {t('performance.powerProfiles.pluggedIn')}
+                <Icon name="plug" size={16} /> {t('performance.powerProfiles.pluggedIn')}
               </span>
               <select
                 className="select-input"
                 style={{ minWidth: 160 }}
-                value={ai.settings.perf_mode_ac ?? ''}
+                value={pp.acMode ?? ''}
                 onChange={(e) =>
-                  ai.updateKey(
-                    'perf_mode_ac',
+                  pp.setAcMode(
                     (e.target.value || null) as
                       import('../../hooks/useHardware').PerformanceMode | null,
                   )
@@ -218,15 +235,14 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
               }}
             >
               <span style={{ fontSize: 13 }} aria-hidden="true">
-                🔋 {t('performance.powerProfiles.onBattery')}
+                <Icon name="battery" size={16} /> {t('performance.powerProfiles.onBattery')}
               </span>
               <select
                 className="select-input"
                 style={{ minWidth: 160 }}
-                value={ai.settings.perf_mode_dc ?? ''}
+                value={pp.dcMode ?? ''}
                 onChange={(e) =>
-                  ai.updateKey(
-                    'perf_mode_dc',
+                  pp.setDcMode(
                     (e.target.value || null) as
                       import('../../hooks/useHardware').PerformanceMode | null,
                   )
@@ -249,10 +265,31 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
               </select>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingTop: 4 }}>
-              {hw.battery?.is_plugged
-                ? `⚡ ${t('performance.powerProfiles.currentlyPluggedIn')}`
-                : `🔋 ${t('performance.powerProfiles.currentlyOnBattery')}`}
+              {pp.status?.last_event ? (
+                <>
+                  <Icon name="gear" size={16} />{' '}
+                  {t('performance.powerProfiles.lastApplied', {
+                    event: pp.status.last_event,
+                    mode: modeLabel(pp.status.last_mode),
+                  })}
+                  {pp.status.last_ok === false ? ` (${pp.status.last_detail ?? 'failed'})` : ''}
+                </>
+              ) : hw.battery?.is_plugged ? (
+                <>
+                  <Icon name="bolt" size={16} /> {t('performance.powerProfiles.currentlyPluggedIn')}
+                </>
+              ) : (
+                <>
+                  <Icon name="battery" size={16} />{' '}
+                  {t('performance.powerProfiles.currentlyOnBattery')}
+                </>
+              )}
             </div>
+            {pp.syncError && (
+              <div style={{ fontSize: 11, color: 'var(--error, #f44336)' }}>
+                <Icon name="alert-triangle" size={16} /> {t('performance.powerProfiles.syncFailed')}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -267,9 +304,9 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
           }}
         >
           <div>
-            <div className="card-title" style={{ marginBottom: 2 }}>
+            <h2 className="card-title" style={{ marginBottom: 2 }}>
               {t('ai.logsTitle')}
-            </div>
+            </h2>
             <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
               {isAiMode && aiApiKeySet
                 ? t('ai.loggingActive')
@@ -292,7 +329,7 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
               onClick={() => void hw.openAiLogsDir()}
               title={t('ai.openLogFolder')}
             >
-              📂
+              <Icon name="folder-open" size={16} />
             </button>
           </div>
         </div>
@@ -435,7 +472,7 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
                     style={{ fontSize: 11 }}
                     onClick={() => void loadLogs()}
                   >
-                    ↻ {t('ai.refreshLogs')}
+                    <Icon name="refresh" size={16} /> {t('ai.refreshLogs')}
                   </button>
                 </div>
               </div>
@@ -449,9 +486,9 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
         <div className="card">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div className="card-title" style={{ marginBottom: 2 }}>
+              <h2 className="card-title" style={{ marginBottom: 2 }}>
                 {t('performance.channels.title')}
-              </div>
+              </h2>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                 {t('performance.channels.subtitle')}
               </div>
@@ -492,9 +529,15 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
                     fontWeight: 600,
                   }}
                 >
-                  {debugInfo.hq_wmi_works
-                    ? `✓ ${t('performance.channels.functional')}`
-                    : `✗ ${t('performance.channels.unavailable')}`}
+                  {debugInfo.hq_wmi_works ? (
+                    <>
+                      <Icon name="check" size={16} /> {t('performance.channels.functional')}
+                    </>
+                  ) : (
+                    <>
+                      <Icon name="x" size={16} /> {t('performance.channels.unavailable')}
+                    </>
+                  )}
                 </span>
               </div>
               {debugInfo.hq_wmi_instance && (
@@ -542,16 +585,20 @@ function PerformanceTab({ hw, ai, onOpenSettings }: Props) {
                     fontWeight: 600,
                   }}
                 >
-                  {debugInfo.vhf_device_path
-                    ? `✓ ${t('performance.channels.found')}`
-                    : `— ${t('performance.channels.notFound')}`}
+                  {debugInfo.vhf_device_path ? (
+                    <>
+                      <Icon name="check" size={16} /> {t('performance.channels.found')}
+                    </>
+                  ) : (
+                    `— ${t('performance.channels.notFound')}`
+                  )}
                 </span>
               </div>
               {debugInfo.vhf_device_path && (
                 <div
                   style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 11 }}
                 >
-                  <span style={{ color: 'var(--text-muted)' }}>Path</span>
+                  <span style={{ color: 'var(--text-muted)' }}>{t('updates.path')}</span>
                   <code
                     style={{
                       color: 'var(--text-dim)',
@@ -601,6 +648,10 @@ interface OsTurboStatus {
   enabled: boolean;
   throttled_processes: number;
   power_plan: string;
+  /** The recovery snapshot references processes that no longer exist. */
+  snapshot_stale?: boolean;
+  /** Truthful readback counts from the last sweep (S39-003). */
+  measured?: OsTurboMeasuredData;
 }
 
 function OsTurboCard() {
@@ -624,6 +675,13 @@ function OsTurboCard() {
     void fetchStatus();
   }, [fetchStatus]);
 
+  // The quadro is measured, so it has to stay measured: refresh it while the
+  // tab is open instead of showing whatever was true at mount time.
+  useEffect(() => {
+    const timer = window.setInterval(() => void fetchStatus(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [fetchStatus]);
+
   const handleToggle = async () => {
     if (!status) return;
     setToggling(true);
@@ -642,6 +700,8 @@ function OsTurboCard() {
 
   if (loading) return null;
 
+  const { applied, inspected } = osTurboCounts(status ?? undefined);
+
   return (
     <div className="card">
       <div
@@ -653,9 +713,9 @@ function OsTurboCard() {
         }}
       >
         <div>
-          <div className="card-title" style={{ marginBottom: 2 }}>
-            ⚡ {t('performance.osTurboTitle')}
-          </div>
+          <h2 className="card-title" style={{ marginBottom: 2 }}>
+            <Icon name="bolt" size={16} /> {t('performance.osTurboTitle')}
+          </h2>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {t('performance.osTurboDesc')}
           </div>
@@ -673,17 +733,34 @@ function OsTurboCard() {
       </div>
       {errorMsg && (
         <div className="alert alert-error" style={{ marginTop: 8 }}>
-          ⚠ {errorMsg}
+          <Icon name="alert-triangle" size={16} /> {errorMsg}
         </div>
       )}
       {status?.enabled && (
         <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
           <div>
-            📊 {t('performance.osTurboThrottled')}: {status.throttled_processes}
+            <Icon name="chart-bar" size={16} />{' '}
+            {inspected > 0
+              ? t('performance.osTurboLimitSummary', { applied, inspected })
+              : t('performance.osTurboNoCandidates')}
           </div>
           <div>
-            🔌 {t('performance.osTurboPowerPlan')}: {status.power_plan}
+            <Icon name="plug" size={16} /> {t('performance.osTurboPowerPlan')}: {status.power_plan}
           </div>
+          {status.snapshot_stale && (
+            <div className="alert alert-warn" style={{ marginTop: 8 }}>
+              <Icon name="alert-triangle" size={16} /> {t('performance.osTurboStaleSnapshot')}
+            </div>
+          )}
+          {(status.measured?.failures ?? 0) > 0 && (
+            <div className="alert alert-warn" style={{ marginTop: 8 }}>
+              <Icon name="alert-triangle" size={16} />{' '}
+              {t('performance.osTurboFailuresHint', {
+                failures: status.measured?.failures ?? 0,
+              })}
+            </div>
+          )}
+          <OsTurboMeasuredBlock measured={status.measured} />
         </div>
       )}
       <FunctionExplain

@@ -10,9 +10,11 @@
 /// It avoids generic Windows Update drivers by reading from XPM's registry cache
 /// and, when available, triggering XPM's update checker component directly.
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
@@ -87,6 +89,13 @@ pub struct UpdateStatus {
 const XPM_BASE: &str = r"C:\Program Files\MI\XiaomiPCManager";
 const DRIVER_REG_KEY: &str = r"SOFTWARE\MI\Driver";
 
+/// Budget for `pnputil /enum-drivers`: typically under 5 s; 60 s covers a
+/// cold disk with hundreds of driver-store entries.
+const PNPUTIL_ENUM_TIMEOUT: Duration = Duration::from_secs(60);
+/// Budget for `pnputil /scan-devices`: a full PnP re-enumeration can take
+/// tens of seconds; 120 s is the ceiling before the registry-flag fallback.
+const PNPUTIL_SCAN_TIMEOUT: Duration = Duration::from_secs(120);
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /// Collect full update / version status.
@@ -151,11 +160,12 @@ pub fn trigger_driver_scan() -> HardwareResult<String> {
     }
 
     // ── Strategy 2: pnputil /scan-devices (always available on Win10+) ───
-    match no_window_command("pnputil")
-        .args(["/scan-devices"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
+    // Bounded wait: on timeout (or any spawn failure) the tree dies and the
+    // registry-flag fallback below still runs, same as the old Err path.
+    let mut scan = no_window_command("pnputil");
+    scan.args(["/scan-devices"]);
+    match process_spawn::run_capture(&mut scan, PNPUTIL_SCAN_TIMEOUT) {
+        Ok(out) if out.success() => {
             return Ok("PnP device scan triggered (pnputil /scan-devices). \
                  Windows will check for updated official drivers."
                 .to_string());
@@ -164,7 +174,7 @@ pub fn trigger_driver_scan() -> HardwareResult<String> {
             log::warn!("pnputil /scan-devices exit: {}", out.status);
         }
         Err(e) => {
-            log::warn!("pnputil not found: {e}");
+            log::warn!("pnputil /scan-devices unavailable: {e}");
         }
     }
 
@@ -303,11 +313,11 @@ fn get_bios_info() -> anyhow::Result<BiosInfo> {
 // ── Installed Xiaomi drivers (pnputil) ───────────────────────────────────────
 
 fn get_xiaomi_drivers() -> anyhow::Result<Vec<XiaomiDriverInfo>> {
-    let output = no_window_command("pnputil")
-        .args(["/enum-drivers"])
-        .output()
+    let mut cmd = no_window_command("pnputil");
+    cmd.args(["/enum-drivers"]);
+    let output = process_spawn::run_capture(&mut cmd, PNPUTIL_ENUM_TIMEOUT)
         .context("pnputil /enum-drivers failed")?;
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = output.stdout_str();
     parse_pnputil_drivers(&text)
 }
 
@@ -376,31 +386,50 @@ pub fn get_drivers_detail() -> HardwareResult<Vec<DriverDetail>> {
         use crate::util::wmi_extract;
 
         wmi_cache::with_cimv2(|wmi| {
+            // F5.2: `Win32_PnPSignedDriver` declares `Status` (inherited from
+            // CIM_ManagedSystemElement) but its provider returns NULL for every
+            // row — measured 355/355 NULL on the audit machine — so the old
+            // read fell back to "Unknown" for all 351 devices in the UI.
+            // Device health is published by `Win32_PnPEntity`, joined here by
+            // DeviceID (`ConfigManagerErrorCode` 0 == working, anything else is
+            // the Device Manager problem code).
             let drivers: Vec<HashMap<String, wmi::Variant>> = wmi.raw_query(
-                "SELECT DeviceName, DeviceClass, HardwareID, Manufacturer, \
+                "SELECT DeviceID, DeviceName, DeviceClass, HardwareID, Manufacturer, \
                  DriverVersion, DriverDate, InfName, DriverProviderName, \
-                 IsSigned, Signer, Status \
+                 IsSigned, Signer \
                  FROM Win32_PnPSignedDriver",
             )?;
 
+            let entities: Vec<HashMap<String, wmi::Variant>> = wmi
+                .raw_query("SELECT DeviceID, Status, ConfigManagerErrorCode FROM Win32_PnPEntity")
+                .unwrap_or_default();
+            let health = build_device_health_map(&entities);
+
             let result = drivers
                 .into_iter()
-                .map(|d| DriverDetail {
-                    device_name: wmi_extract::extract_string_or(&d, "DeviceName", ""),
-                    device_class: wmi_extract::extract_string_or(&d, "DeviceClass", ""),
-                    hardware_id: wmi_extract::extract_string_or(&d, "HardwareID", ""),
-                    manufacturer: wmi_extract::extract_string_or(&d, "Manufacturer", ""),
-                    driver_version: wmi_extract::extract_string_or(&d, "DriverVersion", ""),
-                    driver_date: wmi_extract::extract_string_or(&d, "DriverDate", ""),
-                    inf_name: wmi_extract::extract_string_or(&d, "InfName", ""),
-                    driver_provider_name: wmi_extract::extract_string_or(
-                        &d,
-                        "DriverProviderName",
-                        "",
-                    ),
-                    is_signed: wmi_extract::extract_bool(&d, "IsSigned").unwrap_or(false),
-                    signer: wmi_extract::extract_string_or(&d, "Signer", ""),
-                    status: wmi_extract::extract_string_or(&d, "Status", "Unknown"),
+                .map(|d| {
+                    let device_id = wmi_extract::extract_string_or(&d, "DeviceID", "");
+                    let device_health = health.get(&normalize_device_id(&device_id));
+                    DriverDetail {
+                        device_name: wmi_extract::extract_string_or(&d, "DeviceName", ""),
+                        device_class: wmi_extract::extract_string_or(&d, "DeviceClass", ""),
+                        hardware_id: wmi_extract::extract_string_or(&d, "HardwareID", ""),
+                        manufacturer: wmi_extract::extract_string_or(&d, "Manufacturer", ""),
+                        driver_version: wmi_extract::extract_string_or(&d, "DriverVersion", ""),
+                        driver_date: wmi_extract::extract_string_or(&d, "DriverDate", ""),
+                        inf_name: wmi_extract::extract_string_or(&d, "InfName", ""),
+                        driver_provider_name: wmi_extract::extract_string_or(
+                            &d,
+                            "DriverProviderName",
+                            "",
+                        ),
+                        is_signed: wmi_extract::extract_bool(&d, "IsSigned").unwrap_or(false),
+                        signer: wmi_extract::extract_string_or(&d, "Signer", ""),
+                        status: driver_status_text(
+                            device_health.and_then(|h| h.status.as_deref()),
+                            device_health.and_then(|h| h.config_manager_error_code),
+                        ),
+                    }
                 })
                 .collect();
 
@@ -412,6 +441,64 @@ pub fn get_drivers_detail() -> HardwareResult<Vec<DriverDetail>> {
     Err(HardwareError::NotSupported(
         "Driver details only available on Windows".into(),
     ))
+}
+
+/// Device health as reported by `Win32_PnPEntity`.
+#[cfg(windows)]
+#[derive(Debug, Clone, Default)]
+struct DeviceHealth {
+    status: Option<String>,
+    config_manager_error_code: Option<u32>,
+}
+
+/// Index `Win32_PnPEntity` rows by normalized DeviceID.
+#[cfg(windows)]
+fn build_device_health_map(
+    entities: &[HashMap<String, wmi::Variant>],
+) -> HashMap<String, DeviceHealth> {
+    use crate::util::wmi_extract;
+
+    let mut map = HashMap::with_capacity(entities.len());
+    for entity in entities {
+        let Some(device_id) = wmi_extract::extract_string(entity, "DeviceID") else {
+            continue;
+        };
+        map.insert(
+            normalize_device_id(&device_id),
+            DeviceHealth {
+                status: wmi_extract::extract_string(entity, "Status")
+                    .filter(|status| !status.trim().is_empty()),
+                config_manager_error_code: wmi_extract::extract_u32(
+                    entity,
+                    "ConfigManagerErrorCode",
+                ),
+            },
+        );
+    }
+    map
+}
+
+/// WMI DeviceIDs are case-insensitive; normalise before joining.
+fn normalize_device_id(device_id: &str) -> String {
+    device_id.trim().to_ascii_uppercase()
+}
+
+/// Compose the Status column from Windows' own device status + problem code.
+///
+/// `ConfigManagerErrorCode == 0` is the documented "working properly" value;
+/// any other code is the Device Manager problem number, which is what the user
+/// would see there. `None` for both means Windows published no health record
+/// for this driver (e.g. print queues, which have no PnP entity) — "Unknown"
+/// is then the truthful answer rather than a default.
+fn driver_status_text(status: Option<&str>, config_manager_error_code: Option<u32>) -> String {
+    let status = status.map(str::trim).filter(|status| !status.is_empty());
+    match (status, config_manager_error_code) {
+        (_, Some(0)) => status.unwrap_or("OK").to_string(),
+        (Some(status), Some(code)) => format!("{status} (code {code})"),
+        (None, Some(code)) => format!("Error (code {code})"),
+        (Some(status), None) => status.to_string(),
+        (None, None) => "Unknown".to_string(),
+    }
 }
 
 fn variant_str(map: &HashMap<String, wmi::Variant>, key: &str) -> String {
@@ -496,5 +583,78 @@ Signer Name:        Microsoft Windows\r\n";
             assert!(!bios.manufacturer.is_empty() || bios.manufacturer.is_empty());
             // always true — just checks no panic
         }
+    }
+
+    // ── Driver status mapping (F5.2) ────────────────────────────────────────
+    //
+    // `Win32_PnPSignedDriver.Status` is NULL for every row on real machines
+    // (measured 355/355), so the old code showed "Unknown" ×351. The status is
+    // now derived from `Win32_PnPEntity.ConfigManagerErrorCode`; these tests
+    // pin the mapping without touching WMI.
+
+    #[test]
+    fn driver_status_healthy_device_reports_windows_status() {
+        assert_eq!(driver_status_text(Some("OK"), Some(0)), "OK");
+        assert_eq!(driver_status_text(None, Some(0)), "OK");
+    }
+
+    #[test]
+    fn driver_status_problem_code_is_visible() {
+        // 28 = "The drivers for this device are not installed" (Device Manager).
+        assert_eq!(driver_status_text(None, Some(28)), "Error (code 28)");
+        assert_eq!(
+            driver_status_text(Some("Error"), Some(10)),
+            "Error (code 10)"
+        );
+    }
+
+    #[test]
+    fn driver_status_without_entity_is_unknown_not_ok() {
+        // Print queues have no PnP entity: no data must never read as "OK".
+        assert_eq!(driver_status_text(None, None), "Unknown");
+        assert_eq!(driver_status_text(Some(""), Some(0)), "OK");
+        assert_eq!(driver_status_text(Some("Degraded"), None), "Degraded");
+    }
+
+    #[test]
+    fn device_id_normalisation_is_case_insensitive() {
+        assert_eq!(normalize_device_id("  usb\\vid_1d6b"), "USB\\VID_1D6B");
+        assert_eq!(
+            normalize_device_id(r"PCI\VEN_8086&DEV_7E28"),
+            r"PCI\VEN_8086&DEV_7E28"
+        );
+    }
+
+    /// The pnputil child waits are bounded: a child that sleeps past the
+    /// budget must return `SpawnError::Timeout` and the whole tree must be
+    /// dead (no orphan process left behind).
+    #[test]
+    fn pnputil_child_wait_is_bounded_and_kills_tree() {
+        let mut cmd = no_window_command("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let started = std::time::Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, std::time::Duration::from_millis(500))
+            .expect_err("sleeping child must hit the timeout");
+        assert!(
+            matches!(err, process_spawn::SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "timeout path took too long: {:?}",
+            started.elapsed()
+        );
+
+        // No orphan ping.exe may survive the tree kill.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut probe = no_window_command("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, std::time::Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        assert!(
+            !out.stdout_str().contains("ping.exe"),
+            "ping.exe survived the tree kill: {}",
+            out.stdout_str()
+        );
     }
 }

@@ -4,6 +4,7 @@
 //! fan, audio, etc.) accessed via WMI, IoTService IPC, IOCTL, or
 //! Windows API calls.
 
+pub mod adapter_power;
 pub mod audio;
 pub mod audio_effects;
 pub mod battery;
@@ -16,16 +17,17 @@ pub mod color_calibration;
 pub mod crash_recovery;
 pub mod discovery;
 pub mod display;
-pub mod driver_update;
 pub mod ecram;
 pub mod ecram_service_mgmt;
 pub mod errors;
+pub mod event_log;
 pub mod eye_protection;
 pub mod face;
 pub mod fan;
 pub mod fn_key;
 pub mod hotkeys;
 pub mod hq_wmi;
+pub mod icc_catalog;
 pub mod iot_events;
 pub mod iot_watchdog;
 pub mod iotservice;
@@ -40,6 +42,8 @@ pub mod os_turbo_stats;
 pub mod os_turbo_suggest;
 #[cfg(windows)]
 pub mod osd;
+pub mod overview;
+pub mod panel_edid;
 pub mod performance;
 pub mod phone_link;
 #[cfg(windows)]
@@ -50,6 +54,7 @@ pub mod scrcpy_bridge;
 pub mod screen_cast;
 pub mod security_scan;
 pub mod startup;
+pub mod startup_manager;
 pub mod syncthing;
 pub mod sys_opt;
 pub mod system_info;

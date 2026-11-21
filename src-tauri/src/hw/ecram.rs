@@ -69,7 +69,7 @@
 /// allowed address ranges, so ADPW CANNOT be read through IoTDriver.
 /// However, AC adapter wattage IS available via WMI (ACPI WMAA method) —
 /// see `wmi_ec::read_adapter_power()`. This is the primary path used by MiControl.
-use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::hw::errors::{HardwareError, HardwareResult, RegionBlockKind};
 use anyhow::Context;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -879,32 +879,105 @@ pub fn read_named_region(region: &str) -> HardwareResult<Vec<u8>> {
 
     // Direct driver access works for IOT_STATUS/IOT_SENSORS and may work for
     // ERAM/SMA2 on some configurations. If it fails, fall back to the pipe
-    // broker. If both fail, return zeros for blocked regions so that the UI
-    // (System/Setup/EC Debug tabs) can still show the regions that are
-    // readable (IOT_STATUS / IOT_SENSORS).
-    read_ecram(addr, size)
-        .or_else(|e| {
-            log::debug!(target: "hw::ecram", "Direct read of {region} failed ({e}), trying pipe broker");
-            read_ecram_via_pipe(addr, size)
-                .ok_or(e)
-                .inspect(|data| {
-                    log::debug!(target: "hw::ecram", "Pipe broker read {region}: {len} bytes", len = data.len());
-                })
-        })
-        .or_else(|e| {
-            let region_upper = region.to_ascii_uppercase();
-            if region_upper == "ERAM" || region_upper == "SMA2" {
-                log::warn!(
-                    target: "hw::ecram",
-                    "Region {region} is blocked by the IoTDriver; returning zeros. Error: {e}"
-                );
-                Ok(vec![0u8; size])
-            } else {
-                Err(HardwareError::Ecram(format!(
-                    "Failed to read ECRAM region {region}: {e}"
-                )))
-            }
-        })
+    // broker, and report the region as blocked — returning zeros made the UI
+    // display "0 °C / 0 RPM / 0 mAh" as if they were real readings (the driver
+    // returns 0x80070005 for ERAM/SMA2 even to SYSTEM).
+    //
+    // The two failures are NOT equivalent and must never be merged into one
+    // sentence: the app process is refused when it opens the device (message
+    // "Open IoT driver device") simply because the driver only admits its own
+    // DriverStore IoTService.exe — that is expected. The service's own answer
+    // is the ground truth, so it is the one that classifies the failure.
+    let direct_err = match read_ecram(addr, size) {
+        Ok(bytes) => return Ok(bytes),
+        Err(e) => e,
+    };
+
+    match read_ecram_via_pipe_result(addr, size) {
+        Ok(data) => {
+            log::debug!(
+                target: "hw::ecram",
+                "Pipe broker read {region}: {len} bytes",
+                len = data.len()
+            );
+            Ok(data)
+        }
+        Err(pipe_err) => {
+            let kind = classify_region_block(&pipe_err);
+            log_region_blocked_once(
+                region,
+                kind,
+                &format!("ecram_service: {pipe_err} | direct IOCTL: {direct_err}"),
+            );
+            Err(HardwareError::EcramBlocked {
+                region: region.to_ascii_uppercase(),
+                kind,
+                detail: format!(
+                    "{region} could not be read: ecram_service answered \"{pipe_err}\" \
+                     (the app's own direct IOCTL is refused by the driver's process check: {direct_err})"
+                ),
+            })
+        }
+    }
+}
+
+/// Classify a failed region read from the error text of the authoritative
+/// source (`ecram_service`).
+///
+/// `0x80070005` / "Access is denied" from `DeviceIoControl ECRAM_READ` means
+/// the service **did** open the driver device and the driver refused the
+/// *address* — the expected state for ERAM/SMA2 on this platform. A dead or
+/// busy pipe is a genuine fault that the UI must surface as an error.
+pub fn classify_region_block(reason: &str) -> RegionBlockKind {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("0x80070005") || lower.contains("access is denied") {
+        RegionBlockKind::DriverBlocked
+    } else if lower.contains("open pipe")
+        || lower.contains("no response from pipe")
+        || lower.contains("pipe refuses")
+        || lower.contains("pipe client only supported")
+    {
+        RegionBlockKind::ServiceUnavailable
+    } else {
+        RegionBlockKind::Unknown
+    }
+}
+
+/// Emit the "region blocked" diagnostic **once per process per region**.
+///
+/// P2-5 (recheck 2026-11-11): `Region ERAM unavailable (DriverBlocked)` was
+/// logged at WARN on every map read — the frontend polls every ~4 s, so an
+/// *expected* platform condition (`IoTDriver.sys` refuses ERAM/SMA2 even for
+/// SYSTEM) produced 1 line/4 s of warning noise and pushed real warnings out
+/// of the tail. The first occurrence keeps the full explanation at INFO; later
+/// ones go to DEBUG. A *new* kind for the same region (e.g. `DriverBlocked` →
+/// `ServiceUnavailable`) is a real fault and logs again.
+fn log_region_blocked_once(region: &str, kind: RegionBlockKind, detail: &str) {
+    static SEEN: OnceLock<std::sync::Mutex<Vec<(String, RegionBlockKind)>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+
+    let first = {
+        let mut guard = match seen.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.iter().any(|(r, k)| r == region && *k == kind) {
+            false
+        } else {
+            guard.push((region.to_string(), kind));
+            true
+        }
+    };
+
+    if first {
+        log::info!(
+            target: "hw::ecram",
+            "Region {region} unavailable ({kind:?}) — expected on this platform for ERAM/SMA2 \
+             (IoTDriver refuses the address even for SYSTEM); further occurrences at DEBUG: {detail}"
+        );
+    } else {
+        log::debug!(target: "hw::ecram", "Region {region} unavailable ({kind:?}): {detail}");
+    }
 }
 
 /// Returns `true` when the current process token is elevated (administrator).
@@ -987,39 +1060,57 @@ pub struct EramMap {
 
     /// Raw full 256-byte ERAM dump (hex string, for debugging unmapped fields)
     pub raw_hex: String,
+
+    /// `false` when the ERAM block could not be read at all (the IoT driver
+    /// blocks 0xFE0B0300 with 0x80070005, even for SYSTEM). The numeric
+    /// fields above are then placeholders — never measured values.
+    pub available: bool,
+    /// Regions that could not be read for this map (e.g. `["ERAM", "SMA2"]`).
+    pub blocked_regions: Vec<String>,
+    /// Human-readable reason from the driver/pipe when `available == false`.
+    pub blocked_reason: Option<String>,
+    /// Why the ERAM block is unreadable, classified for the UI:
+    /// `driver_blocked` is this platform's EXPECTED state (render a calm "—"
+    /// with a hint), `service_unavailable`/`unknown` are real faults (error
+    /// banner). `None` while `available == true`.
+    pub blocked_kind: Option<RegionBlockKind>,
+    /// True when `perf_profile` came from WMI (ACPI MICommonInterface) instead
+    /// of ERAM — i.e. it is a real reading even while `available == false`.
+    #[serde(default)]
+    pub perf_profile_from_wmi: bool,
 }
 
 /// Read the ACPI ERAM block and decode all known fields.
 ///
 /// Tries direct IoTDriver access first, then falls back to the custom
-/// IoTService.exe named-pipe broker. On some laptop firmwares the driver
-/// blocks both paths for ERAM/SMA2. In that case we build a partial map from
-/// the data that is still available through the ACPI WMAA WMI interface
-/// (adapter power, battery health, current performance mode) so the System /
-/// Setup / EC Debug tabs do not show a hard error.
+/// IoTService.exe named-pipe broker. The IoT driver rejects ERAM/SMA2 with
+/// `0x80070005` even for SYSTEM, so on this platform both paths fail.
+///
+/// When that happens the returned map carries `available: false` plus
+/// `blocked_regions`/`blocked_reason`, and only the fields that can be
+/// obtained independently (AC adapter power and performance mode via WMI)
+/// are populated. The remaining fields are zero **placeholders**; callers
+/// must check `available` before presenting them as readings.
 pub fn read_eram_map() -> HardwareResult<EramMap> {
-    let eram = read_ecram(get_eram_base(), 0x100)
-        .or_else(|e| {
-            log::debug!(target: "hw::ecram", "Direct ERAM read failed ({e}), trying pipe broker");
-            read_ecram_via_pipe(get_eram_base(), 0x100)
-                .ok_or(e)
-                .inspect(|data| {
-                    log::debug!(target: "hw::ecram", "Pipe broker ERAM read: {len} bytes", len = data.len());
-                })
-        });
-
-    match eram {
+    // `read_named_region` already merges the direct IOCTL and the
+    // ecram_service pipe and classifies the failure (`EcramBlocked`), so the
+    // map never has to guess which side refused and why.
+    match read_named_region("ERAM") {
         Ok(bytes) if bytes.len() >= 0x100 => decode_eram_map(&bytes),
         Ok(bytes) => Err(HardwareError::Ecram(format!(
             "Short ERAM read: {} bytes",
             bytes.len()
         ))),
-        Err(e) => {
-            log::warn!(
-                target: "hw::ecram",
-                "ERAM read unavailable (direct + pipe broker failed: {e}); building partial map from WMI"
-            );
-            Ok(partial_eram_map_from_wmi())
+        Err(HardwareError::EcramBlocked { kind, detail, .. }) => {
+            log_region_blocked_once("ERAM", kind, &detail);
+            Ok(partial_eram_map_from_wmi(kind, &detail))
+        }
+        Err(other) => {
+            log_region_blocked_once("ERAM", RegionBlockKind::Unknown, &other.to_string());
+            Ok(partial_eram_map_from_wmi(
+                RegionBlockKind::Unknown,
+                &other.to_string(),
+            ))
         }
     }
 }
@@ -1073,14 +1164,19 @@ fn decode_eram_map(eram: &[u8]) -> HardwareResult<EramMap> {
         display_brightness_level: eram[0xAE] & 0x7F,
         keyboard_backlight_level: eram[0xB2] & 0x7F,
         raw_hex,
+        available: true,
+        blocked_regions: Vec::new(),
+        blocked_reason: None,
+        blocked_kind: None,
+        perf_profile_from_wmi: false,
     })
 }
 
-/// Build a partial `EramMap` from data sources that do not require direct
-/// ERAM access. Used when the IoTDriver blocks both direct and pipe-broker
-/// reads of the ERAM region.
-fn partial_eram_map_from_wmi() -> EramMap {
-    let mut map = EramMap {
+/// ERAM map for the "region blocked" case: every ERAM-derived field is a
+/// zero placeholder and `available` is `false`. Split out so the honesty
+/// contract is unit-testable without touching WMI or the driver.
+fn unavailable_eram_map(kind: RegionBlockKind, reason: &str) -> EramMap {
+    EramMap {
         misc0: 0,
         misc1: 0,
         control_flags_1b: 0,
@@ -1107,7 +1203,23 @@ fn partial_eram_map_from_wmi() -> EramMap {
         display_brightness_level: 0,
         keyboard_backlight_level: 0,
         raw_hex: "UNAVAILABLE".to_string(),
-    };
+        available: false,
+        blocked_regions: vec!["ERAM".to_string(), "SMA2".to_string()],
+        blocked_reason: Some(reason.to_string()),
+        blocked_kind: Some(kind),
+        perf_profile_from_wmi: false,
+    }
+}
+
+/// Build a partial `EramMap` from data sources that do not require direct
+/// ERAM access. Used when the IoTDriver blocks both direct and pipe-broker
+/// reads of the ERAM region.
+///
+/// The result is explicitly flagged `available: false`: the zeroed fields are
+/// placeholders, not measurements. Only AC adapter power and performance mode
+/// (WMI, no ERAM involved) carry real values.
+fn partial_eram_map_from_wmi(kind: RegionBlockKind, reason: &str) -> EramMap {
+    let mut map = unavailable_eram_map(kind, reason);
 
     if let Ok(sensor) = crate::hw::wmi_ec::read_sensor_data() {
         map.ac_connected = sensor.adapter_power > 0;
@@ -1116,6 +1228,7 @@ fn partial_eram_map_from_wmi() -> EramMap {
 
     if let Ok(mode) = crate::hw::wmi_ec::get_performance_mode() {
         map.perf_profile = mode as u8;
+        map.perf_profile_from_wmi = true;
     }
 
     map
@@ -1138,8 +1251,84 @@ fn partial_eram_map_from_wmi() -> EramMap {
 //   ❌ SMA2 (0xFE0B0A00) — blocked by driver's address range check
 
 /// Named pipe path for our custom IoTService.exe IPC broker.
+///
+/// This pipe speaks **JSON** (`{"op":"read",...}`), not the binary MCPI frame
+/// protocol. `hw::iotservice` checks this constant before it sends an MCPI
+/// header so the two protocols can never be mixed on the same pipe.
 #[cfg(windows)]
-const ECRAM_PIPE_NAME: &str = r"\\.\pipe\ecram_service";
+pub const ECRAM_PIPE_NAME: &str = r"\\.\pipe\ecram_service";
+
+/// How the client side of the EC pipe ended up configured after
+/// `SetNamedPipeHandleState`.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeReadMode {
+    /// `PIPE_READMODE_MESSAGE` was accepted (server created a message pipe).
+    Message,
+    /// The server pipe is byte-mode; `MESSAGE` was rejected with
+    /// `ERROR_INVALID_PARAMETER` (87) and the client kept byte mode.
+    Byte,
+    /// Neither MESSAGE nor non-blocking byte mode was accepted. Reads stay
+    /// blocking; callers must not use this mode when a server response may
+    /// never arrive.
+    Blocking,
+}
+
+/// Configure the client end of the EC pipe for bounded reads.
+///
+/// The EC pipe server (`bin/ecram_service.rs`) historically creates the pipe
+/// with `PIPE_TYPE_BYTE | PIPE_READMODE_BYTE`. Asking a byte-mode pipe for
+/// `PIPE_READMODE_MESSAGE` fails with `ERROR_INVALID_PARAMETER (0x80070057)`
+/// — treating that as fatal broke **every** IoT query for months (the chip
+/// was answering the whole time). The correct sequence is:
+///
+/// 1. try `PIPE_READMODE_MESSAGE | PIPE_NOWAIT` (message-mode servers),
+/// 2. on failure, retry with `PIPE_NOWAIT` only — legal on byte-mode pipes
+///    and enough to enforce our own deadline,
+/// 3. only if that also fails, leave the pipe in its default blocking mode.
+///
+/// This mirrors the tolerant pattern already used by
+/// `hw/iotservice.rs::send_ipc_message`.
+#[cfg(windows)]
+pub fn configure_pipe_read_mode(handle: windows::Win32::Foundation::HANDLE) -> PipeReadMode {
+    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+    use windows::Win32::System::Pipes::{
+        SetNamedPipeHandleState, PIPE_NOWAIT, PIPE_READMODE_MESSAGE,
+    };
+
+    let message_mode = PIPE_READMODE_MESSAGE | PIPE_NOWAIT;
+    // SAFETY: `handle` is an open pipe handle owned by the caller; the mode
+    // pointer is a valid NAMED_PIPE_MODE for the duration of the call.
+    match unsafe { SetNamedPipeHandleState(handle, Some(&message_mode as *const _), None, None) } {
+        Ok(()) => return PipeReadMode::Message,
+        Err(e) => {
+            if e.code() == ERROR_INVALID_PARAMETER.to_hresult() {
+                log::debug!(
+                    target: "hw::ecram::pipe",
+                    "EC pipe is BYTE-mode (MESSAGE rejected with 0x80070057); continuing in BYTE mode"
+                );
+            } else {
+                log::warn!(
+                    target: "hw::ecram::pipe",
+                    "SetNamedPipeHandleState(MESSAGE) failed ({e}); continuing in BYTE mode"
+                );
+            }
+        }
+    }
+
+    let byte_mode = PIPE_NOWAIT;
+    // SAFETY: same handle and same valid pointer as above.
+    match unsafe { SetNamedPipeHandleState(handle, Some(&byte_mode as *const _), None, None) } {
+        Ok(()) => PipeReadMode::Byte,
+        Err(e) => {
+            log::warn!(
+                target: "hw::ecram::pipe",
+                "SetNamedPipeHandleState(NOWAIT) failed ({e}); pipe stays blocking"
+            );
+            PipeReadMode::Blocking
+        }
+    }
+}
 
 /// Response from the custom IoTService.exe pipe server.
 #[derive(Debug, serde::Deserialize)]
@@ -1149,6 +1338,95 @@ struct PipeResponse {
     data: Option<String>,
     #[serde(default)]
     error: Option<String>,
+}
+
+/// Retry budget for opening the EC pipe.
+///
+/// `CreateFileW` fails with `ERROR_PIPE_BUSY` (0xE7) while every instance the
+/// service has created so far is connected to a client, and with
+/// `ERROR_FILE_NOT_FOUND` (0x2) in the window where the serve thread has just
+/// closed the previous instance and `ecram_service::run_pipe_server` has not
+/// created the next one yet (it creates ONE instance per accept-loop
+/// iteration — `PIPE_UNLIMITED_INSTANCES` only lifts the cap, it does not
+/// pre-create instances). Both errors are transient: the listener is back
+/// within milliseconds.
+///
+/// The elevated bridge pipe has had exactly this bounded retry since S32-005c /
+/// S55 FIX 22 (`elev_bridge`); the EC client never got it, so one unlucky
+/// millisecond turned into a hard failure:
+///
+/// ```text
+/// [iot] EC command get_fw_version failed: Open pipe: All pipe instances are
+/// busy. (0x800700E7)
+/// ```
+///
+/// — logged in the middle of a single `get_iot_device_info` run whose other
+/// five queries succeeded. The aggregate appeared healthy because it falls
+/// back to the cached model / registry values; the deprecated single-field
+/// wrappers propagated the error, which is why they measured 0/4 while the
+/// aggregate measured 2/2. External probes never lost a race because process
+/// startup spaces their opens milliseconds apart.
+const PIPE_OPEN_RETRIES: u32 = 20;
+/// Wait between open attempts (20 × 50 ms = 1 s worst case).
+const PIPE_OPEN_BACKOFF_MS: u64 = 50;
+/// Shorter budget for liveness probes — a BUSY pipe still proves the service
+/// is running, only the accept-loop gap needs covering.
+#[cfg(windows)]
+const PIPE_PROBE_RETRIES: u32 = 4;
+
+/// Open the EC pipe, retrying the two transient accept-loop errors.
+///
+/// Returns the raw handle on success; ownership passes to the caller.
+#[cfg(windows)]
+fn open_ecram_pipe_with_retry(
+    path_w: &[u16],
+    retries: u32,
+) -> Result<windows::Win32::Foundation::HANDLE, String> {
+    use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    // leak-check: the opened handle is handed to the caller on success —
+    // `send_pipe_request` adopts it into `OwnedHandle`, `is_pipe_broker_available`
+    // closes it explicitly. No path here drops an open handle.
+    for attempt in 0..=retries {
+        let opened = unsafe {
+            CreateFileW(
+                windows::core::PCWSTR(path_w.as_ptr()),
+                (windows::Win32::Foundation::GENERIC_READ
+                    | windows::Win32::Foundation::GENERIC_WRITE)
+                    .0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                HANDLE::default(),
+            )
+        };
+
+        match opened {
+            Ok(h) if h != INVALID_HANDLE_VALUE => return Ok(h),
+            Ok(_) => return Err("INVALID_HANDLE_VALUE opening pipe".to_string()),
+            Err(e) => {
+                let code = e.code();
+                let busy = code == windows::core::HRESULT(0x8007_00E7_u32 as i32);
+                let transient_absent = code == windows::core::HRESULT(0x8007_0002_u32 as i32);
+                if (!busy && !transient_absent) || attempt == retries {
+                    return Err(format!("Open pipe: {e}"));
+                }
+                log::debug!(
+                    target: "hw::ecram::pipe",
+                    "EC pipe transiently unavailable ({e}) — retry {}/{} in {PIPE_OPEN_BACKOFF_MS} ms",
+                    attempt + 1,
+                    retries
+                );
+                std::thread::sleep(std::time::Duration::from_millis(PIPE_OPEN_BACKOFF_MS));
+            }
+        }
+    }
+
+    Err("Open pipe: retry budget exhausted".to_string())
 }
 
 /// Send a JSON request to the custom IoTService.exe pipe server and return
@@ -1161,33 +1439,13 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
     use std::os::windows::ffi::OsStrExt;
     use std::time::{Duration, Instant};
     use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_LISTENING};
-    use windows::Win32::System::Pipes::{
-        SetNamedPipeHandleState, PIPE_NOWAIT, PIPE_READMODE_MESSAGE,
-    };
 
     let path_w: Vec<u16> = std::ffi::OsStr::new(ECRAM_PIPE_NAME)
         .encode_wide()
         .chain(Some(0))
         .collect();
 
-    let handle = unsafe {
-        windows::Win32::Storage::FileSystem::CreateFileW(
-            windows::core::PCWSTR(path_w.as_ptr()),
-            (windows::Win32::Foundation::GENERIC_READ | windows::Win32::Foundation::GENERIC_WRITE)
-                .0,
-            windows::Win32::Storage::FileSystem::FILE_SHARE_READ
-                | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
-            None,
-            windows::Win32::Storage::FileSystem::OPEN_EXISTING,
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
-            windows::Win32::Foundation::HANDLE::default(),
-        )
-        .map_err(|e| format!("Open pipe: {e}"))?
-    };
-
-    if handle == windows::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return Err("INVALID_HANDLE_VALUE opening pipe".to_string());
-    }
+    let handle = open_ecram_pipe_with_retry(&path_w, PIPE_OPEN_RETRIES)?;
 
     // S67: RAII — this function had three separate manual CloseHandle sites and
     // the `WriteFile(...).map_err(...)?` in the middle leaked the pipe handle on
@@ -1196,11 +1454,14 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
 
     // The service pipe can remain open but stop servicing requests after
     // resume. Non-wait mode lets us enforce a deadline instead of blocking
-    // forever in ReadFile.
-    let mode = PIPE_READMODE_MESSAGE | PIPE_NOWAIT;
-    if let Err(e) = unsafe { SetNamedPipeHandleState(handle, Some(&mode as *const _), None, None) }
-    {
-        return Err(format!("SetNamedPipeHandleState: {e}"));
+    // forever in ReadFile. A byte-mode server rejects PIPE_READMODE_MESSAGE
+    // with 0x80070057 — that is NOT fatal (see configure_pipe_read_mode).
+    // Only a pipe that refuses even NOWAIT must be rejected, otherwise a
+    // missing response would hang the blocking task forever.
+    if configure_pipe_read_mode(handle) == PipeReadMode::Blocking {
+        return Err(
+            "EC pipe refuses non-blocking mode; refusing an unbounded ReadFile".to_string(),
+        );
     }
 
     // Write request
@@ -1248,6 +1509,13 @@ pub fn send_pipe_request(request: &str) -> Result<String, String> {
             });
         }
         if bytes_read == 0 {
+            // PIPE_NOWAIT byte-mode reads can report success with zero bytes
+            // while the server is still processing the EC command. Only a
+            // closed pipe (an error above) is EOF — retry until the deadline.
+            if Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             break;
         }
         total_read += bytes_read as usize;
@@ -1279,42 +1547,21 @@ pub fn send_pipe_request(_request: &str) -> Result<String, String> {
 /// Returns `None` if the pipe server is not running or the request fails.
 #[cfg(windows)]
 pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>> {
-    use std::os::windows::ffi::OsStrExt;
+    read_ecram_via_pipe_result(phys_addr, byte_count).ok()
+}
 
-    let pipe_name = ECRAM_PIPE_NAME;
-
-    // Build the wide path for CreateFileW
-    let path_w: Vec<u16> = std::ffi::OsStr::new(pipe_name)
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-
-    // Open the named pipe
-    let handle = unsafe {
-        windows::Win32::Storage::FileSystem::CreateFileW(
-            windows::core::PCWSTR(path_w.as_ptr()),
-            (windows::Win32::Foundation::GENERIC_READ | windows::Win32::Foundation::GENERIC_WRITE)
-                .0,
-            windows::Win32::Storage::FileSystem::FILE_SHARE_READ
-                | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
-            None,
-            windows::Win32::Storage::FileSystem::OPEN_EXISTING,
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
-            windows::Win32::Foundation::HANDLE::default(),
-        )
-        .ok()?
-    };
-
-    if handle == windows::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return None;
-    }
-
-    // S67: RAII — every early return below (the `WriteFile(...).ok()?` included)
-    // used to skip the CloseHandle at the end, leaking one pipe handle per
-    // failed EC read. Same class as the audited 188,715-handle leak.
-    let _pipe_guard = crate::util::win_handle::OwnedHandle::new(handle);
-
-    // Build JSON request
+/// Read ECRAM through the `ecram_service` pipe, keeping the service's own
+/// error text.
+///
+/// [`read_ecram_via_pipe`] throws that text away (`Option`), which is how the
+/// UI ended up showing the app's *expected* "Open IoT driver device" refusal
+/// as if it were the reason a region is blocked. Callers that report to the
+/// user must use this variant: the service runs as SYSTEM inside the
+/// DriverStore, so its answer is the ground truth.
+#[cfg(windows)]
+pub fn read_ecram_via_pipe_result(phys_addr: u64, byte_count: usize) -> Result<Vec<u8>, String> {
+    // Reuse the hardened generic client: it tolerates byte-mode servers,
+    // enforces a 5 s deadline and owns its handle through an RAII guard.
     let request = serde_json::json!({
         "op": "read",
         "addr": format!("0x{phys_addr:08X}"),
@@ -1322,89 +1569,62 @@ pub fn read_ecram_via_pipe(phys_addr: u64, byte_count: usize) -> Option<Vec<u8>>
     })
     .to_string();
 
-    // Write request
-    let req_bytes = request.as_bytes();
-    let mut written = 0u32;
-    unsafe {
-        windows::Win32::Storage::FileSystem::WriteFile(
-            handle,
-            Some(req_bytes),
-            Some(&mut written),
-            None,
+    let response = send_pipe_request(&request).map_err(|e| {
+        log::debug!(target: "hw::ecram::pipe", "Pipe read request failed: {e}");
+        e
+    })?;
+
+    let resp: PipeResponse = serde_json::from_str(response.trim()).map_err(|e| {
+        log::warn!(target: "hw::ecram::pipe", "Pipe read returned invalid JSON: {e}");
+        format!(
+            "invalid JSON from ecram_service: {e} (response: {})",
+            response.trim().chars().take(120).collect::<String>()
         )
-        .ok()?;
-    }
-
-    // Read response
-    let mut response_buf = [0u8; 4096];
-    let mut total_read = 0usize;
-    loop {
-        if total_read >= response_buf.len() {
-            break;
-        }
-        let mut bytes_read = 0u32;
-        let result = unsafe {
-            windows::Win32::Storage::FileSystem::ReadFile(
-                handle,
-                Some(&mut response_buf[total_read..]),
-                Some(&mut bytes_read),
-                None,
-            )
-        };
-        if result.is_err() || bytes_read == 0 {
-            break;
-        }
-        total_read += bytes_read as usize;
-        let s = String::from_utf8_lossy(&response_buf[..total_read]);
-        if s.trim_end().ends_with('}') {
-            break;
-        }
-    }
-
-    // S67: the pipe handle is owned by `_pipe_guard` — closed on every return
-    // path, including the `WriteFile(...).ok()?` above and the `None` returns
-    // below. The manual CloseHandle that used to sit here is gone.
-
-    if total_read == 0 {
-        return None;
-    }
-
-    let response_str = String::from_utf8_lossy(&response_buf[..total_read]);
-    let resp: PipeResponse = serde_json::from_str(response_str.trim()).ok()?;
+    })?;
 
     if !resp.ok {
-        log::debug!(
-            target: "hw::ecram::pipe",
-            "Pipe read failed: {}",
-            resp.error.unwrap_or_default()
-        );
-        return None;
+        let err = resp
+            .error
+            .unwrap_or_else(|| "ecram_service refused the read without a reason".to_string());
+        log::debug!(target: "hw::ecram::pipe", "Pipe read failed: {err}");
+        return Err(err);
     }
 
-    // Decode hex data
-    let hex = resp.data?;
+    // Decode hex data. `get` instead of slicing: a malformed (odd-length or
+    // non-ASCII) answer must be an error, not a panic in the UI thread.
+    let hex = resp
+        .data
+        .ok_or_else(|| "ecram_service returned ok without data".to_string())?;
     let data: Vec<u8> = (0..hex.len())
         .step_by(2)
-        .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .filter_map(|i| {
+            hex.get(i..i + 2)
+                .and_then(|p| u8::from_str_radix(p, 16).ok())
+        })
         .collect();
 
-    if data.len() == byte_count {
-        Some(data)
-    } else {
+    if data.len() != byte_count {
         log::warn!(
             target: "hw::ecram::pipe",
             "Pipe read returned {} bytes, expected {}",
             data.len(),
             byte_count
         );
-        Some(data)
     }
+    Ok(data)
 }
 
 /// Check if the custom IoTService.exe pipe broker is available.
+///
+/// An `ERROR_PIPE_BUSY` answer means the service IS running (all instances are
+/// connected to clients) — the old code reported `false` for that, which sent
+/// callers down the MCPI path whose broker does not exist on this install.
+/// The probe therefore retries the transient accept-loop window instead of
+/// mistaking a busy service for an absent one.
 #[cfg(windows)]
 pub fn is_pipe_broker_available() -> bool {
-    // leak-check: audited — every exit path closes the handle explicitly (S67).
+    // leak-check: audited — the helper hands back an owned handle and every
+    // exit path closes it explicitly.
     use std::os::windows::ffi::OsStrExt;
 
     let path_w: Vec<u16> = std::ffi::OsStr::new(ECRAM_PIPE_NAME)
@@ -1412,34 +1632,25 @@ pub fn is_pipe_broker_available() -> bool {
         .chain(Some(0))
         .collect();
 
-    let handle = unsafe {
-        windows::Win32::Storage::FileSystem::CreateFileW(
-            windows::core::PCWSTR(path_w.as_ptr()),
-            (windows::Win32::Foundation::GENERIC_READ | windows::Win32::Foundation::GENERIC_WRITE)
-                .0,
-            windows::Win32::Storage::FileSystem::FILE_SHARE_READ
-                | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
-            None,
-            windows::Win32::Storage::FileSystem::OPEN_EXISTING,
-            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
-            windows::Win32::Foundation::HANDLE::default(),
-        )
-    };
-
-    match handle {
-        Ok(h) if h != windows::Win32::Foundation::INVALID_HANDLE_VALUE => {
+    match open_ecram_pipe_with_retry(&path_w, PIPE_PROBE_RETRIES) {
+        Ok(h) => {
             unsafe {
                 windows::Win32::Foundation::CloseHandle(h).ok();
             }
             true
         }
-        _ => false,
+        Err(_) => false,
     }
 }
 
 #[cfg(not(windows))]
 pub fn read_ecram_via_pipe(_phys_addr: u64, _byte_count: usize) -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(not(windows))]
+pub fn read_ecram_via_pipe_result(_phys_addr: u64, _byte_count: usize) -> Result<Vec<u8>, String> {
+    Err("ecram_service pipe is Windows-only".to_string())
 }
 
 #[cfg(not(windows))]
@@ -1583,5 +1794,377 @@ mod tests {
         let offsets = get_safe_write_offsets();
         assert!(!offsets.is_empty());
         assert!(offsets.contains(&0x1B));
+    }
+
+    /// Live smoke test against the installed `ecram_service` (READ-ONLY).
+    ///
+    /// This is the end-to-end proof of the pipe-mode fix: against the real
+    /// byte-mode service it must answer ping and return the IoT sensor block
+    /// instead of failing with `SetNamedPipeHandleState: 0x80070057`.
+    ///
+    /// Requires the installed IoTSvc + IoT driver. Run with:
+    /// `cargo test --lib live_ecram_pipe -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires the installed ecram_service and the IoT driver"]
+    fn live_ecram_pipe_ping_and_sensor_read() {
+        if !is_pipe_broker_available() {
+            eprintln!("skip: ecram_service pipe not available");
+            return;
+        }
+
+        let pong = send_pipe_request(r#"{"op":"ping"}"#).expect("ping over EC pipe");
+        assert!(
+            pong.contains(r#""pong":true"#),
+            "unexpected ping reply: {pong}"
+        );
+
+        let sensors = read_ecram_via_pipe(ECRAM_SENSOR_BLOCK, 8).expect("sensor read via pipe");
+        assert_eq!(sensors.len(), 8);
+        eprintln!("IOT_SENSORS = {sensors:02x?}");
+
+        // IOT_STATUS is one of the three ranges the driver exposes.
+        let status = read_named_region("IOT_STATUS").expect("IOT_STATUS readable");
+        assert_eq!(status.len(), IOT_STATUS_SIZE);
+
+        // ERAM is blocked by the driver: the API must say so, never zeros.
+        let eram = read_named_region("ERAM");
+        assert!(
+            eram.is_err(),
+            "ERAM must report a blocked region, got {} bytes of fake data",
+            eram.map(|b| b.len()).unwrap_or(0)
+        );
+        eprintln!("ERAM correctly reported unavailable: {:?}", eram.err());
+
+        // The decoded map must carry the same classification, so the UI can
+        // render the calm "—" instead of an error banner.
+        let map = read_eram_map().expect("map is always returned (partial when blocked)");
+        if !map.available {
+            assert_eq!(
+                map.blocked_kind,
+                Some(RegionBlockKind::DriverBlocked),
+                "0x80070005 from the service = expected driver block"
+            );
+            eprintln!(
+                "ERAM map blocked_kind = {:?} / regions = {:?}",
+                map.blocked_kind, map.blocked_regions
+            );
+        }
+    }
+
+    /// The driver blocks ERAM/SMA2 with 0x80070005. The map must say so
+    /// instead of presenting zeros as measurements.
+    #[test]
+    fn blocked_eram_map_is_flagged_unavailable() {
+        let reason = "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)";
+        let map = unavailable_eram_map(classify_region_block(reason), reason);
+        assert!(
+            !map.available,
+            "blocked ERAM map must not claim availability"
+        );
+        assert_eq!(map.blocked_regions, vec!["ERAM", "SMA2"]);
+        assert_eq!(map.raw_hex, "UNAVAILABLE");
+        assert!(
+            map.blocked_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("0x80070005")),
+            "reason should carry the driver error, got {:?}",
+            map.blocked_reason
+        );
+        assert_eq!(
+            map.blocked_kind,
+            Some(RegionBlockKind::DriverBlocked),
+            "0x80070005 from the service is the platform's expected driver block"
+        );
+    }
+
+    /// The UI renders `driver_blocked` as a calm "—" and everything else as an
+    /// error banner, so the classification must follow the *service's* answer.
+    #[test]
+    fn region_block_classification() {
+        assert_eq!(
+            classify_region_block("DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"),
+            RegionBlockKind::DriverBlocked
+        );
+        assert_eq!(
+            classify_region_block(
+                "Open pipe: The system cannot find the file specified. (0x80070002)"
+            ),
+            RegionBlockKind::ServiceUnavailable
+        );
+        assert_eq!(
+            classify_region_block("No response from pipe"),
+            RegionBlockKind::ServiceUnavailable
+        );
+        assert_eq!(
+            classify_region_block("something unexpected"),
+            RegionBlockKind::Unknown
+        );
+        // The app's own open failure must NOT be read as a driver block: it is
+        // expected and says nothing about the region.
+        assert_eq!(
+            classify_region_block("Hardware error: Open IoT driver device."),
+            RegionBlockKind::Unknown
+        );
+    }
+
+    #[cfg(windows)]
+    mod pipe_mode_tests {
+        use super::super::*;
+        use std::os::windows::ffi::OsStrExt;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use windows::Win32::Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            PIPE_ACCESS_DUPLEX,
+        };
+        use windows::Win32::System::Pipes::{
+            CreateNamedPipeW, DisconnectNamedPipe, NAMED_PIPE_MODE, PIPE_READMODE_MESSAGE,
+            PIPE_TYPE_BYTE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        };
+
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+
+        struct PipePair {
+            server: HANDLE,
+            client: HANDLE,
+        }
+
+        impl Drop for PipePair {
+            fn drop(&mut self) {
+                unsafe {
+                    DisconnectNamedPipe(self.server).ok();
+                    CloseHandle(self.server).ok();
+                    CloseHandle(self.client).ok();
+                }
+            }
+        }
+
+        /// Create a server/client pipe pair with the requested type, exactly
+        /// like `ecram_service` (server) + MiControl (client) do.
+        // leak-check: both HANDLEs are owned by the returned `PipePair`, whose
+        // Drop runs DisconnectNamedPipe(server) + CloseHandle on both. The test
+        // helper intentionally hands ownership to the struct (SendHandle-style).
+        fn make_pair(tag: &str, pipe_type: NAMED_PIPE_MODE) -> PipePair {
+            let name = format!(
+                r"\\.\pipe\micontrol_test_{}_{}_{}",
+                tag,
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::SeqCst)
+            );
+            let name_w: Vec<u16> = std::ffi::OsStr::new(&name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+
+            let server = unsafe {
+                CreateNamedPipeW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    PIPE_ACCESS_DUPLEX,
+                    pipe_type | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    4096,
+                    4096,
+                    0,
+                    None,
+                )
+            };
+            assert_ne!(
+                server,
+                INVALID_HANDLE_VALUE,
+                "CreateNamedPipeW failed: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let client = unsafe {
+                CreateFileW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            }
+            .expect("open test pipe client");
+            assert_ne!(client, INVALID_HANDLE_VALUE);
+
+            PipePair { server, client }
+        }
+
+        /// Regression: the OD/audit bug. A BYTE-mode server rejects
+        /// PIPE_READMODE_MESSAGE with 0x80070057; the client must fall back to
+        /// byte mode instead of failing every query.
+        #[test]
+        fn byte_mode_server_falls_back_to_byte_reads() {
+            let pair = make_pair("byte", PIPE_TYPE_BYTE);
+            assert_eq!(
+                configure_pipe_read_mode(pair.client),
+                PipeReadMode::Byte,
+                "MESSAGE on a BYTE pipe must degrade to Byte, never fail"
+            );
+        }
+
+        #[test]
+        fn message_mode_server_keeps_message_reads() {
+            let pair = make_pair("msg", PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+            assert_eq!(configure_pipe_read_mode(pair.client), PipeReadMode::Message);
+        }
+
+        /// Regression for the `0x800700E7` that killed the single-field IoT
+        /// wrappers while `get_iot_device_info` "worked" (the aggregate masks
+        /// the error with cached model / registry values).
+        ///
+        /// `ecram_service::run_pipe_server` creates ONE instance per accept-loop
+        /// iteration. A one-instance server reproduces that gap exactly: while
+        /// the only instance is connected to a client, the next `CreateFileW`
+        /// fails with ERROR_PIPE_BUSY. The client must wait for the listener to
+        /// be recreated (as `elev_bridge` already does for the bridge pipe)
+        /// instead of failing the whole command on the first attempt.
+        #[test]
+        fn pipe_open_retries_while_all_instances_are_busy() {
+            // leak-check: test-only. `server` is closed by the recycler thread,
+            // `first_client` and the successfully retried handle are closed at
+            // the end of the test, and the second CreateFileW is expected to
+            // fail (that failure is the point of the test).
+            use std::time::{Duration, Instant};
+
+            let name = format!(
+                r"\\.\pipe\micontrol_test_busy_{}_{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::SeqCst)
+            );
+            let name_w: Vec<u16> = std::ffi::OsStr::new(&name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+
+            // nMaxInstances = 1: the accept loop has not created the next
+            // instance yet.
+            let server = unsafe {
+                CreateNamedPipeW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                    1,
+                    4096,
+                    4096,
+                    0,
+                    None,
+                )
+            };
+            assert_ne!(
+                server,
+                INVALID_HANDLE_VALUE,
+                "CreateNamedPipeW failed: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let first_client = unsafe {
+                CreateFileW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            }
+            .expect("the first client must connect to the only instance");
+
+            // Pre-condition: this is the live failure, reproduced hermetically.
+            let busy = unsafe {
+                CreateFileW(
+                    windows::core::PCWSTR(name_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            };
+            assert_eq!(
+                busy.err().map(|e| e.code()),
+                Some(windows::core::HRESULT(0x8007_00E7_u32 as i32)),
+                "expected ERROR_PIPE_BUSY (0x800700E7) while the only instance is connected"
+            );
+
+            // Accept loop: recycle the instance after 150 ms and keep the pipe
+            // name listening long enough for the retry to land.
+            let server_raw = server.0 as isize;
+            let name_for_thread = name_w.clone();
+            let recycler = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                unsafe {
+                    CloseHandle(HANDLE(server_raw as *mut core::ffi::c_void)).ok();
+                }
+                let next = unsafe {
+                    CreateNamedPipeW(
+                        windows::core::PCWSTR(name_for_thread.as_ptr()),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                        1,
+                        4096,
+                        4096,
+                        0,
+                        None,
+                    )
+                };
+                std::thread::sleep(Duration::from_millis(500));
+                unsafe {
+                    CloseHandle(next).ok();
+                }
+            });
+
+            let started = Instant::now();
+            let opened = open_ecram_pipe_with_retry(&name_w, PIPE_OPEN_RETRIES);
+            let elapsed = started.elapsed();
+
+            assert!(
+                opened.is_ok(),
+                "client must retry the transient busy, got {:?}",
+                opened.err()
+            );
+            assert!(
+                elapsed >= Duration::from_millis(100),
+                "the client must actually wait for the listener, took {elapsed:?}"
+            );
+
+            unsafe {
+                CloseHandle(opened.unwrap()).ok();
+                CloseHandle(first_client).ok();
+            }
+            recycler.join().expect("recycler thread panicked");
+        }
+
+        /// Empirical companion to the hermetic test above: hammer the real
+        /// `ecram_service` pipe with back-to-back opens and require every one
+        /// to succeed. Pre-fix this failed with `All pipe instances are busy`
+        /// often enough to kill the single-field IoT wrappers (0/4 live) while
+        /// `get_iot_device_info` masked the same error behind its cache.
+        ///
+        /// Read-only: `iot_get` → model string. Run with:
+        /// `cargo test --features face live_pipe_requests -- --ignored --nocapture`
+        #[test]
+        #[ignore = "requires the installed ecram_service (read-only iot_get)"]
+        fn live_pipe_requests_never_fail_with_error_pipe_busy() {
+            const REQUESTS: usize = 100;
+            let mut failures = Vec::new();
+            for i in 0..REQUESTS {
+                if let Err(e) = send_pipe_request(r#"{"op":"iot_get","cmd":"model"}"#) {
+                    failures.push(format!("#{i}: {e}"));
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "{}/{REQUESTS} pipe requests failed (first 5: {:?})",
+                failures.len(),
+                &failures[..failures.len().min(5)]
+            );
+        }
     }
 }

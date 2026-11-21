@@ -1,16 +1,20 @@
-import { useState, useEffect, useCallback, lazy, Suspense, memo } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, memo } from 'react';
 import type { ThemeMode } from '../App';
 import { t } from '../hooks/useI18n';
 import type { useHardware } from '../hooks/useHardware';
 import TrayPopup from './TrayPopup';
 import { useSettings } from '../hooks/useSettings';
+import { usePowerProfiles } from '../hooks/usePowerProfiles';
 import { useAnalysisLogger } from '../hooks/useAnalysisLogger';
 import { useAutoUpdate } from '../hooks/useAutoUpdate';
 import { ConsentDialog } from '../components/ConsentDialog';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { MiControlIcon } from '../components/MiControlIcon';
+import { SystemLogPanel } from '../components/SystemLogPanel';
 import OnboardingWizard from '../components/OnboardingWizard';
 import PrivacyPolicy from './PrivacyPolicy';
+import { Icon, type IconName } from '../components/ui/icons';
+import { IconButton } from '../components/ui/icon-button';
 
 // ── Lazy-loaded tab content ──────────────────────────────────────────────────
 const OverviewTab = lazy(() => import('./tabs/overview'));
@@ -48,76 +52,105 @@ interface Props {
   toggleTheme: () => void;
 }
 
-const NAV_ITEMS = [
-  { id: 'overview', icon: '📊', label: 'nav.overview' },
-  { id: 'taskmgr', icon: '📈', label: 'nav.taskmgr' },
-  { id: 'performance', icon: '⚡', label: 'nav.performance' },
-  { id: 'sysopt', icon: '🚀', label: 'nav.sysOpt' },
-  { id: 'battery', icon: '🔋', label: 'nav.battery' },
-  { id: 'display', icon: '🖥️', label: 'nav.display' },
-  { id: 'fan', icon: '💨', label: 'nav.fan' },
-  { id: 'audio', icon: '🎵', label: 'nav.audio' },
-  { id: 'cast', icon: '📺', label: 'nav.cast' },
-  { id: 'touchpad', icon: '🖱️', label: 'nav.touchpad' },
-  { id: 'iot', icon: '🔌', label: 'nav.iot' },
-  { id: 'faceUnlock', icon: '😀', label: 'nav.faceUnlock' },
-  { id: 'wifi', icon: '📶', label: 'nav.wifi' },
-  { id: 'startup', icon: '🚀', label: 'nav.startup' },
-  { id: 'system', icon: '🔧', label: 'nav.system' },
-  { id: 'keyboard', icon: '⌨️', label: 'nav.keyboard' },
-  { id: 'security', icon: '🛡️', label: 'nav.security' },
-  { id: 'crossDevice', icon: '📱', label: 'nav.crossDevice' },
-  { id: 'color', icon: '🎨', label: 'nav.color' },
-  { id: 'cleanup', icon: '🧹', label: 'nav.cleanup' },
-  ...(import.meta.env.DEV ? [{ id: 'ecrdebug', icon: '🔧', label: 'nav.ecrdebug' }] : []),
-  { id: 'ai_analysis', icon: '🤖', label: 'nav.aiAnalysis' },
-  { id: 'settings', icon: '⚙️', label: 'nav.settings' },
-  { id: 'about', icon: 'ℹ️', label: 'nav.about' },
-] as const;
+type NavKey = Parameters<typeof t>[0];
 
-function ThemeIcon({ mode }: { mode: ThemeMode }) {
-  if (mode === 'light')
-    return (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 16 16"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      >
-        <circle cx="8" cy="8" r="2.8" />
-        <line x1="8" y1="1.5" x2="8" y2="3" />
-        <line x1="8" y1="13" x2="8" y2="14.5" />
-        <line x1="1.5" y1="8" x2="3" y2="8" />
-        <line x1="13" y1="8" x2="14.5" y2="8" />
-        <line x1="3.5" y1="3.5" x2="4.5" y2="4.5" />
-        <line x1="11.5" y1="11.5" x2="12.5" y2="12.5" />
-        <line x1="12.5" y1="3.5" x2="11.5" y2="4.5" />
-        <line x1="4.5" y1="11.5" x2="3.5" y2="12.5" />
-      </svg>
-    );
-  if (mode === 'dark')
-    return (
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M7.5 2a6 6 0 1 0 6.5 8.5A5 5 0 0 1 7.5 2z" />
-      </svg>
-    );
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-    >
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 2.5 A5.5 5.5 0 0 1 8 13.5" fill="currentColor" stroke="none" />
-    </svg>
-  );
+interface NavItem {
+  id: string;
+  icon: IconName;
+  label: NavKey;
+}
+
+interface NavGroup {
+  id: string;
+  label: NavKey;
+  items: NavItem[];
+}
+
+/**
+ * Navigation grouped by task domain (audit 2026-11-07, finding #3: 23 flat
+ * destinations cost 23 binary decisions and pushed `Definições` below the
+ * fold). Five groups, each labelled; the last one is pinned outside the
+ * scroll area so Settings is always reachable at 950×660 and at the 600×560
+ * minimum.
+ */
+const NAV_GROUPS: NavGroup[] = [
+  {
+    id: 'system',
+    label: 'nav.groups.system',
+    items: [
+      { id: 'overview', icon: 'chart-bar', label: 'nav.overview' },
+      { id: 'taskmgr', icon: 'chart-line', label: 'nav.taskmgr' },
+      { id: 'system', icon: 'wrench', label: 'nav.system' },
+      { id: 'startup', icon: 'rocket', label: 'nav.startup' },
+      { id: 'security', icon: 'shield', label: 'nav.security' },
+      { id: 'cleanup', icon: 'broom', label: 'nav.cleanup' },
+      { id: 'ai_analysis', icon: 'bot', label: 'nav.aiAnalysis' },
+      // EC Debug é ferramenta de desenvolvimento: só existe em DEV e vive na
+      // lista rolável; o fundo fixo da sidebar passou a ser Settings + Acerca.
+      ...(import.meta.env.DEV
+        ? [{ id: 'ecrdebug', icon: 'wrench' as IconName, label: 'nav.ecrdebug' as NavKey }]
+        : []),
+    ],
+  },
+  {
+    id: 'energy',
+    label: 'nav.groups.energy',
+    items: [
+      { id: 'battery', icon: 'battery', label: 'nav.battery' },
+      { id: 'performance', icon: 'bolt', label: 'nav.performance' },
+      { id: 'fan', icon: 'wind', label: 'nav.fan' },
+      { id: 'sysopt', icon: 'rocket', label: 'nav.sysOpt' },
+    ],
+  },
+  {
+    id: 'screen',
+    label: 'nav.groups.screen',
+    items: [
+      { id: 'display', icon: 'monitor', label: 'nav.display' },
+      { id: 'color', icon: 'palette', label: 'nav.color' },
+      { id: 'audio', icon: 'music', label: 'nav.audio' },
+      { id: 'cast', icon: 'tv', label: 'nav.cast' },
+    ],
+  },
+  {
+    id: 'devices',
+    label: 'nav.groups.devices',
+    items: [
+      { id: 'crossDevice', icon: 'smartphone', label: 'nav.crossDevice' },
+      { id: 'iot', icon: 'plug', label: 'nav.iot' },
+      { id: 'wifi', icon: 'wifi', label: 'nav.wifi' },
+      { id: 'keyboard', icon: 'keyboard', label: 'nav.keyboard' },
+      { id: 'touchpad', icon: 'mouse', label: 'nav.touchpad' },
+      { id: 'faceUnlock', icon: 'smile', label: 'nav.faceUnlock' },
+    ],
+  },
+];
+
+/** Destinos fixos no fundo da sidebar, fora do scroll (audit P1-3). */
+const FOOT_SETTINGS: NavItem = { id: 'settings', icon: 'gear', label: 'nav.settings' };
+const FOOT_ABOUT: NavItem = { id: 'about', icon: 'info', label: 'nav.about' };
+
+const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
+
+/** Alt+1..9 keeps the pre-grouping order, muscle memory must survive the
+ *  reorganisation (audit §4.5: memorability is the weakest axis). */
+const SHORTCUT_TABS = [
+  'overview',
+  'taskmgr',
+  'performance',
+  'sysopt',
+  'battery',
+  'display',
+  'fan',
+  'audio',
+  'cast',
+];
+
+/** Glifo por modo, do catálogo SVG: sol (claro), lua (escuro), contraste (auto). */
+function themeGlyph(mode: ThemeMode): IconName {
+  if (mode === 'light') return 'sun';
+  if (mode === 'dark') return 'moon';
+  return 'contrast';
 }
 
 function getThemeLabel(mode: ThemeMode): string {
@@ -131,93 +164,169 @@ interface SidebarProps {
   toggleTheme: () => void;
   hardware: Hardware;
   setShowTrayPreview: (v: boolean) => void;
+  /** Abre o painel "System log", o erro vive lá, nunca nesta navegação. */
+  onOpenSystemLog: () => void;
 }
 
-const Sidebar = memo(function Sidebar({
+/** Exportado para os testes do rodapé/fundo fixo da sidebar. */
+export const Sidebar = memo(function Sidebar({
   activeTab,
   onTabChange,
   themeMode,
   toggleTheme,
   hardware,
   setShowTrayPreview,
+  onOpenSystemLog,
 }: SidebarProps) {
+  const [query, setQuery] = useState('');
+  const activeRef = useRef<HTMLButtonElement | null>(null);
+  const q = query.trim().toLowerCase();
+
+  // Keep the active destination in view: the list scrolls internally, so a
+  // tab change from a shortcut or the tray must not leave the marker offscreen
+  // (audit §4.3 #7, the active item used to stay below the fold).
+  useEffect(() => {
+    if (!q) activeRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [activeTab, q]);
+
+  const renderItem = (item: NavItem) => {
+    const active = activeTab === item.id;
+    return (
+      <button
+        key={item.id}
+        ref={active ? activeRef : undefined}
+        className={`sidebar-item ${active ? 'active' : ''}`}
+        onClick={() => onTabChange(item.id)}
+        aria-current={active ? 'page' : undefined}
+        title={t(item.label)}
+      >
+        <span className="sidebar-icon" aria-hidden="true">
+          <Icon name={item.icon} size={18} />
+        </span>
+        <span className="sidebar-item-label">{t(item.label)}</span>
+      </button>
+    );
+  };
+
+  const matches = (item: NavItem) => !q || t(item.label).toLowerCase().includes(q);
+  const results = q ? NAV_ITEMS.filter(matches) : null;
+  // While filtering, Settings and About appear in the single result list ,
+  // keeping them in the fixed foot would duplicate the destinations. The
+  // theme toggle stays: it is an action, not a destination.
+  const showFootDestinations = !q;
+
   return (
-    <nav aria-label="Main navigation" className="sidebar">
+    <nav aria-label={t('nav.label')} className="sidebar">
       <div className="sidebar-logo">
-        <MiControlIcon size={22} />
+        <MiControlIcon size={16} />
         MiControl
       </div>
-      {NAV_ITEMS.map((item) => (
-        <button
-          key={item.id}
-          className={`sidebar-item ${activeTab === item.id ? 'active' : ''}`}
-          onClick={() => onTabChange(item.id)}
-          aria-label={t(item.label as Parameters<typeof t>[0])}
-        >
-          <span className="sidebar-icon" aria-hidden="true">
-            {item.icon}
-          </span>
-          {t(item.label as Parameters<typeof t>[0])}
-        </button>
-      ))}
 
-      <div className="sidebar-footer">
-        {hardware.error && (
-          <div
-            style={{
-              padding: '4px 8px',
-              fontSize: 11,
-              color: 'var(--error)',
-              wordBreak: 'break-word',
-            }}
-          >
-            ⚠️ {hardware.error}
-          </div>
-        )}
-        {hardware.loading && (
-          <div style={{ padding: '4px 8px', fontSize: 11, color: 'var(--text-dim)' }}>
-            {t('common.loading')}
-          </div>
-        )}
-        <div
-          style={{
-            padding: '4px 8px',
-            fontSize: 10,
-            color: 'var(--color-text-muted)',
-            opacity: 0.6,
-            textAlign: 'center',
-          }}
+      <div className="sidebar-search">
+        <svg
+          className="sidebar-search-icon"
+          width="12"
+          height="12"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          aria-hidden="true"
         >
-          {t('shortcuts.tabSwitch')}
-        </div>
-        <button className="theme-toggle" onClick={toggleTheme} title={`Theme: ${themeMode}`}>
-          <ThemeIcon mode={themeMode} />
-          <span>{getThemeLabel(themeMode)}</span>
-        </button>
-        {import.meta.env.DEV && (
-          <button
-            className="theme-toggle"
-            onClick={() => setShowTrayPreview(true)}
-            title="Preview tray popup"
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="1" y="10" width="14" height="5" rx="1" />
-              <rect x="1" y="1" width="14" height="7" rx="1" />
-              <line x1="4" y1="12.5" x2="4" y2="12.5" strokeWidth="2" />
-              <line x1="7" y1="12.5" x2="7" y2="12.5" strokeWidth="2" />
-            </svg>
-            <span>Tray</span>
-          </button>
+          <circle cx="7" cy="7" r="4.5" />
+          <line x1="10.5" y1="10.5" x2="14" y2="14" />
+        </svg>
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setQuery('');
+          }}
+          placeholder={t('nav.search')}
+          aria-label={t('nav.search')}
+          spellCheck={false}
+        />
+      </div>
+
+      <div className="sidebar-scroll">
+        {results ? (
+          results.length > 0 ? (
+            results.map(renderItem)
+          ) : (
+            <div className="sidebar-empty" role="status">
+              {t('nav.noResults', { query: query.trim() })}
+            </div>
+          )
+        ) : (
+          NAV_GROUPS.map((group) => (
+            <div key={group.id} className="sidebar-group" role="group" aria-label={t(group.label)}>
+              <div className="sidebar-group-label" aria-hidden="true">
+                {t(group.label)}
+              </div>
+              {group.items.map(renderItem)}
+            </div>
+          ))
         )}
+      </div>
+
+      {/* Rodapé: só existe quando há um erro vivo (botão "System log") ou em
+          DEV (pré-visualização do tray). Sem erro, em produção, não chega a
+          renderizar: o fundo fixo abaixo é a última linha da sidebar. */}
+      {(hardware.error || import.meta.env.DEV) && (
+        <div className="sidebar-footer">
+          {hardware.error && (
+            <div className="sidebar-statusrow">
+              <span className="sidebar-statusrow__spacer" />
+              <span className="sidebar-logbtn sidebar-logbtn--active">
+                <IconButton
+                  icon="alert-triangle"
+                  label={t('systemLog.title')}
+                  onClick={onOpenSystemLog}
+                />
+              </span>
+            </div>
+          )}
+          {import.meta.env.DEV && (
+            <button
+              className="theme-toggle"
+              onClick={() => setShowTrayPreview(true)}
+              title={t('main.previewTray')}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="1" y="10" width="14" height="5" rx="1" />
+                <rect x="1" y="1" width="14" height="7" rx="1" />
+                <line x1="4" y1="12.5" x2="4" y2="12.5" strokeWidth="2" />
+                <line x1="7" y1="12.5" x2="7" y2="12.5" strokeWidth="2" />
+              </svg>
+              <span>{t('main.tray')}</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Fundo fixo, fora do scroll: Definições + toggle de tema (28 px,
+          imediatamente à esquerda do Acerca), com separador hairline. */}
+      <div className="sidebar-foot">
+        {showFootDestinations && renderItem(FOOT_SETTINGS)}
+        <IconButton
+          compact
+          icon={themeGlyph(themeMode)}
+          label={t('main.themeToggle')}
+          title={t('main.themeTitle', { theme: getThemeLabel(themeMode) })}
+          onClick={toggleTheme}
+        />
+        {showFootDestinations && renderItem(FOOT_ABOUT)}
       </div>
     </nav>
   );
@@ -231,9 +340,15 @@ export default function MainWindow({
   toggleTheme,
 }: Props) {
   const aiSettings = useSettings();
+  // P2-6: the Power Profiles toggle must outlive tab switches. The hook lives
+  // in the shell (mounted once), not in the Performance tab, and the actual
+  // AC/DC application happens in Rust (`hw::scenario_rules`), the UI only
+  // mirrors config + subscribes to status.
+  const powerProfiles = usePowerProfiles(aiSettings.settings, aiSettings.updateKey);
   const appUpdate = useAutoUpdate();
   const { onboardingCompleted } = aiSettings.settings;
   const [showTrayPreview, setShowTrayPreview] = useState(false);
+  const [showSystemLog, setShowSystemLog] = useState(false);
   const [showConsentDialog, setShowConsentDialog] = useState(false);
   const [consentChecked, setConsentChecked] = useState(false);
 
@@ -272,14 +387,12 @@ export default function MainWindow({
 
   // ── Keyboard shortcuts: Alt+1..9 to switch tabs ──────────────────────
   useEffect(() => {
-    const tabIds = NAV_ITEMS.slice(0, 9).map((item) => item.id);
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.altKey && e.key >= '1' && e.key <= '9') {
         e.preventDefault();
         const tabIndex = parseInt(e.key, 10) - 1;
-        if (tabIndex < tabIds.length) {
-          onTabChange(tabIds[tabIndex]);
-        }
+        const tabId = SHORTCUT_TABS[tabIndex];
+        if (tabId) onTabChange(tabId);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -294,6 +407,7 @@ export default function MainWindow({
             hw={hardware}
             ai={aiSettings}
             onOpenSettings={() => onTabChange('settings')}
+            onNavigate={onTabChange}
           />
         );
       case 'taskmgr':
@@ -303,6 +417,7 @@ export default function MainWindow({
           <PerformanceTab
             hw={hardware}
             ai={aiSettings}
+            pp={powerProfiles}
             onOpenSettings={() => onTabChange('settings')}
           />
         );
@@ -372,6 +487,7 @@ export default function MainWindow({
             hw={hardware}
             ai={aiSettings}
             onOpenSettings={() => onTabChange('settings')}
+            onNavigate={onTabChange}
           />
         );
     }
@@ -386,6 +502,7 @@ export default function MainWindow({
         toggleTheme={toggleTheme}
         hardware={hardware}
         setShowTrayPreview={setShowTrayPreview}
+        onOpenSystemLog={() => setShowSystemLog(true)}
       />
 
       <main className="content-area">
@@ -420,7 +537,7 @@ export default function MainWindow({
             fontFamily: 'var(--font-mono, monospace)',
           }}
         >
-          <span>By: Marcos Freitas</span>
+          <span>{t('main.by', { name: 'Marcos Freitas' })}</span>
           <a
             href="https://github.com/Freitas-MA"
             target="_blank"
@@ -466,7 +583,7 @@ export default function MainWindow({
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ fontSize: 10, color: 'oklch(90% 0 0 / 0.6)' }}>
-              Preview — click outside to close
+              {t('main.previewHint')}
             </div>
             <TrayPopup hardware={hardware} />
             <div
@@ -483,9 +600,9 @@ export default function MainWindow({
                 fontSize: 18,
                 alignSelf: 'flex-end',
               }}
-              title="MiControl tray icon"
+              title={t('main.trayIconTitle')}
             >
-              🖥️
+              <Icon name="monitor" size={16} />
             </div>
           </div>
         </div>
@@ -493,6 +610,13 @@ export default function MainWindow({
 
       {/* First-run onboarding wizard */}
       {!onboardingCompleted && <OnboardingWizard onFinish={handleFinishOnboarding} />}
+
+      {/* System log, o sítio próprio dos erros (aberto pelo botão da sidebar). */}
+      <SystemLogPanel
+        open={showSystemLog}
+        onClose={() => setShowSystemLog(false)}
+        currentError={hardware.error}
+      />
 
       {/* Telemetry consent dialog */}
       {showConsentDialog && (

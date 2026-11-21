@@ -52,7 +52,6 @@ export interface ProcessTaskInfo {
   memory_mb: number;
   gpu_percent: number;
   npu_percent: number;
-  net_bytes_per_sec: number;
   thread_count: number;
 }
 
@@ -97,9 +96,25 @@ export interface AiBrightnessConfig {
   mode: 'curve' | 'smart';
 }
 
+/** Advanced-color (HDR) state of one connected display. */
+export interface HdrDisplayState {
+  /** GDI device name, e.g. `\\.\DISPLAY1`. */
+  device: string;
+  /** Monitor friendly name when Windows exposes one. */
+  label: string;
+  /** `advancedColorSupported` — the display can do HDR / wide colour gamut. */
+  supported: boolean;
+  /** `advancedColorEnabled` — HDR is currently on for this display. */
+  enabled: boolean;
+}
+
 export interface DisplayInfo {
   brightness: number;
   hdr_enabled: boolean;
+  /** At least one connected display reports HDR support; the toggle is disabled otherwise. */
+  hdr_supported?: boolean;
+  /** Per-display HDR state, so "HDR enabled" can say which monitor it means. */
+  hdr_displays?: HdrDisplayState[];
   refresh_rate_hz: number;
   /** All Hz values supported at the current resolution. */
   available_refresh_rates: number[];
@@ -107,22 +122,101 @@ export interface DisplayInfo {
   dynamic_refresh_rate_capable: boolean;
   /** Intel PSR2 DRRS — driver-level automatic 60↔120 Hz switching. */
   adaptive_refresh_rate: boolean;
+  /**
+   * The DRRS value was written during this boot: the registry holds the new
+   * intent but the driver only loads it on restart. There is no API to observe
+   * the switching, so this is the only honest state.
+   */
+  adaptive_refresh_rate_pending_reboot?: boolean;
   ai_brightness: boolean;
   ai_brightness_config: AiBrightnessConfig;
   /** Current ambient illuminance from the light sensor (lux). Null when unavailable. */
   ambient_lux: number | null;
+  /**
+   * Which backend actually writes brightness (P10). `wmi-fallback` means the
+   * Intel driver loaded ControlLib.dll but exposed no IGCL device, so hardware
+   * brightness control is unavailable and WMI is used instead.
+   */
+  brightness_source?: 'igcl' | 'wmi-fallback' | 'unknown';
 }
 
 export interface FanInfo {
   mode: 'auto' | 'fixed' | 'off';
-  speed_rpm: number;
-  speed_percent: number;
+  /**
+   * Measured fan RPM. `null` when the platform exposes no RPM sensor — which is
+   * the normal state here (`Win32_Fan.DesiredSpeed` is empty and every EC RAM
+   * read is denied). Deliberately not `0`: "0 RPM" means the fan is stopped.
+   */
+  speed_rpm: number | null;
+  /**
+   * Measured fan speed as a percentage, derived from `speed_rpm`. `null` when
+   * there is no RPM reading — the stored value is a request, not a measurement,
+   * and must never be drawn as a gauge.
+   */
+  speed_percent: number | null;
+  /** Last requested percentage (registry). Drives the slider, not the gauge. */
+  requested_speed_percent: number;
   /** GPU temperature in Celsius. Null when no sensor is available. */
   gpu_temp_celsius: number | null;
   /** CPU temperature in Celsius. Null when no sensor is available. */
   cpu_temp_celsius: number | null;
+  /**
+   * Ambient/chassis temperature (ACPI `TZ00`). This is the only reading that
+   * zone is allowed to contribute — it is never used as the CPU temperature.
+   */
+  ambient_temp_celsius: number | null;
   /** System package power from RAPL (\\Power Meter(_Total)\\Power). Null for ~1.5 s after launch. */
   tdp_watts: number | null;
+  /** Which source produced `cpu_temp_celsius`. */
+  temp_source: 'esif' | 'acpi' | 'ecram' | 'unavailable';
+  /**
+   * The EC's **active** performance mode, read back from the firmware. This is
+   * the machine's real mode — never confuse it with `mode`, which is the stored
+   * preference. `null` when the elevated read failed.
+   *
+   * Only five values can be named: the ACPI read path collapses every other EC
+   * mode to `unreported` (raw 0), which does NOT mean "silence".
+   */
+  ec_active?: EcActiveMode | null;
+  /** Raw mode byte behind `ec_active`. `0` = "not nameable through this channel". */
+  ec_active_raw?: number | null;
+  /**
+   * OS-reported lid state when the reading was taken.
+   *
+   * `false` means the lid is closed, and on this platform the EC then runs its
+   * own clamshell fan table: the fan ramps within ~1 s of the lid closing while
+   * CPU/GPU power and temperatures stay flat, and no software path can write
+   * fan duty, so the fan may not follow `mode`. `null`/`undefined` = the
+   * platform did not report the lid switch (not "closed").
+   */
+  lid_open?: boolean | null;
+}
+
+/**
+ * Modes the firmware's WMAA read can name. Anything else arrives as
+ * `unreported` with `ec_active_raw === 0`.
+ */
+export type EcActiveMode =
+  'turbo' | 'decepticon' | 'overdrive' | 'smart_adaptive' | 'smart' | 'unreported';
+
+/**
+ * What `set_fan_mode` actually did. `applied` does not mean the fan speed
+ * changed — `rpm_control` says whether RPM were really pinned, and `warning`
+ * carries the honest caveat to show next to the result.
+ */
+export interface FanModeResult {
+  applied: boolean;
+  /** `registry+ec_profile`, `registry+ec_profile+igcl` or `registry`. */
+  method: string;
+  /** True only when an IGCL fan handle was programmed with a fixed speed. */
+  rpm_control: boolean;
+  warning: string | null;
+  /** EC mode register read back before the write (`null` = read failed). */
+  ec_mode_before?: number | null;
+  /** EC mode register read back after the write. */
+  ec_mode_after?: number | null;
+  /** The write was proven to latch the EC register. */
+  ec_verified?: boolean;
 }
 
 export interface AiPerfLogEntry {
@@ -209,6 +303,17 @@ export interface HardwareProfile {
 
 export type IotRegionName = 'ERAM' | 'SMA2' | 'IOT_STATUS' | 'IOT_SENSORS';
 
+/**
+ * Why an ECRAM region is unreadable — mirrors `RegionBlockKind` in
+ * `src-tauri/src/hw/errors.rs`.
+ *
+ * `driver_blocked` is this platform's EXPECTED state (the IoT driver refuses
+ * ERAM/SMA2 by address with 0x80070005 even for SYSTEM) and must render as a
+ * calm "—" with a hint. `service_unavailable`/`unknown` are real faults and
+ * keep the error banner.
+ */
+export type EramBlockKind = 'driver_blocked' | 'service_unavailable' | 'unknown';
+
 export interface EramMap {
   misc0: number;
   misc1: number;
@@ -236,6 +341,24 @@ export interface EramMap {
   display_brightness_level: number;
   keyboard_backlight_level: number;
   raw_hex: string;
+  /**
+   * Legacy optional flag (older backends signal via `raw_hex === 'UNAVAILABLE'`).
+   * Prefer `available` when present (newer backends always send it).
+   */
+  ecram_available?: boolean;
+  /** False when ERAM could not be read (driver blocks 0xFE0B0300). The
+   *  numeric fields above are placeholders, not measurements. */
+  available: boolean;
+  /** Regions the driver refused (e.g. ["ERAM", "SMA2"]). */
+  blocked_regions: string[];
+  /** Driver/pipe error explaining why the map is unavailable. */
+  blocked_reason: string | null;
+  /** Classified cause of the block — `driver_blocked` is expected (calm "—"),
+   *  anything else is a real fault (error banner). */
+  blocked_kind?: EramBlockKind | null;
+  /** True when `perf_profile` was read via WMI instead of ERAM (real value
+   *  even while `available` is false). */
+  perf_profile_from_wmi?: boolean;
 }
 
 export interface AudioVolumeResult {
@@ -374,6 +497,23 @@ export interface EcSensorData {
   current_mode: number;
 }
 
+/**
+ * Structured AC-adapter-power answer (`wmi_ec_read_adapter_power`).
+ *
+ * P2 (audit 2026-11-07): machines without the WMAA adapter-power class used to
+ * produce a hard error (`WBEM_E_NOT_FOUND`, 115× in 49 h). The command now
+ * succeeds with `supported: false`; the UI should hide the wattage field
+ * instead of rendering an error.
+ */
+export interface AdapterPowerReading {
+  /** `false` when this hardware does not expose the WMI class. */
+  supported: boolean;
+  /** Watts when `supported` is true, `null` otherwise. */
+  watts: number | null;
+  /** Diagnostic reason for `supported: false` (not for end users). */
+  reason?: string;
+}
+
 // ── HQWmiCommonInterface (BIOS control via WMI) ────────────────────────────
 //
 // These types match the Rust structs in `src-tauri/src/hw/hq_wmi.rs`.
@@ -405,4 +545,94 @@ export interface ThermalZoneInfo {
   critical_trip_celsius: number | null;
   /** Whether this thermal zone is active. */
   active: boolean;
+}
+
+// ── Overview snapshot (identity + specs) ───────────────────────────────────
+//
+// Mirrors `src-tauri/src/hw/overview.rs`. Every optional field is `null` when
+// the platform does not expose it — the UI renders "—" with a hint and never a
+// substituted zero. `null` on `npu` means *no neural accelerator detected*.
+
+export interface OverviewDeviceSpec {
+  manufacturer: string;
+  model: string;
+  family: string | null;
+  /** ODM SKU (e.g. `TM2424-77079`). */
+  sku: string | null;
+  bios_version: string | null;
+}
+
+export interface OverviewCpuSpec {
+  name: string;
+  cores: number;
+  threads: number;
+  /** Rated clock from SMBIOS — not a live frequency. */
+  base_clock_mhz: number | null;
+  l3_cache_mb: number | null;
+  socket: string | null;
+}
+
+export interface OverviewGpuSpec {
+  name: string;
+  driver_version: string | null;
+}
+
+export interface OverviewNpuSpec {
+  name: string;
+  vendor: string | null;
+  driver_version: string | null;
+  /** `YYYY-MM-DD`. */
+  driver_date: string | null;
+  /** `ok` | `error`. */
+  status: string;
+  device_id: string | null;
+}
+
+export interface OverviewMemorySpec {
+  total_gb: number;
+  module_count: number;
+  speed_mt_s: number | null;
+  /** SMBIOS label: `DDR5`, `LPDDR5`, … */
+  memory_type: string | null;
+  manufacturer: string | null;
+}
+
+export interface OverviewStorageSpec {
+  model: string;
+  capacity_gb: number;
+  free_gb: number;
+  /** `C:` */
+  system_drive: string;
+  /** `NVMe` | `SATA` | … */
+  bus: string | null;
+  /** `SSD` | `HDD` | `SCM` */
+  media: string | null;
+  /** `Healthy` | `Warning` | `Unhealthy` */
+  health: string | null;
+}
+
+export interface OverviewDisplaySpec {
+  width: number;
+  height: number;
+  refresh_hz: number;
+  name: string | null;
+}
+
+export interface OverviewOsSpec {
+  caption: string;
+  build: string;
+  arch: string;
+  uptime_secs: number;
+}
+
+export interface OverviewSnapshot {
+  device: OverviewDeviceSpec;
+  cpu: OverviewCpuSpec;
+  gpu: OverviewGpuSpec;
+  npu: OverviewNpuSpec | null;
+  memory: OverviewMemorySpec;
+  storage: OverviewStorageSpec;
+  display: OverviewDisplaySpec;
+  os: OverviewOsSpec;
+  captured_at_ms: number;
 }

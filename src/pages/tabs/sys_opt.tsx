@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
 import { useToast } from '../../contexts/ToastContext';
+import { OsTurboMeasuredBlock, osTurboCounts } from '../../components/OsTurboMeasured';
+import { Icon } from '../../components/ui/icons';
 
 interface SysOptStatus {
   id: string;
@@ -14,6 +16,7 @@ interface SysOptStatus {
 interface OsTurboMeasuredStatus {
   inspected: number;
   applied: number;
+  pending: number;
   restored: number;
   skipped: number;
   failures: number;
@@ -25,6 +28,8 @@ interface OsTurboStatus {
   enabled: boolean;
   throttled_processes: number;
   power_plan: string;
+  /** The recovery snapshot references processes that no longer exist. */
+  snapshot_stale?: boolean;
   /** S39-003: truthful readback counts from the last sweep. */
   measured?: OsTurboMeasuredStatus;
 }
@@ -100,6 +105,8 @@ function SystemOptimizationTab() {
     [statuses],
   );
 
+  const turboCounts = osTurboCounts(osTurbo);
+
   return (
     <>
       <PageHeader
@@ -111,7 +118,9 @@ function SystemOptimizationTab() {
 
       {/* OS Turbo card */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <div className="card-title">⚡ {t('sysOpt.osTurboTitle')}</div>
+        <h2 className="card-title">
+          <Icon name="bolt" size={16} /> {t('sysOpt.osTurboTitle')}
+        </h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 14 }}>
           {t('sysOpt.osTurboDesc')}
         </p>
@@ -121,7 +130,11 @@ function SystemOptimizationTab() {
             <span className="toggle-desc">
               {osTurbo
                 ? osTurbo.enabled
-                  ? `${t('sysOpt.osTurboOn')} — ${t('sysOpt.osTurboPlan')}: ${osTurbo.power_plan}`
+                  ? `${t('sysOpt.osTurboPlan')}: ${osTurbo.power_plan} — ${
+                      turboCounts.inspected > 0
+                        ? t('sysOpt.osTurboOnSummary', turboCounts)
+                        : t('sysOpt.osTurboOnIdle')
+                    }`
                   : t('sysOpt.osTurboOff')
                 : t('common.unknown')}
             </span>
@@ -139,7 +152,7 @@ function SystemOptimizationTab() {
         </label>
         <details style={{ marginTop: 4 }}>
           <summary style={{ fontSize: '0.8rem', color: 'var(--text-muted)', cursor: 'pointer' }}>
-            ℹ️ {t('sysOpt.osTurboHowTitle')}
+            <Icon name="info" size={16} /> {t('sysOpt.osTurboHowTitle')}
           </summary>
           <p
             style={{
@@ -154,88 +167,21 @@ function SystemOptimizationTab() {
         </details>
 
         {/* S39-008: measured status — every number comes from a real
-            GetProcessInformation readback, never a guess. */}
-        {osTurbo?.measured && (
-          <div
-            style={{
-              marginTop: 14,
-              paddingTop: 12,
-              borderTop: '1px solid var(--border)',
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 600,
-                color: 'var(--text-dim)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.08em',
-                marginBottom: 8,
-              }}
-            >
-              {t('sysOpt.osTurboMeasuredTitle')}
-            </div>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
-                gap: '8px 14px',
-              }}
-            >
-              {(
-                [
-                  ['osTurboMeasuredInspected', osTurbo.measured.inspected],
-                  ['osTurboMeasuredApplied', osTurbo.measured.applied],
-                  ['osTurboMeasuredRestored', osTurbo.measured.restored],
-                  ['osTurboMeasuredSkipped', osTurbo.measured.skipped],
-                  ['osTurboMeasuredFailures', osTurbo.measured.failures],
-                ] as const
-              ).map(([key, value]) => (
-                <div key={key}>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                    {t(`sysOpt.${key}` as Parameters<typeof t>[0])}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 15,
-                      fontWeight: 600,
-                      fontVariantNumeric: 'tabular-nums',
-                      color: 'var(--text)',
-                    }}
-                  >
-                    {value}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div
-              style={{
-                marginTop: 10,
-                fontSize: 11,
-                color: 'var(--text-dim)',
-                display: 'flex',
-                gap: 12,
-                flexWrap: 'wrap',
-              }}
-            >
-              <span>
-                {osTurbo.measured.worker_active
-                  ? t('sysOpt.osTurboWorkerActive')
-                  : t('sysOpt.osTurboWorkerIdle')}
-              </span>
-              <span>
-                {osTurbo.measured.last_sweep_ms > 0
-                  ? t('sysOpt.osTurboSweepDone')
-                  : t('sysOpt.osTurboSweepNever')}
-              </span>
-            </div>
+            GetProcessInformation readback, never a guess. Shared with the
+            Performance tab so both views can never disagree. */}
+        {osTurbo?.snapshot_stale && (
+          <div className="alert alert-warn" style={{ marginTop: 12 }}>
+            <Icon name="alert-triangle" size={16} /> {t('performance.osTurboStaleSnapshot')}
           </div>
         )}
+        <OsTurboMeasuredBlock measured={osTurbo?.measured} />
       </div>
 
       {/* ── S55: Windows Debloater card ── */}
       <div className="card" style={{ marginBottom: 14 }}>
-        <div className="card-title">🧹 {t('sysOpt.debloaterTitle')}</div>
+        <h2 className="card-title">
+          <Icon name="broom" size={16} /> {t('sysOpt.debloaterTitle')}
+        </h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
           {t('sysOpt.debloaterDesc')}
         </p>
@@ -363,7 +309,9 @@ function DebloaterModal({
             marginBottom: 14,
           }}
         >
-          <div style={{ fontWeight: 600, fontSize: 15 }}>🧹 {t('sysOpt.debloaterTitle')}</div>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>
+            <Icon name="broom" size={16} /> {t('sysOpt.debloaterTitle')}
+          </div>
           <button
             onClick={onClose}
             aria-label={t('common.close')}
@@ -377,7 +325,7 @@ function DebloaterModal({
               padding: '0 4px',
             }}
           >
-            ✕
+            <Icon name="x" size={16} />
           </button>
         </div>
 
@@ -505,7 +453,9 @@ function Accordion({
           textAlign: 'left',
         }}
       >
-        <span style={{ color, fontSize: 14 }}>{open ? '▾' : '▸'}</span>
+        <span style={{ color, fontSize: 14 }}>
+          {open ? <Icon name="chevron-down" size={12} /> : <Icon name="chevron-right" size={12} />}
+        </span>
         <span style={{ color, fontWeight: 600, fontSize: 13 }}>{title}</span>
         <span
           className="text-sm"

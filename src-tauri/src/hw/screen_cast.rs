@@ -4,7 +4,12 @@
 //! `Windows.Media.Casting` and `Windows.Devices.Enumeration` APIs.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use serde::{Deserialize, Serialize};
+
+/// A hung PowerShell must not hold the stop-casting command forever; the
+/// helper tree-kills the child on expiry.
+const PS_CLOSE_PANEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A Miracast/WiDi receiver device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,16 +26,23 @@ pub struct CastResult {
     pub message: String,
 }
 
-/// List available Miracast/WiDi receivers using WinRT DeviceEnumeration.
+/// List the Miracast/WiDi receivers Windows *already knows about*.
 ///
-/// Uses `Windows.Devices.Enumeration.DeviceInformation.FindAllAsync` with
-/// the Miracast device selector to discover available casting receivers.
+/// `DeviceInformation::FindAllAsync` over the Miracast protocol id only
+/// enumerates AssociationEndpoints that Windows has previously seen/paired
+/// (this is why it returns in ~130 ms with zero results on a machine that has
+/// never connected a wireless display — it does not start a Wi-Fi Direct
+/// discovery). Real discovery needs a `DeviceWatcher` over the same selector
+/// plus several seconds of radio time, which this command deliberately does
+/// not do: the Windows Connect panel (opened by `start_casting`) owns
+/// discovery. The UI therefore presents this list as "known displays", never
+/// as "available displays".
 #[cfg(windows)]
 pub fn list_cast_devices() -> HardwareResult<Vec<CastDevice>> {
     use windows::core::HSTRING;
     use windows::Devices::Enumeration::DeviceInformation;
 
-    log::info!("[screen_cast] Enumerating Miracast devices via WinRT DeviceEnumeration");
+    log::info!("[screen_cast] Enumerating known Miracast endpoints (no active discovery)");
 
     // AQS filter that discovers wireless display (Miracast/WiDi) receivers.
     // This is the exact selector used by Microsoft's own display-project sample:
@@ -81,7 +93,10 @@ pub fn list_cast_devices() -> HardwareResult<Vec<CastDevice>> {
         }
     }
 
-    log::info!("[screen_cast] Found {} Miracast devices", devices.len());
+    log::info!(
+        "[screen_cast] Found {} known Miracast endpoints",
+        devices.len()
+    );
     Ok(devices)
 }
 
@@ -162,7 +177,7 @@ pub fn start_casting(device_id: &str) -> HardwareResult<CastResult> {
         Ok(CastResult {
             success,
             message: if success {
-                "Connect panel opened. Select your device to start casting.".into()
+                "Windows projection panel opened. Pick a display there — Windows owns the session, MiControl only opens the panel.".into()
             } else {
                 format!("Failed to open Connect panel (code {}).", hres.0 as isize)
             },
@@ -183,15 +198,18 @@ pub fn start_casting(_device_id: &str) -> HardwareResult<CastResult> {
 /// Instead of killing ALL `SystemSettings.exe` processes (which would close
 /// any other Settings windows the user may have open), we use PowerShell
 /// with the Win32 API to find and close only the Connect panel window.
+///
+/// The result is NOT hardcoded any more: the script prints the number of
+/// panels it closed, and `success` reflects that. MiControl cannot end a
+/// Miracast session directly (no such public API outside the projection UI),
+/// so the message says what actually happened — "panel closed" — rather than
+/// claiming the projection was stopped.
 #[cfg(windows)]
 pub fn stop_casting() -> HardwareResult<CastResult> {
-    use std::os::windows::process::CommandExt;
-
-    log::info!("[screen_cast] Stopping active cast");
+    log::info!("[screen_cast] Closing the Windows Connect panel (if open)");
 
     // Use PowerShell to close only the Connect panel window by sending WM_CLOSE.
     // This avoids killing all SystemSettings.exe processes.
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let ps_script = r#"
         Add-Type @"
         using System;
@@ -202,30 +220,58 @@ pub fn stop_casting() -> HardwareResult<CastResult> {
         }
 "@
         # Find SystemSettings processes whose window title contains "Connect"
+        $closed = 0
         Get-Process -Name SystemSettings -ErrorAction SilentlyContinue | ForEach-Object {
             if ($_.MainWindowTitle -match 'Connect') {
                 [void][Win32]::SendMessage($_.MainWindowHandle, 0x0010, 0, 0)
+                $closed++
             }
         }
+        Write-Output $closed
     "#;
 
     let mut cmd = std::process::Command::new("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", ps_script]);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let output = cmd
-        .output()
-        .map_err(|e| HardwareError::Cast(format!("Failed to stop casting: {e}")))?;
+    let output = process_spawn::run_capture(&mut cmd, PS_CLOSE_PANEL_TIMEOUT)
+        .map_err(|e| HardwareError::Cast(format!("Failed to close the Connect panel: {e}")))?;
 
-    let success = output.status.success();
+    let stdout = output.stdout_str();
+    let closed = parse_closed_count(&stdout);
+    let stderr = output.stderr_str();
+
     log::info!(
-        "[screen_cast] stop_casting PowerShell exited: success={success}, stderr={}",
-        String::from_utf8_lossy(&output.stderr)
+        "[screen_cast] stop_casting exit_ok={} panels_closed={closed} stderr={}",
+        output.status.success(),
+        stderr.trim()
     );
 
+    if !output.status.success() {
+        return Ok(CastResult {
+            success: false,
+            message: format!("Failed to close the Connect panel: {}", stderr.trim()),
+        });
+    }
+
     Ok(CastResult {
-        success: true,
-        message: "Casting stopped".into(),
+        success: closed > 0,
+        message: if closed > 0 {
+            format!("Connect panel closed ({closed}). Note: a running projection is managed by Windows, not MiControl.")
+        } else {
+            "No Connect panel was open. A running projection is managed by Windows — stop it with Win+K or the display's own controls.".to_string()
+        },
     })
+}
+
+/// Last non-empty line of the PowerShell output, as a count. Non-numeric
+/// output (warnings, errors) counts as zero.
+fn parse_closed_count(stdout: &str) -> u32 {
+    stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .and_then(|l| l.parse::<u32>().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(not(windows))]
@@ -246,9 +292,29 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// `stop_casting` must never claim success when no panel was closed. The
+    /// parser is the part that decides; the PowerShell call itself is not
+    /// exercised here (it would close a real Settings window).
     #[test]
-    fn test_stop_casting_returns_ok() {
-        let result = stop_casting();
-        assert!(result.is_ok());
+    fn closed_count_parsing() {
+        assert_eq!(parse_closed_count("1"), 1);
+        assert_eq!(parse_closed_count(" 2 \r\n"), 2);
+        assert_eq!(parse_closed_count("Add-Type: warning\r\n0\r\n"), 0);
+        assert_eq!(parse_closed_count(""), 0);
+        assert_eq!(parse_closed_count("not a number"), 0);
+    }
+
+    /// The success flag is derived from the count, not hardcoded: with zero
+    /// panels closed the caller must see `success == false`.
+    #[test]
+    fn zero_panels_closed_is_not_success() {
+        let closed = parse_closed_count("0\n");
+        assert!(closed == 0);
+        // Mirrors the value the command builds for that case.
+        let result = CastResult {
+            success: closed > 0,
+            message: "no panel".into(),
+        };
+        assert!(!result.success);
     }
 }

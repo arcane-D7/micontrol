@@ -5,9 +5,12 @@
 
 mod bootstrap;
 mod commands;
-mod debug_log;
+// Public so the integration tests (`tests/logging_e2e.rs`) and any future
+// diagnostics command can resolve the log file the app actually writes.
+pub mod debug_log;
 pub mod elev_bridge;
 pub mod elevated;
+pub mod errors;
 mod health_supervisor;
 pub mod hw;
 mod state;
@@ -29,28 +32,25 @@ use commands::face::{
     face_models_remove_all, face_models_status, face_password_configured, face_service_ensure,
     face_service_install, face_set_password, face_set_settings, face_status,
 };
-#[allow(deprecated)]
 use commands::hardware::{
     ensure_bridge_service, ensure_iot_service, get_audio_devices, get_audio_volume,
-    get_battery_care, get_cast_devices, get_charging_threshold, get_ecram_map, get_function_key,
-    get_iot_bind_status, get_iot_device_id, get_iot_device_info, get_iot_device_status,
-    get_iot_fw_version, get_iot_model, get_iot_region_hex, get_iot_wifi_by_index,
-    get_iot_wifi_count, get_iot_wifi_list, get_iot_wifi_status, get_perf_debug,
-    get_performance_mode, get_primary_thermal_zone, get_thermal_zones, hq_change_boot_option,
+    get_battery_care, get_cast_devices, get_charge_hold_state, get_charge_limit_state,
+    get_charging_threshold, get_ecram_map, get_function_key, get_iot_device_info,
+    get_iot_region_hex, get_iot_wifi_list, get_perf_debug, get_performance_mode,
+    get_primary_thermal_zone, get_scenario_rules, get_thermal_zones, hq_change_boot_option,
     hq_enable_pxe_boot, hq_load_default, hq_s5_rtc_wake_enable, hq_set_performance_mode,
     hq_set_shipping_country_code, hq_set_wifi_country_code, iot_connect_wifi, iot_delete_wifi_item,
-    iot_empty_wifi_items, iot_notify_ec_event, iot_notify_event, iot_notify_power_event,
-    iot_pipe_available, iot_report_shutting_down, iot_report_suspending, iot_report_windows_ready,
-    iot_reset_device, iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw,
-    relaunch_as_admin, send_iot_laptop_status, set_audio_default_endpoint, set_audio_mute,
-    set_audio_volume, set_battery_care, set_charging_threshold, set_function_key,
-    set_performance_mode, start_casting, stop_casting, wifi_connect, wifi_disconnect, wifi_scan,
-    wifi_status, wmi_ec_get_performance_mode, wmi_ec_read, wmi_ec_read_adapter_power,
+    iot_empty_wifi_items, iot_notify_event, iot_pipe_available, iot_reset_device,
+    iot_set_device_status, iot_write_wifi_item, is_elevated, read_ecram_raw, relaunch_as_admin,
+    set_audio_default_endpoint, set_audio_mute, set_audio_volume, set_battery_care,
+    set_charging_threshold, set_function_key, set_performance_mode, set_scenario_rules,
+    start_casting, stop_casting, wifi_connect, wifi_disconnect, wifi_scan, wifi_status,
+    wmi_ec_get_performance_mode, wmi_ec_read, wmi_ec_read_adapter_power,
     wmi_ec_read_battery_health, wmi_ec_read_sensor_data, wmi_ec_set_auto_illumination,
-    wmi_ec_set_brightness_data, wmi_ec_set_epof_flag, wmi_ec_set_label_mode,
-    wmi_ec_set_lid_open_type, wmi_ec_set_mi_usage_type, wmi_ec_set_performance_mode,
-    wmi_ec_set_pl1_flag, wmi_ec_set_removable_type, wmi_ec_set_sagv_mode, wmi_ec_set_wmid_type,
-    wmi_ec_write, write_iot_hex,
+    wmi_ec_set_epof_flag, wmi_ec_set_label_mode, wmi_ec_set_lid_open_type,
+    wmi_ec_set_mi_usage_type, wmi_ec_set_performance_mode, wmi_ec_set_pl1_flag,
+    wmi_ec_set_removable_type, wmi_ec_set_sagv_mode, wmi_ec_set_wmid_type, wmi_ec_write,
+    write_iot_hex,
 };
 use commands::hotkeys::{
     get_detected_key, get_hotkey_config, get_remap_apply_state, grant_script_consent,
@@ -58,24 +58,24 @@ use commands::hotkeys::{
 };
 use commands::privacy::{export_user_data, open_external_url, reveal_in_explorer};
 use commands::system::{
-    check_official_driver_updates, clean_junk_files, clear_error_log, custom_security_scan,
-    debug_ecram_dump, download_driver_package, fetch_official_drivers,
-    find_latest_downloaded_installer, full_security_scan, get_ai_brightness_config,
-    get_audio_effects, get_auto_update_config, get_autostart, get_available_refresh_rates,
-    get_battery_info, get_color_status, get_crash_recovery_status, get_defender_status,
-    get_display_info, get_drivers_detail, get_error_log_config, get_eye_protection, get_fan_info,
-    get_hardware_profile, get_hardware_state_batch, get_model_code, get_network_perf, get_os_turbo,
-    get_phone_link_status, get_process_list, get_smart_brightness_model, get_sys_opt_status,
-    get_system_info, get_task_manager, get_threat_history, get_touchpad_info, get_update_status,
-    install_driver, install_update, kill_process, launch_color_calibration_wizard,
-    launch_phone_link, launch_phone_link_feature, load_icc_profile, log_frontend_error,
-    mark_clean_exit, open_color_management_settings, open_phone_link_settings,
+    apply_color_profile, clean_junk_files, clear_error_log, custom_security_scan, debug_ecram_dump,
+    download_color_profile, find_latest_downloaded_installer, full_security_scan,
+    get_ai_brightness_config, get_audio_effects, get_auto_update_config, get_autostart,
+    get_available_refresh_rates, get_battery_info, get_color_status, get_crash_recovery_status,
+    get_defender_status, get_display_info, get_drivers_detail, get_error_log_config,
+    get_eye_protection, get_fan_info, get_hardware_profile, get_hardware_state_batch,
+    get_network_perf, get_os_turbo, get_overview_snapshot, get_phone_link_status, get_process_list,
+    get_smart_brightness_model, get_startup_items, get_sys_opt_status, get_system_info,
+    get_task_manager, get_threat_history, get_touchpad_info, get_update_status, install_driver,
+    install_update, kill_process, launch_color_calibration_wizard, launch_phone_link,
+    launch_phone_link_feature, load_icc_profile, log_frontend_error, mark_clean_exit,
+    open_color_management_settings, open_color_profile_search, open_phone_link_settings,
     open_windows_security, quick_security_scan, read_error_log, reset_smart_brightness_model,
     run_hardware_discovery, scan_junk_files, set_adaptive_refresh_rate, set_ai_brightness,
     set_ai_brightness_config, set_auto_update_beta_feed, set_auto_update_enabled, set_autostart,
     set_brightness, set_error_logging_enabled, set_eye_protection, set_fan_mode, set_hdr,
     set_mic_noise_canceling, set_os_turbo, set_refresh_rate, set_speaker_noise_canceling,
-    set_sys_opt_tweak, set_touchpad_edge_slide, set_touchpad_gesture_screenshot,
+    set_startup_item, set_sys_opt_tweak, set_touchpad_edge_slide, set_touchpad_gesture_screenshot,
     set_touchpad_haptics, set_touchpad_haptics_intensity, set_touchpad_repress,
     set_touchpad_sensitivity, set_voice_focus, trigger_auto_update, trigger_driver_scan,
     unload_icc_profile, update_defender_signatures,
@@ -122,6 +122,72 @@ async fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Build a webview window with the WebView2 UDF-lock retry.
+///
+/// `tauri_runtime_wry` fails with `HRESULT(0x800700AA)` (`ERROR_BUSY`) while a
+/// previous `msedgewebview2.exe` still holds the WebView2 user-data folder —
+/// the exact failure logged twice in production (`22:19:16` / `22:19:40`,
+/// 63 s and 87 s after a crash relaunch). `build()` used to be called as
+/// `let _ = …build()`, so the error was dropped and the app carried on with no
+/// webview at all (the pre-created tray popup then read 0×0). Retrying is safe
+/// because the lock is transient; any other error is returned immediately.
+fn build_webview_with_retry<T>(
+    label: &str,
+    build: impl FnMut() -> Result<T, tauri::Error>,
+) -> Result<T, tauri::Error> {
+    crate::util::webview_retry::retry_webview_create(
+        label,
+        &crate::util::webview_retry::WEBVIEW_RETRY_DELAYS_MS,
+        build,
+        std::thread::sleep,
+    )
+}
+
+/// Build (or rebuild) the main window.
+///
+/// Every path that has to re-create it goes through here: the tray "open" item,
+/// the single-instance relaunch, and the `WindowEvent::Destroyed` self-heal.
+fn build_main_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
+    build_webview_with_retry("main", || {
+        tauri::WebviewWindowBuilder::new(
+            app,
+            "main",
+            tauri::WebviewUrl::App("index.html?window=main".into()),
+        )
+        .title("MiControl")
+        .inner_size(950.0, 660.0)
+        .resizable(true)
+        .decorations(true)
+        .build()
+    })
+}
+
+/// Build the tray quick-access popup (hidden).
+///
+/// Shared by the startup pre-creation, the on-demand path and the 0×0
+/// recreation path so the three cannot drift apart (they were duplicated
+/// before, which is how the pre-created popup kept a size the other paths did
+/// not know about).
+fn build_tray_popup(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
+    build_webview_with_retry("tray", || {
+        tauri::WebviewWindowBuilder::new(
+            app,
+            "tray",
+            tauri::WebviewUrl::App("index.html?window=tray".into()),
+        )
+        .title("")
+        .inner_size(POPUP_W, POPUP_H_DEFAULT)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .build()
+    })
+}
+
 /// Show, un-minimize and focus the main window. Handles the three failure
 /// modes reported by users: window minimized (show() alone does not restore
 /// it), window behind other windows (set_focus alone may not raise it) and
@@ -157,16 +223,10 @@ fn raise_main_window(app: &tauri::AppHandle) {
             });
         }
         None => {
-            let _ = tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::App("index.html?window=main".into()),
-            )
-            .title("MiControl")
-            .inner_size(950.0, 660.0)
-            .resizable(true)
-            .decorations(true)
-            .build();
+            log::warn!("[window] main window missing — rebuilding (UDF-lock retry)");
+            if let Err(e) = build_main_window(app) {
+                log::error!("[window] failed to rebuild main window: {e}");
+            }
         }
     }
 }
@@ -385,11 +445,23 @@ pub fn run() {
     // release build impossible to debug remotely — exactly when we need it.
     // The toggle gate (`start_socket_server`/bridge init) is the security
     // boundary, not the build profile.
+    //
+    // VAGA F4 (audit 2026-11-07 §7.1): the bare `init()` binds 0.0.0.0, i.e.
+    // the WebSocket gives *any host on the LAN* screenshots/DOM/input control
+    // — and 0.0.0.0 is exactly what makes Windows raise the "Allow MiControl
+    // to communicate on these networks" firewall dialog. The bridge now binds
+    // 127.0.0.1 (util::mcp_config::bridge_config), which is enough for every
+    // local MCP client and never triggers the prompt. The separate
+    // tauri-plugin-mcp server below already listens on loopback:4000.
     #[cfg(debug_assertions)]
-    let builder = builder.plugin(tauri_plugin_mcp_bridge::init());
+    let builder = builder.plugin(tauri_plugin_mcp_bridge::init_with_config(
+        crate::util::mcp_config::bridge_config(),
+    ));
     #[cfg(not(debug_assertions))]
     let builder = if crate::util::mcp_config::is_enabled() {
-        builder.plugin(tauri_plugin_mcp_bridge::init())
+        builder.plugin(tauri_plugin_mcp_bridge::init_with_config(
+            crate::util::mcp_config::bridge_config(),
+        ))
     } else {
         builder
     };
@@ -426,10 +498,17 @@ pub fn run() {
             set_performance_mode,
             get_charging_threshold,
             set_charging_threshold,
-            // Battery Care toggle (EC 0xA4)
+            // Firmware truth for the limit (requested vs applied)
+            get_charge_limit_state,
+            // Live hold phase ("holding at 80", "above limit", "charging")
+            get_charge_hold_state,
+            // Battery Care toggle (firmware field, LONL/HBDA)
             get_battery_care,
             set_battery_care,
             get_perf_debug,
+            // P2-6: scenario rules (auto perf-mode on AC/DC) — HKCU config + status
+            get_scenario_rules,
+            set_scenario_rules,
             get_ecram_map,
             get_iot_region_hex,
             write_iot_hex,
@@ -445,27 +524,14 @@ pub fn run() {
             get_iot_device_info,
             get_iot_wifi_list,
             iot_notify_event,
-            // Deprecated wrappers (kept for backward compatibility)
-            get_iot_model,
-            get_iot_fw_version,
-            get_iot_bind_status,
-            get_iot_device_id,
-            get_iot_device_status,
-            send_iot_laptop_status,
-            iot_report_windows_ready,
-            get_iot_wifi_status,
-            get_iot_wifi_count,
-            get_iot_wifi_by_index,
+            // IoT device control — no consolidated replacement exists for these,
+            // so they stay registered even though the UI does not call them yet.
             iot_connect_wifi,
             iot_write_wifi_item,
             iot_delete_wifi_item,
             iot_empty_wifi_items,
             iot_set_device_status,
             iot_reset_device,
-            iot_notify_power_event,
-            iot_notify_ec_event,
-            iot_report_suspending,
-            iot_report_shutting_down,
             // Audio
             get_audio_devices,
             get_audio_volume,
@@ -483,6 +549,8 @@ pub fn run() {
             wifi_disconnect,
             // System info
             get_system_info,
+            // Overview — identity + specs (NPU, memory modules, storage, panel)
+            get_overview_snapshot,
             // Battery
             get_battery_info,
             // Display
@@ -509,6 +577,9 @@ pub fn run() {
             // Startup
             get_autostart,
             set_autostart,
+            // Windows startup manager (runs, folders, logon tasks)
+            get_startup_items,
+            set_startup_item,
             // Update Nucleus (Phase 9)
             get_update_status,
             trigger_driver_scan,
@@ -586,6 +657,11 @@ pub fn run() {
             commands::crossdevice::localsend_receiver_start,
             commands::crossdevice::localsend_receiver_stop,
             commands::crossdevice::localsend_receiver_status,
+            // Cross-device (MIOT-06) — LocalSend consent + receiver settings
+            commands::crossdevice::localsend_respond_consent,
+            commands::crossdevice::localsend_config,
+            commands::crossdevice::localsend_set_auto_accept,
+            commands::crossdevice::localsend_set_max_upload_mb,
             // Cross-device (MIOT-07) — scrcpy phone-camera webcam
             commands::crossdevice::scrcpy_status,
             commands::crossdevice::scrcpy_start,
@@ -599,18 +675,13 @@ pub fn run() {
             // Cross-device (MIOT-10) — KDE Connect discovery + ping MVP
             commands::crossdevice::kde_discover,
             commands::crossdevice::kde_ping,
-            commands::crossdevice::kde_status,
-            commands::crossdevice::kde_identity,
-            // Cross-device (MIOT-11) — NFC pairing guidance + NDEF handshake
+            // Cross-device (MIOT-11) — NFC pairing guidance + custom tag payload
             commands::crossdevice::nfc_guidance,
-            commands::crossdevice::nfc_encode_handshake,
             commands::crossdevice::nfc_build_custom,
             commands::crossdevice::nfc_open_link,
-            // Cross-device (MIOT-12) — Syncthing REST status/folders
+            // Cross-device (MIOT-12) — Syncthing REST status + folder toggle
             commands::crossdevice::syncthing_status,
-            commands::crossdevice::syncthing_folders,
             commands::crossdevice::syncthing_set_folder,
-            commands::crossdevice::syncthing_events,
             // WMAA / WMI MiInterface (elevated bridge)
             wmi_ec_read,
             wmi_ec_write,
@@ -619,7 +690,6 @@ pub fn run() {
             wmi_ec_read_battery_health,
             wmi_ec_read_adapter_power,
             wmi_ec_read_sensor_data,
-            wmi_ec_set_brightness_data,
             wmi_ec_set_sagv_mode,
             wmi_ec_set_pl1_flag,
             wmi_ec_set_epof_flag,
@@ -656,11 +726,6 @@ pub fn run() {
             mark_clean_exit,
             // Driver Details
             get_drivers_detail,
-            // Official Driver Update Check
-            check_official_driver_updates,
-            fetch_official_drivers,
-            get_model_code,
-            download_driver_package,
             // AI Noise Cancellation
             get_audio_effects,
             set_mic_noise_canceling,
@@ -684,6 +749,9 @@ pub fn run() {
             open_phone_link_settings,
             // Color Calibration
             get_color_status,
+            download_color_profile,
+            apply_color_profile,
+            open_color_profile_search,
             get_error_log_config,
             set_error_logging_enabled,
             read_error_log,
@@ -826,6 +894,12 @@ pub fn run() {
             // processes from the unprivileged UI process.
             crate::health_supervisor::start();
 
+            // P8 (audit 2026-11-07): one-time summary of every elevated command
+            // that failed during the first two minutes — command, elapsed and
+            // reason. Background commands never prompt for UAC (MIOT-38), so
+            // without this summary their failures were silent.
+            crate::elev_bridge::spawn_boot_summary();
+
             // Apply Copilot key interception fixes (disables Windows Shell
             // interception + writes Scancode Map for permanent remap).
             // This is async because it dispatches through the elevated bridge.
@@ -835,40 +909,29 @@ pub fn run() {
 
             // Register focus callback: Xiaomi key / AI key / Copilot key fires this.
             // We toggle the tray quick-access popup, exactly like XiaomiPCManager did.
-            // WebviewWindow show/hide/set_focus are thread-safe in Tauri v2 (dispatched
-            // through the winit event loop internally), so we call them directly here.
-            // Do NOT wrap in run_on_main_thread — the WMI thread is NOT the main thread,
-            // but run_on_main_thread would queue the task and return before it executes,
-            // meaning the TRAY_SHOWN_AT_MS store and focus-loss guard race with each other.
+            //
+            // The whole flow is dispatched to the main thread (the callback runs on
+            // the WMI reader thread): `show_tray_popup` may have to *create* the
+            // window and then read its size, and both are only synchronous on the
+            // main thread. Storing TRAY_SHOWN_AT_MS inside the closure keeps it
+            // ordered with the focus-loss handler that also runs there.
             {
                 let app_handle = app.handle().clone();
                 crate::hw::hotkeys::set_focus_callback(Box::new(move || {
-                    match app_handle.get_webview_window("tray") {
-                        None => log::warn!("[tray] focus_callback: popup window not found (tray pre-creation failed?)"),
-                        Some(popup) => {
-                            if popup.is_visible().unwrap_or(false) {
+                    let app = app_handle.clone();
+                    if let Err(e) = app_handle.run_on_main_thread(move || {
+                        match app.get_webview_window("tray") {
+                            Some(popup) if popup.is_visible().unwrap_or(false) => {
                                 log::info!("[tray] focus_callback: hiding popup");
                                 let _ = popup.hide();
-                            } else {
+                            }
+                            _ => {
                                 log::info!("[tray] focus_callback: showing popup");
-                                position_popup_at_tray(&popup);
-                                TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-                                if let Err(e) = popup.show() {
-                                    log::error!("[tray] popup.show() error: {e}");
-                                } else {
-                                    // Re-position after show: a hidden window may report a
-                                    // wrong scale_factor() / inner_size() before it's been
-                                    // associated with a monitor.  The second call uses the
-                                    // real values now that the window is visible.
-                                    position_popup_at_tray(&popup);
-                                    if let Ok(pos) = popup.outer_position() {
-                                        log::info!("[tray] focus_callback shown at outer_pos=({},{}) is_visible={}",
-                                            pos.x, pos.y, popup.is_visible().unwrap_or(false));
-                                    }
-                                    let _ = popup.set_focus();
-                                }
+                                show_tray_popup(&app, None);
                             }
                         }
+                    }) {
+                        log::error!("[tray] focus_callback: dispatch to main thread failed: {e}");
                     }
                 }));
             }
@@ -887,18 +950,16 @@ pub fn run() {
             // Start touchpad gesture listener (5-finger screenshot, edge slide volume/brightness)
             crate::hw::touchpad::start_gesture_listener();
 
-            // S53: re-apply enabled System Optimization tweaks (feature
-            // updates and Windows servicing reset HKLM policies).
-            // S55 FIX 17: the automatic boot re-apply is DISABLED. It was the
-            // trigger of a service crash-loop: app boot → restore_sys_opt_all
-            // → bridge spawns restore threads → bridge crashes (0xc0000005)
-            // → SCM restarts → app health check sees pipe down → dispatches
-            // again → crash again, indefinitely. Every tweak is already
+            // System Optimization tweaks are NOT re-applied at boot.
+            // The automatic sweep was disabled in S55 FIX 17: it triggered a
+            // SYSTEM-service crash-loop (boot → sweep → bridge crash 0xc0000005
+            // → SCM restart → health check redispatch → crash again). The
+            // unreachable elevated branch behind it (`restore_sys_opt_all` +
+            // `sys_opt::restore_all`) was removed in the 2026-11 audit cleanup
+            // — no command or frontend path ever dispatched it. Every tweak is
             // persisted in the registry and the user can re-apply any of them
-            // individually from the Debloater UI, so the boot-time sweep adds
-            // risk without benefit. If an automatic re-apply is wanted later,
-            // it must first be made crash-proof (the restore path panics under
-            // concurrency inside the SYSTEM service).
+            // individually from the Debloater UI. Reinstate a sweep only
+            // alongside a crash-proof, observable implementation.
 
             // Give the gesture thread access to the app handle so it can show the OSD.
             crate::hw::touchpad::set_app_handle(app.handle().clone());
@@ -913,14 +974,30 @@ pub fn run() {
             #[cfg(windows)]
             crate::hw::power_listener::start_power_listener();
 
+            // P1-2 (recheck 2026-11-11): the EC forgets the charging limit
+            // across S3 and across power-source changes. The supervisor
+            // re-asserts the user's requested limit at startup, on resume, on
+            // AC plug and every 5 min thereafter (gated to at most one write
+            // per window, backoff on failure), and logs the real hold phase
+            // every 45 s. The 20:17 limit survived until the 02:23 → 10:55
+            // resume and then silently reverted to 100 %.
+            #[cfg(windows)]
+            crate::hw::charging::start_charge_hold_supervisor();
+
             // MIOT-01: IoT event listener — synthesizes power/charging/low-
             // battery events into native OSD notifications. Reads config from
             // HKCU\SOFTWARE\MiControl\IotEvents; fully isolated from other HW.
             // MIOT-02: the hook now applies user scenario rules (auto perf-mode
-            // on AC/battery) — performance changes run on the blocking pool.
+            // on AC/battery). P2-6 (audit 2026-11-07): the rules ride the
+            // elevated dispatcher — the previous in-process call died on the
+            // HKLM ACL — and the HKCU config key is created up front so the
+            // feature has a durable configuration instead of "no rules".
             #[cfg(windows)]
             {
                 crate::hw::iot_events::set_event_hook(crate::hw::scenario_rules::apply_event);
+                if let Err(e) = crate::hw::iot_events::IotEventsConfig::ensure_key() {
+                    log::warn!("[iot_events] could not create config key: {e}");
+                }
                 crate::hw::iot_events::start_iot_event_listener();
             }
 
@@ -937,8 +1014,27 @@ pub fn run() {
                 crate::hw::ble_presence::start_presence_monitor();
             }
 
+            // MIOT-38: BLE advertising. The publisher lives on its own COM
+            // thread and does not survive a restart, so a persisted
+            // `BleAdvertise\Enabled=1` was silently ignored until the user
+            // toggled it again — while the UI claimed "advertising active".
+            // Re-arm it here and let the UI read `ble_advertise_status` for
+            // the real state.
+            #[cfg(windows)]
+            if crate::hw::ble_advertise::get_config().enabled {
+                crate::hw::ble_advertise::start_advertising();
+            }
+
             // Start adaptive brightness background task
             tauri::async_runtime::spawn(crate::hw::display::adaptive_brightness_loop());
+
+            // F5: reconcile the persisted flag with the machine before the
+            // worker starts. A stale snapshot (every recorded process exited)
+            // is recaptured and re-applied through the bridge; a flag that is
+            // off while recovery state is still on disk finishes its disable.
+            // The old `restore_os_turbo()` was an empty body with no caller,
+            // which is how the feature stayed dead for 12 days.
+            crate::hw::os_turbo::restore_os_turbo();
 
             // S39-003: bounded periodic OS Turbo measurement worker. Idempotent;
             // the worker self-gates on the persisted enabled flag, so starting it
@@ -1003,22 +1099,11 @@ pub fn run() {
             // Pre-create the tray popup window (hidden) so the first click is instant.
             // WebView2 initialisation takes 2-5 s; doing it eagerly at startup avoids
             // that cold-start delay when the user first clicks the tray icon.
-            match tauri::WebviewWindowBuilder::new(
-                app,
-                "tray",
-                tauri::WebviewUrl::App("index.html?window=tray".into()),
-            )
-            .title("")
-            .inner_size(300.0, 460.0)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .resizable(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            .build() {
-                Ok(_)  => log::info!("[tray] pre-created tray popup OK"),
+            // `build_tray_popup` retries the transient WebView2 UDF lock
+            // (0x800700AA) — otherwise the popup exists but never initialises and
+            // reports 0×0 on the first click.
+            match build_tray_popup(app.handle()) {
+                Ok(_) => log::info!("[tray] pre-created tray popup OK"),
                 Err(e) => log::error!("[tray] FAILED to pre-create tray popup: {e}"),
             }
 
@@ -1056,9 +1141,18 @@ pub fn run() {
                     // Guard 2: record the hide timestamp so toggle_tray_popup can tell
                     //          whether the focus-loss was caused by a tray-icon click
                     //          (mouse-down steals focus before mouse-up fires Click).
-                    let age = now_ms().saturating_sub(TRAY_SHOWN_AT_MS.load(Ordering::Relaxed));
-                    log::info!("[tray] Focused(false): age_since_shown={age}ms");
-                    if age < 500 {
+                    // P6: log a real duration, not the epoch. `0` in the slot
+                    // means "never shown this session" → `age_since_shown=unset`
+                    // (the old code printed `now - 0` = 56.8 years).
+                    let now = now_ms();
+                    let shown_at = TRAY_SHOWN_AT_MS.load(Ordering::Relaxed);
+                    log::info!(
+                        "[tray] Focused(false): {}",
+                        crate::util::log_fields::duration_field("age_since_shown", now, shown_at)
+                    );
+                    // A popup that was never shown has no show-age to protect.
+                    if crate::util::log_fields::elapsed_since(now, shown_at).unwrap_or(u64::MAX) < 500
+                    {
                         return; // too soon after show — ignore this focus-loss
                     }
                     TRAY_HIDDEN_AT_MS.store(now_ms(), Ordering::Relaxed);
@@ -1088,8 +1182,17 @@ pub fn run() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running MiControl");
+        .build(tauri::generate_context!())
+        .expect("error while building MiControl")
+        .run(|_app_handle, event| {
+            // P4: every clean shutdown funnels through `RunEvent::Exit` —
+            // tray Quit, `app.exit(0)` from any command, and the dev-mode
+            // window close. Log the lifecycle marker and persist it so the
+            // next start can tell "clean" from "crash/kill".
+            if let tauri::RunEvent::Exit = event {
+                crate::util::session_marker::mark_clean_shutdown();
+            }
+        });
 }
 
 /// Resize the tray popup window, keeping the bottom edge fixed (grows upward).
@@ -1245,17 +1348,128 @@ fn open_window_sync(app: &tauri::AppHandle) {
     // z-order raise). Reuses the helper, rebuilding the window when absent.
     if app.get_webview_window("main").is_some() {
         raise_main_window(app);
+    } else if let Err(e) = build_main_window(app) {
+        // UDF lock (0x800700AA) survives all retries, or WebView2 is genuinely
+        // unavailable. Never panic: the watchdog's ui_ok=0 path picks this up.
+        log::error!("[window] failed to create main window: {e}");
+    }
+}
+
+/// True when the popup window handle exists but has never been given a client
+/// area — the signature of a WebView2 that failed to initialise (observed in
+/// production: `[tray] popup physical size looks stale (0x0 px …)` right after
+/// `failed to create webview: HRESULT(0x800700AA)`). `set_size` cannot revive
+/// such a window: only a fresh WebView2 host window can.
+fn popup_is_uninitialised(window: &tauri::WebviewWindow) -> bool {
+    match window.inner_size() {
+        Ok(size) => size.width == 0 && size.height == 0,
+        Err(_) => true,
+    }
+}
+
+/// Return a usable tray popup, destroying and rebuilding a dead one.
+///
+/// The old heal path only forced 300×460 with `set_size` and carried on, so a
+/// 0×0 popup stayed 0×0: it "opened" invisible while Tauri reported
+/// `is_visible=true`, and the next tray click took the toggle-off branch. A
+/// WebView2 that never initialised cannot be resized back to life — recreate it.
+fn ensure_tray_popup(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(popup) = app.get_webview_window("tray") {
+        if !popup_is_uninitialised(&popup) {
+            return Some(popup);
+        }
+        let (w, h) = popup
+            .inner_size()
+            .map(|s| (s.width, s.height))
+            .unwrap_or((0, 0));
+        log::warn!(
+            "[tray] popup webview never initialised ({w}x{h} px) — destroying and recreating"
+        );
+        if let Err(e) = popup.destroy() {
+            log::warn!("[tray] popup.destroy() failed: {e} — reusing the existing window");
+            return Some(popup);
+        }
+        // On the main thread the destroy is synchronous; from another thread it
+        // is queued, so the label may still resolve. Never build a second
+        // window with the same label.
+        if let Some(stale) = app.get_webview_window("tray") {
+            log::warn!("[tray] destroyed popup still registered (destroy queued) — reusing it");
+            return Some(stale);
+        }
     } else {
-        let _ = tauri::WebviewWindowBuilder::new(
-            app,
-            "main",
-            tauri::WebviewUrl::App("index.html?window=main".into()),
-        )
-        .title("MiControl")
-        .inner_size(950.0, 660.0)
-        .resizable(true)
-        .decorations(true)
-        .build();
+        log::warn!(
+            "[tray] popup window not found — creating on-demand (pre-creation must have failed)"
+        );
+    }
+
+    match build_tray_popup(app) {
+        Ok(popup) => {
+            if popup_is_uninitialised(&popup) {
+                log::error!(
+                    "[tray] recreated popup is still 0x0 px — WebView2 runtime unavailable? \
+                     The tray click cannot show a popup this cycle"
+                );
+            } else {
+                log::info!("[tray] tray popup (re)created OK");
+            }
+            Some(popup)
+        }
+        Err(e) => {
+            log::error!("[tray] failed to create tray popup: {e}");
+            None
+        }
+    }
+}
+
+/// Position, show and focus the tray popup, recreating it when necessary.
+///
+/// Called from the tray click (main thread) and, via `run_on_main_thread`,
+/// from the Xiaomi/AI key callback.
+fn show_tray_popup(app: &tauri::AppHandle, click_pos: Option<&tauri::PhysicalPosition<f64>>) {
+    let Some(popup) = ensure_tray_popup(app) else {
+        return;
+    };
+    let place = |w: &tauri::WebviewWindow| match click_pos {
+        Some(pos) => position_popup(w, pos),
+        None => position_popup_at_tray(w),
+    };
+    place(&popup);
+    TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
+    match popup.show() {
+        Ok(_) => {
+            // Re-position after show: a hidden window may have reported a wrong
+            // scale_factor() / inner_size() before it was associated with a monitor.
+            place(&popup);
+            // Verify the healed size actually took effect (the 0×0 regression
+            // was silent: show() succeeded on a window with no client area).
+            let (w, h) = popup
+                .inner_size()
+                .map(|s| (s.width, s.height))
+                .unwrap_or((0, 0));
+            if w == 0 {
+                log::error!(
+                    "[tray] popup shown but still degenerate ({w}x{h} px) — the WebView2 \
+                     host window has no client area"
+                );
+            } else if h == 0 {
+                log::warn!(
+                    "[tray] popup shown with no height yet ({w}x{h} px) — the frontend \
+                     ResizeObserver sets it on first render"
+                );
+            }
+            if let Ok(pos) = popup.outer_position() {
+                log::info!(
+                    "[tray] show() OK — outer_pos=({},{}) size={}x{} is_visible={}",
+                    pos.x,
+                    pos.y,
+                    w,
+                    h,
+                    popup.is_visible().unwrap_or(false)
+                );
+            }
+            let _ = popup.set_focus();
+        }
+        Err(e) => log::error!("[tray] show() FAILED: {e}"),
     }
 }
 
@@ -1280,73 +1494,59 @@ fn toggle_tray_popup(app: &tauri::AppHandle, click_pos: &tauri::PhysicalPosition
         // tray area steals focus before mouse-up fires the TrayIconEvent::Click).
         // If hidden less than 300 ms ago, treat this click as a toggle-off and
         // do NOT re-show — the popup should stay closed.
-        let elapsed = now_ms().saturating_sub(TRAY_HIDDEN_AT_MS.load(Ordering::Relaxed));
-        log::info!("[tray] elapsed_since_hidden={elapsed}ms");
-        if elapsed < 300 {
+        // P6: real duration (or `unset` when the popup was never hidden).
+        let now = now_ms();
+        let hidden_at = TRAY_HIDDEN_AT_MS.load(Ordering::Relaxed);
+        log::info!(
+            "[tray] {}",
+            crate::util::log_fields::duration_field("elapsed_since_hidden", now, hidden_at)
+        );
+        if crate::util::log_fields::elapsed_since(now, hidden_at).unwrap_or(u64::MAX) < 300 {
             log::info!("[tray] debounce active, aborting show");
             return;
         }
-        // Exists but hidden long enough ago — reposition and show
-        position_popup(&popup, click_pos);
-        TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-        match popup.show() {
-            Ok(_) => {
-                // Re-position after show: a hidden window may have reported a wrong
-                // scale_factor() / inner_size() before it was associated with a monitor.
-                position_popup(&popup, click_pos);
-                if let Ok(pos) = popup.outer_position() {
-                    log::info!(
-                        "[tray] show() OK — outer_pos=({},{}) is_visible={}",
-                        pos.x,
-                        pos.y,
-                        popup.is_visible().unwrap_or(false)
-                    );
-                }
-                let _ = popup.set_focus();
-            }
-            Err(e) => log::error!("[tray] show() FAILED: {e}"),
-        }
-        return;
     }
+    // Exists but hidden long enough ago (or missing) — position and show.
+    // `show_tray_popup` recreates the window when the webview never initialised.
+    show_tray_popup(app, Some(click_pos));
+}
 
-    log::warn!(
-        "[tray] popup window not found — creating on-demand (pre-creation must have failed)"
-    );
-    // Fallback: pre-creation at startup failed — create the window now.
-    let popup = match tauri::WebviewWindowBuilder::new(
-        app,
-        "tray",
-        tauri::WebviewUrl::App("index.html?window=tray".into()),
-    )
-    .title("")
-    .inner_size(300.0, 460.0)
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .resizable(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible(false)
-    .build()
-    {
-        Ok(w) => w,
-        Err(e) => {
-            log::error!("[tray] Failed to build tray popup on-demand: {e}");
-            return;
-        }
-    };
-
-    position_popup(&popup, click_pos);
-    TRAY_SHOWN_AT_MS.store(now_ms(), Ordering::Relaxed);
-    match popup.show() {
-        Ok(_) => {
-            log::info!(
-                "[tray] on-demand show() OK — is_visible={}",
-                popup.is_visible().unwrap_or(false)
-            );
-            let _ = popup.set_focus();
-        }
-        Err(e) => log::error!("[tray] on-demand show() FAILED: {e}"),
+/// Heal a stale popup physical size and return the height to use for layout.
+///
+/// A previously shown popup can carry a width collapsed to 171 px, or a size
+/// left over from a previous display scale (observed 525×1365 from a 1.75 era
+/// while the current scale was 1.00). A stale physical size makes the Y math
+/// place the popup at the top of the screen (`y≈19`), so the design width is
+/// enforced on every show and the stored height is only trusted when it is
+/// non-zero.
+///
+/// Note this only *heals* an existing window. A window whose WebView2 never
+/// initialised reports 0×0 and ignores `set_size`; `ensure_tray_popup` destroys
+/// and recreates that one before we get here.
+fn heal_popup_size(window: &tauri::WebviewWindow, scale: f64) -> f64 {
+    let (cur_w, cur_h) = window
+        .inner_size()
+        .map(|s| (s.width, s.height))
+        .unwrap_or((0, 0));
+    let want_w = (POPUP_W * scale).round() as u32;
+    if cur_w != want_w {
+        log::warn!(
+            "[tray] popup physical size looks stale ({cur_w}x{cur_h} px, expected width \
+             {want_w}) — healing"
+        );
+        let healed_h = if cur_h > 0 {
+            cur_h
+        } else {
+            (POPUP_H_DEFAULT * scale).round() as u32
+        };
+        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
+    }
+    // A hidden window may report height=0 before its first render; a stale or
+    // zero height must never drive the Y math.
+    if cur_w != want_w || cur_h == 0 {
+        POPUP_H_DEFAULT * scale
+    } else {
+        cur_h as f64
     }
 }
 
@@ -1359,38 +1559,9 @@ fn position_popup(window: &tauri::WebviewWindow, click_pos: &tauri::PhysicalPosi
     // window (which caches a stale value for a hidden/just-shown popup).
     let scale = popup_scale(window, Some(*click_pos));
     let pw = POPUP_W * scale;
-    // S63/S64: heal a stale physical size on every show. A previously shown
-    // popup can carry a width collapsed to 171 px, or a size left over from a
-    // previous display scale (observed 525x1365 from a 1.75 era while the
-    // current scale was 1.00). A stale physical size makes the Y math place the
-    // popup at the top of the screen (`y≈19`). Enforce the design width and
-    // fall back to the default height when the stored size is inconsistent.
-    let cur = window
-        .inner_size()
-        .map(|s| (s.width, s.height))
-        .unwrap_or((0, 0));
-    let want_w = (POPUP_W * scale).round() as u32;
-    let stale = cur.0 != want_w;
-    if stale {
-        log::warn!(
-            "[tray] popup physical size looks stale ({}x{} px, expected width {want_w}) — healing",
-            cur.0,
-            cur.1
-        );
-        let healed_h = if cur.1 > 0 {
-            cur.1
-        } else {
-            (POPUP_H_DEFAULT * scale).round() as u32
-        };
-        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
-    }
-    // Guard: a hidden window may report height=0 before first render, and a
-    // stale physical height must never drive the Y math — fall back to default.
-    let ph = if stale || cur.1 == 0 {
-        POPUP_H_DEFAULT * scale
-    } else {
-        cur.1 as f64
-    };
+    // S63/S64: heal a stale physical size on every show, then use the healed
+    // height for the Y math (see `heal_popup_size`).
+    let ph = heal_popup_size(window, scale);
     let gap = POPUP_GAP * scale;
 
     // Get the work area (screen minus taskbar) in physical pixels for the
@@ -1443,33 +1614,8 @@ fn position_popup_at_tray(window: &tauri::WebviewWindow) {
     // click point) instead of the stale `window.scale_factor()`.
     let scale = popup_scale(window, None);
     let pw = POPUP_W * scale;
-    // S63/S64: same stale-size heal as position_popup — see the note there.
-    let cur = window
-        .inner_size()
-        .map(|s| (s.width, s.height))
-        .unwrap_or((0, 0));
-    let want_w = (POPUP_W * scale).round() as u32;
-    let stale = cur.0 != want_w;
-    if stale {
-        log::warn!(
-            "[tray] popup physical size looks stale ({}x{} px, expected width {want_w}) — healing",
-            cur.0,
-            cur.1
-        );
-        let healed_h = if cur.1 > 0 {
-            cur.1
-        } else {
-            (POPUP_H_DEFAULT * scale).round() as u32
-        };
-        let _ = window.set_size(tauri::PhysicalSize::new(want_w, healed_h));
-    }
-    // Guard: a hidden window may report height=0 before first render, and a
-    // stale physical height must never drive the Y math — fall back to default.
-    let ph = if stale || cur.1 == 0 {
-        POPUP_H_DEFAULT * scale
-    } else {
-        cur.1 as f64
-    };
+    // S63/S64: same stale-size heal as position_popup — see `heal_popup_size`.
+    let ph = heal_popup_size(window, scale);
     let gap = POPUP_GAP * scale;
 
     #[cfg(windows)]

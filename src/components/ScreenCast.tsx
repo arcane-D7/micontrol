@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
+import { Icon } from './ui/icons';
 
 interface CastDevice {
   name: string;
@@ -17,11 +18,15 @@ interface CastResult {
 export default function ScreenCast() {
   const [devices, setDevices] = useState<CastDevice[]>([]);
   const [selectedId, setSelectedId] = useState<string>('');
-  const [casting, setCasting] = useState(false);
+  const [panelOpened, setPanelOpened] = useState(false);
   const [loading, setLoading] = useState(false);
   const { addToast } = useToast();
 
-  const handleScan = async () => {
+  // Lists the displays Windows already knows about. This is NOT discovery:
+  // FindAllAsync only enumerates AssociationEndpoints Windows has seen before,
+  // so an empty list means "nothing paired yet", not "nothing in range". The
+  // copy below says exactly that instead of promising a scan.
+  const handleRefreshKnown = async () => {
     setLoading(true);
     try {
       const list = await invoke<CastDevice[]>('get_cast_devices');
@@ -35,22 +40,22 @@ export default function ScreenCast() {
       addToast({
         message: `${t('cast.scanError')}: ${String(e)}`,
         type: 'error',
-        onRetry: handleScan,
+        onRetry: handleRefreshKnown,
       });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleStartCast = async () => {
-    // Use the selected device when there is one; otherwise fall back to
-    // opening the system Connect panel (which lets the user pick a sink).
+  const handleOpenPanel = async () => {
+    // With a known display selected the ID is validated first; with none the
+    // panel still opens and the user picks the sink inside Windows.
     const deviceId = selectedId || '';
     setLoading(true);
     try {
       const result = await invoke<CastResult>('start_casting', { deviceId });
       if (result.success) {
-        setCasting(true);
+        setPanelOpened(true);
         addToast({ message: t('cast.panelOpened'), type: 'success' });
       } else {
         addToast({ message: result.message, type: 'error' });
@@ -59,26 +64,30 @@ export default function ScreenCast() {
       addToast({
         message: `${t('cast.error')}: ${String(e)}`,
         type: 'error',
-        onRetry: handleStartCast,
+        onRetry: handleOpenPanel,
       });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleStopCast = async () => {
+  const handleClosePanel = async () => {
     setLoading(true);
     try {
       const result = await invoke<CastResult>('stop_casting');
+      // `success` is only true when a Connect panel was actually closed — the
+      // backend no longer hardcodes it. Show whatever it reports.
       if (result.success) {
-        setCasting(false);
+        setPanelOpened(false);
         addToast({ message: t('cast.stopped'), type: 'info' });
+      } else {
+        addToast({ message: result.message, type: 'info' });
       }
     } catch (e) {
       addToast({
         message: `${t('cast.error')}: ${String(e)}`,
         type: 'error',
-        onRetry: handleStopCast,
+        onRetry: handleClosePanel,
       });
     } finally {
       setLoading(false);
@@ -87,33 +96,39 @@ export default function ScreenCast() {
 
   return (
     <div className="card">
-      <div className="card-title">📺 {t('cast.title')}</div>
+      <h2 className="card-title">
+        <Icon name="tv" size={16} /> {t('cast.title')}
+      </h2>
       <p className="page-subtitle">{t('cast.subtitle')}</p>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <button
           className="btn btn-primary"
-          onClick={handleStartCast}
-          disabled={loading || casting}
+          onClick={handleOpenPanel}
+          disabled={loading}
           style={{ flex: 1 }}
         >
-          {casting ? `🟢 ${t('cast.casting')}` : `📤 ${t('cast.start')}`}
+          <Icon name="upload" size={16} /> {t('cast.start')}
         </button>
-        {casting && (
-          <button className="btn btn-secondary" onClick={handleStopCast} disabled={loading}>
-            ⏹ {t('cast.stop')}
+        {panelOpened && (
+          <button className="btn btn-secondary" onClick={handleClosePanel} disabled={loading}>
+            <Icon name="stop" size={16} /> {t('cast.stop')}
           </button>
         )}
       </div>
 
       <button
         className="btn btn-secondary"
-        onClick={handleScan}
+        onClick={handleRefreshKnown}
         disabled={loading}
         style={{ marginTop: 8, width: '100%' }}
       >
-        🔍 {t('cast.scan')}
+        <Icon name="search" size={16} /> {t('cast.scan')}
       </button>
+
+      <p className="text-muted" style={{ fontSize: 12, marginTop: 8 }}>
+        {t('cast.knownOnly')}
+      </p>
 
       {devices.length > 0 && (
         <div style={{ marginTop: 12 }}>
@@ -159,7 +174,7 @@ export default function ScreenCast() {
         }}
       >
         <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.6 }}>
-          <strong>{t('cast.tip')}:</strong> {t('cast.tipText')}
+          <strong>{t('cast.panelNoteTitle')}:</strong> {t('cast.panelNote')}
         </div>
       </div>
     </div>

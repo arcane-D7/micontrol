@@ -18,7 +18,10 @@
 //!
 //! Configuration (per-user, no elevation):
 //! `HKCU\SOFTWARE\MiControl\IotEvents`:
-//!   - `Enabled`         DWORD (default 1) — master switch
+//!   - `Enabled`         DWORD (default 1) — master switch for the OSD notifications
+//!   - `RulesEnabled`    DWORD (default 1) — master switch for the auto perf-mode
+//!     rules (`scenario_rules`); independent of `Enabled` so silencing the OSDs
+//!     does not disable the rules and vice versa
 //!   - `NotifyAcDc`      DWORD (default 1) — OSD on AC/DC change
 //!   - `NotifyCharging`  DWORD (default 0) — OSD when charging state changes
 //!   - `NotifyLowBattery`DWORD (default 1) — OSD at low battery threshold
@@ -48,6 +51,13 @@ pub(crate) const CONFIG_KEY: &str = r"SOFTWARE\MiControl\IotEvents";
 #[derive(Debug, Clone)]
 pub struct IotEventsConfig {
     pub enabled: bool,
+    /// Master switch for the auto perf-mode rules (`scenario_rules`).
+    ///
+    /// Deliberately **separate** from [`Self::enabled`]: `Enabled=0` silences
+    /// the OSD notifications, and the Power Profiles toggle must not take the
+    /// notifications down with it (the old shape reused `Enabled`, so the two
+    /// features could not be switched independently).
+    pub rules_enabled: bool,
     pub notify_ac_dc: bool,
     pub notify_charging: bool,
     pub notify_low_battery: bool,
@@ -60,6 +70,7 @@ impl Default for IotEventsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            rules_enabled: true,
             notify_ac_dc: true,
             notify_charging: false,
             notify_low_battery: true,
@@ -90,6 +101,7 @@ impl IotEventsConfig {
         };
 
         cfg.enabled = d("Enabled", 1) != 0;
+        cfg.rules_enabled = d("RulesEnabled", 1) != 0;
         cfg.notify_ac_dc = d("NotifyAcDc", 1) != 0;
         cfg.notify_charging = d("NotifyCharging", 0) != 0;
         cfg.notify_low_battery = d("NotifyLowBattery", 1) != 0;
@@ -100,27 +112,54 @@ impl IotEventsConfig {
         cfg
     }
 
-    pub fn save(&self) {
+    pub fn save(&self) -> Result<(), String> {
         use crate::util::registry::RegKeyGuard;
         use windows::Win32::System::Registry::HKEY_CURRENT_USER;
 
-        if let Ok(key) = RegKeyGuard::create_write(HKEY_CURRENT_USER, CONFIG_KEY) {
-            let _ = key.write_u32("Enabled", self.enabled as u32);
-            let _ = key.write_u32("NotifyAcDc", self.notify_ac_dc as u32);
-            let _ = key.write_u32("NotifyCharging", self.notify_charging as u32);
-            let _ = key.write_u32("NotifyLowBattery", self.notify_low_battery as u32);
-            let _ = key.write_u32("LowBatteryPct", self.low_battery_pct as u32);
-            if let Some(m) = &self.on_ac_mode {
-                let _ = key.write_string("OnAcMode", &format!("{m:?}"));
-            } else {
-                let _ = key.write_string("OnAcMode", "");
-            }
-            if let Some(m) = &self.on_battery_mode {
-                let _ = key.write_string("OnBatteryMode", &format!("{m:?}"));
-            } else {
-                let _ = key.write_string("OnBatteryMode", "");
-            }
+        let key = RegKeyGuard::create_write(HKEY_CURRENT_USER, CONFIG_KEY)?;
+        key.write_u32("Enabled", self.enabled as u32)?;
+        key.write_u32("RulesEnabled", self.rules_enabled as u32)?;
+        key.write_u32("NotifyAcDc", self.notify_ac_dc as u32)?;
+        key.write_u32("NotifyCharging", self.notify_charging as u32)?;
+        key.write_u32("NotifyLowBattery", self.notify_low_battery as u32)?;
+        key.write_u32("LowBatteryPct", self.low_battery_pct as u32)?;
+        key.write_string(
+            "OnAcMode",
+            &self
+                .on_ac_mode
+                .map(|m| format!("{m:?}"))
+                .unwrap_or_default(),
+        )?;
+        key.write_string(
+            "OnBatteryMode",
+            &self
+                .on_battery_mode
+                .map(|m| format!("{m:?}"))
+                .unwrap_or_default(),
+        )?;
+        Ok(())
+    }
+
+    /// Create `HKCU\SOFTWARE\MiControl\IotEvents` with defaults when it is
+    /// missing.
+    ///
+    /// The audit found the key absent on this machine, which is why every rule
+    /// read fell back to `on_ac_mode = None` and `scenario_rules` never had
+    /// anything to apply. Returns `Ok(true)` when the key was created, `Ok(false)`
+    /// when it already existed. User scope: no elevation involved.
+    pub fn ensure_key() -> Result<bool, String> {
+        use crate::util::registry::RegKeyGuard;
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+
+        if matches!(
+            RegKeyGuard::open_read(HKEY_CURRENT_USER, CONFIG_KEY),
+            Ok(Some(_))
+        ) {
+            return Ok(false);
         }
+        Self::default().save()?;
+        log::info!("[iot_events] created config key HKCU\\{CONFIG_KEY} with defaults");
+        Ok(true)
     }
 }
 
@@ -193,37 +232,93 @@ pub fn start_iot_event_listener() {
         return;
     }
 
+    // Audit 2026-11-07: `[iot_events]` had ZERO lines in 72 h of logs, which
+    // made it impossible to tell a quiet listener from a dead one. One line per
+    // app start fixes that without adding per-tick noise.
+    log::info!("[iot_events] listener started (5 s tick)");
+
     tauri::async_runtime::spawn(async {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         // First tick fires immediately; the listener self-baselines.
         loop {
             interval.tick().await;
-            tick();
+            poll_and_apply().await;
         }
     });
 }
 
 /// Manually trigger a scan now (used by sleep-resume hook and tests).
+///
+/// Fire-and-forget: the scan needs a battery read, which must not run on the
+/// caller's thread (P1-b).
 pub fn scan_now() {
-    tick();
+    tauri::async_runtime::spawn(poll_and_apply());
 }
 
-fn tick() {
+/// Time budget for one listener battery read.
+///
+/// The query has its own 5 s internal timeout; the listener runs every 5 s
+/// and a skipped tick is cheap, so it caps the wait lower than that.
+const BATTERY_POLL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A slow/failed poll is worth a WARN, but a chronic WMI stall would flood the
+/// log (3 808 lines in 34.7 h in STAB-ROUND-1) — one WARN per 5 min, DEBUG
+/// otherwise. State transitions still log at INFO.
+const POLL_WARN_MIN_INTERVAL: Duration = Duration::from_secs(300);
+
+static LAST_POLL_WARN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn log_poll_problem(msg: &str) {
+    let mut guard = crate::util::panic::lock_or_recover(&LAST_POLL_WARN);
+    let due = (*guard)
+        .map(|at| at.elapsed() >= POLL_WARN_MIN_INTERVAL)
+        .unwrap_or(true);
+    if due {
+        *guard = Some(std::time::Instant::now());
+        log::warn!("{msg}");
+    } else {
+        log::debug!("{msg}");
+    }
+}
+
+/// Read the battery and apply the transition rules.
+///
+/// P1-b (STAB-ROUND-1): `tick()` used to call `hw::battery::get_battery_info()`
+/// — a blocking WMI call that can take 40+ s — directly inside the Tokio task,
+/// holding a runtime worker. It now runs on the dedicated fixed pool (which is
+/// itself waited on asynchronously), so a stalled query cannot starve the
+/// runtime. Transitions are applied only when a reading actually arrives; a
+/// skipped tick leaves the previous state untouched (no synthetic event).
+async fn poll_and_apply() {
     let cfg = IotEventsConfig::load();
     if !cfg.enabled {
         return;
     }
 
-    // Battery info is already cached/throttled inside hw::battery; on error we
-    // simply skip this tick (no event, no OSD).
-    let info = match crate::hw::battery::get_battery_info() {
-        Ok(i) => i,
-        Err(e) => {
+    let info = match crate::util::fixed_pool::run_blocking_timeout(
+        BATTERY_POLL_TIMEOUT,
+        crate::hw::battery::get_battery_info,
+    )
+    .await
+    {
+        Ok(Ok(info)) => info,
+        Ok(Err(e)) => {
             log::debug!("[iot_events] battery poll failed (skipping tick): {e}");
+            return;
+        }
+        Err(e) => {
+            log_poll_problem(&format!(
+                "[iot_events] battery poll exceeded {} ms (skipping tick): {e}",
+                BATTERY_POLL_TIMEOUT.as_millis()
+            ));
             return;
         }
     };
 
+    apply_battery_snapshot(&cfg, &info);
+}
+
+fn apply_battery_snapshot(cfg: &IotEventsConfig, info: &crate::hw::battery::BatteryInfo) {
     let ac_now = info.is_plugged;
     let charging_now = info.is_charging;
     let level_now = info.level;
@@ -242,6 +337,16 @@ fn tick() {
                     });
                 }
                 fire_hook(if ac_now { "ac_on" } else { "ac_off" });
+                // F5: the EC drops the charging limit on power-source changes
+                // (the OEM re-applies on every AC/DC transition for the same
+                // reason). Plugging in is when a missing limit costs charge,
+                // so re-assert it right away instead of waiting for the 5 min
+                // poll window. Unplugging only needs the periodic verify.
+                if ac_now {
+                    tauri::async_runtime::spawn(async {
+                        crate::hw::charging::reconcile_charge_limit_with("ac_plug", true).await;
+                    });
+                }
             }
         }
         *last_ac = Some(ac_now);
@@ -382,6 +487,7 @@ mod tests {
     fn default_config_is_safe() {
         let cfg = IotEventsConfig::default();
         assert!(cfg.enabled);
+        assert!(cfg.rules_enabled, "rules default on, but with no modes set");
         assert!(cfg.notify_ac_dc);
         assert!(!cfg.notify_charging);
         assert_eq!(cfg.low_battery_pct, 20);

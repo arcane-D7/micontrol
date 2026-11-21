@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MiControl",
-  "version": "0.2.20",
+  "version": "0.2.22",
   "identifier": "com.micontrol.app",
   "build": {
     "frontendDist": "../dist",
@@ -31,7 +31,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -49,9 +51,9 @@
       "bin/micontrol_setup.exe": "micontrol_setup.exe"
     },
     "windows": {
-      "certificateThumbprint": "4678FB4266F446C72CF4A181D6A348B9EE9C9661",
+      "certificateThumbprint": "7838982959B86B5E7795A4025208A7E68F34F755",
       "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.digicert.com",
+      "timestampUrl": null,
       "nsis": {
         "installMode": "perMachine",
         "installerHooks": "./nsis/installer-hooks.nsi",
@@ -65,7 +67,9 @@
       "active": true,
       "dialog": false,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyODg4MjcyNUM2MjIyOUEKUldTYUltSmNjb0tJZ2tGdXBhSkNoU3VrTjI5bDRiMXYzL2l1NlQ0MnBSblR1OW9TemhZWXRRV3cK",
-      "endpoints": ["https://github.com/arcane-D7/micontrol/releases/latest/download/latest.json"]
+      "endpoints": [
+        "https://github.com/arcane-D7/micontrol/releases/latest/download/latest.json"
+      ]
     }
   }
 }

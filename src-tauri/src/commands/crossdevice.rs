@@ -6,11 +6,11 @@
 
 use crate::hw::ble_presence::{PresenceConfig, PresenceStatus};
 use crate::hw::ble_scan::BleScanResult;
-use crate::hw::kde_connect::{KdeDevice, KdeMessage};
-use crate::hw::localsend::{LocalSendPeer, ReceiverStatus, SendReport};
-use crate::hw::nfc_pairing::{NfcGuidance, NfcHandshake};
+use crate::hw::kde_connect::KdeDevice;
+use crate::hw::localsend::{LocalSendConfig, LocalSendPeer, ReceiverStatus, SendReport};
+use crate::hw::nfc_pairing::NfcGuidance;
 use crate::hw::scrcpy_bridge::ScrcpyStatus;
-use crate::hw::syncthing::{SyncthingConfig, SyncthingEvent, SyncthingFolder, SyncthingStatus};
+use crate::hw::syncthing::{SyncthingConfig, SyncthingStatus};
 use crate::hw::transcription::TranscriptionStatus;
 use std::time::Duration;
 
@@ -95,10 +95,14 @@ pub async fn localsend_send_files(
     crate::hw::localsend::send_files(&peer, &paths).await
 }
 
-/// Start the embedded LocalSend receiver (auto-accept → Downloads).
+/// Start the embedded LocalSend receiver.
+///
+/// The app handle is what lets an incoming transfer ask the UI for consent;
+/// without it every transfer is declined. Nothing is auto-accepted except the
+/// devices the user explicitly added to the auto-accept list.
 #[tauri::command]
-pub async fn localsend_receiver_start() -> Result<ReceiverStatus, String> {
-    let port = crate::hw::localsend::start_receiver()?;
+pub async fn localsend_receiver_start(app: tauri::AppHandle) -> Result<ReceiverStatus, String> {
+    let port = crate::hw::localsend::start_receiver(app)?;
     let mut status = crate::hw::localsend::receiver_status();
     status.port = port;
     Ok(status)
@@ -115,6 +119,70 @@ pub async fn localsend_receiver_stop() -> Result<ReceiverStatus, String> {
 #[tauri::command]
 pub async fn localsend_receiver_status() -> Result<ReceiverStatus, String> {
     Ok(crate::hw::localsend::receiver_status())
+}
+
+/// Answer the consent prompt for an incoming transfer.
+///
+/// `remember` opts the sending device into the auto-accept list, so the next
+/// transfer from it is not interrupted. Returns an error when the prompt has
+/// already expired (the sender gave up, or the 60 s window closed), so the UI
+/// can say so instead of pretending it was accepted.
+#[tauri::command]
+pub async fn localsend_respond_consent(
+    session_id: String,
+    accept: bool,
+    remember: Option<bool>,
+) -> Result<(), String> {
+    if remember.unwrap_or(false) && accept {
+        // Only a device that just asked can be remembered, and only after the
+        // user said yes — the fingerprint comes from the pending prompt, not
+        // from the caller, so the UI cannot whitelist an arbitrary id.
+        if let Some(pending) = crate::hw::localsend::pending_device(&session_id) {
+            let mut cfg = LocalSendConfig::load();
+            if cfg.allow_device(&pending) {
+                cfg.save();
+                log::info!("[localsend] device {pending} added to the auto-accept list");
+            }
+        }
+    }
+    if crate::hw::localsend::respond_consent(&session_id, accept) {
+        Ok(())
+    } else {
+        Err("This transfer request has expired — ask the sender to retry.".into())
+    }
+}
+
+/// Read the receiver settings (auto-accept list + size limit).
+#[tauri::command]
+pub async fn localsend_config() -> Result<LocalSendConfig, String> {
+    Ok(LocalSendConfig::load())
+}
+
+/// Opt a device in/out of auto-accept.
+#[tauri::command]
+pub async fn localsend_set_auto_accept(
+    fingerprint: String,
+    enabled: bool,
+) -> Result<LocalSendConfig, String> {
+    let mut cfg = LocalSendConfig::load();
+    let changed = if enabled {
+        cfg.allow_device(&fingerprint)
+    } else {
+        cfg.forget_device(&fingerprint)
+    };
+    if changed {
+        cfg.save();
+    }
+    Ok(cfg)
+}
+
+/// Change the per-file size limit (MiB).
+#[tauri::command]
+pub async fn localsend_set_max_upload_mb(max_upload_mb: u64) -> Result<LocalSendConfig, String> {
+    let mut cfg = LocalSendConfig::load();
+    cfg.max_upload_mb = max_upload_mb.clamp(1, crate::hw::localsend::MAX_MAX_UPLOAD_MB);
+    cfg.save();
+    Ok(cfg)
 }
 
 /// scrcpy orchestration (MIOT-07): turn the phone camera into a webcam.
@@ -196,19 +264,6 @@ pub async fn kde_ping(device: KdeDevice) -> Result<bool, String> {
     crate::hw::kde_connect::send_ping(&device, Duration::from_secs(5)).await
 }
 
-/// Refresh the shared KDE Connect cache and return the current device list.
-#[tauri::command]
-pub async fn kde_status() -> Result<Vec<KdeDevice>, String> {
-    let devs = crate::hw::kde_connect::refresh_cache(Duration::from_millis(800)).await;
-    Ok(devs)
-}
-
-/// Build the local KDE Connect identity message (used by tests/debug UI).
-#[tauri::command]
-pub fn kde_identity() -> Result<KdeMessage, String> {
-    Ok(crate::hw::kde_connect::build_identity())
-}
-
 /// Build NFC pairing guidance for the UI (deep link + NDEF handshake text).
 #[tauri::command]
 pub fn nfc_guidance(
@@ -221,14 +276,6 @@ pub fn nfc_guidance(
         fingerprint.as_deref(),
         pair_uri.as_deref(),
     ))
-}
-
-/// Encode a custom pairing handshake as an NDEF record (base64 text field).
-#[tauri::command]
-pub fn nfc_encode_handshake(handshake: NfcHandshake) -> Result<String, String> {
-    let rec = crate::hw::nfc_pairing::build_handshake_record(&handshake)?;
-    use base64::Engine;
-    Ok(base64::engine::general_purpose::STANDARD.encode(rec.encode()))
 }
 
 /// Build a user-defined NFC tag payload (URI / text / internal action).
@@ -255,15 +302,6 @@ pub async fn syncthing_status(config: Option<SyncthingConfig>) -> Result<Syncthi
     Ok(crate::hw::syncthing::get_status(&cfg).await)
 }
 
-/// Syncthing: list configured folders.
-#[tauri::command]
-pub async fn syncthing_folders(
-    config: Option<SyncthingConfig>,
-) -> Result<Vec<SyncthingFolder>, String> {
-    let cfg = config.unwrap_or_default();
-    crate::hw::syncthing::fetch_folders(&cfg).await
-}
-
 /// Syncthing: pause/resume a folder (requires read+write API key).
 #[tauri::command]
 pub async fn syncthing_set_folder(
@@ -273,15 +311,4 @@ pub async fn syncthing_set_folder(
 ) -> Result<(), String> {
     let cfg = config.unwrap_or_default();
     crate::hw::syncthing::set_folder_paused(&cfg, &folder_id, paused).await
-}
-
-/// Syncthing: poll events since a cursor (bounded, returns immediately).
-#[tauri::command]
-pub async fn syncthing_events(
-    config: Option<SyncthingConfig>,
-    since: Option<u64>,
-    limit: Option<u32>,
-) -> Result<Vec<SyncthingEvent>, String> {
-    let cfg = config.unwrap_or_default();
-    Ok(crate::hw::syncthing::events_since(&cfg, since.unwrap_or(0), limit.unwrap_or(50)).await)
 }

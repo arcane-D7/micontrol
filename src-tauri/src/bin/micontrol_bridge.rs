@@ -34,7 +34,7 @@
 #![cfg(windows)]
 
 use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -133,6 +133,7 @@ fn main() {
             //     <url> optional — overrides the persisted beta feed URL.
             //   micontrol_bridge auto-update --url <url>
             let url_arg = args.get(2).map(|s| s.as_str());
+            let explicit_url = url_arg.is_some();
             let url = if let Some(a) = url_arg {
                 if a == "--url" {
                     args.get(3).cloned()
@@ -142,6 +143,17 @@ fn main() {
             } else {
                 micontrol_lib::util::auto_update::beta_feed_url()
             };
+            // F9.2: the "Auto-update" switch finally gates the unattended
+            // updater. An explicit URL on the command line is an intentional
+            // override (dev/MCP: "aponta para esta build beta"), so it is
+            // honoured even when the switch is off; the persisted-feed path is
+            // the unattended one and must respect it.
+            if !explicit_url && !micontrol_lib::util::auto_update::is_enabled() {
+                println!(
+                    "auto-update is disabled in settings (HKCU\\SOFTWARE\\MiControl\\AutoUpdateEnabled=0) — nothing to do"
+                );
+                std::process::exit(0);
+            }
             match relay_auto_update(url) {
                 Ok(printed) => {
                     println!("{printed}");
@@ -165,8 +177,6 @@ fn main() {
 
 // ── Service install helpers ──────────────────────────────────────────────────
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 /// Find the current executable path (this binary).
 fn current_exe() -> String {
     std::env::current_exe()
@@ -175,16 +185,15 @@ fn current_exe() -> String {
 }
 
 /// Stop + delete a possibly-running service, then attempt to wait for the SCM
-/// entry to actually disappear. `sc delete` is ASYNC: the entry lingers
+/// entry to actually disappear. DeleteService is ASYNC: the entry lingers
 /// (marked for deletion, 1072) until every open service handle closes — which
 /// may take much longer than 15 s on an upgrade (the old bridge process /
 /// installer service-control race). This is BEST-EFFORT: it never aborts the
-/// install. The long `sc create` retry loop below is the actual wait mechanism
+/// install. The long create retry loop below is the actual wait mechanism
 /// (1072 is transient and retried), so failing to observe deletion here must
 /// not be fatal — aborting guarantees a broken install, retrying usually wins.
 fn remove_service_wait(name: &str) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use micontrol_lib::util::win_service;
 
     // S58 FIX: disable SCM crash auto-restart BEFORE stopping. The service is
     // installed with `restart/5000` — on a degraded SCM (1061 busy, 1072
@@ -192,65 +201,56 @@ fn remove_service_wait(name: &str) -> Result<(), String> {
     // revives the process between our stop and the binary overwrite, re-locking
     // the exe ("Error opening file for writing"). A stopped service must STAY
     // stopped until the install finishes; the fresh failure actions are
-    // re-applied by install_service() after `sc create`.
-    let _ = Command::new("sc")
-        .args(["failure", name, "reset=", "0", "actions=", ""])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let _ = Command::new("sc")
-        .args(["stop", name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    // re-applied by install_service() after create.
+    //
+    // `sc failure reset= 0 actions= ""` -> ChangeServiceConfig2W with an
+    // EMPTY action list, then read back to confirm the clear landed.
+    match win_service::set_failure_actions(name, &[], 0) {
+        Ok(()) => match win_service::failure_actions(name) {
+            Ok(fa) if fa.actions.is_empty() && fa.reset_period_secs == 0 => {}
+            Ok(fa) => eprintln!("[install_service] failure actions still set after clear: {fa:?}"),
+            Err(e) => eprintln!("[install_service] failure-actions readback failed: {e}"),
+        },
+        // Best effort, exactly like the old `let _ = sc failure ...`: a
+        // service that does not exist (or access denied) is handled by the
+        // retry loop in install_service().
+        Err(e) => eprintln!("[install_service] could not clear failure actions (best effort): {e}"),
+    }
+    let _ = win_service::stop_request(name);
     // Brief pause so the stop reaches the SCM before the delete.
     std::thread::sleep(std::time::Duration::from_millis(700));
-    let _ = Command::new("sc")
-        .args(["delete", name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    let _ = win_service::delete(name);
 
-    // Poll until the entry is gone (exit != 0 → 1060 does not exist) or ~30 s.
-    // NOTE: while marked-for-delete the entry STILL queries successfully
-    // (exit 0), so we keep polling. Best effort — see the doc comment above.
+    // Poll until the entry is gone (SCM says 1060 -> Absent) or ~30 s.
+    // NOTE: while marked-for-delete the entry STILL queries successfully, so
+    // we keep polling. Best effort — see the doc comment above.
     for _ in 0..60 {
-        let q = Command::new("sc")
-            .args(["query", name])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("sc query failed to spawn: {e}"))?;
-        if !q.status.success() {
-            let text = String::from_utf8_lossy(&q.stdout).to_lowercase();
-            if text.contains("does not exist") || text.contains("1060") {
+        match win_service::query(name) {
+            Ok(info) if info.state == win_service::ServiceState::Absent => return Ok(()),
+            Ok(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+            // Query failed (SCM busy, access denied): treat as gone enough to
+            // proceed — a failed query means no usable entry, same call the
+            // old exit-code check made.
+            Err(e) => {
+                eprintln!("[install_service] query during delete wait failed: {e}");
                 return Ok(());
             }
-            // Some non-zero exit with an unexpected body — treat as gone enough
-            // to proceed (sc query failed = SCM has no usable entry).
-            return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
     }
     // Never fatal: the retry loop in install_service() absorbs the remaining
     // time a marked-for-delete entry needs to vanish (1072 is retried).
     eprintln!(
         "[install_service] service {name} still visible after 30s (delete pending) — \
-         continuing; sc create will retry 1072"
+         continuing; create will retry 1072"
     );
     Ok(())
 }
 
-/// Normalize a sc.exe command's combined output for parsing (sc writes its
-/// error text to stdout; join with any stderr to be safe).
-fn sc_text(out: &std::process::Output) -> String {
-    format!(
-        "{} {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    )
-}
-
 /// Install the MiControlBridge Windows service (requires admin).
 fn install_service() -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use micontrol_lib::util::win_service::{
+        self, CreateSpec, FailureAction, ServiceErrorControl, ServiceStartType,
+    };
 
     let exe = current_exe();
     let bin_path = format!("\"{exe}\" service");
@@ -262,108 +262,66 @@ fn install_service() -> Result<(), String> {
         eprintln!("[install_service] {e}");
     }
 
-    // Create the service with a LONG retry window. `sc delete` is async: the
-    // old entry can stay marked-for-delete (1072) well past a fixed sleep,
+    // Create the service with a LONG retry window. DeleteService is async:
+    // the old entry can stay marked-for-delete (1072) well past a fixed sleep,
     // especially when service-control handles linger. 1072/1073 are
     // transient upgrade states — keep retrying; only fail on a definite error
     // (e.g. access denied 5, invalid param 87).
     const MAX_CREATE_ATTEMPTS: usize = 30; // ~30 s window
     const RETRY_DELAY_MS: u64 = 1000;
-    let mut out = Command::new("sc")
-        .args([
-            "create",
-            SERVICE_NAME,
-            "binPath=",
-            &bin_path,
-            "start=",
-            "auto",
-            "DisplayName=",
-            SERVICE_DISPLAY,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("sc create failed to spawn: {e}"))?;
-
+    let spec = CreateSpec {
+        binary_path: bin_path,
+        display_name: SERVICE_DISPLAY.to_string(),
+        start_type: ServiceStartType::Auto,
+        error_control: ServiceErrorControl::Normal,
+        deps: Vec::new(),
+    };
     let mut attempt: usize = 0;
     loop {
-        if out.status.success() {
-            break;
+        match win_service::create(SERVICE_NAME, &spec) {
+            Ok(()) => break,
+            Err(e) => {
+                // 1072 (marked-for-delete) and 1073 (already exists) are the
+                // ONLY transient upgrade states — the async delete is still
+                // settling. Any other code (5 access denied, 87 invalid
+                // param, ...) is a definite failure that retrying will never
+                // fix: fail fast with a clear error.
+                let transient = win_service::is_win32(&e, win_service::WIN32_MARKED_FOR_DELETE)
+                    || win_service::is_win32(&e, win_service::WIN32_SERVICE_EXISTS);
+                attempt += 1;
+                if transient && attempt < MAX_CREATE_ATTEMPTS {
+                    eprintln!(
+                        "[install_service] create attempt {attempt} retrying \
+                         (delete of old entry still settling): {e}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                } else {
+                    return Err(format!("service create failed: {e}"));
+                }
+            }
         }
-        let text = sc_text(&out);
-        let lower = text.to_lowercase();
-        // 1072 (marked-for-delete) and 1073 (already exists) are the ONLY
-        // transient upgrade states — the async delete is still settling.
-        // Any other code (5 access denied, 87 invalid param, ...) is a definite
-        // failure that retrying will never fix: fail fast with a clear error.
-        let transient = lower.contains("1072") || lower.contains("1073");
-        attempt += 1;
-        if transient && attempt < MAX_CREATE_ATTEMPTS {
-            eprintln!(
-                "[install_service] sc create attempt {attempt} retrying \
-                 (delete of old entry still settling): {}",
-                text.trim()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
-        } else {
-            return Err(format!("sc create failed: {text}"));
-        }
-        out = Command::new("sc")
-            .args([
-                "create",
-                SERVICE_NAME,
-                "binPath=",
-                &bin_path,
-                "start=",
-                "auto",
-                "DisplayName=",
-                SERVICE_DISPLAY,
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("sc create failed to spawn: {e}"))?;
     }
 
-    // Run as LocalSystem with failure auto-restart.
-    let _ = Command::new("sc")
-        .args(["config", SERVICE_NAME, "obj=", "LocalSystem"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let _ = Command::new("sc")
-        .args([
-            "failure",
-            SERVICE_NAME,
-            "reset=",
-            "86400",
-            "actions=",
-            "restart/5000/restart/10000/restart/30000",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    // No desktop interaction needed.
-    let _ = Command::new("sc")
-        .args(["config", SERVICE_NAME, "type=", "own", "start=", "auto"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    // LocalSystem + own-process + auto start are properties of the
+    // CreateServiceW call above; the old redundant `sc config` re-statements
+    // are gone. Failure auto-restart, identical to the old
+    // `sc failure reset= 86400 actions= restart/5000/restart/10000/restart/30000`.
+    let actions = [
+        FailureAction::restart(5000),
+        FailureAction::restart(10000),
+        FailureAction::restart(30000),
+    ];
+    if let Err(e) = win_service::set_failure_actions(SERVICE_NAME, &actions, 86400) {
+        eprintln!("[install_service] failure actions not set: {e}");
+    }
 
-    // Start the service.
-    let start = Command::new("sc")
-        .args(["start", SERVICE_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("sc start failed to spawn: {e}"))?;
-    if !start.status.success() {
-        // Might already be running — check.
-        let q = Command::new("sc")
-            .args(["query", SERVICE_NAME])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("sc query failed: {e}"))?;
-        let qtext = String::from_utf8_lossy(&q.stdout);
-        if !qtext.contains("RUNNING") {
-            return Err(format!(
-                "sc start failed: {}",
-                String::from_utf8_lossy(&start.stderr)
-            ));
+    // Start the service (already-running 1056 tolerated inside start()).
+    if let Err(e) = win_service::start(SERVICE_NAME) {
+        // Might already be running — check, exactly like the old
+        // `sc start` + `sc query` fallback.
+        match win_service::query(SERVICE_NAME) {
+            Ok(info) if info.state == win_service::ServiceState::Running => {}
+            _ => return Err(format!("service start failed: {e}")),
         }
     }
 
@@ -372,26 +330,14 @@ fn install_service() -> Result<(), String> {
 
 /// Uninstall the MiControlBridge Windows service (requires admin).
 fn uninstall_service() -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
+    use micontrol_lib::util::win_service;
 
-    let _ = Command::new("sc")
-        .args(["stop", SERVICE_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    // Fire-and-forget stop + settle pause, exactly like the old
+    // `sc stop` + 700 ms sleep before the delete.
+    let _ = win_service::stop_request(SERVICE_NAME);
     std::thread::sleep(std::time::Duration::from_millis(700));
-    let out = Command::new("sc")
-        .args(["delete", SERVICE_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("sc delete failed to spawn: {e}"))?;
-    if !out.status.success() {
-        let text = String::from_utf8_lossy(&out.stderr);
-        // "service does not exist" is fine.
-        if !text.to_lowercase().contains("does not exist") {
-            return Err(format!("sc delete failed: {text}"));
-        }
-    }
+    // Absent (1060) is fine; anything else real fails the uninstall.
+    win_service::delete(SERVICE_NAME).map_err(|e| format!("service delete failed: {e}"))?;
     // Wait for the entry to actually disappear (handles may linger).
     let _ = remove_service_wait(SERVICE_NAME);
     Ok(())
@@ -698,24 +644,18 @@ mod service {
                     pipe_server::run(shutdown_clone);
                 });
 
-                // S55 FIX 19: watchdog DISABLED.
-                //
-                // The watchdog thread crashes the whole SYSTEM service with
-                // 0xc0000005 ~40 s after every start (its first poll — WTS
-                // token / CreateProcessAsUserW path in launch_app). Access
-                // violations in Win32 FFI cannot be caught by Rust panics, so
-                // every restart reproduced the crash within a minute: the pipe
-                // went down ~90% of the time → all elevated tabs stuck in
-                // "Loading" and the app fell back to the broken scheduled-task
-                // path → UAC prompts.
-                //
-                // The watchdog is redundant anyway: the app self-restarts via
-                // RegisterApplicationRestart (Restart Manager) and the Run-key
-                // autostart covers boot. It stays in the codebase behind this
-                // opt-in flag until the AV in its Win32 path is root-caused
-                // with a dump.
-                let watchdog_enabled =
-                    std::env::var("MCONTROL_WATCHDOG").ok().as_deref() == Some("1");
+                // S55 FIX 19 disabled the watchdog unconditionally after an
+                // access violation in the Win32 launch path (~40 s after every
+                // start), which left `ui_ok` with NO consumer: the 06-Nov-2026
+                // starvation ran 2 h 46 min with zero restarts. Arming now
+                // follows the user's autostart mirror (`watchdog_enabled`,
+                // written by the app since 2026-11-06 22:19) or the
+                // `MCONTROL_WATCHDOG` env override; `MCONTROL_WATCHDOG=0`
+                // forces it off without touching the marker. The poll body is
+                // wrapped in catch_unwind and only touches the Win32 launch
+                // path when the app is actually unhealthy, so a healthy system
+                // never executes it.
+                let watchdog_enabled = watchdog::start_enabled();
                 let watchdog_thread = if watchdog_enabled {
                     let wd_shutdown = shutdown.clone();
                     Some(std::thread::spawn(move || {
@@ -723,7 +663,8 @@ mod service {
                     }))
                 } else {
                     eprintln!(
-                        "[micontrol_bridge] watchdog disabled (MCONTROL_WATCHDOG=1 to enable)"
+                        "[micontrol_bridge] watchdog disabled (no watchdog_enabled marker, \
+                         MCONTROL_WATCHDOG not set to 1)"
                     );
                     None
                 };
@@ -785,7 +726,10 @@ mod pipe_server {
     use super::*;
     use std::ffi::OsStr;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
+        WAIT_OBJECT_0,
+    };
     use windows::Win32::Storage::FileSystem::{
         FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
@@ -794,7 +738,7 @@ mod pipe_server {
         PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
-    use windows::Win32::System::IO::CancelIoEx;
+    use windows::Win32::System::IO::{CancelIoEx, OVERLAPPED};
 
     /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
     /// access to the named pipe.
@@ -859,6 +803,185 @@ mod pipe_server {
         }
     }
 
+    // ── Accept-step primitives ──────────────────────────────────────────────
+
+    /// `HANDLE` wraps a raw pointer, so it is `!Send`. These newtypes carry a
+    /// handle across a thread boundary where ownership is 1:1 and unambiguous.
+    ///
+    /// SAFETY (both impls): a handle is an opaque kernel identifier, not memory.
+    /// The value is owned by exactly one thread at a time — the accept loop
+    /// stops touching it after the handoff and an unbounded channel has a single
+    /// consumer per item — so no two threads ever use the same handle
+    /// concurrently.
+    use micontrol_lib::util::win_handle::{OwnedEvent, OwnedHandle};
+
+    struct SendHandle(HANDLE);
+    unsafe impl Send for SendHandle {}
+    struct SendEvent(HANDLE);
+    unsafe impl Send for SendEvent {}
+
+    impl SendHandle {
+        /// Raw handle, consuming the newtype. Taking `self` is deliberate:
+        /// a `move` closure that only reads `.0` would capture the `!Send`
+        /// `HANDLE` field alone (edition 2021 disjoint captures), so callers go
+        /// through this method and capture the whole newtype instead.
+        fn into_handle(self) -> HANDLE {
+            self.0
+        }
+    }
+
+    impl SendEvent {
+        /// See [`SendHandle::into_handle`].
+        fn into_event(self) -> HANDLE {
+            self.0
+        }
+    }
+
+    /// Outcome of one accept step ([`accept_client`]).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AcceptOutcome {
+        /// A client connected while `ConnectNamedPipe` was pending: the
+        /// overlapped event fired. The normal path.
+        Connected,
+        /// A client had ALREADY connected when `ConnectNamedPipe` ran, so the
+        /// call failed with `ERROR_PIPE_CONNECTED` (535) *without queueing any
+        /// overlapped I/O*. The event is never signalled — but the pipe IS
+        /// connected and the client must be served.
+        AlreadyConnected,
+        /// `ConnectNamedPipe` (or the wait) failed hard; the instance is
+        /// unusable and must be destroyed. Carries the Win32 error code.
+        Failed(u32),
+    }
+
+    /// One accept step: issue `ConnectNamedPipe` on `handle` and block until a
+    /// client is connected.
+    ///
+    /// `handle` must be a pipe instance created with `FILE_FLAG_OVERLAPPED`;
+    /// `event` must be the manual-reset event stored in the `OVERLAPPED` passed
+    /// to `ConnectNamedPipe`.
+    ///
+    /// C-01 (deadlock, production 2026-11-02 → 2026-11-07): the previous code
+    /// discarded the `ConnectNamedPipe` result (`let _ = …`) and always waited
+    /// `INFINITE` on the event. For an overlapped pipe, a client that connects
+    /// BEFORE the call makes `ConnectNamedPipe` return FALSE with
+    /// `ERROR_PIPE_CONNECTED` **without queueing I/O**, so the event can never
+    /// be signalled and the accept loop parked forever: the service stayed
+    /// RUNNING, the single listening instance stayed connected to a client
+    /// nobody served, and every later open failed with `ERROR_PIPE_BUSY`
+    /// (0x800700E7) — the app then fell back to one elevated helper process per
+    /// hardware read. `bridge.log` stops right after such a client
+    /// ("client connected" / "read 0 bytes").
+    ///
+    /// `ERROR_PIPE_CONNECTED` means "there is already a client on the other
+    /// end": the correct response is to proceed to the handoff, never to wait.
+    fn accept_client(handle: HANDLE, event: HANDLE) -> AcceptOutcome {
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.hEvent = event;
+
+        let connect = unsafe { ConnectNamedPipe(handle, Some(&mut overlapped)) };
+        // Grab GetLastError before anything else on this thread can clobber it.
+        // `windows` builds its Err from the same value, but reading it here is
+        // what makes the ERROR_PIPE_CONNECTED branch explicit.
+        let last_error = std::io::Error::last_os_error();
+
+        if connect.is_ok() {
+            // Connected synchronously — there is no pending I/O to wait for.
+            return AcceptOutcome::Connected;
+        }
+
+        let code = last_error.raw_os_error().unwrap_or(0) as u32;
+        if code == ERROR_PIPE_CONNECTED.0 {
+            // The client raced in between CreateNamedPipeW and this call. No
+            // I/O was queued, so waiting on the event would hang forever.
+            return AcceptOutcome::AlreadyConnected;
+        }
+        if code != ERROR_IO_PENDING.0 {
+            return AcceptOutcome::Failed(code);
+        }
+
+        // Normal overlapped path: park until a client actually connects.
+        // INFINITE is deliberate (S55 FIX 21): a client connection is the only
+        // wake-up, and timing the instance out orphaned connected clients.
+        match unsafe { WaitForSingleObject(event, INFINITE) } {
+            WAIT_OBJECT_0 => AcceptOutcome::Connected,
+            _ => AcceptOutcome::Failed(
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32
+            ),
+        }
+    }
+
+    /// One listening instance of the bridge pipe plus the manual-reset event
+    /// used for its overlapped accept.
+    ///
+    /// Owns both HANDLEs: `Drop` closes them, so every `continue` in the accept
+    /// loop is leak-free (S67 RAII discipline — the loop used to close handles
+    /// by hand at four different exits). [`PipeInstance::into_handles`] releases
+    /// them to the worker that serves the client.
+    struct PipeInstance {
+        handle: OwnedHandle,
+        event: OwnedEvent,
+    }
+
+    impl PipeInstance {
+        /// `CreateNamedPipeW` + `CreateEventW` with the exact flags the service
+        /// uses. Returns `None` (closing anything already created) on failure.
+        fn create(
+            name_w: &[u16],
+            max_instances: u32,
+            sec_attr: Option<&windows::Win32::Security::SECURITY_ATTRIBUTES>,
+        ) -> Option<Self> {
+            // SAFETY: `name_w` is NUL-terminated and outlives the call;
+            // `sec_attr`, when present, outlives the call and points to a
+            // descriptor the kernel copies into the pipe object (so it does not
+            // have to outlive the instance).
+            let handle = OwnedHandle::new(unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(name_w.as_ptr()),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    max_instances,
+                    PIPE_BUF_SIZE,
+                    PIPE_BUF_SIZE,
+                    0,
+                    sec_attr.map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
+                )
+            });
+            if handle.is_invalid() {
+                eprintln!(
+                    "[micontrol_bridge] CreateNamedPipeW failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                return None;
+            }
+
+            let event = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(event) => OwnedEvent::new(event),
+                Err(_) => {
+                    eprintln!(
+                        "[micontrol_bridge] CreateEventW failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    // `handle` (OwnedHandle) closes itself on drop — no manual
+                    // CloseHandle, no leak on this early return.
+                    return None;
+                }
+            };
+            Some(Self { handle, event })
+        }
+
+        /// Block until a client is connected on this instance (see
+        /// [`accept_client`] for the `ERROR_PIPE_CONNECTED` race).
+        fn accept(&self) -> AcceptOutcome {
+            accept_client(self.handle.raw(), self.event.raw())
+        }
+
+        /// Release both handles to the worker that will serve the client. The
+        /// instance no longer closes them on drop.
+        fn into_handles(self) -> (HANDLE, HANDLE) {
+            (self.handle.into_raw(), self.event.into_raw())
+        }
+    }
+
     pub fn run(shutdown: Arc<AtomicBool>) {
         let pipe_name_w: Vec<u16> = OsStr::new(BRIDGE_PIPE_NAME)
             .encode_wide()
@@ -874,11 +997,8 @@ mod pipe_server {
         // SAFETY: HANDLEs crossing the channel are owned 1:1 by whichever
         // worker pops the job; the accept loop never touches them again and
         // no other thread can see them (unbounded channel, single consumer
-        // per item). The SendHandle/SendEvent newtypes assert `Send` only.
-        struct SendHandle(windows::Win32::Foundation::HANDLE);
-        unsafe impl Send for SendHandle {}
-        struct SendEvent(windows::Win32::Foundation::HANDLE);
-        unsafe impl Send for SendEvent {}
+        // per item). The module-level SendHandle/SendEvent newtypes assert
+        // `Send` only — see their definition above.
 
         const PIPE_WORKERS: usize = 4;
         let (worker_tx, worker_rx) = std::sync::mpsc::channel::<(SendHandle, SendEvent)>();
@@ -933,89 +1053,75 @@ mod pipe_server {
         // (thermal/battery via other processes/threads) and the app's own
         // health checks raced, producing the storm of
         // "All pipe instances are busy" fallbacks to schtasks in the app log.
-        // FIX: accept loop creates a fresh pipe instance, then serves the
-        // client on a dedicated short-lived thread while the loop immediately
-        // recreates the listener — effectively unlimited concurrent clients.
+        // FIX: the accept loop creates a fresh pipe instance, hands the
+        // connected client to the fixed worker pool, and immediately recreates
+        // the listener — effectively unlimited concurrent clients.
+        //
+        // C-01: `last_accept_error` throttles accept-failure logging to one line
+        // per distinct error code, so a stuck listener is visible in bridge.log
+        // without flooding a 3 × 8 MiB rotation.
+        let mut last_accept_error: Option<u32> = None;
         while !shutdown.load(Ordering::SeqCst) {
-            // Keep the SECURITY_ATTRIBUTES alive for the duration of the
-            // CreateNamedPipeW call — passing it as an inline temporary and
-            // converting to a raw pointer in the same expression is safe, but
-            // binding it explicitly guarantees the pointed-to memory cannot be
-            // recycled between the temporary's drop and the FFI read.
+            // The SECURITY_ATTRIBUTES only has to outlive each CreateNamedPipeW
+            // call — the kernel copies the descriptor into the pipe object — so
+            // it is built ONCE here. Building it inside the loop (as before)
+            // leaked one heap SECURITY_DESCRIPTOR per accepted connection:
+            // ConvertStringSecurityDescriptorToSecurityDescriptorW allocates
+            // and nothing ever freed it.
             let sec_attr = build_pipe_security_attributes();
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    PCWSTR(pipe_name_w.as_ptr()),
-                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    PIPE_UNLIMITED_INSTANCES,
-                    PIPE_BUF_SIZE,
-                    PIPE_BUF_SIZE,
-                    0,
-                    sec_attr
-                        .as_ref()
-                        .map(|s| s as *const windows::Win32::Security::SECURITY_ATTRIBUTES),
-                )
-            };
 
-            if handle == INVALID_HANDLE_VALUE {
-                eprintln!(
-                    "[micontrol_bridge] CreateNamedPipeW failed: {}",
-                    std::io::Error::last_os_error()
-                );
+            // The accept step (create instance → connect → wait) lives in
+            // `PipeInstance` so it can be tested without a service: see
+            // `accept_client` for the C-01 ERROR_PIPE_CONNECTED fix.
+            let Some(instance) =
+                PipeInstance::create(&pipe_name_w, PIPE_UNLIMITED_INSTANCES, sec_attr.as_ref())
+            else {
+                // CreateNamedPipeW / CreateEventW failed. Back off instead of
+                // spinning: a persistent failure (handle exhaustion, a stuck
+                // name) would otherwise burn 100% CPU.
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
-            }
-
-            let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) };
-            let Ok(event) = event else {
-                unsafe {
-                    CloseHandle(handle).ok();
-                }
-                continue;
             };
 
-            let mut overlapped = unsafe {
-                windows::Win32::System::IO::OVERLAPPED {
-                    hEvent: event,
-                    ..std::mem::zeroed()
+            match instance.accept() {
+                // C-01: BOTH success shapes hand the instance off. The
+                // pre-connected client (ERROR_PIPE_CONNECTED) never signals the
+                // event, so treating it as "keep waiting" is what parked this
+                // loop for five days in production.
+                AcceptOutcome::Connected | AcceptOutcome::AlreadyConnected => {
+                    if last_accept_error.take().is_some() {
+                        bridge_log("accept step recovered — client connected");
+                    }
                 }
-            };
-
-            // S55 FIX 21: the previous loop waited only 500 ms for a client and
-            // CANCELLED + destroyed the instance on timeout. A client that
-            // connected inside that tiny window could be orphaned — its
-            // CreateFileW succeeded, but the instance (and its pending
-            // ConnectNamedPipe I/O) was destroyed before handle_client could
-            // run. The client then saw read=0/EOF with no response, which the
-            // app logged as "No response from bridge service (timed out or
-            // empty)" and fell back to the (broken) scheduled-task path.
-            // Observed empirically: the FIRST request after an idle period hit
-            // the race consistently, so every tab's first elevated call failed.
-            //
-            // FIX: wait on the overlapped event INDEFINITELY instead of 500 ms.
-            // ConnectNamedPipe with FILE_FLAG_OVERLAPPED returns immediately
-            // (ERROR_IO_PENDING); the event fires when a client connects. A
-            // client connection IS the wake-up, so blocking forever is correct:
-            // each loop iteration parks until a real client arrives, then the
-            // instance is handed to a dedicated client thread and the loop
-            // immediately creates the next listening instance. Service stop
-            // still works because the SCM stop path terminates the process.
-            let _ = unsafe { ConnectNamedPipe(handle, Some(&mut overlapped)) };
-            // ERROR_IO_PENDING (997) is the expected overlapped result; any
-            // other hard failure (or ERROR_PIPE_CONNECTED, where a client
-            // connected before ConnectNamedPipe was called and the event is
-            // already/signalled) is handled below.
-            let wait_result = unsafe { WaitForSingleObject(event, INFINITE) };
-
-            if wait_result != WAIT_OBJECT_0 {
-                unsafe {
-                    CancelIoEx(handle, Some(&overlapped)).ok();
-                    CloseHandle(handle).ok();
-                    CloseHandle(event).ok();
+                AcceptOutcome::Failed(code) => {
+                    // Log the FIRST failure of a given code only: a persistent
+                    // failure must be visible in bridge.log without flooding a
+                    // file that keeps only 3 × 8 MiB.
+                    if last_accept_error != Some(code) {
+                        bridge_log(&format!(
+                            "accept step failed: win32 error {code} — destroying the instance and listening again"
+                        ));
+                        last_accept_error = Some(code);
+                    }
+                    // Bounded backoff: never turn a hard failure into a
+                    // create/destroy storm. `instance` is closed by Drop.
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
                 }
-                continue;
             }
+
+            let (handle, event) = instance.into_handles();
+
+            // S55 FIX 21 (history): this loop used to wait only 500 ms for a
+            // client and then CANCELLED + destroyed the instance. A client that
+            // connected inside that window was orphaned: its CreateFileW had
+            // succeeded but the instance (and its pending ConnectNamedPipe I/O)
+            // was destroyed before handle_client could run, so the app saw
+            // "No response from bridge service (timed out or empty)" and fell
+            // back to the (broken) scheduled-task path. The wait is therefore
+            // INFINITE — a client connection is the only wake-up. That wait now
+            // lives in `accept_client`, which also handles the
+            // ERROR_PIPE_CONNECTED case where no wait must happen at all.
 
             // S55 FIX 23b: serve on a worker from a FIXED pool instead of
             // spawning a short-lived thread per client.
@@ -1055,18 +1161,16 @@ mod pipe_server {
     /// this there was NO way to see whether a client request even reached the
     /// worker — the recurring "No response" loop was undiagnosable.
     ///
-    /// S64: size-based rotation (8 MiB x 3) — this file reached 18 MB in one
-    /// release cycle with no cap.
+    /// S64: size-based rotation (8 MiB x 7 since the 2026-11-07 logging fix) —
+    /// this file reached 18 MB in one release cycle with no cap.
     fn bridge_log(msg: &str) {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
         let dir = std::path::Path::new("C:\\ProgramData\\MiControl\\logs");
         let path = dir.join("bridge.log");
+        // `append_line` adds the RFC 3339 timestamp and writes the record in a
+        // single append — do not prepend a second (epoch) timestamp here.
         if let Err(e) = micontrol_lib::util::log_rotation::append_line(
             &path,
-            &format!("{ts} {msg}"),
+            msg,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
         ) {
@@ -1075,7 +1179,34 @@ mod pipe_server {
         }
     }
 
+    /// At most one health-probe line per this window (the probe runs 2×/min).
+    pub(crate) const EMPTY_PROBE_LOG_INTERVAL_MS: u64 = 10 * 60 * 1000;
+
+    /// Should this empty connection produce a log line? Pure so the window is
+    /// tested: the previous "reset by any real request" flag never suppressed
+    /// anything because a real poll lands between two 30 s probes.
+    pub(crate) fn should_log_empty_probe(now_ms: u64, last_log_ms: u64) -> bool {
+        last_log_ms == 0 || now_ms.saturating_sub(last_log_ms) >= EMPTY_PROBE_LOG_INTERVAL_MS
+    }
+
+    /// Wall-clock now in epoch milliseconds (wall clock: the log rate must be
+    /// comparable across processes).
+    fn probe_now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
     fn handle_client(handle: windows::Win32::Foundation::HANDLE) {
+        // P2: the app's health supervisor probes this pipe every 30 s with a
+        // connect-and-close. The first suppression attempt ("log on change,
+        // reset by any real request") did not work: a real poll lands between
+        // two probes every 15 s, so the flag was cleared constantly and
+        // bridge.log still collected 1 601 + 3 828 probe lines in 53 h — one
+        // per 30 s. Suppression is now TIME-based and independent of traffic.
+        static LAST_EMPTY_PROBE_LOG_MS: AtomicU64 = AtomicU64::new(0);
+        static EMPTY_PROBES_SINCE_LOG: AtomicU64 = AtomicU64::new(0);
         let t0 = std::time::Instant::now();
         bridge_log("client connected");
         // S55 FIX 24d: the pipe instance was created with FILE_FLAG_OVERLAPPED
@@ -1159,7 +1290,20 @@ mod pipe_server {
         }
 
         if total_read == 0 {
-            bridge_log("read 0 bytes (client closed before sending)");
+            // Health-probe bookkeeping: one line per window, carrying the count
+            // of probes that were suppressed (so the rate is still measurable).
+            let now = probe_now_ms();
+            let last = LAST_EMPTY_PROBE_LOG_MS.load(Ordering::Relaxed);
+            if should_log_empty_probe(now, last) {
+                LAST_EMPTY_PROBE_LOG_MS.store(now, Ordering::Relaxed);
+                let suppressed = EMPTY_PROBES_SINCE_LOG.swap(0, Ordering::Relaxed);
+                bridge_log(&format!(
+                    "read 0 bytes (client closed before sending) — health probe; \
+                     {suppressed} identical probe(s) suppressed since the last line"
+                ));
+            } else {
+                EMPTY_PROBES_SINCE_LOG.fetch_add(1, Ordering::Relaxed);
+            }
             return;
         }
 
@@ -1377,7 +1521,12 @@ mod pipe_server {
             return 1;
         }
 
-        // Connect the server side.
+        // Connect the server side. NOTE THE ORDER: the CLIENT is opened first,
+        // which is the case the service hits in production (a client that
+        // connects between CreateNamedPipeW and ConnectNamedPipe). The accept
+        // step therefore takes the ERROR_PIPE_CONNECTED path deterministically,
+        // so this self-test doubles as a field canary for C-01 — the deadlock
+        // that parked the accept loop in production from 2026-11-02.
         let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) };
         let Ok(event) = event else {
             eprintln!("[self-test] CreateEventW failed");
@@ -1386,13 +1535,6 @@ mod pipe_server {
             }
             return 1;
         };
-        let mut overlapped = unsafe {
-            windows::Win32::System::IO::OVERLAPPED {
-                hEvent: event,
-                ..std::mem::zeroed()
-            }
-        };
-        let _ = unsafe { ConnectNamedPipe(server_handle, Some(&mut overlapped)) };
 
         // Now connect as the current (unprivileged) user → the whole point.
         let client_handle = unsafe {
@@ -1419,6 +1561,46 @@ mod pipe_server {
             return 1;
         }
         let client_handle = client_handle.unwrap();
+
+        // Run the real accept step (same code as the service's accept loop) on
+        // a helper thread with a bounded wait: if the ERROR_PIPE_CONNECTED
+        // handling ever regresses, the self-test fails loudly in 5 s instead of
+        // hanging forever on an event that can never be signalled.
+        let (accept_tx, accept_rx) = std::sync::mpsc::channel();
+        // HANDLE is !Send: hand it over through the same newtypes the worker
+        // pool uses.
+        let accept_pipe = SendHandle(server_handle);
+        let accept_event = SendEvent(event);
+        std::thread::spawn(move || {
+            let _ = accept_tx.send(accept_client(
+                accept_pipe.into_handle(),
+                accept_event.into_event(),
+            ));
+        });
+        let accept_outcome = match accept_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                eprintln!(
+                    "[self-test] FAIL: accept step did not complete within 5 s — a pre-connected \
+                     client (ERROR_PIPE_CONNECTED) must never be waited on (C-01 deadlock)",
+                );
+                unsafe {
+                    CloseHandle(server_handle).ok();
+                    CloseHandle(event).ok();
+                    CloseHandle(client_handle).ok();
+                }
+                return 1;
+            }
+        };
+        if let AcceptOutcome::Failed(code) = accept_outcome {
+            eprintln!("[self-test] FAIL: accept step failed (win32 error {code})");
+            unsafe {
+                CloseHandle(server_handle).ok();
+                CloseHandle(event).ok();
+                CloseHandle(client_handle).ok();
+            }
+            return 1;
+        }
 
         // Round-trip: client writes "ping", server reads it.
         let ping = b"ping";
@@ -1462,6 +1644,264 @@ mod pipe_server {
             1
         }
     }
+
+    // ── C-01 regression tests ───────────────────────────────────────────────
+    // Only compiled for `cargo test --bin micontrol_bridge`; the whole file is
+    // `#![cfg(windows)]`, so these are Windows-only by construction. They use
+    // real named pipes (the race cannot be faked) but never touch
+    // `handle_client` / `bridge_log`, so they do not write to the production
+    // `ProgramData\MiControl\logs\bridge.log`.
+    #[cfg(test)]
+    mod c01_accept_tests {
+        use super::*;
+        use std::os::windows::ffi::OsStrExt;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows::Win32::System::IO::GetOverlappedResult;
+
+        /// Unique pipe name per call (pid + counter), so the tests can run in
+        /// parallel and a leftover instance from a crashed run cannot collide.
+        fn unique_pipe_name(tag: &str) -> String {
+            static SEQ: AtomicU32 = AtomicU32::new(0);
+            format!(
+                r"\\.\pipe\micontrol_bridge_c01_{tag}_{}_{}",
+                std::process::id(),
+                SEQ.fetch_add(1, AtomicOrdering::SeqCst)
+            )
+        }
+
+        fn wide(name: &str) -> Vec<u16> {
+            std::ffi::OsStr::new(name)
+                .encode_wide()
+                .chain(Some(0))
+                .collect()
+        }
+
+        /// A listening instance with the production flags (overlapped, byte
+        /// mode, Everyone-RW DACL).
+        fn listening_instance(name: &str) -> PipeInstance {
+            let sec_attr = build_pipe_security_attributes();
+            PipeInstance::create(&wide(name), 1, sec_attr.as_ref())
+                .expect("CreateNamedPipeW/CreateEventW failed")
+        }
+
+        /// Client side. A SYNCHRONOUS handle (no FILE_FLAG_OVERLAPPED) so the
+        /// test can use plain blocking WriteFile; the server side stays
+        /// overlapped exactly like production.
+        fn connect_client(name: &str) -> OwnedHandle {
+            let path = wide(name);
+            OwnedHandle::new(
+                unsafe {
+                    CreateFileW(
+                        PCWSTR(path.as_ptr()),
+                        (GENERIC_READ | GENERIC_WRITE).0,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL,
+                        None,
+                    )
+                }
+                .expect("client CreateFileW failed"),
+            )
+        }
+
+        fn client_write(handle: HANDLE, payload: &[u8]) {
+            let mut written = 0u32;
+            unsafe { WriteFile(handle, Some(payload), Some(&mut written), None) }
+                .expect("client WriteFile failed");
+            assert_eq!(written, payload.len() as u32, "short client write");
+        }
+
+        /// Server-side read on an overlapped instance handle. `None` means the
+        /// client is gone (`ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`) —
+        /// the condition `handle_client` maps to "read 0 bytes".
+        fn server_read(handle: HANDLE, buf: &mut [u8]) -> Option<usize> {
+            let event = OwnedEvent::new(
+                unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+                    .expect("server_read: CreateEventW failed"),
+            );
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = event.raw();
+            let mut transferred = 0u32;
+
+            let started = unsafe {
+                ReadFile(
+                    handle,
+                    Some(buf),
+                    Some(&mut transferred),
+                    Some(&mut overlapped),
+                )
+            };
+            let immediate = match started {
+                Ok(()) => Some(transferred as usize),
+                Err(_) => None,
+            };
+
+            let result = match immediate {
+                Some(n) => Some(n),
+                None => {
+                    let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+                    if code != ERROR_IO_PENDING.0 {
+                        None // client vanished: EOF
+                    } else {
+                        assert_eq!(
+                            unsafe { WaitForSingleObject(event.raw(), 5_000) },
+                            WAIT_OBJECT_0,
+                            "server read never completed"
+                        );
+                        let mut done = 0u32;
+                        unsafe { GetOverlappedResult(handle, &overlapped, &mut done, false) }
+                            .expect("GetOverlappedResult failed");
+                        Some(done as usize)
+                    }
+                }
+            };
+
+            // OwnedEvent closes the event on drop — no manual CloseHandle.
+            result
+        }
+
+        /// One accept step on a helper thread with a 5 s guard: if the C-01
+        /// bug ever comes back, the test fails instead of hanging the suite.
+        fn accept_with_timeout(handle: HANDLE, event: HANDLE) -> AcceptOutcome {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let pipe = SendHandle(handle);
+            let accept_event = SendEvent(event);
+            std::thread::spawn(move || {
+                let _ = tx.send(accept_client(pipe.into_handle(), accept_event.into_event()));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5)).expect(
+                "accept step did not complete within 5 s — ERROR_PIPE_CONNECTED deadlock (C-01)",
+            )
+        }
+
+        /// C-01, the exact production race: the client is connected BEFORE the
+        /// accept step runs. `ConnectNamedPipe` then returns FALSE +
+        /// ERROR_PIPE_CONNECTED *without queueing overlapped I/O*; the pre-fix
+        /// code `let _ =`'d that result and waited INFINITE on an event that can
+        /// never be signalled, parking the accept loop for good (service
+        /// RUNNING, pipe permanently ERROR_BUSY).
+        #[test]
+        fn accept_completes_when_client_connects_before_connect_named_pipe() {
+            let name = unique_pipe_name("race");
+            let instance = listening_instance(&name);
+
+            // Client first — this IS the race.
+            let client = connect_client(&name);
+
+            let outcome = accept_with_timeout(instance.handle.raw(), instance.event.raw());
+            assert_eq!(
+                outcome,
+                AcceptOutcome::AlreadyConnected,
+                "a pre-connected client must be recognised as ERROR_PIPE_CONNECTED"
+            );
+
+            // And the connection must be USABLE, not merely "not blocked".
+            client_write(client.raw(), b"ping");
+            let mut buf = [0u8; 16];
+            let n = server_read(instance.handle.raw(), &mut buf).expect("server read failed");
+            assert_eq!(&buf[..n], b"ping".as_slice());
+
+            client.close();
+        }
+
+        /// Normal path: no client yet, so `ConnectNamedPipe` pends
+        /// (ERROR_IO_PENDING) and the accept step must return exactly when the
+        /// client connects — never before.
+        #[test]
+        fn accept_returns_when_client_connects_after_connect_named_pipe() {
+            let name = unique_pipe_name("normal");
+            let instance = listening_instance(&name);
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let pipe = SendHandle(instance.handle.raw());
+            let accept_event = SendEvent(instance.event.raw());
+            std::thread::spawn(move || {
+                let _ = tx.send(accept_client(pipe.into_handle(), accept_event.into_event()));
+            });
+
+            // Let the helper reach the blocking wait, so this really exercises
+            // the ERROR_IO_PENDING path rather than the pre-connected one.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(
+                matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+                "accept step returned before any client connected"
+            );
+
+            let client = connect_client(&name);
+            let outcome = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("accept step never woke up when the client connected");
+            assert_eq!(outcome, AcceptOutcome::Connected);
+
+            client_write(client.raw(), b"pong");
+            let mut buf = [0u8; 16];
+            let n = server_read(instance.handle.raw(), &mut buf).expect("server read failed");
+            assert_eq!(&buf[..n], b"pong".as_slice());
+
+            client.close();
+        }
+
+        /// A client that connects and immediately disappears must not wedge the
+        /// accept step, and the loop must keep serving afterwards — the
+        /// production signature was "client connected" / "read 0 bytes" right
+        /// before bridge.log went silent for five days.
+        #[test]
+        fn accept_step_survives_client_that_connects_and_disconnects() {
+            let name = unique_pipe_name("ghost");
+
+            // Round 1: a probe connects and vanishes without sending anything.
+            {
+                let instance = listening_instance(&name);
+                let ghost = connect_client(&name);
+                assert!(matches!(
+                    accept_with_timeout(instance.handle.raw(), instance.event.raw()),
+                    AcceptOutcome::Connected | AcceptOutcome::AlreadyConnected
+                ));
+                ghost.close();
+
+                let mut buf = [0u8; 16];
+                assert_eq!(
+                    server_read(instance.handle.raw(), &mut buf),
+                    None,
+                    "a vanished client must surface as EOF, never as a hang"
+                );
+            }
+
+            // Round 2: same pipe name, fresh instance — the loop can still
+            // accept and serve a real client (the name is released on drop).
+            let instance = listening_instance(&name);
+            let client = connect_client(&name);
+            assert_eq!(
+                accept_with_timeout(instance.handle.raw(), instance.event.raw()),
+                AcceptOutcome::AlreadyConnected
+            );
+
+            client_write(client.raw(), b"pong");
+            let mut buf = [0u8; 16];
+            let n = server_read(instance.handle.raw(), &mut buf).expect("server read failed");
+            assert_eq!(&buf[..n], b"pong".as_slice());
+
+            client.close();
+        }
+
+        /// A hard `ConnectNamedPipe` failure must surface as `Failed(code)` so
+        /// the accept loop destroys the instance and logs it, instead of being
+        /// swallowed and mistaken for a connection.
+        #[test]
+        fn accept_reports_hard_failure_instead_of_assuming_connected() {
+            // Null handle: ConnectNamedPipe fails with ERROR_INVALID_HANDLE.
+            let outcome = accept_client(HANDLE::default(), HANDLE::default());
+            assert!(
+                matches!(outcome, AcceptOutcome::Failed(_)),
+                "expected a hard failure, got {outcome:?}"
+            );
+        }
+    }
 }
 
 // ── Watchdog ─────────────────────────────────────────────────────────────────
@@ -1484,8 +1924,11 @@ mod pipe_server {
 //   whenever it disappears unexpectedly.
 //
 // Relaunch is gated on TWO machine-wide markers in `%ProgramData%\MiControl`:
-//   - `watchdog_enabled`   — present iff the user has autostart enabled
-//                            (mirrored by the app at every startup/toggle).
+//   - `watchdog_enabled`   — present AND `"1"` iff the user has autostart
+//                            enabled (mirrored by the app at every startup and
+//                            toggled with it). This is the production arming
+//                            source: the file has existed since 2026-11-06
+//                            22:19 but the service ignored it until now.
 //   - `watchdog_user_quit` — sentinel written by the app on INTENTIONAL quit
 //                            (tray Quit, dev window close). Its presence keeps
 //                            the watchdog silent indefinitely; the app REMOVES
@@ -1494,6 +1937,10 @@ mod pipe_server {
 //                            a manual quit stops MiControl for good (until the
 //                            user starts it again), while any other death is
 //                            auto-relaunched.
+//
+// The watchdog thread itself starts when either the `MCONTROL_WATCHDOG=1`
+// environment variable (operator override) or the `watchdog_enabled` marker is
+// present; `MCONTROL_WATCHDOG=0` force-disables it even when the marker exists.
 mod watchdog {
     use super::*;
     use std::ffi::OsString;
@@ -1520,9 +1967,46 @@ mod watchdog {
     /// A heartbeat older than this (without the app refreshing it) means the
     /// process exists but its UI is dead (frozen zombie after a WebView2
     /// crash/relaunch). The watchdog force-restarts such instances.
+    ///
+    /// The app's ticker is a dedicated OS thread with a 10 s period, so 45 s
+    /// is 4.5 missed ticks — no healthy process ever trips this.
     const HEARTBEAT_STALE_MS: u64 = 45_000;
+    /// How long `ui_ok=0` must be observed before acting.
+    ///
+    /// The app reports `ui_ok=0` from the very first heartbeat after process
+    /// start (the window does not exist yet), so acting on the first sample
+    /// would kill every launch. 60 s is two poll periods — the confirmation
+    /// window the stale path has always used, now explicit and time-based.
+    const UI_DEAD_GRACE_MS: u64 = 60_000;
+    /// After a watchdog-initiated relaunch, ignore missing/stale heartbeats
+    /// for this long while the app boots WebView2.
+    const STARTUP_GRACE_MS: u64 = 120_000;
+    /// Consecutive polls of a stale/unreadable heartbeat required to act.
+    const ZOMBIE_CONFIRMATIONS: u32 = 2;
+    /// Max restart actions without a sustained healthy period ([`HEALTHY_RESET_MS`]).
+    /// Bounds a kill loop if the app cannot recover.
+    const MAX_RESTARTS: u32 = 3;
+    /// Continuous healthy time that resets the restart budget.
+    const HEALTHY_RESET_MS: u64 = 600_000;
+    /// Consecutive "app not running" polls before relaunching (~2 min).
+    const DEAD_MISSES_BEFORE_LAUNCH: u32 = 4;
+    /// Read attempts for the heartbeat file. Writer uses write-then-rename,
+    /// but a fallback direct write can be observed mid-truncation; retrying
+    /// for ~50 ms avoids misreading a torn file as a dead UI.
+    const HEARTBEAT_READ_ATTEMPTS: u32 = 3;
     /// Default install location fallback.
     const DEFAULT_EXE: &str = r"C:\Program Files\MiControl\micontrol.exe";
+    /// Port the app's MCP plugin binds at startup. The previous instance's
+    /// listening socket must be gone before a relaunch, or the new process
+    /// dies on `bind 127.0.0.1:4000` (os error 10048) before it can log a
+    /// panic (2026-11-09 16:17: the app restarted 1.2 s after the kill, wrote
+    /// five lines and vanished; the watchdog only came back 2 min later).
+    const MCP_PORT: u16 = 4000;
+    /// Budget for the old listener to disappear before we relaunch.
+    const MCP_PORT_RELEASE_TIMEOUT_MS: u64 = 10_000;
+    /// First probe interval; doubles up to the max.
+    const MCP_PORT_POLL_MIN_MS: u64 = 100;
+    const MCP_PORT_POLL_MAX_MS: u64 = 1_000;
     /// Uninstall registry keys (DisplayIcon / InstallLocation) to find a
     /// relocated install.
     const UNINSTALL_KEYS: &[&str] = &[
@@ -1546,13 +2030,14 @@ mod watchdog {
             .unwrap_or_default()
             .as_secs();
         eprintln!("[{ts}] [watchdog] {msg}");
-        // S64: persist with size-based rotation (the previous comment said
-        // "rotating log" but the implementation was a plain unbounded append).
+        // S64: persist with size-based rotation, 8 MiB x 7 (the previous
+        // comment said "rotating log" but it was a plain unbounded append).
         let dir = marker_dir().join("logs");
         let path = dir.join("watchdog.log");
+        // `append_line` owns the timestamp (RFC 3339) and the whole-line write.
         let _ = micontrol_lib::util::log_rotation::append_line(
             &path,
-            &format!("{ts} {msg}"),
+            msg,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
             micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
         );
@@ -1566,51 +2051,57 @@ mod watchdog {
     /// means exactly that: a manual quit is armed forever, until the user
     /// starts the app again themselves.
     fn user_quit_pending() -> bool {
-        let path = marker_path(QUIT_MARKER);
-        if path.exists() {
-            write_log("user quit sentinel present — watchdog stays silent");
-            true
-        } else {
-            false
-        }
+        // Logging is done by `log_gate_transition` — one line per transition,
+        // not one line every 30 s poll.
+        marker_path(QUIT_MARKER).exists()
     }
 
-    /// True if the watchdog should be armed (autostart mirror present).
+    /// True if the watchdog should be armed (autostart mirror says `"1"`).
+    ///
+    /// The app writes exactly `1` (`crash_recovery::set_watchdog_enabled`) and
+    /// removes the file when autostart is off. Treat an empty file as armed
+    /// (older builds wrote it before the content mattered) and `"0"` as
+    /// explicitly disarmed.
     fn watchdog_armed() -> bool {
-        marker_path(ENABLED_MARKER).exists()
+        let path = marker_path(ENABLED_MARKER);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => content.trim() != "0",
+            Err(_) => false,
+        }
     }
 
-    /// True if a process named `micontrol.exe` is currently running anywhere.
-    fn app_is_running() -> bool {
-        // leak-check: audited — every exit path closes the handle explicitly (S67).
-        let target: Vec<u16> = "micontrol.exe".encode_utf16().collect();
-        let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-            return false;
-        };
-        let snapshot_ok = snapshot != INVALID_HANDLE_VALUE;
-        if !snapshot_ok {
-            return false;
+    /// Should the watchdog thread start at all?
+    ///
+    /// `MCONTROL_WATCHDOG=1` / `=0` is an explicit operator override and wins
+    /// over the marker; otherwise the app's `watchdog_enabled` file decides.
+    /// S55 FIX 19 disabled the thread unconditionally after an access violation
+    /// in the Win32 launch path, which left `ui_ok` with no consumer: the
+    /// 06-Nov-2026 starvation ran for 2 h 46 min before the user quit the app.
+    pub fn start_enabled() -> bool {
+        match std::env::var("MCONTROL_WATCHDOG")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("1") => return true,
+            Some("0") => return false,
+            _ => {}
         }
-        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        watchdog_armed()
+    }
 
-        let mut found = false;
-        let mut has = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
-        while has {
-            let mut name: Vec<u16> = entry.szExeFile[..].to_vec();
-            while let Some(&0) = name.last() {
-                name.pop();
-            }
-            if name.len() == target.len() && name == target {
-                found = true;
-                break;
-            }
-            has = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+    /// Which source armed the watchdog (for the startup log line).
+    fn arm_source() -> &'static str {
+        match std::env::var("MCONTROL_WATCHDOG")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("1") => "env MCONTROL_WATCHDOG=1",
+            Some("0") => "env MCONTROL_WATCHDOG=0 (forced off)",
+            _ if watchdog_armed() => "marker watchdog_enabled",
+            _ => "none",
         }
-        unsafe {
-            CloseHandle(snapshot).ok();
-        }
-        found
     }
 
     /// Returns the PID of a running `micontrol.exe`, if any.
@@ -1645,48 +2136,535 @@ mod watchdog {
         result
     }
 
-    /// Read millisecond timestamp (`<unix_ms>` first line) from the app's
-    /// heartbeat file. `None` if missing/unreadable.
-    fn read_heartbeat_ms() -> Option<u64> {
-        let path = marker_path(HEARTBEAT_FILE);
-        let content = std::fs::read_to_string(path).ok()?;
-        let first = content.lines().next()?.trim();
-        first.parse::<u64>().ok().filter(|&v| v > 0)
+    /// Wall-clock now in epoch milliseconds.
+    fn epoch_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
     }
 
-    /// Read the third heartbeat line: `ui_ok` flag written by the app.
-    /// `1` = main window (WebView2) exists; `0` = process alive but UI dead
-    /// (WebView2 crashed / window destroyed) — a zombie that keeps its
-    /// timestamp fresh via the tokio ticker but cannot show UI.
-    fn read_ui_ok() -> Option<u8> {
-        let path = marker_path(HEARTBEAT_FILE);
-        let content = std::fs::read_to_string(path).ok()?;
-        content.lines().nth(2)?.trim().parse::<u8>().ok()
+    /// Parsed contents of `%ProgramData%\MiControl\heartbeat`.
+    ///
+    /// Writer: `hw::crash_recovery::write_heartbeat`; format
+    /// `<epoch_ms>\n<pid>\n<ui_ok>\n`. All three fields are mandatory.
+    ///
+    /// Before 2026-11-07 `app_heartbeat_fresh()` read **only** line 1, so a
+    /// fresh timestamp with `ui_ok=0` — a process whose tokio runtime is
+    /// starved and whose UI cannot answer — looked perfectly healthy. The
+    /// 06-Nov starvation ran 2 h 46 min that way.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Heartbeat {
+        ts_ms: u64,
+        pid: u32,
+        ui_ok: u8,
     }
 
-    /// A "healthy" app refreshes its heartbeat every 10 s AND reports
-    /// `ui_ok=1` (main window alive). Missing/stale heartbeat, or a fresh
-    /// heartbeat with `ui_ok=0`, means the process is a zombie (UI dead) →
-    /// force-restart it. `ui_ok` needs consecutive confirmation so a transient
-    /// hiccup during the app's own startup (before the first write includes
-    /// the window) doesn't cause a kill loop.
-    fn app_heartbeat_fresh() -> bool {
-        match heartbeat_age_ms() {
-            Some(age) => age < HEARTBEAT_STALE_MS,
-            None => false,
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HeartbeatError {
+        Missing,
+        Empty,
+        BadTimestamp,
+        MissingPid,
+        BadPid,
+        MissingUiOk,
+        BadUiOk,
+    }
+
+    impl HeartbeatError {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Missing => "missing",
+                Self::Empty => "empty",
+                Self::BadTimestamp => "invalid timestamp",
+                Self::MissingPid => "missing pid",
+                Self::BadPid => "invalid pid",
+                Self::MissingUiOk => "missing ui_ok",
+                Self::BadUiOk => "invalid ui_ok",
+            }
         }
     }
 
-    /// Age of the app's heartbeat in milliseconds (0 if in the future).
-    /// `None` if missing/unreadable. Used both for the freshness check and
-    /// for diagnostic logging (how stale was the heartbeat when we killed).
-    fn heartbeat_age_ms() -> Option<u64> {
-        let hb = read_heartbeat_ms()?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis() as u64;
-        Some(now_ms.saturating_sub(hb))
+    /// Strict three-line parse. Garbage in any field rejects the whole file:
+    /// acting on a half-understood heartbeat is how a watchdog kills a healthy
+    /// app. Extra trailing lines are ignored (forward-compatible).
+    fn parse_heartbeat(content: &str) -> Result<Heartbeat, HeartbeatError> {
+        let mut lines = content.lines();
+        let ts = lines.next().ok_or(HeartbeatError::Empty)?.trim();
+        if ts.is_empty() {
+            return Err(HeartbeatError::Empty);
+        }
+        let ts_ms = ts
+            .parse::<u64>()
+            .map_err(|_| HeartbeatError::BadTimestamp)?;
+        if ts_ms == 0 {
+            return Err(HeartbeatError::BadTimestamp);
+        }
+        let pid = lines
+            .next()
+            .ok_or(HeartbeatError::MissingPid)?
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| HeartbeatError::BadPid)?;
+        if pid == 0 {
+            return Err(HeartbeatError::BadPid);
+        }
+        let ui_ok = lines
+            .next()
+            .ok_or(HeartbeatError::MissingUiOk)?
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| HeartbeatError::BadUiOk)?;
+        if ui_ok > 1 {
+            return Err(HeartbeatError::BadUiOk);
+        }
+        Ok(Heartbeat { ts_ms, pid, ui_ok })
+    }
+
+    /// Read + parse the heartbeat, retrying briefly.
+    ///
+    /// The app writes it with write-then-rename, but the fallback direct write
+    /// can be observed mid-truncation; ~50 ms of retries keeps a torn read
+    /// from being misdiagnosed as a dead UI.
+    fn read_heartbeat() -> Result<Heartbeat, HeartbeatError> {
+        let path = marker_path(HEARTBEAT_FILE);
+        let mut last = HeartbeatError::Missing;
+        for attempt in 0..HEARTBEAT_READ_ATTEMPTS {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match parse_heartbeat(&content) {
+                    Ok(hb) => return Ok(hb),
+                    Err(e) => last = e,
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(HeartbeatError::Missing)
+                }
+                Err(_) => last = HeartbeatError::Missing,
+            }
+            if attempt + 1 < HEARTBEAT_READ_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        Err(last)
+    }
+
+    /// What the heartbeat says about the running process.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HeartbeatHealth {
+        /// Fresh, same pid, `ui_ok=1`.
+        Healthy,
+        /// Fresh, same pid, `ui_ok=0` — main window gone (WebView2 crash) or
+        /// the async runtime is starved. Needs the grace period, then restart.
+        UiNotReady,
+        /// Fresh timestamp, but written by another process — typically the
+        /// previous instance right after a relaunch, before the new one has
+        /// written its first heartbeat.
+        ForeignPid { pid: u32 },
+        /// Timestamp older than [`HEARTBEAT_STALE_MS`].
+        Stale { age_ms: u64 },
+        /// Missing, empty or malformed.
+        Unreadable { why: &'static str },
+    }
+
+    impl HeartbeatHealth {
+        fn is_healthy(self) -> bool {
+            matches!(self, Self::Healthy)
+        }
+
+        fn describe(self) -> String {
+            match self {
+                Self::Healthy => "healthy".to_string(),
+                Self::UiNotReady => "ui_ok=0".to_string(),
+                Self::ForeignPid { pid } => format!("heartbeat from other pid {pid}"),
+                Self::Stale { age_ms } => format!("stale {age_ms}ms"),
+                Self::Unreadable { why } => format!("unreadable ({why})"),
+            }
+        }
+    }
+
+    /// Classify a heartbeat against the running pid and the clock.
+    fn heartbeat_health(
+        heartbeat: Result<Heartbeat, HeartbeatError>,
+        app_pid: Option<u32>,
+        now_ms: u64,
+    ) -> HeartbeatHealth {
+        let hb = match heartbeat {
+            Ok(hb) => hb,
+            Err(e) => return HeartbeatHealth::Unreadable { why: e.as_str() },
+        };
+        match app_pid {
+            Some(pid) if hb.pid == pid => {}
+            Some(_) => {
+                return HeartbeatHealth::ForeignPid { pid: hb.pid };
+            }
+            None => {
+                return HeartbeatHealth::Unreadable {
+                    why: "no running pid",
+                }
+            }
+        }
+        // A future timestamp (clock skew) is treated as age 0.
+        let age_ms = now_ms.saturating_sub(hb.ts_ms);
+        if age_ms > HEARTBEAT_STALE_MS {
+            return HeartbeatHealth::Stale { age_ms };
+        }
+        if hb.ui_ok == 1 {
+            HeartbeatHealth::Healthy
+        } else {
+            HeartbeatHealth::UiNotReady
+        }
+    }
+
+    /// Escalation marker written by `hw::crash_recovery` after N consecutive
+    /// failed async-runtime probes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct StarvationSignal {
+        pid: u32,
+        fails: u32,
+        age_ms: u64,
+    }
+
+    fn read_starvation(now_ms: u64) -> Option<StarvationSignal> {
+        use micontrol_lib::hw::crash_recovery as cr;
+        let path = cr::starvation_marker_path()?;
+        let content = std::fs::read_to_string(path).ok()?;
+        let state = cr::parse_starvation_marker(&content).ok()?;
+        if state.fails < cr::STARVATION_ESCALATE_FAILS {
+            return None;
+        }
+        Some(StarvationSignal {
+            pid: state.pid,
+            fails: state.fails,
+            age_ms: now_ms.saturating_sub(state.ts_ms),
+        })
+    }
+
+    /// A signal is actionable only for the *current* app pid and while fresh;
+    /// a leftover marker from a previous session must never trigger a restart.
+    fn starvation_actionable(signal: StarvationSignal, app_pid: u32) -> bool {
+        use micontrol_lib::hw::crash_recovery as cr;
+        signal.pid == app_pid
+            && signal.fails >= cr::STARVATION_ESCALATE_FAILS
+            && signal.age_ms <= cr::STARVATION_MARKER_TTL_MS
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RestartCause {
+        /// No `micontrol.exe` at all.
+        Missing,
+        /// Process alive, heartbeat stale/foreign/unreadable.
+        Stale,
+        /// Fresh heartbeat with `ui_ok=0`.
+        UiDead,
+        /// `crash_recovery` escalated a starved async runtime.
+        Starved,
+    }
+
+    impl RestartCause {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::Missing => "app not running",
+                Self::Stale => "heartbeat stale",
+                Self::UiDead => "UI dead (ui_ok=0)",
+                Self::Starved => "async runtime starved",
+            }
+        }
+    }
+
+    /// Why a poll decided to wait instead of acting — logged and asserted by
+    /// the decision-matrix tests.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WaitDetail {
+        Missing { misses: u32 },
+        StartupGrace,
+        UiDeadGrace { since_ms: u64 },
+        Confirm { count: u32 },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WatchdogAction {
+        Idle,
+        Wait {
+            cause: RestartCause,
+            detail: WaitDetail,
+        },
+        Relaunch {
+            misses: u32,
+        },
+        Restart {
+            cause: RestartCause,
+        },
+        GiveUp {
+            cause: RestartCause,
+        },
+    }
+
+    /// Which gate is currently blocking supervision (for one-line logging on
+    /// transitions instead of a line every 30 s).
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    enum GateState {
+        #[default]
+        Armed,
+        QuitPending,
+        Disarmed,
+    }
+
+    /// Counters and timers that survive between polls.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    struct WatchdogState {
+        dead_misses: u32,
+        zombie_confirmations: u32,
+        ui_dead_since_ms: Option<u64>,
+        last_launch_ms: Option<u64>,
+        restarts: u32,
+        healthy_since_ms: Option<u64>,
+        gave_up: bool,
+        gate: GateState,
+    }
+
+    /// Everything a poll observes. Kept as plain data so [`decide`] is pure
+    /// and the whole matrix is unit-testable without Win32 or files.
+    struct WatchdogInput {
+        quit_pending: bool,
+        armed: bool,
+        app_pid: Option<u32>,
+        heartbeat: HeartbeatHealth,
+        starvation: Option<StarvationSignal>,
+        now_ms: u64,
+    }
+
+    /// The watchdog decision matrix.
+    ///
+    /// Order matters:
+    /// 1. quit sentinel / not armed → stand down (reset counters);
+    /// 2. app absent → 4 misses, then relaunch;
+    /// 3. healthy (fresh **and** `ui_ok=1` **and** matching pid) → reset;
+    /// 4. escalated starvation → restart immediately (the app itself waited
+    ///    for 10 consecutive probe failures ≈ 2.5 min);
+    /// 5. fresh but `ui_ok=0` → 60 s grace, then restart;
+    /// 6. stale/foreign/unreadable → startup grace after our own relaunch,
+    ///    then 2 confirmations, then restart;
+    /// 7. restart budget exhausted → give up until a sustained healthy period.
+    fn decide(input: &WatchdogInput, state: &mut WatchdogState) -> WatchdogAction {
+        if input.quit_pending {
+            *state = WatchdogState {
+                gate: GateState::QuitPending,
+                ..WatchdogState::default()
+            };
+            return WatchdogAction::Idle;
+        }
+        if !input.armed {
+            *state = WatchdogState {
+                gate: GateState::Disarmed,
+                ..WatchdogState::default()
+            };
+            return WatchdogAction::Idle;
+        }
+        state.gate = GateState::Armed;
+
+        let Some(pid) = input.app_pid else {
+            state.dead_misses += 1;
+            state.zombie_confirmations = 0;
+            state.ui_dead_since_ms = None;
+            state.healthy_since_ms = None;
+            if state.dead_misses < DEAD_MISSES_BEFORE_LAUNCH {
+                return WatchdogAction::Wait {
+                    cause: RestartCause::Missing,
+                    detail: WaitDetail::Missing {
+                        misses: state.dead_misses,
+                    },
+                };
+            }
+            let misses = state.dead_misses;
+            state.dead_misses = 0;
+            return start_restart(RestartCause::Missing, state, input.now_ms, misses);
+        };
+
+        if input.heartbeat.is_healthy() {
+            state.dead_misses = 0;
+            state.zombie_confirmations = 0;
+            state.ui_dead_since_ms = None;
+            let since = *state.healthy_since_ms.get_or_insert(input.now_ms);
+            if state.restarts > 0 && input.now_ms.saturating_sub(since) >= HEALTHY_RESET_MS {
+                state.restarts = 0;
+                state.gave_up = false;
+            }
+            return WatchdogAction::Idle;
+        }
+        state.healthy_since_ms = None;
+
+        // crash_recovery already counted 10 consecutive failed probes; that is
+        // stronger evidence than any confirmation we could add.
+        if let Some(signal) = input
+            .starvation
+            .filter(|signal| starvation_actionable(*signal, pid))
+        {
+            return start_restart(RestartCause::Starved, state, input.now_ms, signal.fails);
+        }
+
+        if input.heartbeat == HeartbeatHealth::UiNotReady {
+            state.dead_misses = 0;
+            state.zombie_confirmations = 0;
+            // A freshly relaunched app reports ui_ok=0 until WebView2 creates
+            // the main window; never count that against it.
+            if let Some(launched) = state.last_launch_ms {
+                if input.now_ms.saturating_sub(launched) < STARTUP_GRACE_MS {
+                    return WatchdogAction::Wait {
+                        cause: RestartCause::UiDead,
+                        detail: WaitDetail::StartupGrace,
+                    };
+                }
+            }
+            let since = state.ui_dead_since_ms.unwrap_or(input.now_ms);
+            state.ui_dead_since_ms = Some(since);
+            if input.now_ms.saturating_sub(since) < UI_DEAD_GRACE_MS {
+                return WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: since },
+                };
+            }
+            return start_restart(RestartCause::UiDead, state, input.now_ms, 0);
+        }
+
+        state.dead_misses = 0;
+        state.ui_dead_since_ms = None;
+        // After a relaunch the app needs a moment to create its window and
+        // write the first heartbeat; never kill it inside that window.
+        if let Some(launched) = state.last_launch_ms {
+            if input.now_ms.saturating_sub(launched) < STARTUP_GRACE_MS {
+                return WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::StartupGrace,
+                };
+            }
+        }
+        state.zombie_confirmations += 1;
+        if state.zombie_confirmations < ZOMBIE_CONFIRMATIONS {
+            return WatchdogAction::Wait {
+                cause: RestartCause::Stale,
+                detail: WaitDetail::Confirm {
+                    count: state.zombie_confirmations,
+                },
+            };
+        }
+        start_restart(RestartCause::Stale, state, input.now_ms, 0)
+    }
+
+    /// Common bookkeeping for both "launch because absent" and "kill+relaunch".
+    fn start_restart(
+        cause: RestartCause,
+        state: &mut WatchdogState,
+        now_ms: u64,
+        detail: u32,
+    ) -> WatchdogAction {
+        if state.restarts >= MAX_RESTARTS {
+            if !state.gave_up {
+                state.gave_up = true;
+                return WatchdogAction::GiveUp { cause };
+            }
+            return WatchdogAction::Idle;
+        }
+        state.restarts += 1;
+        state.dead_misses = 0;
+        state.zombie_confirmations = 0;
+        state.ui_dead_since_ms = None;
+        state.last_launch_ms = Some(now_ms);
+        state.healthy_since_ms = None;
+        if cause == RestartCause::Missing {
+            WatchdogAction::Relaunch { misses: detail }
+        } else {
+            WatchdogAction::Restart { cause }
+        }
+    }
+
+    /// Execute a decision. All Win32/process work lives here; the decision
+    /// itself is pure.
+    fn apply_action(action: WatchdogAction, input: &WatchdogInput) {
+        match action {
+            WatchdogAction::Idle => {}
+            WatchdogAction::Wait { cause, detail } => match detail {
+                WaitDetail::Missing { misses } => {
+                    write_log(&format!("micontrol.exe NOT running (miss #{misses})"));
+                }
+                WaitDetail::StartupGrace => {
+                    write_log(&format!(
+                        "{} — startup grace ({}ms) after relaunch, waiting",
+                        cause.as_str(),
+                        STARTUP_GRACE_MS
+                    ));
+                }
+                WaitDetail::UiDeadGrace { since_ms } => {
+                    write_log(&format!(
+                        "{} for {}ms (grace {}ms) — waiting",
+                        cause.as_str(),
+                        input.now_ms.saturating_sub(since_ms),
+                        UI_DEAD_GRACE_MS
+                    ));
+                }
+                WaitDetail::Confirm { count } => {
+                    write_log(&format!(
+                        "{} — confirmation {count}/{ZOMBIE_CONFIRMATIONS}",
+                        cause.as_str()
+                    ));
+                }
+            },
+            WatchdogAction::Relaunch { misses } => {
+                write_log(&format!(
+                    "micontrol.exe not running after {misses} misses — relaunching (minimized)"
+                ));
+                if let Some(exe) = find_app_exe() {
+                    launch_when_mcp_port_is_free(&exe, true);
+                }
+            }
+            WatchdogAction::Restart { cause } => {
+                let escalation = match (cause, input.starvation) {
+                    (RestartCause::Starved, Some(signal)) => {
+                        format!(", crash_recovery fails={}", signal.fails)
+                    }
+                    _ => String::new(),
+                };
+                write_log(&format!(
+                    "{} ({}{escalation}) — killing micontrol.exe (pid {}) and relaunching",
+                    cause.as_str(),
+                    input.heartbeat.describe(),
+                    input
+                        .app_pid
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                ));
+                if kill_app() {
+                    if let Some(exe) = find_app_exe() {
+                        // Visible window: the user must see that the UI is back.
+                        // Wait for the old socket to leave :4000 first (P1-d).
+                        launch_when_mcp_port_is_free(&exe, false);
+                    }
+                } else {
+                    write_log("could not kill the app — waiting for the next poll");
+                }
+            }
+            WatchdogAction::GiveUp { cause } => {
+                write_log(&format!(
+                    "{} — {MAX_RESTARTS} restarts without a sustained healthy period; \
+                     giving up until the next user launch",
+                    cause.as_str()
+                ));
+            }
+        }
+    }
+
+    /// Log a gate transition once, not on every 30 s poll.
+    fn log_gate_transition(previous: GateState, current: GateState) {
+        if previous == current {
+            return;
+        }
+        match current {
+            GateState::Armed => write_log("watchdog armed — supervising micontrol.exe"),
+            GateState::QuitPending => {
+                write_log("user quit sentinel present — watchdog stays silent");
+            }
+            GateState::Disarmed => {
+                write_log("watchdog disabled (autostart off) — sleeping");
+            }
+        }
     }
 
     /// Force-terminate the running micontrol.exe instance(s). Returns true if
@@ -1784,6 +2762,71 @@ mod watchdog {
             "micontrol.exe not found (checked uninstall keys + {DEFAULT_EXE})"
         ));
         None
+    }
+
+    /// True when `127.0.0.1:port` can be bound again.
+    ///
+    /// Deliberately a BIND probe, not a connect probe: connecting to the old
+    /// listener creates an accepted-but-unaccepted connection that keeps the
+    /// port occupied (TIME_WAIT) *after* the listener exits — the probe would
+    /// poison the very condition it is measuring. A bind leaves nothing behind
+    /// when it fails, and exactly mirrors what the new process will do.
+    fn mcp_port_is_free(port: u16) -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    }
+
+    /// Poll the MCP port with exponential backoff until it is released.
+    ///
+    /// Returns the total wait in ms, or `None` when the budget elapsed with
+    /// the port still taken. Backoff 100 → 200 → 400 → 800 → 1 000 ms: an
+    /// immediate release is noticed at once, a slow one costs ~10 wakeups,
+    /// not a busy loop or a fixed 5 s sleep.
+    fn wait_for_mcp_port_release(port: u16, timeout: std::time::Duration) -> Option<u64> {
+        let started = std::time::Instant::now();
+        let mut backoff = std::time::Duration::from_millis(MCP_PORT_POLL_MIN_MS);
+        let max_backoff = std::time::Duration::from_millis(MCP_PORT_POLL_MAX_MS);
+        loop {
+            if mcp_port_is_free(port) {
+                return Some(started.elapsed().as_millis() as u64);
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return None;
+            }
+            std::thread::sleep(backoff.min(timeout - elapsed));
+            backoff = (backoff * 2).min(max_backoff);
+        }
+    }
+
+    /// Launch `micontrol.exe` only after the old instance released the MCP
+    /// port (P1-d, STAB-ROUND-1).
+    ///
+    /// If the port never frees inside the budget we still launch: refusing
+    /// would turn a possibly-doomed launch into a guaranteed outage, and the
+    /// watchdog has no other way to restore the UI. The log line names the
+    /// wait so a bind failure is attributable.
+    fn launch_when_mcp_port_is_free(exe: &std::path::Path, minimized: bool) -> bool {
+        match wait_for_mcp_port_release(
+            MCP_PORT,
+            std::time::Duration::from_millis(MCP_PORT_RELEASE_TIMEOUT_MS),
+        ) {
+            Some(waited_ms) => {
+                if waited_ms >= MCP_PORT_POLL_MIN_MS {
+                    write_log(&format!(
+                        "waited {waited_ms} ms for MCP port {MCP_PORT} to be released — launching"
+                    ));
+                }
+                launch_app(exe, minimized)
+            }
+            None => {
+                write_log(&format!(
+                    "MCP port {MCP_PORT} still in use after {MCP_PORT_RELEASE_TIMEOUT_MS} ms of \
+                     backoff retries — launching anyway (the new session may fail to bind; the \
+                     next poll will retry)"
+                ));
+                launch_app(exe, minimized)
+            }
+        }
     }
 
     /// Launch `micontrol.exe` into the interactive user session.
@@ -1928,16 +2971,18 @@ mod watchdog {
 
     /// Watchdog main loop.
     pub fn run(shutdown: Arc<AtomicBool>, delay_start_ms: u64) {
-        write_log("watchdog thread started");
+        write_log(&format!(
+            "watchdog thread started (armed by: {}; poll {}ms, stale {}ms, ui_ok grace {}ms)",
+            arm_source(),
+            POLL_MS,
+            HEARTBEAT_STALE_MS,
+            UI_DEAD_GRACE_MS
+        ));
         // Give the app time to have (re)started before first probe.
         if delay_start_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay_start_ms));
         }
-        let mut consecutive_dead = 0u32;
-        // Consecutive "running but zombie (stale heartbeat)" detections.
-        // Bounded: after MAX_ZOMBIE_RESETS force-restarts in a row we stop
-        // hammering the machine and wait for the user or app to act.
-        let mut consecutive_zombie = 0u32;
+        let mut state = WatchdogState::default();
         while !shutdown.load(Ordering::SeqCst) {
             // S55 FIX 18: the whole poll body runs inside catch_unwind. A
             // panic anywhere here (WTS token paths, registry reads, process
@@ -1948,12 +2993,11 @@ mod watchdog {
             // UAC fallback storms the user saw). A panicked poll is now just
             // a skipped tick: the service survives and the next poll retries.
             let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                watchdog_poll(&mut consecutive_dead, &mut consecutive_zombie);
+                watchdog_poll(&mut state);
             }));
             if poll_result.is_err() {
                 write_log("watchdog poll PANICKED — tick skipped, service kept alive");
-                consecutive_dead = 0;
-                consecutive_zombie = 0;
+                state = WatchdogState::default();
             }
             // Sleep in small steps so shutdown is prompt.
             let step = std::time::Duration::from_millis(250);
@@ -1966,71 +3010,499 @@ mod watchdog {
         write_log("watchdog thread stopped");
     }
 
-    /// One watchdog poll: quit-pending check, armed check, app-liveness
-    /// check (relaunch after 4 misses) and stale-heartbeat zombie handling
-    /// (kill + relaunch after 2 confirmations, bounded by MAX_ZOMBIE_RESETS).
+    /// One watchdog poll: observe everything, decide (pure), then act.
+    ///
     /// S55 FIX 18: extracted so the watchdog loop can run it inside
     /// catch_unwind — a panic here must skip the tick, not kill the service.
-    fn watchdog_poll(consecutive_dead: &mut u32, consecutive_zombie: &mut u32) {
-        const MAX_ZOMBIE_RESETS: u32 = 3;
-        if user_quit_pending() {
-            *consecutive_dead = 0;
-            *consecutive_zombie = 0;
-        } else if !watchdog_armed() {
-            write_log("watchdog disabled (autostart off) — sleeping");
-            *consecutive_dead = 0;
-            *consecutive_zombie = 0;
-        } else if !app_is_running() {
-            *consecutive_dead += 1;
-            write_log(&format!(
-                "micontrol.exe NOT running (miss #{consecutive_dead})"
-            ));
-            *consecutive_zombie = 0;
-            // Require 4 consecutive misses (~2 min) before relaunching.
-            // Gives Windows Restart Manager (RegisterApplicationRestart)
-            // and any in-flight user launch time to bring the process up,
-            // avoiding a redundant launch racing the WER restart dialog.
-            if *consecutive_dead >= 4 {
-                if let Some(exe) = find_app_exe() {
-                    launch_app(&exe, true);
-                }
-                *consecutive_dead = 0;
+    fn watchdog_poll(state: &mut WatchdogState) {
+        let now_ms = epoch_ms();
+        let quit_pending = user_quit_pending();
+        let armed = watchdog_armed();
+        let app_pid = app_pid();
+        let heartbeat = heartbeat_health(read_heartbeat(), app_pid, now_ms);
+        let starvation = read_starvation(now_ms);
+        let input = WatchdogInput {
+            quit_pending,
+            armed,
+            app_pid,
+            heartbeat,
+            starvation,
+            now_ms,
+        };
+
+        let previous_gate = state.gate;
+        let action = decide(&input, state);
+        log_gate_transition(previous_gate, state.gate);
+        apply_action(action, &input);
+    }
+
+    // ── Tests ───────────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const T0: u64 = 1_794_044_373_192;
+        const PID: u32 = 2944;
+
+        fn hb(age_ms: u64, ui_ok: u8) -> HeartbeatHealth {
+            heartbeat_health(
+                Ok(Heartbeat {
+                    ts_ms: T0 - age_ms,
+                    pid: PID,
+                    ui_ok,
+                }),
+                Some(PID),
+                T0,
+            )
+        }
+
+        fn input(now_ms: u64, heartbeat: HeartbeatHealth) -> WatchdogInput {
+            WatchdogInput {
+                quit_pending: false,
+                armed: true,
+                app_pid: Some(PID),
+                heartbeat,
+                starvation: None,
+                now_ms,
             }
-        } else if !app_heartbeat_fresh() {
-            // S32-005: Process alive but the UI heartbeat is stale → frozen
-            // zombie. Force-kill and fresh-relaunch instead of leaving a dead
-            // UI. S32-005b: require TWO consecutive stale detections before
-            // killing (a single transient miss recovers on the next tick).
-            *consecutive_dead = 0;
-            *consecutive_zombie += 1;
-            let hb_age = heartbeat_age_ms();
-            let ui_ok = read_ui_ok();
-            write_log(&format!(
-                "micontrol.exe running but heartbeat STALE (zombie #{consecutive_zombie}, \
-                 age={}ms, ui_ok={ui_ok:?})",
-                hb_age.unwrap_or(0)
+        }
+
+        fn signal(age_ms: u64, fails: u32) -> StarvationSignal {
+            StarvationSignal {
+                pid: PID,
+                fails,
+                age_ms,
+            }
+        }
+
+        // ── Heartbeat parsing ───────────────────────────────────────────────
+
+        #[test]
+        fn parses_the_production_heartbeat_format() {
+            let parsed = parse_heartbeat("1794044373192\n2944\n1\n").expect("valid");
+            assert_eq!(
+                parsed,
+                Heartbeat {
+                    ts_ms: 1_794_044_373_192,
+                    pid: 2944,
+                    ui_ok: 1
+                }
+            );
+            // CRLF and trailing junk lines are tolerated.
+            assert!(parse_heartbeat("1794044373192\r\n2944\r\n0\r\n").is_ok());
+            assert!(parse_heartbeat("1794044373192\n2944\n1\nextra\n").is_ok());
+        }
+
+        #[test]
+        fn rejects_empty_garbage_and_partial_heartbeats() {
+            for bad in [
+                "",
+                "\n\n\n",
+                "garbage\n2944\n1\n",
+                "0\n2944\n1\n",
+                "1794044373192\nnope\n1\n",
+                "1794044373192\n0\n1\n",
+                "1794044373192\n2944\n",
+                "1794044373192\n2944\n2\n",
+                "1794044373192\n2944\nmaybe\n",
+            ] {
+                assert!(
+                    parse_heartbeat(bad).is_err(),
+                    "must reject heartbeat {bad:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn health_classifies_fresh_stale_ui_and_foreign_pid() {
+            assert_eq!(hb(0, 1), HeartbeatHealth::Healthy);
+            assert_eq!(
+                hb(HEARTBEAT_STALE_MS + 1, 1),
+                HeartbeatHealth::Stale {
+                    age_ms: HEARTBEAT_STALE_MS + 1
+                }
+            );
+            assert_eq!(hb(5_000, 0), HeartbeatHealth::UiNotReady);
+            // Clock skew (heartbeat timestamp in the future) is treated as
+            // age 0 rather than as stale.
+            assert_eq!(
+                heartbeat_health(
+                    Ok(Heartbeat {
+                        ts_ms: T0 + 5_000,
+                        pid: PID,
+                        ui_ok: 1
+                    }),
+                    Some(PID),
+                    T0
+                ),
+                HeartbeatHealth::Healthy
+            );
+            // A heartbeat from another pid is never trusted.
+            assert_eq!(
+                heartbeat_health(
+                    Ok(Heartbeat {
+                        ts_ms: T0,
+                        pid: 999,
+                        ui_ok: 1
+                    }),
+                    Some(PID),
+                    T0
+                ),
+                HeartbeatHealth::ForeignPid { pid: 999 }
+            );
+            assert!(matches!(
+                heartbeat_health(Err(HeartbeatError::Missing), Some(PID), T0),
+                HeartbeatHealth::Unreadable { .. }
             ));
-            if *consecutive_zombie >= 2 && *consecutive_zombie <= MAX_ZOMBIE_RESETS {
-                if kill_app() {
-                    if let Some(exe) = find_app_exe() {
-                        // Zombie: relaunch with a VISIBLE window so the
-                        // user sees the UI is back and can confirm it.
-                        launch_app(&exe, false);
+        }
+
+        /// The exact 06-Nov-2026 failure: fresh timestamp, `ui_ok=0`.
+        #[test]
+        fn fresh_heartbeat_with_ui_ok_zero_is_not_healthy() {
+            let health = hb(1_000, 0);
+            assert!(!health.is_healthy());
+            assert_eq!(health, HeartbeatHealth::UiNotReady);
+        }
+
+        // ── Decision matrix ────────────────────────────────────────────────
+
+        #[test]
+        fn healthy_app_is_left_alone() {
+            let mut state = WatchdogState::default();
+            assert_eq!(
+                decide(&input(T0, HeartbeatHealth::Healthy), &mut state),
+                WatchdogAction::Idle
+            );
+            assert_eq!(state.restarts, 0);
+        }
+
+        #[test]
+        fn quit_sentinel_and_disarmed_stand_down() {
+            let mut state = WatchdogState {
+                restarts: 2,
+                dead_misses: 3,
+                ..WatchdogState::default()
+            };
+            let mut quit = input(T0, HeartbeatHealth::Stale { age_ms: 90_000 });
+            quit.quit_pending = true;
+            assert_eq!(decide(&quit, &mut state), WatchdogAction::Idle);
+            assert_eq!(state.gate, GateState::QuitPending);
+            assert_eq!(state.restarts, 0, "counters reset while quit is pending");
+
+            let mut disarmed = input(T0, HeartbeatHealth::Healthy);
+            disarmed.armed = false;
+            assert_eq!(decide(&disarmed, &mut state), WatchdogAction::Idle);
+            assert_eq!(state.gate, GateState::Disarmed);
+        }
+
+        #[test]
+        fn missing_app_relaunches_after_four_misses() {
+            let mut state = WatchdogState::default();
+            let mut gone = input(T0, HeartbeatHealth::Unreadable { why: "missing" });
+            gone.app_pid = None;
+            for miss in 1..DEAD_MISSES_BEFORE_LAUNCH {
+                assert_eq!(
+                    decide(&gone, &mut state),
+                    WatchdogAction::Wait {
+                        cause: RestartCause::Missing,
+                        detail: WaitDetail::Missing { misses: miss }
                     }
-                } else {
-                    write_log("could not kill zombie — waiting for next poll");
-                }
-            } else if *consecutive_zombie > MAX_ZOMBIE_RESETS {
-                write_log(&format!(
-                    "zombie detected {consecutive_zombie}x in a row — giving up until \
-                     next user launch (bounded)"
-                ));
-            } else {
-                write_log("stale once — waiting for next poll to confirm");
+                );
             }
-        } else {
-            *consecutive_dead = 0;
-            *consecutive_zombie = 0;
+            assert_eq!(
+                decide(&gone, &mut state),
+                WatchdogAction::Relaunch {
+                    misses: DEAD_MISSES_BEFORE_LAUNCH
+                }
+            );
+            assert_eq!(state.restarts, 1);
+            assert_eq!(state.last_launch_ms, Some(T0));
+        }
+
+        /// ui_ok=0 must be observed for the grace period before killing:
+        /// the app reports ui_ok=0 on the very first heartbeat of every start.
+        #[test]
+        fn ui_ok_zero_waits_for_the_grace_period_then_restarts() {
+            let mut state = WatchdogState::default();
+            assert_eq!(
+                decide(&input(T0, hb(0, 0)), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: T0 }
+                }
+            );
+            assert_eq!(
+                decide(&input(T0 + 30_000, hb(0, 0)), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: T0 }
+                }
+            );
+            assert_eq!(
+                decide(&input(T0 + UI_DEAD_GRACE_MS, hb(0, 0)), &mut state),
+                WatchdogAction::Restart {
+                    cause: RestartCause::UiDead
+                }
+            );
+            assert_eq!(state.restarts, 1);
+        }
+
+        /// A single ui_ok=0 sample that recovers must not restart anything.
+        #[test]
+        fn transient_ui_ok_zero_recovers_without_a_restart() {
+            let mut state = WatchdogState::default();
+            let _ = decide(&input(T0, hb(0, 0)), &mut state);
+            assert_eq!(
+                decide(&input(T0 + 30_000, hb(0, 1)), &mut state),
+                WatchdogAction::Idle
+            );
+            assert_eq!(state.ui_dead_since_ms, None);
+            assert_eq!(state.restarts, 0);
+        }
+
+        /// A freshly relaunched app reports ui_ok=0 until its window exists.
+        #[test]
+        fn ui_ok_zero_inside_startup_grace_never_kills() {
+            let mut state = WatchdogState {
+                last_launch_ms: Some(T0),
+                ..WatchdogState::default()
+            };
+            assert_eq!(
+                decide(&input(T0 + 30_000, hb(0, 0)), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::StartupGrace
+                }
+            );
+            assert_eq!(state.restarts, 0);
+        }
+
+        #[test]
+        fn stale_heartbeat_needs_two_confirmations() {
+            let mut state = WatchdogState::default();
+            let stale = HeartbeatHealth::Stale { age_ms: 60_000 };
+            assert_eq!(
+                decide(&input(T0, stale), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::Confirm { count: 1 }
+                }
+            );
+            assert_eq!(
+                decide(&input(T0 + 30_000, stale), &mut state),
+                WatchdogAction::Restart {
+                    cause: RestartCause::Stale
+                }
+            );
+        }
+
+        #[test]
+        fn startup_grace_after_our_own_relaunch_blocks_a_kill() {
+            let mut state = WatchdogState {
+                last_launch_ms: Some(T0),
+                ..WatchdogState::default()
+            };
+            let stale = HeartbeatHealth::Stale { age_ms: 50_000 };
+            assert_eq!(
+                decide(&input(T0 + 30_000, stale), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::StartupGrace
+                }
+            );
+            // Once the grace expires the normal confirmation applies.
+            assert_eq!(
+                decide(&input(T0 + STARTUP_GRACE_MS, stale), &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::Stale,
+                    detail: WaitDetail::Confirm { count: 1 }
+                }
+            );
+        }
+
+        /// crash_recovery already waited 10 probe failures (~2.5 min): the
+        /// watchdog acts on the first poll that sees a fresh marker.
+        #[test]
+        fn escalated_starvation_restarts_immediately() {
+            let mut state = WatchdogState::default();
+            let mut starved = input(T0, hb(0, 0));
+            starved.starvation = Some(signal(30_000, 10));
+            assert_eq!(
+                decide(&starved, &mut state),
+                WatchdogAction::Restart {
+                    cause: RestartCause::Starved
+                }
+            );
+            assert_eq!(state.restarts, 1);
+        }
+
+        #[test]
+        fn starvation_marker_from_another_pid_or_too_old_is_ignored() {
+            assert!(!starvation_actionable(signal(0, 10), PID + 1));
+            assert!(starvation_actionable(signal(0, 10), PID));
+            assert!(!starvation_actionable(
+                signal(
+                    micontrol_lib::hw::crash_recovery::STARVATION_MARKER_TTL_MS + 1,
+                    10
+                ),
+                PID
+            ));
+            assert!(!starvation_actionable(signal(0, 9), PID));
+
+            let mut state = WatchdogState::default();
+            let mut stale_marker = input(T0, hb(0, 0));
+            stale_marker.starvation = Some(signal(
+                micontrol_lib::hw::crash_recovery::STARVATION_MARKER_TTL_MS + 1,
+                10,
+            ));
+            // Falls back to the normal ui_ok grace — no immediate restart.
+            assert_eq!(
+                decide(&stale_marker, &mut state),
+                WatchdogAction::Wait {
+                    cause: RestartCause::UiDead,
+                    detail: WaitDetail::UiDeadGrace { since_ms: T0 }
+                }
+            );
+        }
+
+        #[test]
+        fn restart_budget_is_bounded_then_gives_up() {
+            let mut state = WatchdogState::default();
+            let mut starved = input(T0, hb(0, 0));
+            starved.starvation = Some(signal(0, 10));
+            for _ in 0..MAX_RESTARTS {
+                assert!(matches!(
+                    decide(&starved, &mut state),
+                    WatchdogAction::Restart {
+                        cause: RestartCause::Starved
+                    }
+                ));
+            }
+            assert_eq!(
+                decide(&starved, &mut state),
+                WatchdogAction::GiveUp {
+                    cause: RestartCause::Starved
+                }
+            );
+            // The give-up line is logged once, then the watchdog stays quiet.
+            assert_eq!(decide(&starved, &mut state), WatchdogAction::Idle);
+        }
+
+        #[test]
+        fn sustained_health_resets_the_restart_budget() {
+            let mut state = WatchdogState::default();
+            let mut starved = input(T0, hb(0, 0));
+            starved.starvation = Some(signal(0, 10));
+            for _ in 0..MAX_RESTARTS {
+                let _ = decide(&starved, &mut state);
+            }
+            assert_eq!(state.restarts, MAX_RESTARTS);
+
+            let healthy_at = T0 + 1_000;
+            assert_eq!(
+                decide(&input(healthy_at, HeartbeatHealth::Healthy), &mut state),
+                WatchdogAction::Idle
+            );
+            assert_eq!(
+                state.restarts, MAX_RESTARTS,
+                "budget only decays after a while"
+            );
+            assert_eq!(
+                decide(
+                    &input(healthy_at + HEALTHY_RESET_MS, HeartbeatHealth::Healthy),
+                    &mut state
+                ),
+                WatchdogAction::Idle
+            );
+            assert_eq!(state.restarts, 0);
+        }
+
+        // ── P1-d: relaunch must wait for the MCP port ───────────────────────
+
+        /// Real loopback socket (port 0 → the OS picks a free one).
+        fn bound_listener() -> (std::net::TcpListener, u16) {
+            let listener =
+                std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+            let port = listener.local_addr().expect("local_addr").port();
+            (listener, port)
+        }
+
+        #[test]
+        fn a_bound_listener_counts_as_busy_and_a_dropped_one_as_free() {
+            let (listener, port) = bound_listener();
+            assert!(
+                !mcp_port_is_free(port),
+                "a listening socket must be reported as busy"
+            );
+            drop(listener);
+            assert!(
+                mcp_port_is_free(port),
+                "the port must be reusable once the listener is gone"
+            );
+        }
+
+        #[test]
+        fn a_free_port_returns_immediately() {
+            let (listener, port) = bound_listener();
+            drop(listener);
+            let started = std::time::Instant::now();
+            let waited = wait_for_mcp_port_release(port, std::time::Duration::from_secs(2))
+                .expect("free port");
+            assert!(waited < 100, "must not sleep on an already free port");
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        }
+
+        #[test]
+        fn wait_returns_as_soon_as_the_listener_exits() {
+            let (listener, port) = bound_listener();
+            let releaser = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                drop(listener);
+            });
+            let waited = wait_for_mcp_port_release(port, std::time::Duration::from_secs(5))
+                .expect("the port is released mid-wait");
+            assert!(
+                (150..2_000).contains(&waited),
+                "expected to wait for the listener, waited {waited} ms"
+            );
+            releaser.join().expect("releaser thread");
+        }
+
+        #[test]
+        fn wait_times_out_while_the_listener_holds_the_port() {
+            let (_listener, port) = bound_listener(); // held for the whole test
+            let started = std::time::Instant::now();
+            let waited = wait_for_mcp_port_release(port, std::time::Duration::from_millis(400));
+            assert!(waited.is_none(), "a held port must time out");
+            assert!(
+                started.elapsed() >= std::time::Duration::from_millis(400),
+                "must honour the budget"
+            );
+        }
+
+        /// RECHECK-2: the probe line was supposed to be suppressed "until a
+        /// real request arrives", but a real poll lands every 15 s between two
+        /// 30 s probes, so the flag was cleared constantly: 5 429 lines in
+        /// 53 h (1 601 + 3 828) — one per 30 s. Time-based now.
+        #[test]
+        fn the_health_probe_line_is_windowed() {
+            use crate::pipe_server::{should_log_empty_probe, EMPTY_PROBE_LOG_INTERVAL_MS};
+            // First probe of the process logs.
+            assert!(should_log_empty_probe(1_000_000, 0));
+            // The next 19 probes inside 10 min do not.
+            assert!(!should_log_empty_probe(1_000_000 + 30_000, 1_000_000));
+            assert!(!should_log_empty_probe(
+                1_000_000 + EMPTY_PROBE_LOG_INTERVAL_MS - 1,
+                1_000_000
+            ));
+            // The window reopens.
+            assert!(should_log_empty_probe(
+                1_000_000 + EMPTY_PROBE_LOG_INTERVAL_MS,
+                1_000_000
+            ));
+            // A backwards clock must not spam.
+            assert!(!should_log_empty_probe(500, 1_000_000));
         }
     }
 }

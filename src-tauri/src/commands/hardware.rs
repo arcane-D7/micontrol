@@ -7,16 +7,10 @@ use crate::hw::audio::{
     list_audio_devices as hw_list_audio, set_playback_mute as hw_set_mute,
     set_playback_volume as hw_set_volume, AudioDeviceList, AudioVolumeResult,
 };
-use crate::hw::charging::{
-    get_battery_care as hw_get_battery_care, get_charging_threshold as hw_get_charge,
-    ChargingResult,
-};
+use crate::hw::charging::{get_charging_threshold as hw_get_charge, ChargingResult};
 use crate::hw::errors::{ErrorResponse, HardwareError};
 use crate::hw::iotservice;
-use crate::hw::iotservice::{
-    BindStatusInfo, IotDeviceInfo, IotEvent, IotWifiList, LaptopStatus, PowerEvent, WiFiItem,
-    WiFiItemInfo, WiFiStatusInfo,
-};
+use crate::hw::iotservice::{IotDeviceInfo, IotEvent, IotWifiList, WiFiItem};
 use crate::hw::performance::{
     get_perf_debug as hw_perf_debug, get_performance_mode as hw_get_perf, PerfDebugInfo,
     PerformanceResult,
@@ -66,10 +60,52 @@ pub async fn set_performance_mode(
 
 #[tauri::command]
 pub async fn get_charging_threshold(_state: State<'_, AppState>) -> Result<u8, ErrorResponse> {
-    // S24-013: Wrap in run_blocking — hw_get_charge() does sync WMI/registry I/O.
+    // Cheap, non-elevated: the *requested* limit from the registry. It is the
+    // value the segmented control edits — NOT proof the firmware took it.
+    // `get_charge_limit_state` carries the firmware truth.
     run_blocking(hw_get_charge)
         .await
         .map_err(ErrorResponse::from)
+}
+
+/// Firmware truth: requested vs applied-on-hardware, plus why not.
+///
+/// P1-2 (recheck 2026-11-11): a read that comes back `applied=false` while
+/// care is on is *also* the cheapest place to notice a drift, so it kicks off
+/// the gated reconciler. The reconcile is fire-and-forget — the read must not
+/// pay for an elevated write — and the gate caps it at one write per 5 min, so
+/// a UI that polls this command cannot turn into a write loop.
+#[tauri::command]
+pub async fn get_charge_limit_state() -> Result<crate::hw::charging::ChargeLimitState, ErrorResponse>
+{
+    let raw = elev_bridge::run_elevated("get_charge_limit_state", serde_json::json!({})).await?;
+    let state: crate::hw::charging::ChargeLimitState = serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))?;
+
+    // Refresh the app-side cache the hold state renders from: the read itself
+    // runs in the elevated helper, so this is the only place the app process
+    // learns the firmware value.
+    crate::hw::charging::note_firmware_state(&state);
+
+    if !state.applied && state.requested_threshold < 100 {
+        #[cfg(windows)]
+        tauri::async_runtime::spawn(async {
+            crate::hw::charging::reconcile_charge_limit("read-back").await;
+        });
+    }
+
+    Ok(state)
+}
+
+/// Live hold state — the phase the machine is really in, plus the numbers the
+/// UI shows ("holding at 80", "above the limit, this firmware cannot
+/// discharge", "charging to 80").
+///
+/// Cheap by design: it reads the cached battery snapshot and the last verified
+/// firmware value, so the battery tab can poll it without WMI or elevation.
+#[tauri::command]
+pub fn get_charge_hold_state() -> crate::hw::charging::ChargeHoldState {
+    crate::hw::charging::current_hold_state()
 }
 
 #[tauri::command]
@@ -88,23 +124,28 @@ pub async fn set_charging_threshold(
     Ok(result)
 }
 
-// ── Battery Care Toggle (EC register 0xA4) ─────────────────────────────────
+// ── Battery Care toggle (firmware field, same as the limit) ────────────────
 
 #[tauri::command]
 pub async fn get_battery_care() -> Result<bool, ErrorResponse> {
-    run_blocking(hw_get_battery_care)
-        .await
-        .map_err(ErrorResponse::from)
+    // The MICommonInterface instance query is denied to non-admin callers
+    // (0x80041003), so the read runs in the elevated helper — never in-process.
+    let raw = elev_bridge::run_elevated("get_battery_care", serde_json::json!({})).await?;
+    Ok(raw.as_bool().unwrap_or(false))
 }
 
 #[tauri::command]
-pub async fn set_battery_care(enabled: bool) -> Result<(), ErrorResponse> {
-    elev_bridge::run_elevated(
+pub async fn set_battery_care(enabled: bool) -> Result<ChargingResult, ErrorResponse> {
+    let raw = elev_bridge::run_elevated(
         "set_battery_care",
         serde_json::json!({ "enabled": enabled }),
     )
     .await?;
-    Ok(())
+    serde_json::from_value(raw).map_err(|e| {
+        ErrorResponse::from(HardwareError::Other(format!(
+            "Unexpected elevated result: {e}"
+        )))
+    })
 }
 
 /// Returns diagnostic information about the performance mode control channel:
@@ -119,6 +160,92 @@ pub async fn get_perf_debug() -> Result<PerfDebugInfo, ErrorResponse> {
     run_blocking(move || Ok(hw_perf_debug()))
         .await
         .map_err(ErrorResponse::from)
+}
+
+// ── Scenario rules (P2-6: auto perf-mode on AC/DC) ───────────────────────────
+//
+// The rules themselves live in `hw::scenario_rules` and are applied by the IoT
+// event listener (5 s tick) through the elevated dispatcher — i.e. they keep
+// working with the Performance tab unmounted and the window hidden. These
+// commands are the **user-scope** half: they read/create the HKCU config and
+// expose the backend's last-application status so the UI can subscribe instead
+// of owning the loop.
+
+/// Scenario-rules state exposed to the UI.
+///
+/// Flat fields (rather than nested `LastApplication`) keep the TypeScript
+/// contract trivial and tolerant of a not-yet-applied rule.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ScenarioRulesView {
+    /// Rules master switch — the registry `RulesEnabled` value, NOT the
+    /// notification switch `Enabled`.
+    pub enabled: bool,
+    pub on_ac_mode: Option<PerformanceMode>,
+    pub on_battery_mode: Option<PerformanceMode>,
+    pub last_event: Option<String>,
+    pub last_mode: Option<PerformanceMode>,
+    pub last_ok: Option<bool>,
+    pub last_detail: Option<String>,
+    pub last_at_unix_ms: Option<u64>,
+    pub applied_total: u64,
+    pub failed_total: u64,
+}
+
+#[cfg(windows)]
+fn scenario_rules_view() -> ScenarioRulesView {
+    let cfg = crate::hw::scenario_rules::ScenarioRulesConfig::load_or_create();
+    let status = crate::hw::scenario_rules::status();
+    let last = status.last_application;
+    ScenarioRulesView {
+        enabled: cfg.enabled,
+        on_ac_mode: cfg.on_ac_mode,
+        on_battery_mode: cfg.on_battery_mode,
+        last_event: last.as_ref().map(|l| l.event.clone()),
+        last_mode: last.as_ref().map(|l| l.mode),
+        last_ok: last.as_ref().map(|l| l.ok),
+        last_detail: last.as_ref().map(|l| l.detail.clone()),
+        last_at_unix_ms: last.as_ref().map(|l| l.at_unix_ms),
+        applied_total: status.applied_total,
+        failed_total: status.failed_total,
+    }
+}
+
+#[cfg(not(windows))]
+fn scenario_rules_view() -> ScenarioRulesView {
+    ScenarioRulesView::default()
+}
+
+/// Read the scenario-rule config (HKCU, no elevation) + last application.
+#[tauri::command]
+pub async fn get_scenario_rules() -> Result<ScenarioRulesView, ErrorResponse> {
+    run_blocking(|| -> crate::hw::errors::HardwareResult<ScenarioRulesView> {
+        Ok(scenario_rules_view())
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
+/// Persist the scenario-rule config (HKCU, no elevation) and echo it back.
+#[tauri::command]
+pub async fn set_scenario_rules(
+    enabled: bool,
+    on_ac_mode: Option<PerformanceMode>,
+    on_battery_mode: Option<PerformanceMode>,
+) -> Result<ScenarioRulesView, ErrorResponse> {
+    run_blocking(
+        move || -> crate::hw::errors::HardwareResult<ScenarioRulesView> {
+            #[cfg(windows)]
+            crate::hw::scenario_rules::set_rules(enabled, on_ac_mode, on_battery_mode)
+                .map_err(HardwareError::Registry)?;
+            #[cfg(not(windows))]
+            {
+                let _ = (enabled, on_ac_mode, on_battery_mode);
+            }
+            Ok(scenario_rules_view())
+        },
+    )
+    .await
+    .map_err(ErrorResponse::from)
 }
 
 /// Read all ACPI ERAM fields via direct IoTDriver IOCTL access.
@@ -201,10 +328,12 @@ pub async fn write_iot_hex(address: String, hex_data: String) -> Result<(), Erro
     .map_err(ErrorResponse::from)
 }
 
-/// Read `count` bytes (1–256) from ECRAM at `address` via direct IoTDriver IOCTL.
+/// Read `count` bytes (1–256) from ECRAM at `address`.
 ///
-/// Returns the bytes as a lowercase hex string.  Requires the process to be
-/// running elevated (administrator).
+/// Tries the direct IoTDriver IOCTL first; the unprivileged app is refused by
+/// the driver's process-name check, so it falls back to the ecram_service JSON
+/// pipe (which runs as SYSTEM from the DriverStore). Returns the bytes as a
+/// lowercase hex string.
 #[tauri::command]
 pub async fn read_ecram_raw(address: String, count: u32) -> Result<String, ErrorResponse> {
     run_blocking(move || {
@@ -223,8 +352,42 @@ pub async fn read_ecram_raw(address: String, count: u32) -> Result<String, Error
             )));
         }
 
-        let bytes = crate::hw::ecram::read_ecram(addr, count as usize)?;
-        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+        // The direct IOCTL requires the caller to be the DriverStore
+        // `IoTService.exe`; the unprivileged app is always refused at open
+        // ("Open IoT driver device") — expected, not the reason a read fails.
+        // The ecram_service JSON pipe is the authoritative source.
+        let count = count as usize;
+        let direct_err = match crate::hw::ecram::read_ecram(addr, count) {
+            Ok(bytes) => {
+                return Ok(bytes.iter().map(|b| format!("{b:02x}")).collect());
+            }
+            Err(e) => e,
+        };
+        log::debug!(
+            target: "commands::hardware",
+            "read_ecram_raw: direct IOCTL failed for 0x{addr:08X} ({direct_err}); trying ecram_service pipe"
+        );
+
+        match crate::hw::ecram::read_ecram_via_pipe_result(addr, count) {
+            Ok(bytes) if bytes.len() == count => {
+                Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+            }
+            Ok(bytes) => Err(HardwareError::Ecram(format!(
+                "Short read from ecram_service pipe at 0x{addr:08X}: {} of {count} bytes",
+                bytes.len()
+            ))),
+            Err(pipe_err) => {
+                let kind = crate::hw::ecram::classify_region_block(&pipe_err);
+                Err(HardwareError::EcramBlocked {
+                    region: format!("0x{addr:08X}"),
+                    kind,
+                    detail: format!(
+                        "read of 0x{addr:08X} ({count} bytes) failed — ecram_service: {pipe_err}; \
+                         the app's own direct IOCTL was refused by the driver: {direct_err}"
+                    ),
+                })
+            }
+        }
     })
     .await
     .map_err(ErrorResponse::from)
@@ -292,103 +455,6 @@ pub async fn get_iot_device_info() -> Result<IotDeviceInfo, ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
-/// Get the device model via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_model() -> Result<String, ErrorResponse> {
-    run_blocking(iotservice::get_model)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the firmware version via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_fw_version() -> Result<String, ErrorResponse> {
-    run_blocking(iotservice::get_fw_version)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the IoT device bind status via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_bind_status() -> Result<BindStatusInfo, ErrorResponse> {
-    run_blocking(iotservice::get_bind_status)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the IoT device ID via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_device_id() -> Result<i64, ErrorResponse> {
-    run_blocking(iotservice::get_device_id)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the current device status via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_device_info` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_device_info instead")]
-pub async fn get_iot_device_status() -> Result<String, ErrorResponse> {
-    run_blocking(iotservice::get_device_status)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Report laptop status to the IoT device via IPC.
-///
-/// Valid status values: `win_ready`, `suspending`, `shutting`.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn send_iot_laptop_status(status: String) -> Result<(), ErrorResponse> {
-    let status = match status.as_str() {
-        "win_ready" => LaptopStatus::WinReady,
-        "suspending" => LaptopStatus::Suspending,
-        "shutting" => LaptopStatus::Shutting,
-        _ => {
-            // S24-08: Use typed HardwareError instead of ad-hoc INVALID_STATUS code.
-            return Err(ErrorResponse::from(HardwareError::Other(format!(
-                "Invalid laptop status: {status}"
-            ))));
-        }
-    };
-    run_blocking(move || iotservice::send_laptop_status(status))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send WinReady status via IoTService IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn iot_report_windows_ready() -> Result<(), ErrorResponse> {
-    run_blocking(iotservice::report_windows_ready)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
 /// Get the full IoT WiFi provisioning list in one call.
 ///
 /// Consolidates `get_iot_wifi_status`, `get_iot_wifi_count`, and
@@ -397,42 +463,6 @@ pub async fn iot_report_windows_ready() -> Result<(), ErrorResponse> {
 #[tauri::command]
 pub async fn get_iot_wifi_list() -> Result<IotWifiList, ErrorResponse> {
     run_blocking(move || Ok(iotservice::get_wifi_list()))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get WiFi connection status via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_wifi_list` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_wifi_list instead")]
-pub async fn get_iot_wifi_status() -> Result<WiFiStatusInfo, ErrorResponse> {
-    run_blocking(iotservice::read_wifi_status)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get the number of provisioned WiFi networks via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_wifi_list` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_wifi_list instead")]
-pub async fn get_iot_wifi_count() -> Result<u32, ErrorResponse> {
-    run_blocking(iotservice::read_wifi_count)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Get a WiFi item by index via IoTService IPC.
-///
-/// **Deprecated:** Use `get_iot_wifi_list` instead.  This wrapper is kept
-/// for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use get_iot_wifi_list instead")]
-pub async fn get_iot_wifi_by_index(index: u32) -> Result<WiFiItemInfo, ErrorResponse> {
-    run_blocking(move || iotservice::get_wifi_by_index(index))
         .await
         .map_err(ErrorResponse::from)
 }
@@ -498,54 +528,6 @@ pub async fn iot_notify_event(event: IotEvent) -> Result<(), ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
-/// Send a power event notification to IoTService via IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::Power` instead.
-/// This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::Power instead")]
-pub async fn iot_notify_power_event(event: PowerEvent) -> Result<(), ErrorResponse> {
-    run_blocking(move || iotservice::notify_power_event(&event))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send an EC event notification to IoTService via IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::Ec` instead.
-/// This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::Ec instead")]
-pub async fn iot_notify_ec_event(event_func: u32, event_value: u32) -> Result<(), ErrorResponse> {
-    run_blocking(move || iotservice::notify_ec_event(event_func, event_value))
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send Suspending status via IoTService IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn iot_report_suspending() -> Result<(), ErrorResponse> {
-    run_blocking(iotservice::report_suspending)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
-/// Send Shutting status via IoTService IPC.
-///
-/// **Deprecated:** Use `iot_notify_event` with `IotEvent::LaptopStatus`
-/// instead.  This wrapper is kept for backward compatibility.
-#[tauri::command]
-#[deprecated(note = "Use iot_notify_event with IotEvent::LaptopStatus instead")]
-pub async fn iot_report_shutting_down() -> Result<(), ErrorResponse> {
-    run_blocking(iotservice::report_shutting_down)
-        .await
-        .map_err(ErrorResponse::from)
-}
-
 /// Re-launch the application as administrator (UAC prompt) and exit the current instance.
 ///
 /// This triggers the standard Windows UAC prompt.  If the user approves, a new
@@ -602,9 +584,9 @@ fn is_known_safe_single_byte_write(addr: u64, data: &[u8]) -> bool {
 /// Scan for available WiFi networks.
 #[tauri::command]
 pub async fn wifi_scan() -> Result<Vec<WifiNetwork>, ErrorResponse> {
-    run_blocking(wifi::scan_networks)
-        .await
-        .map_err(ErrorResponse::from)
+    // `scan_networks` is async on purpose: the 4 s radio settle is an async
+    // sleep, so it no longer parks a fixed-pool thread doing nothing.
+    wifi::scan_networks().await.map_err(ErrorResponse::from)
 }
 
 /// Get current WiFi connection status.
@@ -616,9 +598,18 @@ pub async fn wifi_status() -> Result<WifiStatus, ErrorResponse> {
 }
 
 /// Connect to a WiFi network.
+///
+/// `security` is the label reported by `wifi_scan` (`WPA2-Personal`,
+/// `WPA3-Personal`, `Open`, `Enterprise (802.1X)`, …). It selects the profile
+/// that is written, and lets 802.1X / legacy networks fail with an explicit
+/// reason instead of a 15 s "association not confirmed" timeout.
 #[tauri::command]
-pub async fn wifi_connect(ssid: String, password: Option<String>) -> Result<(), ErrorResponse> {
-    run_blocking(move || wifi::connect(&ssid, password.as_deref()))
+pub async fn wifi_connect(
+    ssid: String,
+    password: Option<String>,
+    security: Option<String>,
+) -> Result<(), ErrorResponse> {
+    run_blocking(move || wifi::connect(&ssid, password.as_deref(), security.as_deref()))
         .await
         .map_err(ErrorResponse::from)
 }
@@ -774,10 +765,18 @@ pub async fn wmi_ec_read_battery_health() -> Result<u32, ErrorResponse> {
 }
 
 /// Read AC adapter power in watts via WMAA (elevated).
+///
+/// P2 (audit 2026-11-07): on machines without the WMAA adapter-power class this
+/// used to fail with `0x80041002` (`WBEM_E_NOT_FOUND`) on every poll — 115
+/// failures in 49 h. It now returns a **structured answer**:
+/// `{ supported: false, watts: null, reason }`. That is a success, not an error,
+/// and the caller can simply hide the field.
 #[tauri::command]
-pub async fn wmi_ec_read_adapter_power() -> Result<u32, ErrorResponse> {
-    let raw = elev_bridge::run_elevated("wmi_ec_read_adapter_power", serde_json::json!({})).await?;
-    Ok(raw.as_u64().unwrap_or(0) as u32)
+pub async fn wmi_ec_read_adapter_power(
+) -> Result<crate::hw::adapter_power::AdapterPowerReading, ErrorResponse> {
+    crate::hw::adapter_power::read_via_bridge()
+        .await
+        .map_err(ErrorResponse::from)
 }
 
 /// Read all EC sensor data in one call via WMAA (elevated).
@@ -788,16 +787,9 @@ pub async fn wmi_ec_read_sensor_data() -> Result<crate::hw::wmi_ec::EcSensorData
         .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
-/// Set hotkey brightness data via WMAA (elevated).
-#[tauri::command]
-pub async fn wmi_ec_set_brightness_data(level: u32) -> Result<(), ErrorResponse> {
-    let _ = elev_bridge::run_elevated(
-        "wmi_ec_set_brightness_data",
-        serde_json::json!({ "level": level }),
-    )
-    .await?;
-    Ok(())
-}
+// `wmi_ec_set_brightness_data` was removed: WMAA (0x1000, 0x02, FUN4) is the
+// charging-protection setter, not display brightness. Writing a brightness
+// level there rewrote the battery limit (see hw::charging module docs).
 
 /// Set SAGV (System Agent Geyserville) mode via WMAA (elevated).
 #[tauri::command]

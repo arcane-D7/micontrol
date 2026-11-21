@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+use crate::util::process_spawn::{self, SpawnPolicy};
+
 // ── Entry type ───────────────────────────────────────────────────────────────
 
 /// One timed snapshot written while an AI mode is active.
@@ -151,9 +153,11 @@ pub async fn open_ai_logs_dir(app: AppHandle) -> Result<(), String> {
     let dir = log_dir(&app)?;
     #[cfg(windows)]
     {
-        std::process::Command::new("explorer")
-            .arg(dir.as_os_str())
-            .spawn()
+        // B7: spawn through the windowless helper. explorer is a GUI binary;
+        // Quiet only suppresses a child console, never the folder window.
+        let mut cmd = std::process::Command::new("explorer");
+        cmd.arg(dir.as_os_str());
+        process_spawn::spawn_detached(&mut cmd, SpawnPolicy::Quiet)
             .map_err(|e| format!("Cannot open explorer: {e}"))?;
     }
     Ok(())

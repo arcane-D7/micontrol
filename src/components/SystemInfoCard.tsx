@@ -14,7 +14,7 @@ export default function SystemInfoCard({ info, getProcessList }: Props) {
   if (!info) {
     return (
       <div className="card">
-        <div className="card-title">{t('overview.system')}</div>
+        <h2 className="card-title">{t('overview.system')}</h2>
         <div className="skeleton" style={{ height: 120 }} />
       </div>
     );
@@ -26,7 +26,7 @@ export default function SystemInfoCard({ info, getProcessList }: Props) {
 
   const PlusBtn = ({ resource }: { resource: 'cpu' | 'gpu' | 'ram' }) => (
     <button
-      title="Show top processes"
+      title={t('process.showTop')}
       onClick={() => setProcessResource(resource)}
       style={{
         background: 'none',
@@ -46,7 +46,7 @@ export default function SystemInfoCard({ info, getProcessList }: Props) {
 
   return (
     <div className="card">
-      <div className="card-title">{t('overview.system')}</div>
+      <h2 className="card-title">{t('overview.system')}</h2>
 
       <div className="stat-row">
         <span className="stat-label">{t('overview.cpu')}</span>
@@ -75,7 +75,7 @@ export default function SystemInfoCard({ info, getProcessList }: Props) {
       <div style={{ marginBottom: 12 }}>
         <div className="stat-row" style={{ paddingBottom: 4 }}>
           <span className="stat-label" style={{ display: 'flex', alignItems: 'center' }}>
-            GPU Usage
+            {t('system.gpuUsage')}
             {getProcessList && <PlusBtn resource="gpu" />}
           </span>
           <span className="stat-value">{info.gpu_usage.toFixed(1)}%</span>

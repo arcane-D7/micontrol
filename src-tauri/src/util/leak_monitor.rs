@@ -17,6 +17,23 @@
 //!
 //! Thresholds are expressed as *rates* over a sliding window, because absolute
 //! counts legitimately vary with feature usage (Face, OS Turbo, task manager).
+//!
+//! Calibration history (2026-11-07 production audit):
+//!
+//! * The original `MIN_SAMPLES = 3` evaluated the very first sample pair, i.e.
+//!   **2 minutes** after process start, and fired twice on startup ramps:
+//!   925 handles (+3.5/min) and 643 handles (+5.0/min). Eleven hours later the
+//!   counts were 640/647 — flat. The real historical leak was 188,715 handles
+//!   (~11/min sustained for 218 h) and `RADAR_PRE_LEAK_64` is a separate,
+//!   OS-side signal to be watched, not a reason to lower these thresholds.
+//! * A rate is now only actionable after [`MIN_SAMPLES`] samples **and**
+//!   [`MIN_SPAN`] of wall-clock history, and a handle alarm additionally
+//!   requires [`ABSOLUTE_HANDLE_FLOOR`] handles — a process that ramps from
+//!   300 to 900 handles is not the failure mode we care about.
+//! * The first [`WARMUP`] of process life uses doubled thresholds
+//!   ([`WARMUP_FACTOR`]): WebView2/COM warm-up naturally grows handles and
+//!   commit, and that is exactly where the false positives came from. A real
+//!   leak (11/min) still trips them during warm-up.
 
 #![cfg(windows)]
 
@@ -29,21 +46,51 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 /// Sliding window used to compute the growth rate.
 pub const WINDOW: Duration = Duration::from_secs(15 * 60);
 
-/// Handles/minute above which a leak is declared.
+/// Handles/minute above which a leak is declared (steady state).
 ///
 /// The audited leak ran at ~11/min. A healthy steady state is < 1/min
 /// (occasional short-lived handles), so 3/min gives comfortable margin while
 /// still catching a regression in ~1 hour instead of 218.
 pub const LEAK_HANDLES_PER_MIN: f64 = 3.0;
 
-/// Private/commit bytes per minute above which a leak is declared.
+/// Minimum absolute handle count before the handle-rate alarm may fire.
+///
+/// Window-relative growth alone is meaningless on a small process: the 06-Nov
+/// false positives sat at 643–925 handles, two orders of magnitude below the
+/// audited 188,715. 5,000 is far above any healthy idle/startup count observed
+/// on this app (≈600–1,000) and far below the real leak.
+pub const ABSOLUTE_HANDLE_FLOOR: u32 = 5_000;
+
+/// Private/commit bytes per minute above which a leak is declared (steady
+/// state).
 ///
 /// The audited leak grew commit by ~11.5 MB/min alongside the handles.
 /// 2 MB/min is well above normal allocator noise (log rotation, caches).
 pub const LEAK_COMMIT_BYTES_PER_MIN: f64 = 2.0 * 1024.0 * 1024.0;
 
-/// Minimum number of samples before a rate is meaningful.
-const MIN_SAMPLES: usize = 3;
+/// Minimum number of samples before a rate is actionable.
+///
+/// 3 samples = 2 minutes, which is what produced the false positives. 10
+/// samples with a 60 s cadence covers 9 minutes; combined with [`MIN_SPAN`]
+/// the first evaluation happens at 10 minutes of history.
+pub const MIN_SAMPLES: usize = 10;
+
+/// Minimum wall-clock span between the oldest in-window sample and `now`
+/// before a rate is actionable.
+///
+/// Making this explicit (rather than relying on sample count) keeps the
+/// guarantee if [`SAMPLE_INTERVAL`] is ever shortened.
+pub const MIN_SPAN: Duration = Duration::from_secs(10 * 60);
+
+/// Process start-up period during which thresholds are multiplied by
+/// [`WARMUP_FACTOR`].
+pub const WARMUP: Duration = Duration::from_secs(30 * 60);
+
+/// Multiplier applied to both rate thresholds during [`WARMUP`].
+///
+/// Startup work (WebView2, COM, caches) legitimately allocates; a leak at the
+/// audited 11/min still clears 6/min easily.
+pub const WARMUP_FACTOR: f64 = 2.0;
 
 /// Log cooldown after a leak alert (prevents log flooding during a leak).
 const LOG_COOLDOWN: Duration = Duration::from_secs(30 * 60);
@@ -119,6 +166,8 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 static LAST_HANDLES: AtomicU32 = AtomicU32::new(0);
 static LAST_COMMIT_MB: AtomicU64 = AtomicU64::new(0);
 static LAST_RATE_X1000: AtomicU64 = AtomicU64::new(0);
+static LAST_COMMIT_RATE_X1000: AtomicU64 = AtomicU64::new(0);
+static LAST_SAMPLES: AtomicU64 = AtomicU64::new(0);
 static LEAKING: AtomicBool = AtomicBool::new(false);
 static ALERTS: AtomicU64 = AtomicU64::new(0);
 
@@ -133,14 +182,23 @@ pub fn start() {
         .spawn(|| {
             let mut ring = Ring::new();
             let mut last_log: Option<Instant> = None;
+            // Warm-up is measured from the sampler start, which is right after
+            // the app's setup — close enough to process start for a 30 min gate.
+            let started_at = Instant::now();
 
             loop {
                 std::thread::sleep(SAMPLE_INTERVAL);
-                if let Some(report) = sample_and_evaluate(&mut ring) {
+                let warmup = started_at.elapsed() < WARMUP;
+                if let Some(report) = sample_and_evaluate(&mut ring, warmup) {
                     LAST_HANDLES.store(report.handles, Ordering::Relaxed);
                     LAST_COMMIT_MB.store(report.commit_bytes / (1024 * 1024), Ordering::Relaxed);
                     LAST_RATE_X1000
                         .store((report.handles_per_min * 1000.0) as u64, Ordering::Relaxed);
+                    LAST_COMMIT_RATE_X1000.store(
+                        (report.commit_bytes_per_min * 1000.0) as u64,
+                        Ordering::Relaxed,
+                    );
+                    LAST_SAMPLES.store(report.samples as u64, Ordering::Relaxed);
                     LEAKING.store(report.leaking, Ordering::Relaxed);
 
                     if report.leaking {
@@ -153,13 +211,18 @@ pub fn start() {
                             log::warn!(
                                 target: "leak_monitor",
                                 "KERNEL HANDLE LEAK SUSPECTED: {} handles (+{:.1}/min), \
-                                 commit {} MB (+{:.1} MB/min) over {} samples — see \
+                                 commit {} MB (+{:.1} MB/min) over {} samples{} — see \
                                  memory-leak-audit.md; restart the app to reclaim",
                                 report.handles,
                                 report.handles_per_min,
                                 report.commit_bytes / (1024 * 1024),
                                 report.commit_bytes_per_min / (1024.0 * 1024.0),
-                                report.samples
+                                report.samples,
+                                if warmup {
+                                    " (still in warm-up: thresholds doubled)"
+                                } else {
+                                    ""
+                                }
                             );
                         }
                     }
@@ -174,12 +237,13 @@ pub fn latest() -> LeakReport {
     let handles = LAST_HANDLES.load(Ordering::Relaxed);
     let commit_bytes = LAST_COMMIT_MB.load(Ordering::Relaxed) * 1024 * 1024;
     let rate = LAST_RATE_X1000.load(Ordering::Relaxed) as f64 / 1000.0;
+    let commit_rate = LAST_COMMIT_RATE_X1000.load(Ordering::Relaxed) as f64 / 1000.0;
     LeakReport {
         handles,
         commit_bytes,
         handles_per_min: rate,
-        commit_bytes_per_min: 0.0,
-        samples: 0,
+        commit_bytes_per_min: commit_rate,
+        samples: LAST_SAMPLES.load(Ordering::Relaxed) as usize,
         leaking: LEAKING.load(Ordering::Relaxed),
     }
 }
@@ -191,7 +255,7 @@ pub fn alert_count() -> u64 {
 
 /// One measurement + rate evaluation. Extracted from the loop so it is
 /// unit-testable without sleeping for minutes.
-fn sample_and_evaluate(ring: &mut Ring) -> Option<LeakReport> {
+fn sample_and_evaluate(ring: &mut Ring, warmup: bool) -> Option<LeakReport> {
     let handles = super::win_handle::process_handle_count()?;
     let commit_bytes = private_bytes()?;
     let now = Instant::now();
@@ -200,42 +264,63 @@ fn sample_and_evaluate(ring: &mut Ring) -> Option<LeakReport> {
         handles,
         commit_bytes,
     });
+    Some(evaluate(ring, now, handles, commit_bytes, warmup))
+}
 
+/// Pure rate evaluation — no syscalls, no statics, so the whole decision can
+/// be exercised with a synthetic series.
+///
+/// A rate is reported as soon as there are two samples (useful for
+/// diagnostics) but `leaking` stays `false` until **both** [`MIN_SAMPLES`] and
+/// [`MIN_SPAN`] gates pass. The handle channel additionally requires
+/// [`ABSOLUTE_HANDLE_FLOOR`]; the commit channel stands on its own (the
+/// audited leak grew commit 11.5 MB/min with the handles).
+fn evaluate(ring: &Ring, now: Instant, handles: u32, commit: u64, warmup: bool) -> LeakReport {
     let samples = ring.count_in_window(now);
-    if samples < MIN_SAMPLES {
-        return Some(LeakReport {
+    let Some(oldest) = ring.oldest_in_window(now) else {
+        return LeakReport {
             handles,
-            commit_bytes,
+            commit_bytes: commit,
+            handles_per_min: 0.0,
+            commit_bytes_per_min: 0.0,
+            samples: 0,
+            leaking: false,
+        };
+    };
+
+    let span = now.duration_since(oldest.at);
+    let elapsed_min = span.as_secs_f64() / 60.0;
+    if elapsed_min <= 0.0 {
+        return LeakReport {
+            handles,
+            commit_bytes: commit,
             handles_per_min: 0.0,
             commit_bytes_per_min: 0.0,
             samples,
             leaking: false,
-        });
-    }
-
-    let oldest = ring.oldest_in_window(now)?;
-    let elapsed_min = now.duration_since(oldest.at).as_secs_f64() / 60.0;
-    if elapsed_min <= 0.0 {
-        return None;
+        };
     }
 
     // Saturating subtraction: a DROP (app reclaimed memory) yields 0 growth.
     let d_handles = handles.saturating_sub(oldest.handles) as f64;
-    let d_commit = commit_bytes.saturating_sub(oldest.commit_bytes) as f64;
+    let d_commit = commit.saturating_sub(oldest.commit_bytes) as f64;
     let handles_per_min = d_handles / elapsed_min;
     let commit_bytes_per_min = d_commit / elapsed_min;
 
-    let leaking = handles_per_min >= LEAK_HANDLES_PER_MIN
-        || commit_bytes_per_min >= LEAK_COMMIT_BYTES_PER_MIN;
+    let enough_history = samples >= MIN_SAMPLES && span >= MIN_SPAN;
+    let factor = if warmup { WARMUP_FACTOR } else { 1.0 };
+    let leaking = enough_history
+        && ((handles_per_min >= LEAK_HANDLES_PER_MIN * factor && handles >= ABSOLUTE_HANDLE_FLOOR)
+            || commit_bytes_per_min >= LEAK_COMMIT_BYTES_PER_MIN * factor);
 
-    Some(LeakReport {
+    LeakReport {
         handles,
-        commit_bytes,
+        commit_bytes: commit,
         handles_per_min,
         commit_bytes_per_min,
         samples,
         leaking,
-    })
+    }
 }
 
 /// Private (commit) bytes of the current process.
@@ -268,6 +353,8 @@ fn private_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
+    const MB: u64 = 1024 * 1024;
+
     /// Reference "now" for tests, shifted 2 h into the future.
     ///
     /// CI runners can have <1 h of uptime, so `Instant::now() - 3600s`
@@ -278,7 +365,7 @@ mod tests {
         Instant::now() + Duration::from_secs(7200)
     }
 
-    fn s(secs_from_now: i64, handles: u32, commit: u64, now: Instant) -> Sample {
+    fn sample(secs_from_now: i64, handles: u32, commit: u64, now: Instant) -> Sample {
         let at = if secs_from_now >= 0 {
             now + Duration::from_secs(secs_from_now as u64)
         } else {
@@ -291,12 +378,45 @@ mod tests {
         }
     }
 
+    /// Ring built from `(seconds from now, handles, commit)` — production
+    /// cadence is one sample per 60 s.
+    fn series(points: &[(i64, u32, u64)], now: Instant) -> Ring {
+        let mut ring = Ring::new();
+        for &(secs, handles, commit) in points {
+            ring.push(sample(secs, handles, commit, now));
+        }
+        ring
+    }
+
+    /// Evaluate the last point of a synthetic series (production entry point
+    /// semantics: the newest sample is "now").
+    fn eval_series(points: &[(i64, u32, u64)], warmup: bool) -> LeakReport {
+        let now = test_now();
+        let ring = series(points, now);
+        let &(_, handles, commit) = points.last().expect("series must not be empty");
+        evaluate(&ring, now, handles, commit, warmup)
+    }
+
+    /// `n` samples one minute apart, oldest first, ending at "now".
+    fn per_minute(
+        n: i64,
+        handles: impl Fn(i64) -> u32,
+        commit: impl Fn(i64) -> u64,
+    ) -> Vec<(i64, u32, u64)> {
+        (0..n)
+            .map(|step| {
+                let secs = -(n - 1 - step) * 60;
+                (secs, handles(step), commit(step))
+            })
+            .collect()
+    }
+
     #[test]
     fn ring_is_bounded() {
         let mut ring = Ring::new();
         let now = test_now();
         for i in 0..1000 {
-            ring.push(s(0, i as u32, 0, now));
+            ring.push(sample(0, i as u32, 0, now));
         }
         assert_eq!(ring.len, RING, "ring must not grow past capacity");
         assert!(ring.count_in_window(now) <= RING);
@@ -307,48 +427,132 @@ mod tests {
         let mut ring = Ring::new();
         let now = test_now();
         // One sample far outside the window, one inside.
-        ring.push(s(-3600, 100, 0, now));
-        ring.push(s(-60, 200, 0, now));
+        ring.push(sample(-3600, 100, 0, now));
+        ring.push(sample(-60, 200, 0, now));
         let oldest = ring.oldest_in_window(now).expect("oldest");
         assert_eq!(oldest.handles, 200, "expired sample must be ignored");
     }
 
+    /// The 06-Nov production series: 643 handles, completely flat.
     #[test]
-    fn rate_detects_handle_growth() {
-        let mut ring = Ring::new();
-        let now = test_now();
-        // 10 minutes ago: 1000 handles. Now: 1100 → 10/min → LEAK.
-        ring.push(s(-600, 1000, 500 * 1024 * 1024, now));
-        ring.push(s(-300, 1050, 550 * 1024 * 1024, now));
-        ring.push(Sample {
-            at: now,
-            handles: 1100,
-            commit_bytes: 600 * 1024 * 1024,
-        });
-
-        let report = evaluate(&ring, now, 1100, 600 * 1024 * 1024);
+    fn flat_643_handles_over_15_minutes_is_not_a_leak() {
+        let points = per_minute(16, |_| 643, |_| 200 * MB);
+        let report = eval_series(&points, false);
+        assert_eq!(report.samples, 16);
+        assert_eq!(report.handles_per_min, 0.0, "flat series has zero growth");
         assert!(
-            report.handles_per_min >= 9.0 && report.handles_per_min <= 11.0,
-            "expected ~10/min, got {}",
-            report.handles_per_min
+            !report.leaking,
+            "643 flat handles is the healthy steady state"
         );
-        assert!(report.leaking, "10 handles/min must be flagged as a leak");
     }
 
+    /// Exactly the false positive from the audit: a 2-minute startup ramp
+    /// (643 → 650, +3.5/min) must NOT alert. The old MIN_SAMPLES=3 fired here.
     #[test]
-    fn rate_ignores_stable_state() {
-        let mut ring = Ring::new();
-        let now = test_now();
-        ring.push(s(-600, 500, 200 * 1024 * 1024, now));
-        ring.push(s(-300, 505, 201 * 1024 * 1024, now));
-        ring.push(Sample {
-            at: now,
-            handles: 508,
-            commit_bytes: 202 * 1024 * 1024,
-        });
+    fn startup_ramp_false_positive_from_audit_is_suppressed() {
+        let points = [
+            (-120, 643u32, 189 * MB),
+            (-60, 646, 194 * MB),
+            (0, 650, 200 * MB),
+        ];
+        let report = eval_series(&points, false);
+        assert_eq!(report.samples, 3, "only three samples exist");
+        assert!(
+            (report.handles_per_min - 3.5).abs() < 0.01,
+            "rate must still be reported for diagnostics, got {}",
+            report.handles_per_min
+        );
+        assert!(
+            !report.leaking,
+            "three samples / two minutes is not enough history to call a leak"
+        );
 
-        let report = evaluate(&ring, now, 508, 202 * 1024 * 1024);
-        assert!(!report.leaking, "stable counts must not be flagged");
+        // Second audit FP: +5.0/min over 2 minutes at 633 → 643.
+        let second = [(-120, 633u32, 11 * MB), (0, 643, 22 * MB)];
+        assert!(!eval_series(&second, false).leaking);
+    }
+
+    /// A real ramp must still be caught quickly: 643 → 20k in 15 minutes.
+    #[test]
+    fn sustained_handle_ramp_to_20k_is_flagged() {
+        let points = per_minute(
+            16,
+            |step| 643 + ((20_000 - 643) * step / 15) as u32,
+            |_| 200 * MB,
+        );
+        let report = eval_series(&points, false);
+        assert!(
+            report.handles_per_min > 500.0,
+            "expected ~1290/min, got {}",
+            report.handles_per_min
+        );
+        assert!(
+            report.leaking,
+            "a ramp to {} handles must be flagged",
+            report.handles
+        );
+    }
+
+    /// The absolute floor keeps small-process churn quiet: 300 → 400 handles
+    /// is 10/min, above the rate threshold, but nowhere near a real leak.
+    #[test]
+    fn handle_leak_below_absolute_floor_is_quiet() {
+        let points = per_minute(11, |step| 300 + (step as u32 * 10), |_| 120 * MB);
+        let report = eval_series(&points, false);
+        assert!(
+            (report.handles_per_min - 10.0).abs() < 0.01,
+            "rate is 10/min, got {}",
+            report.handles_per_min
+        );
+        assert!(
+            report.handles < ABSOLUTE_HANDLE_FLOOR,
+            "test premise: below the floor"
+        );
+        assert!(!report.leaking, "small counts must not page anyone");
+    }
+
+    /// Commit growth alone still flags a leak (flat handles, 6 MB/min).
+    #[test]
+    fn commit_growth_alone_flags_a_leak() {
+        let points = per_minute(11, |_| 6_000, |step| 200 * MB + step as u64 * 6 * MB);
+        let report = eval_series(&points, false);
+        assert!(
+            report.commit_bytes_per_min > 5.0 * MB as f64,
+            "expected ~6 MB/min, got {}",
+            report.commit_bytes_per_min
+        );
+        assert!(
+            report.leaking,
+            "commit growth of 6 MB/min must be flagged even with flat handles"
+        );
+    }
+
+    /// Warm-up doubles the thresholds, so a 4/min ramp is quiet in the first
+    /// 30 minutes and loud afterwards.
+    #[test]
+    fn warmup_doubles_the_threshold() {
+        let points = per_minute(11, |step| 6_000 + (step as u32 * 4), |_| 200 * MB);
+        assert!(
+            !eval_series(&points, true).leaking,
+            "4/min during warm-up is below 2x3/min"
+        );
+        assert!(
+            eval_series(&points, false).leaking,
+            "4/min in steady state must be flagged"
+        );
+    }
+
+    /// Sample count alone is not enough — the span gate must also pass.
+    #[test]
+    fn insufficient_span_never_flags() {
+        let now = test_now();
+        let mut ring = Ring::new();
+        for i in 0..10 {
+            ring.push(sample(-(i * 30), 6_000 + (i as u32 * 600), 200 * MB, now));
+        }
+        let report = evaluate(&ring, now, 11_400, 200 * MB, false);
+        assert_eq!(report.samples, 10, "ten samples, but only 4.5 minutes");
+        assert!(!report.leaking, "a short burst must not be called a leak");
     }
 
     #[test]
@@ -356,14 +560,10 @@ mod tests {
         let mut ring = Ring::new();
         let now = test_now();
         // Samples DROP (e.g. the app restarted and reclaimed handles).
-        ring.push(s(-600, 5000, 2_000 * 1024 * 1024, now));
-        ring.push(Sample {
-            at: now,
-            handles: 100,
-            commit_bytes: 100 * 1024 * 1024,
-        });
+        ring.push(sample(-600, 5000, 2_000 * MB, now));
+        ring.push(sample(0, 100, 100 * MB, now));
 
-        let report = evaluate(&ring, now, 100, 100 * 1024 * 1024);
+        let report = evaluate(&ring, now, 100, 100 * MB, false);
         assert_eq!(
             report.handles_per_min, 0.0,
             "saturating subtraction must yield 0, never a negative rate"
@@ -371,41 +571,15 @@ mod tests {
         assert!(!report.leaking);
     }
 
+    /// A single sample has no rate at all and must not be evaluated.
     #[test]
-    fn commit_growth_alone_flags_a_leak() {
-        let mut ring = Ring::new();
+    fn single_sample_yields_no_rate() {
         let now = test_now();
-        // Handles flat, commit +100 MB in 10 min = 10 MB/min → LEAK.
-        ring.push(s(-600, 500, 100 * 1024 * 1024, now));
-        ring.push(s(-300, 500, 150 * 1024 * 1024, now));
-        ring.push(Sample {
-            at: now,
-            handles: 500,
-            commit_bytes: 200 * 1024 * 1024,
-        });
-
-        let report = evaluate(&ring, now, 500, 200 * 1024 * 1024);
-        assert!(
-            report.leaking,
-            "commit growth of 10 MB/min must be flagged even with flat handles"
-        );
-    }
-
-    /// Mirrors the production evaluation without touching process statics.
-    fn evaluate(ring: &Ring, now: Instant, handles: u32, commit: u64) -> LeakReport {
-        let samples = ring.count_in_window(now);
-        let oldest = ring.oldest_in_window(now).expect("oldest");
-        let elapsed_min = now.duration_since(oldest.at).as_secs_f64() / 60.0;
-        let handles_per_min = handles.saturating_sub(oldest.handles) as f64 / elapsed_min;
-        let commit_bytes_per_min = commit.saturating_sub(oldest.commit_bytes) as f64 / elapsed_min;
-        LeakReport {
-            handles,
-            commit_bytes: commit,
-            handles_per_min,
-            commit_bytes_per_min,
-            samples,
-            leaking: handles_per_min >= LEAK_HANDLES_PER_MIN
-                || commit_bytes_per_min >= LEAK_COMMIT_BYTES_PER_MIN,
-        }
+        let mut ring = Ring::new();
+        ring.push(sample(0, 900, 100 * MB, now));
+        let report = evaluate(&ring, now, 900, 100 * MB, false);
+        assert_eq!(report.samples, 1);
+        assert_eq!(report.handles_per_min, 0.0);
+        assert!(!report.leaking);
     }
 }

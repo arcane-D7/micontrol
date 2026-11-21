@@ -1,0 +1,4 @@
+{
+  "comment": "sc.exe spawn sites in src-tauri/src outside util::win_service, for scripts/check-service-calls.mjs. Ratchet baseline for C1a/U3 (architecture governor D3): the native SCM API replaced every production sc.exe spawn, so this list holds ZERO entries and must stay empty. Test modules are excluded by the gate itself.",
+  "entries": []
+}

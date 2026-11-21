@@ -4,6 +4,7 @@ import { t } from '../../hooks/useI18n';
 import AppUpdateBanner from '../../components/AppUpdateBanner';
 import AutoUpdateCard from '../../components/AutoUpdateCard';
 import type { AppUpdateState, AppUpdateInfo } from '../../hooks/useAutoUpdate';
+import { Icon } from '../../components/ui/icons';
 
 const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '0.0.0';
 
@@ -62,15 +63,15 @@ export default function AboutTab({
           <div>
             <div className="stat-row">
               <span className="stat-label">{t('about.author')}</span>
-              <span className="stat-value">MiControl Contributors</span>
+              <span className="stat-value">{t('about.contributors')}</span>
             </div>
             <div className="stat-row">
               <span className="stat-label">{t('about.license')}</span>
-              <span className="stat-value">MIT License</span>
+              <span className="stat-value">{t('about.license')}</span>
             </div>
             <div className="stat-row">
               <span className="stat-label">{t('about.github')}</span>
-              <span className="stat-value">GitHub Repository</span>
+              <span className="stat-value">{t('about.githubRepo')}</span>
             </div>
           </div>
         </div>
@@ -79,7 +80,7 @@ export default function AboutTab({
         </p>
       </div>
       <div className="card">
-        <div className="card-title">{t('about.drivers')}</div>
+        <h2 className="card-title">{t('about.drivers')}</h2>
         <div className="grid-2">
           <div className="stat-row">
             <span className="stat-label">{t('about.driversList.virtualControlHID')}</span>
@@ -99,7 +100,7 @@ export default function AboutTab({
 
       {/* S49: Buy me a coffee — optional thank-you donation */}
       <div className="card">
-        <div className="card-title">{t('about.support.title')}</div>
+        <h2 className="card-title">{t('about.support.title')}</h2>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
           <span
             aria-hidden="true"
@@ -110,12 +111,12 @@ export default function AboutTab({
               width: 44,
               height: 44,
               borderRadius: 12,
-              background: 'oklch(from var(--warning) l c h / 0.15)',
-              fontSize: 22,
+              background: 'color-mix(in oklab, var(--warning) 15%, transparent)',
+              color: 'var(--warning)',
               flexShrink: 0,
             }}
           >
-            ☕
+            <Icon name="coffee" size={22} />
           </span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <p
@@ -134,7 +135,7 @@ export default function AboutTab({
                   }).catch((e) => console.error('[support] open failed:', e))
                 }
               >
-                ☕ {t('about.support.bmc')}
+                <Icon name="coffee" size={16} /> {t('about.support.bmc')}
               </button>
               <button
                 type="button"
@@ -145,7 +146,7 @@ export default function AboutTab({
                   }).catch((e) => console.error('[support] open failed:', e))
                 }
               >
-                ⭐ {t('about.support.star')}
+                <Icon name="star" size={16} /> {t('about.support.star')}
               </button>
             </div>
             <p

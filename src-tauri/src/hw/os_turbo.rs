@@ -127,8 +127,135 @@ fn is_throttle_candidate(process_name: &str) -> bool {
             .any(|protected| protected.eq_ignore_ascii_case(process_name))
 }
 
-fn snapshot_can_be_created(existing: Option<&OsTurboRecoverySnapshot>) -> bool {
-    existing.is_none()
+impl ProcessPowerStateSnapshot {
+    /// Windows' per-process default: no throttling policy applied. Writing
+    /// this state back is what "restore a process" means.
+    const DEFAULT: Self = Self {
+        version: 1,
+        control_mask: 0,
+        state_mask: 0,
+    };
+}
+
+/// Health of the recovery snapshot, derived from the liveness of the
+/// processes it recorded.
+///
+/// Since F2 the snapshot only records processes whose **original** power
+/// state was not the Windows default, so on a typical machine it is empty and
+/// cannot rot. When it does carry entries they must still be backed by the
+/// same live process, or the record no longer describes the machine — that is
+/// exactly the 2026-10-26 failure (PIDs 9400/20704 exited, the snapshot kept
+/// being treated as valid for 12 days).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotHealth {
+    /// No snapshot file at all.
+    Missing,
+    /// At least one recorded process is still alive, or nothing was recorded.
+    Current,
+    /// Every recorded process has exited: the snapshot must be recaptured.
+    Stale,
+}
+
+/// Startup reconciliation decision. Pure so it is unit-tested directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileAction {
+    /// Flag and snapshot agree: do not touch the machine.
+    Nothing,
+    /// Flag is on but the snapshot is missing/stale: recapture and re-apply.
+    Reapply,
+    /// Flag is off but recovery state is still on disk: finish the disable so
+    /// the power plan and the process masks return to their captured values.
+    CompleteDisable,
+}
+
+fn reconcile_action(enabled: bool, health: SnapshotHealth) -> ReconcileAction {
+    match (enabled, health) {
+        (true, SnapshotHealth::Missing | SnapshotHealth::Stale) => ReconcileAction::Reapply,
+        (false, SnapshotHealth::Current | SnapshotHealth::Stale) => {
+            ReconcileAction::CompleteDisable
+        }
+        _ => ReconcileAction::Nothing,
+    }
+}
+
+/// Count recorded entries whose process is still the same live process.
+/// Returns `(alive, expired)`.
+fn count_live_entries(
+    entries: &[ProcessRecoverySnapshot],
+    mut is_alive: impl FnMut(&ProcessIdentitySnapshot) -> bool,
+) -> (u32, u32) {
+    let mut alive = 0u32;
+    let mut expired = 0u32;
+    for entry in entries {
+        if is_alive(&entry.identity) {
+            alive = alive.saturating_add(1);
+        } else {
+            expired = expired.saturating_add(1);
+        }
+    }
+    (alive, expired)
+}
+
+fn snapshot_health(alive: u32, expired: u32) -> SnapshotHealth {
+    if alive > 0 || expired == 0 {
+        SnapshotHealth::Current
+    } else {
+        SnapshotHealth::Stale
+    }
+}
+
+/// Snapshot entry for exactly this process incarnation, if one was recorded.
+fn find_snapshot_entry(
+    snapshot: Option<&OsTurboRecoverySnapshot>,
+    pid: u32,
+    creation_time: u64,
+) -> Option<&ProcessRecoverySnapshot> {
+    snapshot?
+        .processes
+        .iter()
+        .find(|entry| process_identity_matches(&entry.identity, pid, creation_time))
+}
+
+/// State that restoring this process must write back. Processes Turbo never
+/// recorded were in the Windows default state before Turbo touched them.
+fn original_state_for(
+    snapshot: Option<&OsTurboRecoverySnapshot>,
+    pid: u32,
+    creation_time: u64,
+) -> ProcessPowerStateSnapshot {
+    let recorded = find_snapshot_entry(snapshot, pid, creation_time)
+        .map(|entry| entry.original_state.clone())
+        .unwrap_or(ProcessPowerStateSnapshot::DEFAULT);
+    // Defensive: never restore INTO the throttled state. A legacy snapshot
+    // that recorded EcoQoS as the "original" would otherwise keep the process
+    // throttled after disable — the opposite of what disable promises.
+    if recorded == throttling_state_snapshot(true) {
+        ProcessPowerStateSnapshot::DEFAULT
+    } else {
+        recorded
+    }
+}
+
+/// Drop snapshot entries whose process is no longer in the live candidate set.
+/// Returns `true` when the snapshot changed.
+fn prune_snapshot_entries(snapshot: &mut OsTurboRecoverySnapshot, live_pids: &[u32]) -> bool {
+    let before = snapshot.processes.len();
+    snapshot
+        .processes
+        .retain(|entry| live_pids.contains(&entry.identity.pid));
+    snapshot.processes.len() != before
+}
+
+/// `OpenProcess` reports a PID that no longer exists as
+/// `ERROR_INVALID_PARAMETER` (87), either bare or wrapped as
+/// `HRESULT_FROM_WIN32(87)`. Anything else (access denied, timeout) means the
+/// process exists but could not be opened — a real failure, not a termination.
+fn open_error_means_process_gone(code: i32) -> bool {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const HRESULT_FROM_WIN32_BASE: u32 = 0x8007_0000;
+    let raw = code as u32;
+    (raw & 0xFFFF) == ERROR_INVALID_PARAMETER
+        && (raw == ERROR_INVALID_PARAMETER || (raw & 0xFFFF_0000) == HRESULT_FROM_WIN32_BASE)
 }
 
 fn snapshot_is_valid(snapshot: &OsTurboRecoverySnapshot) -> bool {
@@ -158,8 +285,11 @@ fn should_retain_snapshot(process_restore_failed: bool, scheme_restore_failed: b
     process_restore_failed || scheme_restore_failed
 }
 
-fn disable_has_recovery_state(enabled: bool, snapshot: Option<&OsTurboRecoverySnapshot>) -> bool {
-    !enabled || snapshot.is_some()
+/// Restoring is required whenever the feature is (or was) active: an enabled
+/// flag with no snapshot still means processes may have been throttled by
+/// discovery, and a snapshot with the flag off is an interrupted disable.
+fn disable_requires_restore(enabled: bool, has_snapshot: bool) -> bool {
+    enabled || has_snapshot
 }
 
 /// OS Turbo status.
@@ -171,6 +301,11 @@ pub struct OsTurboStatus {
     pub throttled_processes: u32,
     /// Current power plan GUID.
     pub power_plan: String,
+    /// The recovery snapshot records processes that no longer exist and a
+    /// recapture is due. `#[serde(default)]` so a status produced by an older
+    /// bridge binary still deserializes.
+    #[serde(default)]
+    pub snapshot_stale: bool,
     /// S39-003 measured sweep data — truthful readback counts.
     pub measured: OsTurboMeasuredStatus,
 }
@@ -186,12 +321,18 @@ pub struct OsTurboMeasuredStatus {
     pub inspected: u32,
     /// Candidates verified in the throttled state (readback-verified).
     pub applied: u32,
+    /// Live candidates found in the Windows default state — discovered but
+    /// not throttled yet. Reset on every restart of the process; unlike
+    /// `restored` this is not a regression, it is work still to do.
+    #[serde(default)]
+    pub pending: u32,
     /// Candidates verified in their original (pre-enable) state.
     pub restored: u32,
     /// Candidates skipped: exited, PID reused (identity mismatch), or in a
     /// state OS Turbo does not own.
     pub skipped: u32,
-    /// Open/read/write/bridge errors encountered during the last sweep.
+    /// Open/read/write/bridge errors encountered during the last sweep. A
+    /// process that no longer exists is `skipped`, never a failure.
     pub failures: u32,
     /// Wall-clock milliseconds (UNIX epoch) of the last completed sweep;
     /// 0 when no sweep has completed.
@@ -214,35 +355,63 @@ pub fn get_os_turbo() -> HardwareResult<OsTurboStatus> {
     #[cfg(windows)]
     {
         let mut enabled = read_enabled_compat();
+        let mut snapshot_stale = false;
 
-        // S68 (OS Turbo "does nothing" bug): the flag said ENABLED while the
-        // recovery snapshot was MISSING (observed live 2026-10-25: HKLM
-        // Enabled=1, no os_turbo_recovery.json). In that state enable() errors
-        // with "recovery state is missing", measure_sweep() measures nothing,
-        // and the feature is a no-op that still claims to be on. Auto-repair:
-        // capture a FRESH snapshot from the current process state so the
-        // feature actually does something again. (The original snapshot was
-        // lost across an install that cleaned ProgramData\MiControl.)
-        if enabled && read_recovery_snapshot().ok().flatten().is_none() {
-            log::warn!(
-                "[os_turbo] enabled flag set but recovery snapshot missing — \
-                 capturing a fresh snapshot (auto-repair)"
-            );
-            match capture_recovery_snapshot() {
-                Ok(snapshot) => {
-                    if let Err(e) = save_recovery_snapshot(&snapshot) {
-                        log::warn!("[os_turbo] auto-repair snapshot save failed: {e}");
-                    }
+        // S68/F1 (OS Turbo "does nothing" bug): the flag said ENABLED while the
+        // recovery snapshot was missing OR — the 2026-10-26 failure — while
+        // every process it recorded had already exited. Both states make the
+        // feature a no-op that still claims to be on. Auto-repair captures a
+        // FRESH snapshot from the current process state. The original
+        // power-scheme record is preserved when a stale snapshot is replaced:
+        // dropping it would lose the only remaining undo information.
+        if enabled {
+            let (health, previous) = match read_recovery_snapshot() {
+                Ok(Some(snapshot)) => {
+                    let (alive, expired) =
+                        count_live_entries(&snapshot.processes, identity_is_alive);
+                    (snapshot_health(alive, expired), Some(snapshot))
                 }
-                Err(e) => {
-                    // Cannot capture (e.g. process enumeration failed): the
-                    // honest state is DISABLED — clear the stale flag rather
-                    // than keep advertising a no-op.
+                Ok(None) => (SnapshotHealth::Missing, None),
+                Err(error) => {
                     log::warn!(
-                        "[os_turbo] auto-repair capture failed ({e}) — clearing stale enabled flag"
+                        "[os_turbo] recovery snapshot unreadable ({error}) — treating as missing"
                     );
-                    let _ = persist_os_turbo(false);
-                    enabled = false;
+                    (SnapshotHealth::Missing, None)
+                }
+            };
+            if health == SnapshotHealth::Stale {
+                log::warn!(
+                    "[os_turbo] recovery snapshot records only exited processes — recapturing (auto-repair)"
+                );
+                snapshot_stale = true;
+            }
+            if health != SnapshotHealth::Current {
+                match capture_recovery_snapshot(previous.as_ref()) {
+                    Ok(snapshot) => {
+                        if let Err(e) = write_recovery_snapshot(&snapshot) {
+                            log::warn!("[os_turbo] auto-repair snapshot save failed: {e}");
+                            // The record could not be refreshed: the flag is on
+                            // but there is no usable snapshot to describe it.
+                            snapshot_stale = true;
+                        } else {
+                            log::info!(
+                                "[os_turbo] auto-repair captured a fresh recovery snapshot ({} recorded state(s))",
+                                snapshot.processes.len()
+                            );
+                            snapshot_stale = false;
+                        }
+                    }
+                    Err(e) => {
+                        // Cannot capture (e.g. process enumeration failed): the
+                        // honest state is DISABLED — clear the stale flag rather
+                        // than keep advertising a no-op.
+                        log::warn!(
+                            "[os_turbo] auto-repair capture failed ({e}) — clearing stale enabled flag"
+                        );
+                        let _ = persist_os_turbo(false);
+                        enabled = false;
+                        snapshot_stale = false;
+                    }
                 }
             }
         }
@@ -262,6 +431,7 @@ pub fn get_os_turbo() -> HardwareResult<OsTurboStatus> {
             enabled,
             throttled_processes: throttled,
             power_plan,
+            snapshot_stale,
             measured,
         })
     }
@@ -271,109 +441,88 @@ pub fn get_os_turbo() -> HardwareResult<OsTurboStatus> {
             enabled: false,
             throttled_processes: 0,
             power_plan: String::new(),
+            snapshot_stale: false,
             measured: OsTurboMeasuredStatus::default(),
         })
     }
 }
 
 /// Enable OS Turbo optimizations.
+///
+/// F2+F4: "enable" and "already enabled, apply now" are the same operation —
+/// throttle every live allowlisted candidate, not just the PIDs that happened
+/// to exist when the snapshot was first captured.
 fn enable_os_turbo() -> HardwareResult<OsTurboStatus> {
     #[cfg(windows)]
     {
-        let existing_snapshot = read_recovery_snapshot()?;
         if read_enabled_compat() {
-            if existing_snapshot.is_none() {
-                return Err(HardwareError::Other(
-                    "OS Turbo is enabled but its recovery state is missing".into(),
-                ));
-            }
-            return get_os_turbo();
-        }
-        if !snapshot_can_be_created(existing_snapshot.as_ref()) {
-            return Err(HardwareError::Other(
-                "OS Turbo recovery is pending; disable before enabling again".into(),
-            ));
+            // F4: touching the toggle while it is already on must APPLY, not
+            // return the previous status (the old code was a pure no-op, so a
+            // user had to switch it off and on again to get a re-apply).
+            log::info!(
+                "[os_turbo] enable requested while already enabled — re-applying to live candidates"
+            );
+            return refresh_os_turbo();
         }
 
-        let snapshot = capture_recovery_snapshot()?;
-        save_recovery_snapshot(&snapshot)?;
+        // Leftover recovery state with the flag off means an interrupted run
+        // (crash between the snapshot and the flag, or a disable that failed).
+        // Finish that restore before capturing a new baseline, otherwise the
+        // processes it still throttles would never be freed. Its recorded
+        // power scheme is carried over: it is the only evidence of what the
+        // plan was before OS Turbo changed it.
+        let previous = match read_recovery_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::warn!(
+                    "[os_turbo] existing recovery snapshot is unusable ({error}) — replacing it"
+                );
+                None
+            }
+        };
+        if previous.is_some() {
+            log::warn!(
+                "[os_turbo] recovery state present while disabled — completing the restore before enabling"
+            );
+            let _ = disable_os_turbo();
+        }
+
+        let mut snapshot = capture_recovery_snapshot(previous.as_ref())?;
+        // Write the recovery record BEFORE touching a single process: if the
+        // app dies mid-apply, the next start still knows what to undo. The
+        // `Enabled` flag is written LAST, for the same reason.
+        write_recovery_snapshot(&snapshot)?;
+
+        let power_plan = set_power_plan_best_performance()?;
+        let (counts, changed) = apply_to_live_candidates(&mut snapshot);
+        if changed {
+            write_recovery_snapshot(&snapshot)?;
+        }
 
         persist_os_turbo(true)?;
-        let power_plan = set_power_plan_best_performance()?;
-        let desired = throttling_state_snapshot(true);
-        let mut write_failed = false;
-        let mut counts = SweepCounts {
-            inspected: snapshot.processes.len() as u32,
-            ..SweepCounts::default()
-        };
-
-        for process in &snapshot.processes {
-            let handle = match open_process_for_turbo(process.identity.pid) {
-                Ok(handle) => handle,
-                Err(_) => {
-                    counts.failures = counts.failures.saturating_add(1);
-                    continue;
-                }
-            };
-
-            let identity_matches = match get_process_creation_time(handle) {
-                Ok(creation_time) => {
-                    process_identity_matches(&process.identity, process.identity.pid, creation_time)
-                }
-                Err(_) => {
-                    counts.failures = counts.failures.saturating_add(1);
-                    unsafe {
-                        windows::Win32::Foundation::CloseHandle(handle).ok();
-                    }
-                    continue;
-                }
-            };
-            if !identity_matches {
-                counts.skipped = counts.skipped.saturating_add(1);
-                unsafe {
-                    windows::Win32::Foundation::CloseHandle(handle).ok();
-                }
-                continue;
-            }
-            match read_process_power_state(handle) {
-                Ok(current) if current == desired => {
-                    counts.applied = counts.applied.saturating_add(1);
-                }
-                Ok(_) => {
-                    // set_process_power_state re-verifies by readback.
-                    if set_process_power_state(handle, &desired).is_ok() {
-                        counts.applied = counts.applied.saturating_add(1);
-                    } else {
-                        counts.failures = counts.failures.saturating_add(1);
-                        write_failed = true;
-                    }
-                }
-                Err(_) => counts.failures = counts.failures.saturating_add(1),
-            }
-
-            unsafe {
-                windows::Win32::Foundation::CloseHandle(handle).ok();
-            }
-        }
-
-        if write_failed {
-            return Err(HardwareError::Other(
-                "OS Turbo partially applied; recovery state was retained".into(),
-            ));
-        }
+        log::info!(
+            "[os_turbo] enabled: inspected={} applied={} pending={} skipped={} failures={} plan={power_plan}",
+            counts.inspected,
+            counts.applied,
+            counts.pending,
+            counts.skipped,
+            counts.failures
+        );
 
         Ok(OsTurboStatus {
             enabled: true,
             throttled_processes: counts.applied,
             power_plan,
+            snapshot_stale: false,
             measured: OsTurboMeasuredStatus {
                 inspected: counts.inspected,
                 applied: counts.applied,
+                pending: counts.pending,
                 restored: counts.restored,
                 skipped: counts.skipped,
                 failures: counts.failures,
                 last_sweep_ms: sweep_timestamp_ms(),
-                worker_active: false,
+                worker_active: worker_active(),
             },
         })
     }
@@ -383,100 +532,68 @@ fn enable_os_turbo() -> HardwareResult<OsTurboStatus> {
             enabled: false,
             throttled_processes: 0,
             power_plan: String::new(),
+            snapshot_stale: false,
             measured: OsTurboMeasuredStatus::default(),
         })
     }
 }
 
 /// Disable OS Turbo optimizations.
+///
+/// F2: restore by **discovery**, not by replaying a stale PID list — every
+/// live allowlisted candidate is checked, so processes that were throttled
+/// after the snapshot was captured are freed too (they are not in the
+/// snapshot by design).
 fn disable_os_turbo() -> HardwareResult<OsTurboStatus> {
     #[cfg(windows)]
     {
-        let snapshot = read_recovery_snapshot()?;
+        let snapshot = match read_recovery_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::warn!(
+                    "[os_turbo] recovery snapshot unreadable ({error}) — restoring by discovery only"
+                );
+                None
+            }
+        };
         let enabled = read_enabled_compat();
-        if !disable_has_recovery_state(enabled, snapshot.as_ref()) {
-            return Err(HardwareError::Other(
-                "OS Turbo cannot be disabled because recovery state is missing".into(),
-            ));
+        if !disable_requires_restore(enabled, snapshot.is_some()) {
+            // Nothing was applied and nothing is recorded: make the persisted
+            // flag agree without touching the machine.
+            persist_os_turbo(false)?;
+            log::info!("[os_turbo] disable: no recovery state to restore");
+            let power_plan = get_active_power_plan()?;
+            return Ok(OsTurboStatus {
+                enabled: false,
+                throttled_processes: 0,
+                power_plan,
+                snapshot_stale: false,
+                measured: OsTurboMeasuredStatus {
+                    last_sweep_ms: sweep_timestamp_ms(),
+                    worker_active: worker_active(),
+                    ..OsTurboMeasuredStatus::default()
+                },
+            });
         }
-        let Some(snapshot) = snapshot else {
-            return get_os_turbo();
-        };
 
-        let mut process_restore_failed = false;
-        let mut counts = SweepCounts {
-            inspected: snapshot.processes.len() as u32,
-            ..SweepCounts::default()
-        };
-        for process in &snapshot.processes {
-            let handle = match open_process_for_turbo(process.identity.pid) {
-                Ok(handle) => handle,
-                Err(_) => {
-                    // Exited/unopenable: skipped, not a failure (S39-002
-                    // restore contract: skip exited or unverifiable).
-                    counts.skipped = counts.skipped.saturating_add(1);
-                    continue;
-                }
-            };
-
-            let identity_matches = match get_process_creation_time(handle) {
-                Ok(creation_time) => {
-                    process_identity_matches(&process.identity, process.identity.pid, creation_time)
-                }
-                Err(_) => {
-                    // Cannot verify identity — treat as restore incomplete.
-                    process_restore_failed = true;
-                    counts.skipped = counts.skipped.saturating_add(1);
-                    unsafe {
-                        windows::Win32::Foundation::CloseHandle(handle).ok();
-                    }
-                    continue;
-                }
-            };
-            if !identity_matches {
-                counts.skipped = counts.skipped.saturating_add(1);
-                unsafe {
-                    windows::Win32::Foundation::CloseHandle(handle).ok();
-                }
-                continue;
-            }
-            match read_process_power_state(handle) {
-                Ok(current) if current == process.original_state => {
-                    counts.restored = counts.restored.saturating_add(1);
-                }
-                Ok(current) if current == throttling_state_snapshot(true) => {
-                    if set_process_power_state(handle, &process.original_state).is_ok() {
-                        counts.restored = counts.restored.saturating_add(1);
-                    } else {
-                        counts.failures = counts.failures.saturating_add(1);
-                        process_restore_failed = true;
-                    }
-                }
-                Ok(_) => counts.skipped = counts.skipped.saturating_add(1),
-                Err(_) => {
-                    counts.failures = counts.failures.saturating_add(1);
-                    process_restore_failed = true;
-                }
-            }
-
-            unsafe {
-                windows::Win32::Foundation::CloseHandle(handle).ok();
-            }
-        }
+        let (counts, process_restore_failed) = restore_all(snapshot.as_ref());
 
         let mut scheme_restore_failed = false;
         let active_scheme = get_active_power_scheme_guid()?.to_u128();
-        if turbo_owns_power_scheme(active_scheme)
-            && snapshot.original_power_scheme != HIGH_PERFORMANCE_SCHEME
-            && set_active_power_scheme(windows::core::GUID::from_u128(
-                snapshot.original_power_scheme,
-            ))
-            .is_err()
-        {
-            scheme_restore_failed = true;
+        if turbo_owns_power_scheme(active_scheme) {
+            if let Some(original) = snapshot.as_ref().map(|s| s.original_power_scheme) {
+                if original != HIGH_PERFORMANCE_SCHEME
+                    && set_active_power_scheme(windows::core::GUID::from_u128(original)).is_err()
+                {
+                    scheme_restore_failed = true;
+                }
+            }
         }
 
         if should_retain_snapshot(process_restore_failed, scheme_restore_failed) {
+            log::warn!(
+                "[os_turbo] disable incomplete (restore_failed={process_restore_failed} scheme_failed={scheme_restore_failed}) — recovery state retained"
+            );
             return Err(HardwareError::Other(
                 "OS Turbo restore was incomplete; recovery state was retained".into(),
             ));
@@ -484,19 +601,28 @@ fn disable_os_turbo() -> HardwareResult<OsTurboStatus> {
 
         persist_os_turbo(false)?;
         remove_recovery_snapshot()?;
+        log::info!(
+            "[os_turbo] disabled: inspected={} restored={} skipped={} failures={}",
+            counts.inspected,
+            counts.restored,
+            counts.skipped,
+            counts.failures
+        );
         let power_plan = get_active_power_plan()?;
         Ok(OsTurboStatus {
             enabled: false,
             throttled_processes: 0,
             power_plan,
+            snapshot_stale: false,
             measured: OsTurboMeasuredStatus {
                 inspected: counts.inspected,
                 applied: 0,
+                pending: 0,
                 restored: counts.restored,
                 skipped: counts.skipped,
                 failures: counts.failures,
                 last_sweep_ms: sweep_timestamp_ms(),
-                worker_active: false,
+                worker_active: worker_active(),
             },
         })
     }
@@ -506,6 +632,7 @@ fn disable_os_turbo() -> HardwareResult<OsTurboStatus> {
             enabled: false,
             throttled_processes: 0,
             power_plan: String::new(),
+            snapshot_stale: false,
             measured: OsTurboMeasuredStatus::default(),
         })
     }
@@ -526,17 +653,18 @@ fn set_power_plan_best_performance() -> HardwareResult<String> {
 
 #[cfg(windows)]
 fn set_active_power_scheme(target: windows::core::GUID) -> HardwareResult<windows::core::GUID> {
-    use std::os::windows::process::CommandExt;
     use windows::Win32::System::Power::PowerSetActiveScheme;
 
     let result = unsafe { PowerSetActiveScheme(None, Some(&target)) };
     if result.0 != 0 {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Fallback for the rare PowerSetActiveScheme failure. The spawn
+        // helper applies CREATE_NO_WINDOW and bounds the child wait
+        // (tree-killed on expiry).
+        const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         let target_text = format!("{target:?}");
-        let output = std::process::Command::new("powercfg")
-            .args(["/setactive", target_text.as_str()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
+        let mut cmd = std::process::Command::new("powercfg");
+        cmd.args(["/setactive", target_text.as_str()]);
+        let output = crate::util::process_spawn::run_capture(&mut cmd, POWERCFG_TIMEOUT)
             .map_err(|_| HardwareError::Other("Power scheme write failed".into()))?;
         if !output.status.success() {
             return Err(HardwareError::Other(format!(
@@ -799,17 +927,57 @@ fn enumerate_processes() -> anyhow::Result<Vec<(u32, String)>> {
     .map_err(|e| anyhow::anyhow!(e))
 }
 
+/// Live allowlisted background candidates, deterministically ordered.
 #[cfg(windows)]
-fn capture_recovery_snapshot() -> HardwareResult<OsTurboRecoverySnapshot> {
-    let original_power_scheme = get_active_power_scheme_guid()?.to_u128();
+fn discover_candidates() -> HardwareResult<Vec<(u32, String)>> {
     let mut candidates: Vec<(u32, String)> = enumerate_processes()?
         .into_iter()
         .filter(|(_, name)| is_throttle_candidate(name))
         .collect();
     candidates.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+    Ok(candidates)
+}
 
-    let mut processes = Vec::with_capacity(candidates.len().min(MAX_SNAPSHOT_PROCESSES));
-    for (pid, process_name) in candidates.into_iter().take(MAX_SNAPSHOT_PROCESSES) {
+/// `true` when this exact process incarnation is still running.
+#[cfg(windows)]
+fn identity_is_alive(identity: &ProcessIdentitySnapshot) -> bool {
+    // leak-check: audited — the handle is closed on both exit paths (S67).
+    let Ok(handle) = open_process_for_read(identity.pid) else {
+        return false;
+    };
+    let alive = get_process_creation_time(handle)
+        .map(|creation_time| process_identity_matches(identity, identity.pid, creation_time))
+        .unwrap_or(false);
+    unsafe {
+        windows::Win32::Foundation::CloseHandle(handle).ok();
+    }
+    alive
+}
+
+/// Capture the minimum state OS Turbo must be able to undo.
+///
+/// F2: only the **power plan** and processes whose original state is not the
+/// Windows default are recorded. A process sitting in the default state needs
+/// no record — restoring it means writing the default back, which is always
+/// valid. This is what makes "PIDs in the snapshot are dead" structurally
+/// impossible: there are usually no per-process entries at all.
+///
+/// `previous` supplies the power scheme recorded by an earlier snapshot, so
+/// replacing a stale snapshot cannot lose the undo information for a plan
+/// change Turbo made days ago.
+#[cfg(windows)]
+fn capture_recovery_snapshot(
+    previous: Option<&OsTurboRecoverySnapshot>,
+) -> HardwareResult<OsTurboRecoverySnapshot> {
+    let active_scheme = get_active_power_scheme_guid()?.to_u128();
+    let original_power_scheme = power_scheme_to_record(previous, active_scheme);
+    let desired = throttling_state_snapshot(true);
+
+    let mut processes = Vec::new();
+    for (pid, process_name) in discover_candidates()?
+        .into_iter()
+        .take(MAX_SNAPSHOT_PROCESSES)
+    {
         let handle = match open_process_for_turbo(pid) {
             Ok(handle) => handle,
             Err(_) => continue,
@@ -825,6 +993,11 @@ fn capture_recovery_snapshot() -> HardwareResult<OsTurboRecoverySnapshot> {
             windows::Win32::Foundation::CloseHandle(handle).ok();
         }
         if let Some((creation_time, original_state)) = captured {
+            // States Turbo itself wrote (or the Windows default) are not
+            // "original": recording them would make disable re-apply EcoQoS.
+            if !should_record_original(&original_state, &desired) {
+                continue;
+            }
             processes.push(ProcessRecoverySnapshot {
                 identity: ProcessIdentitySnapshot {
                     pid,
@@ -873,19 +1046,18 @@ fn read_recovery_snapshot() -> HardwareResult<Option<OsTurboRecoverySnapshot>> {
     Ok(Some(snapshot))
 }
 
+/// Atomically write the recovery snapshot, replacing any existing file.
+///
+/// Replacement is intentional: a stale snapshot (every recorded process
+/// exited) is recaptured rather than treated as valid forever.
 #[cfg(windows)]
-fn save_recovery_snapshot(snapshot: &OsTurboRecoverySnapshot) -> HardwareResult<()> {
+fn write_recovery_snapshot(snapshot: &OsTurboRecoverySnapshot) -> HardwareResult<()> {
     if !snapshot_is_valid(snapshot) {
         return Err(HardwareError::Other(
             "OS Turbo recovery snapshot is unsupported or too large".into(),
         ));
     }
     let path = recovery_snapshot_path();
-    if path.exists() {
-        return Err(HardwareError::Other(
-            "OS Turbo recovery snapshot already exists".into(),
-        ));
-    }
     let parent = path
         .parent()
         .ok_or_else(|| HardwareError::Other("OS Turbo recovery snapshot path is invalid".into()))?;
@@ -906,7 +1078,8 @@ fn save_recovery_snapshot(snapshot: &OsTurboRecoverySnapshot) -> HardwareResult<
 
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(true)
             .open(&temporary_path)
             .map_err(|_| "temporary snapshot cannot be created".to_string())?;
         file.write_all(&bytes)
@@ -914,6 +1087,9 @@ fn save_recovery_snapshot(snapshot: &OsTurboRecoverySnapshot) -> HardwareResult<
         file.sync_all()
             .map_err(|_| "temporary snapshot cannot be flushed".to_string())?;
         crate::util::auth::restrict_file_acl(&temporary_path)?;
+        // `fs::rename` replaces an existing destination on Windows
+        // (MoveFileExW + MOVEFILE_REPLACE_EXISTING): recapturing a stale
+        // snapshot is exactly the intended behaviour.
         std::fs::rename(&temporary_path, &path)
             .map_err(|_| "recovery snapshot cannot be committed".to_string())?;
         Ok(())
@@ -959,7 +1135,106 @@ fn persist_os_turbo(enabled: bool) -> HardwareResult<()> {
     }
 }
 
-pub fn restore_os_turbo() {}
+/// Coarse bucket for the current hour (UTC). The log deliberately carries no
+/// exact timestamp; see `hw::os_turbo_log`.
+fn current_time_bucket() -> crate::hw::os_turbo_log::TimeBucket {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    crate::hw::os_turbo_log::TimeBucket::from_hour(((seconds % 86_400) / 3_600) as u32)
+}
+
+/// Append one record to the anonymous, bounded action log and persist it.
+///
+/// F6: the 0.2.20 changelog promised this file and nothing ever instantiated
+/// `ActionLog`, which is why "OS Turbo has no logs" was literally true. It is
+/// now enabled by default and written from the user-context app (the bridge
+/// runs as SYSTEM, whose `LOCALAPPDATA` is not the user's).
+fn record_os_turbo_action(build: impl FnOnce() -> crate::hw::os_turbo_log::ActionRecord) {
+    use crate::hw::os_turbo_log::{load_action_log, save_action_log, ActionLog};
+
+    static ACTION_LOG: std::sync::OnceLock<std::sync::Mutex<ActionLog>> =
+        std::sync::OnceLock::new();
+    let log = ACTION_LOG.get_or_init(|| std::sync::Mutex::new(load_action_log(true)));
+    let mut guard = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.push(build());
+    if let Err(error) = save_action_log(&guard) {
+        log::warn!("[os_turbo] action log write failed: {error}");
+    }
+}
+
+/// Startup reconciliation (F5).
+///
+/// The old `restore_os_turbo()` was an empty body with no caller, so nothing
+/// ever reconciled the persisted flag with the machine: a crash (or a disable
+/// that failed halfway) left throttled processes and a `High performance`
+/// plan behind with no code path to undo them.
+///
+/// Runs in the user-context app, so every privileged write goes through the
+/// authenticated bridge. Never blocks startup: a failure is logged and the
+/// 30 s worker sweep retries the repair path.
+pub fn restore_os_turbo() {
+    #[cfg(windows)]
+    {
+        let enabled = read_enabled_compat();
+        let health = match read_recovery_snapshot() {
+            Ok(None) => SnapshotHealth::Missing,
+            Ok(Some(snapshot)) => {
+                let (alive, expired) = count_live_entries(&snapshot.processes, identity_is_alive);
+                snapshot_health(alive, expired)
+            }
+            Err(error) => {
+                log::warn!("[os_turbo] startup reconcile: recovery snapshot unreadable ({error})");
+                SnapshotHealth::Missing
+            }
+        };
+
+        match reconcile_action(enabled, health) {
+            ReconcileAction::Nothing => {
+                log::info!(
+                    "[os_turbo] startup reconcile: nothing to do (enabled={enabled}, snapshot={health:?})"
+                );
+            }
+            ReconcileAction::Reapply => {
+                log::warn!(
+                    "[os_turbo] startup reconcile: enabled with a {health:?} recovery snapshot — re-applying through the bridge"
+                );
+                tauri::async_runtime::spawn(async move {
+                    match crate::elev_bridge::run_elevated_bridge_only(
+                        "refresh_os_turbo",
+                        serde_json::json!({}),
+                    )
+                    .await
+                    {
+                        Ok(_) => log::info!("[os_turbo] startup reconcile: re-apply completed"),
+                        Err(error) => log::warn!(
+                            "[os_turbo] startup reconcile: re-apply failed ({error}); the worker will retry"
+                        ),
+                    }
+                });
+            }
+            ReconcileAction::CompleteDisable => {
+                log::warn!(
+                    "[os_turbo] startup reconcile: flag is off but recovery state is still on disk — completing the disable"
+                );
+                tauri::async_runtime::spawn(async move {
+                    match crate::elev_bridge::run_elevated_bridge_only(
+                        "set_os_turbo",
+                        serde_json::json!({ "enabled": false }),
+                    )
+                    .await
+                    {
+                        Ok(_) => log::info!("[os_turbo] startup reconcile: disable completed"),
+                        Err(error) => log::warn!(
+                            "[os_turbo] startup reconcile: disable failed ({error}); recovery state retained"
+                        ),
+                    }
+                });
+            }
+        }
+    }
+}
 
 /// Read the HKLM Enabled flag; `None` when the key/value does not exist.
 #[cfg(windows)]
@@ -1004,25 +1279,30 @@ fn read_enabled_compat() -> bool {
 enum ReadbackOutcome {
     /// Verified in the throttled state.
     Applied,
-    /// Verified in the original (pre-enable) state.
+    /// Alive and in the Windows default state: discovered but not throttled
+    /// yet. This is work to do, not a regression.
+    Pending,
+    /// Valid identity but verified back in its captured (non-default) state.
     Restored,
     /// Valid identity but in a state Turbo does not own (foreign mask).
     Other,
-    /// Exited or PID reused — cannot be attributed.
+    /// Exited or PID reused — cannot be attributed (counted as terminated,
+    /// never as a failure).
     Skipped,
-    /// Open/read/set error.
+    /// Open/read/set error on a process that still exists.
     Failed,
 }
 
 /// Truthful, per-sweep aggregate of readback outcomes.
 ///
-/// `inspected` equals `applied + restored + other + skipped + failures`
-/// (saturated); no field is guessed or extrapolated, and a disabled Turbo
-/// produces an all-default aggregate (no work, no fabricated counts).
+/// `inspected` equals `applied + pending + restored + other + skipped +
+/// failures` (saturated); no field is guessed or extrapolated, and a disabled
+/// Turbo produces an all-default aggregate (no work, no fabricated counts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct SweepCounts {
     inspected: u32,
     applied: u32,
+    pending: u32,
     restored: u32,
     other: u32,
     skipped: u32,
@@ -1030,13 +1310,19 @@ struct SweepCounts {
 }
 
 impl SweepCounts {
-    /// Identity-valid processes that should be throttled but are not.
+    /// Candidates that are alive and should be throttled but are not.
     fn driftable(&self) -> u32 {
-        self.restored.saturating_add(self.other)
+        self.restored
+            .saturating_add(self.other)
+            .saturating_add(self.pending)
     }
 
+    /// F3: drift is "there is work to do", and a live process that could not
+    /// be opened or read is work to do as well — the bridge runs as SYSTEM and
+    /// may well succeed where the unprivileged sweep failed. A process that no
+    /// longer exists is `Skipped`, so it never reaches this branch.
     fn drift_detected(&self) -> bool {
-        self.driftable() > 0
+        self.driftable() > 0 || self.failures > 0
     }
 }
 
@@ -1048,6 +1334,7 @@ impl OsTurboMeasuredStatus {
         SweepCounts {
             inspected: self.inspected,
             applied: self.applied,
+            pending: self.pending,
             restored: self.restored,
             other: 0,
             skipped: self.skipped,
@@ -1063,6 +1350,7 @@ fn aggregate_counts(items: impl IntoIterator<Item = ReadbackOutcome>, limit: usi
         counts.inspected = counts.inspected.saturating_add(1);
         match item {
             ReadbackOutcome::Applied => counts.applied = counts.applied.saturating_add(1),
+            ReadbackOutcome::Pending => counts.pending = counts.pending.saturating_add(1),
             ReadbackOutcome::Restored => counts.restored = counts.restored.saturating_add(1),
             ReadbackOutcome::Other => counts.other = counts.other.saturating_add(1),
             ReadbackOutcome::Skipped => counts.skipped = counts.skipped.saturating_add(1),
@@ -1086,6 +1374,10 @@ struct WorkerState {
     backoff_until: std::sync::Mutex<Option<std::time::Instant>>,
     /// Latest truthful measured status.
     measured: std::sync::Mutex<OsTurboMeasuredStatus>,
+    /// Last aggregate written to the log. A steady state must not produce a
+    /// line every 30 s, so logging and action-log records are edge-triggered
+    /// on a change of these counts.
+    last_logged: std::sync::Mutex<Option<SweepCounts>>,
 }
 
 impl Default for WorkerState {
@@ -1103,6 +1395,7 @@ impl WorkerState {
             consecutive_failures: std::sync::atomic::AtomicU32::new(0),
             backoff_until: std::sync::Mutex::new(None),
             measured: std::sync::Mutex::new(OsTurboMeasuredStatus::default()),
+            last_logged: std::sync::Mutex::new(None),
         }
     }
     /// Claims the single-flight gate. `false` means a sweep is already running.
@@ -1146,6 +1439,7 @@ impl WorkerState {
         *self.measured.lock().unwrap_or_else(|p| p.into_inner()) = OsTurboMeasuredStatus {
             inspected: sweep.inspected,
             applied: sweep.applied,
+            pending: sweep.pending,
             restored: sweep.restored,
             skipped: sweep.skipped,
             failures: sweep.failures,
@@ -1161,12 +1455,74 @@ impl WorkerState {
         *self.measured.lock().unwrap_or_else(|p| p.into_inner()) = OsTurboMeasuredStatus {
             inspected: status.measured.inspected,
             applied: status.measured.applied,
+            pending: status.measured.pending,
             restored: status.measured.restored,
             skipped: status.measured.skipped,
             failures: status.measured.failures,
             last_sweep_ms: status.measured.last_sweep_ms,
             worker_active,
         };
+    }
+
+    /// F6: one `info!` line per material change, never per 30 s tick. The
+    /// counts (not process names) are the whole message, matching the
+    /// anonymity policy of `os_turbo_log`.
+    fn log_sweep(&self, sweep: &SweepCounts) {
+        let mut last = self.last_logged.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = *last;
+        if previous == Some(*sweep) {
+            log::debug!(
+                "[os_turbo] sweep unchanged: applied={} pending={} failures={}",
+                sweep.applied,
+                sweep.pending,
+                sweep.failures
+            );
+            return;
+        }
+        *last = Some(*sweep);
+        drop(last);
+
+        log::info!(
+            "[os_turbo] sweep: inspected={} applied={} pending={} restored={} skipped={} failures={}",
+            sweep.inspected,
+            sweep.applied,
+            sweep.pending,
+            sweep.restored,
+            sweep.skipped,
+            sweep.failures
+        );
+
+        let before = previous.unwrap_or_default();
+        if sweep.applied > before.applied {
+            let affected = sweep.applied.saturating_sub(before.applied);
+            record_os_turbo_action(|| {
+                crate::hw::os_turbo_log::ActionRecord::applied(
+                    current_time_bucket(),
+                    crate::hw::os_turbo_policy::PolicyAction::ThrottleAllowlistedBackground,
+                )
+                .with_affected(affected)
+            });
+        }
+        if sweep.restored > before.restored {
+            let affected = sweep.restored.saturating_sub(before.restored);
+            record_os_turbo_action(|| {
+                crate::hw::os_turbo_log::ActionRecord::rolled_back(
+                    current_time_bucket(),
+                    crate::hw::os_turbo_policy::RollbackReason::VerificationFailed,
+                )
+                .with_affected(affected)
+            });
+        }
+        if sweep.failures > before.failures {
+            let affected = sweep.failures.saturating_sub(before.failures);
+            record_os_turbo_action(|| {
+                crate::hw::os_turbo_log::ActionRecord::failed(
+                    current_time_bucket(),
+                    crate::hw::os_turbo_log::SafeErrorCode::ProcessWriteFailed,
+                )
+                .with_affected(affected)
+            });
+        }
     }
 
     fn measured(&self) -> OsTurboMeasuredStatus {
@@ -1212,6 +1568,43 @@ pub fn last_measured_status() -> OsTurboMeasuredStatus {
 /// `set_os_turbo` computes counts from real readback in the bridge.
 pub fn note_user_action(status: &OsTurboStatus) {
     worker().record_user_action(status, worker().started.load(Ordering::Acquire));
+    // The bridge has no user-context logger or data dir (it runs as SYSTEM),
+    // so the app records both the human-readable line and the anonymous
+    // action-log entry for the operation the user just performed.
+    if status.enabled {
+        log::info!(
+            "[os_turbo] user enable: inspected={} applied={} pending={} skipped={} failures={}",
+            status.measured.inspected,
+            status.measured.applied,
+            status.measured.pending,
+            status.measured.skipped,
+            status.measured.failures
+        );
+        let affected = status.measured.applied;
+        record_os_turbo_action(|| {
+            crate::hw::os_turbo_log::ActionRecord::applied(
+                current_time_bucket(),
+                crate::hw::os_turbo_policy::PolicyAction::ThrottleAllowlistedBackground,
+            )
+            .with_affected(affected)
+        });
+    } else {
+        log::info!(
+            "[os_turbo] user disable: inspected={} restored={} skipped={} failures={}",
+            status.measured.inspected,
+            status.measured.restored,
+            status.measured.skipped,
+            status.measured.failures
+        );
+        let affected = status.measured.restored;
+        record_os_turbo_action(|| {
+            crate::hw::os_turbo_log::ActionRecord::rolled_back(
+                current_time_bucket(),
+                crate::hw::os_turbo_policy::RollbackReason::UserDisabled,
+            )
+            .with_affected(affected)
+        });
+    }
 }
 
 /// Wall-clock milliseconds (UNIX epoch) for `last_sweep_ms`.
@@ -1281,6 +1674,12 @@ async fn run_sweep() {
     #[cfg(windows)]
     {
         if sweep.drift_detected() && crate::elev_bridge::is_bridge_service_available() {
+            log::debug!(
+                "[os_turbo] drift: pending={} restored={} failed={} — re-applying through the bridge",
+                sweep.pending,
+                sweep.restored,
+                sweep.failures
+            );
             // Privileged writes go through the authenticated bridge ONLY —
             // never UAC, never a scheduled-task fallback.
             let refreshed = crate::elev_bridge::run_elevated_bridge_only(
@@ -1296,12 +1695,17 @@ async fn run_sweep() {
                     state.note_success();
                     sweep = status.measured.as_counts();
                 }
-                Err(_) => {
+                Err(error) => {
                     // Repeated bridge failures open a bounded backoff window.
+                    log::warn!("[os_turbo] drift re-apply failed: {error}");
                     sweep.failures = sweep.failures.saturating_add(1);
                     state.note_failure();
                 }
             }
+        } else if sweep.drift_detected() {
+            // Drift while the bridge is down: counted, no write attempted.
+            log::warn!("[os_turbo] drift detected but the elevation bridge is unavailable");
+            state.note_failure();
         } else {
             state.note_success();
         }
@@ -1312,30 +1716,34 @@ async fn run_sweep() {
     }
 
     state.end_sweep();
+    state.log_sweep(&sweep);
     state.record(&sweep, true);
 }
 
 /// Measure allowlisted candidates strictly by readback. Read-only — never
 /// writes, never dispatches; bounded by batch and sweep duration.
+///
+/// F2: candidates come from live process enumeration, not from the recovery
+/// snapshot, so a background process that started after enable is inspected
+/// (and then throttled by the refresh pass) on the very next sweep.
 #[cfg(windows)]
 fn measure_sweep() -> SweepCounts {
-    let Some(snapshot) = read_recovery_snapshot().ok().flatten() else {
-        // Enabled without recovery state: nothing to measure truthfully.
+    if !read_enabled_compat() {
         return SweepCounts::default();
-    };
+    }
+    let snapshot = read_recovery_snapshot().ok().flatten();
     let desired = throttling_state_snapshot(true);
     let deadline = std::time::Instant::now() + WORKER_MAX_SWEEP;
-    let mut outcomes = Vec::with_capacity(snapshot.processes.len().min(WORKER_MAX_BATCH));
-    for process in snapshot.processes.iter().take(WORKER_MAX_BATCH) {
+    let mut outcomes = Vec::with_capacity(WORKER_MAX_BATCH);
+    for (pid, _name) in discover_candidates()
+        .unwrap_or_default()
+        .into_iter()
+        .take(WORKER_MAX_BATCH)
+    {
         if std::time::Instant::now() >= deadline {
             break;
         }
-        outcomes.push(readback_outcome(
-            process.identity.pid,
-            &process.identity,
-            &process.original_state,
-            &desired,
-        ));
+        outcomes.push(measure_candidate(pid, snapshot.as_ref(), &desired));
     }
     aggregate_counts(outcomes, WORKER_MAX_BATCH)
 }
@@ -1357,17 +1765,66 @@ fn open_process_for_read(pid: u32) -> Result<windows::Win32::Foundation::HANDLE,
     }
 }
 
+/// Map an `OpenProcess` failure to an outcome: a process that no longer
+/// exists is "terminated" (skipped), never a failure (F3).
+#[cfg(windows)]
+fn open_failure_outcome(code: i32) -> ReadbackOutcome {
+    if open_error_means_process_gone(code) {
+        ReadbackOutcome::Skipped
+    } else {
+        ReadbackOutcome::Failed
+    }
+}
+
+/// Classify a readback against the states Turbo knows about.
+///
+/// Order matters: the throttled state is Turbo's own, the Windows default on
+/// a discovered candidate means "not throttled yet", and only a state that
+/// equals the recorded original is a genuine `Restored`.
+fn classify_readback(
+    state: &ProcessPowerStateSnapshot,
+    original: &ProcessPowerStateSnapshot,
+    desired: &ProcessPowerStateSnapshot,
+) -> ReadbackOutcome {
+    if state == desired {
+        ReadbackOutcome::Applied
+    } else if state == &ProcessPowerStateSnapshot::DEFAULT {
+        ReadbackOutcome::Pending
+    } else if state == original {
+        ReadbackOutcome::Restored
+    } else {
+        ReadbackOutcome::Other
+    }
+}
+
+/// `true` when this pre-enable state must be recorded so disable can undo it:
+/// it is neither the Windows default nor a state Turbo itself wrote.
+fn should_record_original(
+    state: &ProcessPowerStateSnapshot,
+    desired: &ProcessPowerStateSnapshot,
+) -> bool {
+    state != &ProcessPowerStateSnapshot::DEFAULT && state != desired
+}
+
+/// Power scheme to record in a snapshot. An earlier snapshot wins: replacing a
+/// stale snapshot must not overwrite the scheme Turbo changed days ago with
+/// the scheme Turbo itself activated.
+fn power_scheme_to_record(previous: Option<&OsTurboRecoverySnapshot>, active: u128) -> u128 {
+    previous
+        .map(|snapshot| snapshot.original_power_scheme)
+        .unwrap_or(active)
+}
+
 /// Read-only per-process readback used by the measure sweep.
 #[cfg(windows)]
-fn readback_outcome(
+fn measure_candidate(
     pid: u32,
-    identity: &ProcessIdentitySnapshot,
-    original: &ProcessPowerStateSnapshot,
+    snapshot: Option<&OsTurboRecoverySnapshot>,
     desired: &ProcessPowerStateSnapshot,
 ) -> ReadbackOutcome {
     let handle = match open_process_for_read(pid) {
         Ok(handle) => handle,
-        Err(_) => return ReadbackOutcome::Failed,
+        Err(code) => return open_failure_outcome(code),
     };
     let creation_time = match get_process_creation_time(handle) {
         Ok(creation_time) => creation_time,
@@ -1378,16 +1835,9 @@ fn readback_outcome(
             return ReadbackOutcome::Failed;
         }
     };
-    if !process_identity_matches(identity, pid, creation_time) {
-        unsafe {
-            windows::Win32::Foundation::CloseHandle(handle).ok();
-        }
-        return ReadbackOutcome::Skipped;
-    }
+    let original = original_state_for(snapshot, pid, creation_time);
     let outcome = match read_process_power_state(handle) {
-        Ok(state) if state == *desired => ReadbackOutcome::Applied,
-        Ok(state) if state == *original => ReadbackOutcome::Restored,
-        Ok(_) => ReadbackOutcome::Other,
+        Ok(state) => classify_readback(&state, &original, desired),
         Err(_) => ReadbackOutcome::Failed,
     };
     unsafe {
@@ -1396,43 +1846,78 @@ fn readback_outcome(
     outcome
 }
 
-/// Re-apply throttling to recovery-snapshot processes. Runs only inside the
-/// authenticated bridge (no UAC, no scheduled-task fallback). Bounded by the
-/// snapshot size, the batch cap and the per-sweep duration budget. Only
-/// touches allowlisted, identity-verified processes — never protected,
-/// security or update processes, and never EC/fan/power-limit registers.
+/// Re-apply throttling to every live allowlisted candidate. Runs only inside
+/// the authenticated bridge (no UAC, no scheduled-task fallback). Bounded by
+/// the batch cap and the per-sweep duration budget. Only touches allowlisted,
+/// identity-verified processes — never protected, security or update
+/// processes, and never EC/fan/power-limit registers.
+///
+/// F1/F2/F4: repairs a missing or stale recovery snapshot (preserving its
+/// recorded power scheme) and then throttles by discovery, so this is also
+/// the "apply now" path behind the toggle.
 pub fn refresh_os_turbo() -> HardwareResult<OsTurboStatus> {
     #[cfg(windows)]
     {
         if !read_enabled_compat() {
             return get_os_turbo();
         }
-        let snapshot = read_recovery_snapshot()?.ok_or_else(|| {
-            HardwareError::Other("OS Turbo is enabled but its recovery state is missing".into())
-        })?;
-        let desired = throttling_state_snapshot(true);
-        let deadline = std::time::Instant::now() + WORKER_MAX_SWEEP;
-        let mut outcomes = Vec::with_capacity(snapshot.processes.len().min(WORKER_MAX_BATCH));
-        for process in snapshot.processes.iter().take(WORKER_MAX_BATCH) {
-            if std::time::Instant::now() >= deadline {
-                break;
+
+        let previous = match read_recovery_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                log::warn!("[os_turbo] recovery snapshot unreadable ({error}) — recapturing");
+                None
             }
-            outcomes.push(throttle_readback(process, &desired));
+        };
+        let (mut snapshot, recaptured) = match previous {
+            Some(snapshot) => {
+                let (alive, expired) = count_live_entries(&snapshot.processes, identity_is_alive);
+                if snapshot_health(alive, expired) == SnapshotHealth::Stale {
+                    log::warn!(
+                        "[os_turbo] recovery snapshot is stale ({expired} recorded process(es) already exited) — recapturing"
+                    );
+                    (capture_recovery_snapshot(Some(&snapshot))?, true)
+                } else {
+                    (snapshot, false)
+                }
+            }
+            None => {
+                log::warn!(
+                    "[os_turbo] enabled but recovery snapshot is missing — capturing a fresh one"
+                );
+                (capture_recovery_snapshot(None)?, true)
+            }
+        };
+
+        let (counts, changed) = apply_to_live_candidates(&mut snapshot);
+        if recaptured || changed {
+            write_recovery_snapshot(&snapshot)?;
         }
-        let counts = aggregate_counts(outcomes, WORKER_MAX_BATCH);
+
         let power_plan = get_active_power_plan()?;
+        log::info!(
+            "[os_turbo] refresh: inspected={} applied={} pending={} restored={} skipped={} failures={} recaptured={recaptured}",
+            counts.inspected,
+            counts.applied,
+            counts.pending,
+            counts.restored,
+            counts.skipped,
+            counts.failures
+        );
         Ok(OsTurboStatus {
             enabled: true,
             throttled_processes: counts.applied,
             power_plan,
+            snapshot_stale: false,
             measured: OsTurboMeasuredStatus {
                 inspected: counts.inspected,
                 applied: counts.applied,
+                pending: counts.pending,
                 restored: counts.restored,
                 skipped: counts.skipped,
                 failures: counts.failures,
                 last_sweep_ms: sweep_timestamp_ms(),
-                worker_active: false,
+                worker_active: worker_active(),
             },
         })
     }
@@ -1442,47 +1927,164 @@ pub fn refresh_os_turbo() -> HardwareResult<OsTurboStatus> {
     }
 }
 
-/// Bridge-side per-process throttle-with-readback-verify helper.
+/// Throttle every live allowlisted candidate, readback-verified, recording any
+/// non-default original state in `snapshot` so disable can restore it.
+///
+/// Returns the counts and whether `snapshot` gained/lost entries.
 #[cfg(windows)]
-fn throttle_readback(
-    process: &ProcessRecoverySnapshot,
-    desired: &ProcessPowerStateSnapshot,
-) -> ReadbackOutcome {
-    let handle = match open_process_for_turbo(process.identity.pid) {
-        Ok(handle) => handle,
-        Err(_) => return ReadbackOutcome::Failed,
-    };
-    let creation_time = match get_process_creation_time(handle) {
-        Ok(creation_time) => creation_time,
-        Err(_) => {
+fn apply_to_live_candidates(snapshot: &mut OsTurboRecoverySnapshot) -> (SweepCounts, bool) {
+    let desired = throttling_state_snapshot(true);
+    let deadline = std::time::Instant::now() + WORKER_MAX_SWEEP;
+    let candidates = discover_candidates().unwrap_or_default();
+    let live_pids: Vec<u32> = candidates.iter().map(|(pid, _)| *pid).collect();
+    let mut outcomes = Vec::with_capacity(candidates.len().min(WORKER_MAX_BATCH));
+    let mut changed = false;
+
+    for (pid, process_name) in candidates.into_iter().take(WORKER_MAX_BATCH) {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let handle = match open_process_for_turbo(pid) {
+            Ok(handle) => handle,
+            Err(code) => {
+                outcomes.push(open_failure_outcome(code));
+                continue;
+            }
+        };
+        let creation_time = match get_process_creation_time(handle) {
+            Ok(creation_time) => creation_time,
+            Err(_) => {
+                unsafe {
+                    windows::Win32::Foundation::CloseHandle(handle).ok();
+                }
+                outcomes.push(ReadbackOutcome::Failed);
+                continue;
+            }
+        };
+        let current = match read_process_power_state(handle) {
+            Ok(state) => state,
+            Err(_) => {
+                unsafe {
+                    windows::Win32::Foundation::CloseHandle(handle).ok();
+                }
+                outcomes.push(ReadbackOutcome::Failed);
+                continue;
+            }
+        };
+        if current == desired {
+            outcomes.push(ReadbackOutcome::Applied);
             unsafe {
                 windows::Win32::Foundation::CloseHandle(handle).ok();
             }
-            return ReadbackOutcome::Failed;
+            continue;
         }
-    };
-    if !process_identity_matches(&process.identity, process.identity.pid, creation_time) {
+
+        // Record the pre-enable state only when it is something Turbo must undo
+        // later: not the Windows default, and not a state Turbo itself wrote.
+        if should_record_original(&current, &desired)
+            && find_snapshot_entry(Some(snapshot), pid, creation_time).is_none()
+            && snapshot.processes.len() < MAX_SNAPSHOT_PROCESSES
+        {
+            snapshot.processes.push(ProcessRecoverySnapshot {
+                identity: ProcessIdentitySnapshot {
+                    pid,
+                    creation_time,
+                    process_name,
+                },
+                original_state: current,
+            });
+            changed = true;
+        }
+
+        // set_process_power_state re-verifies by readback.
+        if set_process_power_state(handle, &desired).is_ok() {
+            outcomes.push(ReadbackOutcome::Applied);
+        } else {
+            outcomes.push(ReadbackOutcome::Failed);
+        }
         unsafe {
             windows::Win32::Foundation::CloseHandle(handle).ok();
         }
-        return ReadbackOutcome::Skipped;
     }
-    let outcome = match read_process_power_state(handle) {
-        Ok(current) if current == *desired => ReadbackOutcome::Applied,
-        Ok(_) => {
-            // set_process_power_state re-verifies by readback.
-            if set_process_power_state(handle, desired).is_ok() {
-                ReadbackOutcome::Applied
-            } else {
-                ReadbackOutcome::Failed
+
+    changed |= prune_snapshot_entries(snapshot, &live_pids);
+    (aggregate_counts(outcomes, WORKER_MAX_BATCH), changed)
+}
+
+/// Clear throttling on every live allowlisted candidate, restoring the state
+/// the snapshot recorded (the Windows default when it recorded nothing).
+///
+/// Returns the counts and whether any restore failed (the snapshot must then
+/// be retained so the caller can retry).
+#[cfg(windows)]
+fn restore_all(snapshot: Option<&OsTurboRecoverySnapshot>) -> (SweepCounts, bool) {
+    let desired = throttling_state_snapshot(true);
+    let deadline = std::time::Instant::now() + WORKER_MAX_SWEEP;
+    let candidates = discover_candidates().unwrap_or_default();
+    let live_pids: Vec<u32> = candidates.iter().map(|(pid, _)| *pid).collect();
+    let mut outcomes = Vec::new();
+    let mut restore_failed = false;
+
+    // Recorded processes that already exited have nothing to restore: count
+    // them as terminated (skipped), which is what they are.
+    if let Some(snapshot) = snapshot {
+        for entry in &snapshot.processes {
+            if !live_pids.contains(&entry.identity.pid) {
+                outcomes.push(ReadbackOutcome::Skipped);
             }
         }
-        Err(_) => ReadbackOutcome::Failed,
-    };
-    unsafe {
-        windows::Win32::Foundation::CloseHandle(handle).ok();
     }
-    outcome
+
+    for (pid, _name) in candidates.into_iter().take(WORKER_MAX_BATCH) {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let handle = match open_process_for_turbo(pid) {
+            Ok(handle) => handle,
+            Err(code) => {
+                outcomes.push(open_failure_outcome(code));
+                continue;
+            }
+        };
+        let creation_time = match get_process_creation_time(handle) {
+            Ok(creation_time) => creation_time,
+            Err(_) => {
+                unsafe {
+                    windows::Win32::Foundation::CloseHandle(handle).ok();
+                }
+                restore_failed = true;
+                outcomes.push(ReadbackOutcome::Failed);
+                continue;
+            }
+        };
+        let original = original_state_for(snapshot, pid, creation_time);
+        let outcome = match read_process_power_state(handle) {
+            Ok(state) if state == original => ReadbackOutcome::Restored,
+            Ok(state) if state == desired => {
+                if set_process_power_state(handle, &original).is_ok() {
+                    ReadbackOutcome::Restored
+                } else {
+                    restore_failed = true;
+                    ReadbackOutcome::Failed
+                }
+            }
+            // A foreign mask (set by something else) is not ours to clear.
+            Ok(_) => ReadbackOutcome::Skipped,
+            Err(_) => {
+                restore_failed = true;
+                ReadbackOutcome::Failed
+            }
+        };
+        unsafe {
+            windows::Win32::Foundation::CloseHandle(handle).ok();
+        }
+        outcomes.push(outcome);
+    }
+
+    (
+        aggregate_counts(outcomes, WORKER_MAX_BATCH + MAX_SNAPSHOT_PROCESSES),
+        restore_failed,
+    )
 }
 
 #[cfg(test)]
@@ -1533,10 +2135,79 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_is_not_replaced_after_first_capture() {
+    fn snapshot_liveness_distinguishes_live_from_exited_processes() {
         let snapshot = sample_snapshot();
-        assert!(super::snapshot_can_be_created(None));
-        assert!(!super::snapshot_can_be_created(Some(&snapshot)));
+        let entries = &snapshot.processes;
+
+        // The 2026-10-26 case: the recorded PID 42 no longer exists.
+        let (alive, expired) = super::count_live_entries(entries, |_| false);
+        assert_eq!((alive, expired), (0, 1));
+        assert_eq!(
+            super::snapshot_health(alive, expired),
+            super::SnapshotHealth::Stale,
+            "a snapshot whose processes all exited is stale"
+        );
+
+        // Same PID, different creation time → PID reuse, still stale.
+        let (alive, expired) = super::count_live_entries(entries, |identity| {
+            super::process_identity_matches(identity, identity.pid, identity.creation_time + 1)
+        });
+        assert_eq!((alive, expired), (0, 1));
+        assert_eq!(
+            super::snapshot_health(alive, expired),
+            super::SnapshotHealth::Stale
+        );
+
+        // Same PID and creation time → alive.
+        let (alive, expired) = super::count_live_entries(entries, |_| true);
+        assert_eq!((alive, expired), (1, 0));
+        assert_eq!(
+            super::snapshot_health(alive, expired),
+            super::SnapshotHealth::Current
+        );
+
+        // A partially dead snapshot still describes something real: keep it.
+        assert_eq!(super::snapshot_health(1, 7), super::SnapshotHealth::Current);
+        // No recorded processes (the normal case since F2) cannot rot.
+        assert_eq!(super::snapshot_health(0, 0), super::SnapshotHealth::Current);
+        assert_eq!(
+            super::count_live_entries(&[], |_| false),
+            (0, 0),
+            "an empty snapshot has nothing to check"
+        );
+    }
+
+    #[test]
+    fn startup_reconcile_matches_flag_with_snapshot_health() {
+        use super::{reconcile_action, ReconcileAction, SnapshotHealth};
+
+        assert_eq!(
+            reconcile_action(true, SnapshotHealth::Stale),
+            ReconcileAction::Reapply,
+            "enabled + dead snapshot must recapture and re-apply"
+        );
+        assert_eq!(
+            reconcile_action(true, SnapshotHealth::Missing),
+            ReconcileAction::Reapply
+        );
+        assert_eq!(
+            reconcile_action(false, SnapshotHealth::Stale),
+            ReconcileAction::CompleteDisable,
+            "a stale snapshot still holds the original power plan"
+        );
+        assert_eq!(
+            reconcile_action(false, SnapshotHealth::Current),
+            ReconcileAction::CompleteDisable,
+            "flag off with state on disk is an interrupted disable"
+        );
+        assert_eq!(
+            reconcile_action(false, SnapshotHealth::Missing),
+            ReconcileAction::Nothing
+        );
+        assert_eq!(
+            reconcile_action(true, SnapshotHealth::Current),
+            ReconcileAction::Nothing
+        );
     }
 
     #[test]
@@ -1555,11 +2226,20 @@ mod tests {
     }
 
     #[test]
-    fn missing_prior_state_fails_only_when_turbo_is_enabled() {
-        assert!(!super::disable_has_recovery_state(true, None));
-        assert!(super::disable_has_recovery_state(false, None));
-        let snapshot = sample_snapshot();
-        assert!(super::disable_has_recovery_state(true, Some(&snapshot)));
+    fn disable_restores_whenever_the_feature_was_active() {
+        assert!(
+            super::disable_requires_restore(true, false),
+            "enabled without a snapshot may still have throttled processes"
+        );
+        assert!(super::disable_requires_restore(true, true));
+        assert!(
+            super::disable_requires_restore(false, true),
+            "a snapshot with the flag off is an interrupted disable"
+        );
+        assert!(
+            !super::disable_requires_restore(false, false),
+            "nothing was applied and nothing is recorded"
+        );
     }
 
     #[cfg(windows)]
@@ -1667,7 +2347,13 @@ mod tests {
         })();
 
         let _ = child.kill();
-        let _ = child.wait();
+        // Bounded reap: the spawn contract forbids unbounded Child::wait.
+        // Same try_wait + deadline pattern the helper uses after a kill; on
+        // Windows the killed child is also reaped when the handle drops.
+        let reap_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < reap_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         result.expect("public process-power API should update disposable child");
     }
 
@@ -1691,6 +2377,7 @@ mod tests {
         let items = [
             Outcome::Applied,
             Outcome::Applied,
+            Outcome::Pending,
             Outcome::Restored,
             Outcome::Other,
             Outcome::Skipped,
@@ -1698,15 +2385,21 @@ mod tests {
             Outcome::Restored,
         ];
         let counts = aggregate_counts(items, items.len());
-        assert_eq!(counts.inspected, 7);
+        assert_eq!(counts.inspected, 8);
         assert_eq!(counts.applied, 2);
+        assert_eq!(counts.pending, 1);
         assert_eq!(counts.restored, 2);
         assert_eq!(counts.skipped, 1);
         assert_eq!(counts.failures, 1);
         assert_eq!(counts.other, 1);
         // Every inspected candidate lands in exactly one bucket.
         assert_eq!(
-            counts.applied + counts.restored + counts.other + counts.skipped + counts.failures,
+            counts.applied
+                + counts.pending
+                + counts.restored
+                + counts.other
+                + counts.skipped
+                + counts.failures,
             counts.inspected
         );
         // Identity-valid processes not in the throttled state → drift.
@@ -1717,6 +2410,190 @@ mod tests {
             ..SweepCounts::default()
         };
         assert!(!no_drift.drift_detected());
+    }
+
+    /// F3: failures are drift (work the SYSTEM bridge may still complete), but
+    /// a process that simply exited is not — it is `Skipped`.
+    #[test]
+    fn drift_counts_pending_and_live_failures_but_not_terminations() {
+        use super::SweepCounts;
+
+        let discovered = SweepCounts {
+            inspected: 3,
+            pending: 3,
+            ..SweepCounts::default()
+        };
+        assert!(
+            discovered.drift_detected(),
+            "new candidates need a re-apply"
+        );
+
+        let unreadable = SweepCounts {
+            inspected: 1,
+            failures: 1,
+            ..SweepCounts::default()
+        };
+        assert!(
+            unreadable.drift_detected(),
+            "a live unreadable process is drift"
+        );
+
+        let all_gone = SweepCounts {
+            inspected: 2,
+            skipped: 2,
+            ..SweepCounts::default()
+        };
+        assert!(
+            !all_gone.drift_detected(),
+            "terminated processes must never trigger a re-apply"
+        );
+
+        let healthy = SweepCounts {
+            inspected: 2,
+            applied: 2,
+            ..SweepCounts::default()
+        };
+        assert!(!healthy.drift_detected());
+    }
+
+    #[test]
+    fn discovered_default_state_is_pending_not_restored() {
+        use super::{classify_readback, ProcessPowerStateSnapshot as State, ReadbackOutcome as O};
+
+        let desired = State {
+            version: 1,
+            control_mask: 1,
+            state_mask: 1,
+        };
+        let foreign = State {
+            version: 1,
+            control_mask: 1,
+            state_mask: 0,
+        };
+
+        assert_eq!(
+            classify_readback(&desired, &State::DEFAULT, &desired),
+            O::Applied
+        );
+        // A live candidate Turbo never touched: work to do, not a regression.
+        assert_eq!(
+            classify_readback(&State::DEFAULT, &State::DEFAULT, &desired),
+            O::Pending
+        );
+        // A recorded non-default original that came back: drift.
+        assert_eq!(classify_readback(&foreign, &foreign, &desired), O::Restored);
+        // Same state, but nothing of ours recorded: foreign mask.
+        assert_eq!(
+            classify_readback(&foreign, &State::DEFAULT, &desired),
+            O::Other
+        );
+    }
+
+    #[test]
+    fn only_non_default_and_non_turbo_states_are_recorded() {
+        use super::{should_record_original, ProcessPowerStateSnapshot as State};
+
+        let desired = State {
+            version: 1,
+            control_mask: 1,
+            state_mask: 1,
+        };
+        let foreign = State {
+            version: 1,
+            control_mask: 1,
+            state_mask: 0,
+        };
+
+        assert!(!should_record_original(&State::DEFAULT, &desired));
+        assert!(
+            !should_record_original(&desired, &desired),
+            "Turbo's own state must never be stored as the original"
+        );
+        assert!(should_record_original(&foreign, &desired));
+    }
+
+    #[test]
+    fn recapture_keeps_the_previously_recorded_power_scheme() {
+        use super::{power_scheme_to_record, OsTurboRecoverySnapshot};
+
+        let original = 0x381b_4222_f694_41f0_9685_ff5b_b260_df2e;
+        let active = super::HIGH_PERFORMANCE_SCHEME;
+        let previous = OsTurboRecoverySnapshot {
+            version: super::SNAPSHOT_VERSION,
+            original_power_scheme: original,
+            processes: Vec::new(),
+        };
+
+        assert_eq!(
+            power_scheme_to_record(Some(&previous), active),
+            original,
+            "a stale snapshot's scheme is the only record of what Turbo changed"
+        );
+        assert_eq!(power_scheme_to_record(None, active), active);
+    }
+
+    #[test]
+    fn a_legacy_snapshot_never_restores_into_the_throttled_state() {
+        use super::{original_state_for, ProcessPowerStateSnapshot as State};
+
+        let mut snapshot = sample_snapshot();
+        assert_eq!(
+            original_state_for(Some(&snapshot), 42, 100),
+            snapshot.processes[0].original_state,
+            "a recorded non-default original is restored as recorded"
+        );
+
+        // A snapshot that (wrongly) recorded EcoQoS as the pre-Turbo state must
+        // not leave the process throttled after disable.
+        snapshot.processes[0].original_state = super::throttling_state_snapshot(true);
+        assert_eq!(original_state_for(Some(&snapshot), 42, 100), State::DEFAULT);
+
+        // An identity mismatch must never inherit another process's state.
+        assert_eq!(original_state_for(Some(&snapshot), 42, 101), State::DEFAULT);
+        assert_eq!(original_state_for(None, 42, 100), State::DEFAULT);
+    }
+
+    #[test]
+    fn terminated_pid_is_reported_as_gone_not_as_a_failure() {
+        use super::open_error_means_process_gone;
+
+        // ERROR_INVALID_PARAMETER: the PID does not exist.
+        assert!(open_error_means_process_gone(87));
+        // HRESULT_FROM_WIN32(87), what OpenProcess actually returns.
+        assert!(open_error_means_process_gone(0x8007_0057u32 as i32));
+        // ERROR_ACCESS_DENIED and HRESULT_FROM_WIN32(5): the process exists.
+        assert!(!open_error_means_process_gone(5));
+        assert!(!open_error_means_process_gone(0x8007_0005u32 as i32));
+        assert!(!open_error_means_process_gone(0));
+    }
+
+    #[test]
+    fn pruning_drops_entries_for_processes_that_are_gone() {
+        use super::{prune_snapshot_entries, ProcessRecoverySnapshot};
+
+        let mut snapshot = sample_snapshot();
+        snapshot.processes.push(ProcessRecoverySnapshot {
+            identity: super::ProcessIdentitySnapshot {
+                pid: 77,
+                creation_time: 900,
+                process_name: "OneDrive.exe".to_string(),
+            },
+            original_state: super::ProcessPowerStateSnapshot {
+                version: 1,
+                control_mask: 1,
+                state_mask: 0,
+            },
+        });
+
+        assert!(
+            !prune_snapshot_entries(&mut snapshot, &[42, 77]),
+            "nothing changed when every recorded process is still enumerated"
+        );
+        assert_eq!(snapshot.processes.len(), 2);
+
+        assert!(prune_snapshot_entries(&mut snapshot, &[77]));
+        assert_eq!(snapshot.processes.len(), 1);
+        assert_eq!(snapshot.processes[0].identity.pid, 77);
     }
 
     #[test]
@@ -1787,10 +2664,49 @@ mod tests {
     }
 
     #[test]
+    fn a_sweep_with_discovery_counts_processes_the_snapshot_never_recorded() {
+        use super::{aggregate_counts, classify_readback, ProcessPowerStateSnapshot as State};
+
+        // F2: the snapshot is empty (it only stores non-default originals), so
+        // a snapshot-driven sweep would inspect exactly zero processes. The
+        // sweep must instead inspect what is alive right now.
+        let empty_snapshot: Vec<(u32, State)> = Vec::new();
+        let desired = State {
+            version: 1,
+            control_mask: 1,
+            state_mask: 1,
+        };
+        let live = [
+            (9001u32, State::DEFAULT),
+            (9002u32, State::DEFAULT),
+            (9003u32, State::DEFAULT),
+        ];
+
+        let outcomes = live.iter().map(|(pid, state)| {
+            let original = empty_snapshot
+                .iter()
+                .find(|(snapshot_pid, _)| snapshot_pid == pid)
+                .map(|(_, recorded)| recorded.clone())
+                .unwrap_or(State::DEFAULT);
+            classify_readback(state, &original, &desired)
+        });
+        let counts = aggregate_counts(outcomes, super::WORKER_MAX_BATCH);
+
+        assert_eq!(counts.inspected, 3, "every live candidate is inspected");
+        assert_eq!(counts.pending, 3, "none of them is throttled yet");
+        assert_eq!(counts.applied, 0);
+        assert!(
+            counts.drift_detected(),
+            "discovered processes must schedule a re-apply"
+        );
+    }
+
+    #[test]
     fn measured_status_round_trips_to_sweep_counts() {
         let status = super::OsTurboMeasuredStatus {
-            inspected: 4,
+            inspected: 5,
             applied: 2,
+            pending: 1,
             restored: 1,
             skipped: 0,
             failures: 1,
@@ -1798,8 +2714,9 @@ mod tests {
             worker_active: true,
         };
         let counts = status.as_counts();
-        assert_eq!(counts.inspected, 4);
+        assert_eq!(counts.inspected, 5);
         assert_eq!(counts.applied, 2);
+        assert_eq!(counts.pending, 1);
         assert_eq!(counts.restored, 1);
         assert_eq!(counts.failures, 1);
         assert!(counts.drift_detected());

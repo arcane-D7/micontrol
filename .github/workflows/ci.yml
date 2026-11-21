@@ -69,9 +69,12 @@ jobs:
 
       # Exactly the same checks as the local health check (single source of
       # truth: scripts/health-check.mjs — no drift allowed between local & CI).
+      # `build` + `handle-leaks` were missing here: the vite build and the S67
+      # static handle-leak gate only ran locally, so a PR could pass CI with a
+      # broken bundle or a new unguarded kernel handle.
       - name: Health check (static)
         shell: pwsh
-        run: node scripts/health-check.mjs --step=version,fmt,clippy,tsc,lint,format,i18n,toolchain
+        run: node scripts/health-check.mjs --step=version,fmt,clippy,tsc,lint,format,build,i18n,handle-leaks,windowless-spawn,spawn-timeout,error-catalog,state-writes,service-calls,schtasks-calls,toolchain
 
   test:
     name: Tests + coverage

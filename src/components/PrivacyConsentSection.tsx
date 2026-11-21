@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
+import { Button } from './ui';
+import { Icon } from './ui/icons';
 
 interface PrivacyConsentSectionProps {
   consent: 'granted' | 'denied' | null;
@@ -28,7 +30,7 @@ export default function PrivacyConsentSection({
   // The consent state is shared with the AI features (same store) but this
   // card speaks plainly about crash reports only, with a real toggle. The
   // Sentry init in App.tsx listens for `micontrol:consent-changed` and
-  // enables/disables capture live — no restart needed.
+  // enables/disables capture live, no restart needed.
   const [crashReports, setCrashReports] = useState<'granted' | 'denied' | null>(consent);
   const [crashBusy, setCrashBusy] = useState(false);
   useEffect(() => {
@@ -64,9 +66,9 @@ export default function PrivacyConsentSection({
   };
   return (
     <>
-      {/* ── S49: Crash Reports (Sentry) — dedicated, plain-language card ── */}
+      {/* ── S49: Crash Reports (Sentry), dedicated, plain-language card ── */}
       <div className="card">
-        <div className="card-title">{t('consent.dialog.settingsTitle')}</div>
+        <h2 className="card-title">{t('consent.dialog.settingsTitle')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 14 }}>
           {t('consent.dialog.settingsDesc')}
         </p>
@@ -94,18 +96,22 @@ export default function PrivacyConsentSection({
         </label>
         <div className="badge" style={{ alignSelf: 'flex-start' }}>
           <span className={`badge ${crashReports === 'granted' ? 'success' : 'info'}`}>
-            {crashReports === 'granted'
-              ? `✓ ${t('consent.dialog.settingsEnabledAt')}`
-              : crashReports === 'denied'
-                ? `⊘ ${t('consent.dialog.settingsDisabledAt')}`
-                : `? ${t('privacy.consentNotSet')}`}
+            {crashReports === 'granted' ? (
+              <>
+                <Icon name="check" size={16} /> {t('consent.dialog.settingsEnabledAt')}
+              </>
+            ) : crashReports === 'denied' ? (
+              `⊘ ${t('consent.dialog.settingsDisabledAt')}`
+            ) : (
+              `? ${t('privacy.consentNotSet')}`
+            )}
           </span>
         </div>
       </div>
 
       {/* Privacy & Consent */}
       <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-title">{t('settings.privacy')}</div>
+        <h2 className="card-title">{t('settings.privacy')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 16 }}>
           {t('settings.consentStatus')}:{' '}
           <strong
@@ -126,32 +132,30 @@ export default function PrivacyConsentSection({
           </strong>
         </p>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <button className="btn-ghost btn-sm" onClick={() => void onOpenPrivacyPolicy()}>
-            📄 {t('settings.privacyPolicy')}
-          </button>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon="file-text"
+            onClick={() => void onOpenPrivacyPolicy()}
+          >
+            {t('settings.privacyPolicy')}
+          </Button>
           {consent === 'granted' && (
-            <button
-              className="btn-ghost btn-sm"
-              onClick={() => void onRevoke()}
-              style={{
-                color: 'var(--color-danger, #f87171)',
-                borderColor: 'var(--color-danger, #f87171)',
-              }}
-            >
-              🛑 {t('settings.revokeConsent')}
-            </button>
+            <Button variant="danger" size="sm" icon="ban" onClick={() => void onRevoke()}>
+              {t('settings.revokeConsent')}
+            </Button>
           )}
           {consent === 'denied' && (
-            <button className="btn-primary btn-sm" onClick={() => void onGrant()}>
-              ✅ {t('settings.grantConsent')}
-            </button>
+            <Button variant="primary" size="sm" icon="check-circle" onClick={() => void onGrant()}>
+              {t('settings.grantConsent')}
+            </Button>
           )}
         </div>
         <p
           className="text-xs"
           style={{ color: 'var(--color-text-muted)', marginTop: 12, marginBottom: 0 }}
         >
-          🔒 {t('settings.consentStatus')}{' '}
+          <Icon name="lock" size={14} /> {t('settings.consentStatus')}{' '}
           {consent === 'granted'
             ? t('settings.consentGranted')
             : consent === 'denied'
@@ -160,25 +164,22 @@ export default function PrivacyConsentSection({
         </p>
       </div>
 
-      {/* Data Deletion — GDPR Art.17 */}
+      {/* Data Deletion, GDPR Art.17 */}
       {onDeleteAllData && (
         <div className="card" style={{ marginTop: 16 }}>
-          <div className="card-title">{t('settings.dataDeletion')}</div>
+          <h2 className="card-title">{t('settings.dataDeletion')}</h2>
           <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 16 }}>
             {t('settings.dataDeletionDesc')}
           </p>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button
-              className="btn-ghost btn-sm"
+            <Button
+              variant="danger"
+              size="sm"
+              pending={isDeleting}
               onClick={() => void onDeleteAllData()}
-              disabled={isDeleting}
-              style={{
-                color: 'var(--color-danger, #f87171)',
-                borderColor: 'var(--color-danger, #f87171)',
-              }}
             >
-              {isDeleting ? t('settings.deleting') : `🗑 ${t('settings.deleteAllData')}`}
-            </button>
+              {isDeleting ? t('settings.deleting') : t('settings.deleteAllData')}
+            </Button>
           </div>
           {deleteResult && (
             <div
@@ -197,28 +198,35 @@ export default function PrivacyConsentSection({
                 border: `1px solid ${deleteResult.errors.length > 0 ? 'rgba(248,113,113,0.3)' : 'rgba(74,222,128,0.3)'}`,
               }}
             >
-              {deleteResult.errors.length > 0
-                ? `✗ ${t('settings.deleteError')}`
-                : `✓ ${t('settings.deleteSuccess')}`}
+              {deleteResult.errors.length > 0 ? (
+                <>
+                  <Icon name="x" size={16} /> {t('settings.deleteError')}
+                </>
+              ) : (
+                <>
+                  <Icon name="check" size={16} /> {t('settings.deleteSuccess')}
+                </>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {/* Data Export — GDPR Art.20 (S19-16) */}
+      {/* Data Export, GDPR Art.20 (S19-16) */}
       <div className="card" style={{ marginTop: 16 }}>
-        <div className="card-title">{t('settings.dataExport')}</div>
+        <h2 className="card-title">{t('settings.dataExport')}</h2>
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 16 }}>
           {t('settings.dataExportDesc')}
         </p>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button
-            className="btn-ghost btn-sm"
+          <Button
+            variant="ghost"
+            size="sm"
+            pending={isExporting}
             onClick={() => void handleExportData()}
-            disabled={isExporting}
           >
-            {isExporting ? t('settings.exporting') : `📦 ${t('settings.downloadData')}`}
-          </button>
+            {isExporting ? t('settings.exporting') : t('settings.downloadData')}
+          </Button>
         </div>
         {exportError && (
           <div
@@ -233,7 +241,7 @@ export default function PrivacyConsentSection({
               border: '1px solid rgba(248,113,113,0.3)',
             }}
           >
-            ✗ {exportError}
+            <Icon name="x" size={16} /> {exportError}
           </div>
         )}
       </div>

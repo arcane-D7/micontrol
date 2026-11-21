@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
+import { Icon } from './ui/icons';
 
 interface WifiNetwork {
   ssid: string;
@@ -15,6 +16,19 @@ interface WifiStatus {
   ssid: string | null;
   signal: number | null;
   interface: string | null;
+}
+
+/// The backend creates WPA2-PSK, WPA3-SAE or open profiles — an empty password
+/// can only fail for a secured network, so the UI blocks it.
+function requiresPassword(security: string): boolean {
+  return security !== 'Open' && security !== 'Unknown';
+}
+
+/// 802.1X/EAP and legacy WPA/TKIP cannot be provisioned by MiControl: the
+/// backend refuses them with an explicit reason, and the UI says so up front
+/// instead of offering a Connect button that cannot work.
+function isUnsupported(security: string): boolean {
+  return /enterprise|802\.1x|legacy/i.test(security);
 }
 
 export default function WiFiManager() {
@@ -45,19 +59,32 @@ export default function WiFiManager() {
     void loadData();
   }, [loadData]);
 
-  const handleConnect = async (ssid: string) => {
+  // The password box is shared by every row, so switching networks must not
+  // carry the previous network's passphrase over to the next one.
+  useEffect(() => {
+    setNewPassword('');
+  }, [selectedSsid]);
+
+  const handleConnect = async (ssid: string, security: string) => {
     setSelectedSsid(ssid);
     setConnecting(true);
     try {
-      await invoke('wifi_connect', { ssid, password: newPassword || null });
-      addToast({ message: `Connected to "${ssid}"`, type: 'success' });
+      // `security` is the label the scan reported. The backend uses it to build
+      // a matching profile (WPA2-PSK vs WPA3-SAE vs open) and refuses 802.1X
+      // with a real reason instead of failing to associate.
+      await invoke('wifi_connect', {
+        ssid,
+        password: newPassword || null,
+        security,
+      });
+      addToast({ message: t('wifi.toast.connected', { ssid }), type: 'success' });
       setNewPassword('');
       void loadData();
     } catch (e) {
       addToast({
-        message: `Connect error: ${String(e)}`,
+        message: t('wifi.toast.connectError', { error: String(e) }),
         type: 'error',
-        onRetry: () => handleConnect(ssid),
+        onRetry: () => handleConnect(ssid, security),
       });
     } finally {
       setConnecting(false);
@@ -67,11 +94,11 @@ export default function WiFiManager() {
   const handleDisconnect = async () => {
     try {
       await invoke('wifi_disconnect');
-      addToast({ message: 'Disconnected', type: 'info' });
+      addToast({ message: t('wifi.toast.disconnected'), type: 'info' });
       void loadData();
     } catch (e) {
       addToast({
-        message: `Disconnect error: ${String(e)}`,
+        message: t('wifi.toast.disconnectError', { error: String(e) }),
         type: 'error',
         onRetry: handleDisconnect,
       });
@@ -86,7 +113,9 @@ export default function WiFiManager() {
   if (loading) {
     return (
       <div className="card">
-        <div className="card-title">📶 {t('wifi.title')}</div>
+        <h2 className="card-title">
+          <Icon name="wifi" size={16} /> {t('wifi.title')}
+        </h2>
         <p className="page-subtitle">{t('common.loading')}</p>
       </div>
     );
@@ -94,7 +123,9 @@ export default function WiFiManager() {
 
   return (
     <div className="card">
-      <div className="card-title">📶 {t('wifi.title')}</div>
+      <h2 className="card-title">
+        <Icon name="wifi" size={16} /> {t('wifi.title')}
+      </h2>
       <p className="page-subtitle">
         {status?.connected && status.ssid
           ? `${t('wifi.connectedTo')}: ${status.ssid}`
@@ -152,11 +183,10 @@ export default function WiFiManager() {
               >
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 500 }}>
-                    {isHidden ? '🔒 ' : ''}
-                    {n.ssid}
+                    {isHidden && <Icon name="lock" size={12} />} {n.ssid}
                     {n.connected && (
                       <span style={{ color: 'var(--success)', marginLeft: 8 }}>
-                        ● {t('wifi.connected')}
+                        <Icon name="dot" size={8} /> {t('wifi.connected')}
                       </span>
                     )}
                   </div>
@@ -168,27 +198,46 @@ export default function WiFiManager() {
                 </div>
                 {selectedSsid === n.ssid && !n.connected && !isHidden && (
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <input
-                      className="text-input"
-                      type="password"
-                      placeholder={t('wifi.password')}
-                      aria-label={t('wifi.passwordLabel')}
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ width: 140, fontSize: 12 }}
-                    />
-                    <button
-                      className="btn btn-primary"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void handleConnect(n.ssid);
-                      }}
-                      disabled={connecting}
-                      style={{ padding: '4px 10px', fontSize: 12 }}
-                    >
-                      {connecting ? '...' : t('wifi.connect')}
-                    </button>
+                    {isUnsupported(n.security) ? (
+                      <span
+                        style={{ fontSize: 11, color: 'var(--text-dim)', maxWidth: 220 }}
+                        title={t('wifi.enterpriseUnsupported')}
+                      >
+                        {t('wifi.enterpriseUnsupported')}
+                      </span>
+                    ) : (
+                      <>
+                        <input
+                          className="text-input"
+                          type="password"
+                          placeholder={t('wifi.password')}
+                          aria-label={t('wifi.passwordLabel')}
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ width: 140, fontSize: 12 }}
+                        />
+                        <button
+                          className="btn btn-primary"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleConnect(n.ssid, n.security);
+                          }}
+                          // An empty password on a secured network can only
+                          // fail; don't send the request (and don't overwrite a
+                          // saved profile with an open one).
+                          disabled={connecting || (requiresPassword(n.security) && !newPassword)}
+                          title={
+                            requiresPassword(n.security) && !newPassword
+                              ? t('wifi.passwordRequired')
+                              : undefined
+                          }
+                          style={{ padding: '4px 10px', fontSize: 12 }}
+                        >
+                          {connecting ? '...' : t('wifi.connect')}
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -202,7 +251,7 @@ export default function WiFiManager() {
         onClick={handleRefresh}
         style={{ marginTop: 12, width: '100%' }}
       >
-        🔄 {t('wifi.refresh')}
+        <Icon name="refresh" size={16} /> {t('wifi.refresh')}
       </button>
     </div>
   );

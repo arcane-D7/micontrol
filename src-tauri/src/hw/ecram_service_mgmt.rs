@@ -13,12 +13,24 @@ use std::path::PathBuf;
 const SERVICE_NAME: &str = "IoTSvc";
 const SERVICE_EXE: &str = "ecram_service.exe";
 
-/// Prevent console window flash when spawning subprocesses.
+/// `taskkill /F /IM` inside the destructive recreation path. A force kill
+/// completes well under a second; 10 s is headroom for a slow kill without
+/// wedging the recreation (contract: UNIVERSAL-CONTRACTS.md section 4, every
+/// child wait is bounded).
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const TASKKILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Kill every process of one image name (best-effort `taskkill /F /IM`)
+/// through the canonical spawn helper: bounded wait, tree kill on timeout,
+/// CREATE_NO_WINDOW applied by the helper itself. The callers already treat
+/// a missing process as fine, so failures stay best-effort there but are
+/// logged.
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+fn kill_process_image(image: &str) -> Result<(), crate::util::process_spawn::SpawnError> {
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/F", "/IM", image]);
+    crate::util::process_spawn::run_capture(&mut cmd, TASKKILL_TIMEOUT).map(|_| ())
+}
 
 /// Status of the ecram_service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,28 +164,22 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
             log::info!(
                 "[ecram_service_mgmt] Pipe unusable — stopping & killing stale IoTService process"
             );
-            let _ = std::process::Command::new("sc")
-                .args(["stop", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            let _ = crate::util::win_service::stop_request(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "IoTService.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "ecram_service.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // Best-effort as before, but bounded: a spawn failure (timeout
+            // included) is logged and the child tree dies on expiry.
+            if let Err(e) = kill_process_image("IoTService.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill IoTService.exe failed: {e}");
+            }
+            if let Err(e) = kill_process_image("ecram_service.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill ecram_service.exe failed: {e}");
+            }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
 
         if need_copy {
             // Stop the service before replacing the file
-            let _ = std::process::Command::new("sc")
-                .args(["stop", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            let _ = crate::util::win_service::stop_request(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             // Backup original if not already backed up
@@ -227,30 +233,27 @@ pub fn ensure_service_running() -> Result<ServiceStatus, String> {
 
         if !matches {
             // Stop and reconfigure
-            let _ = std::process::Command::new("sc")
-                .args(["stop", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            let _ = crate::util::win_service::stop_request(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             // Kill any lingering process
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "IoTService.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/IM", "ecram_service.exe"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // Best-effort as before, but bounded: a spawn failure (timeout
+            // included) is logged and the child tree dies on expiry.
+            if let Err(e) = kill_process_image("IoTService.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill IoTService.exe failed: {e}");
+            }
+            if let Err(e) = kill_process_image("ecram_service.exe") {
+                log::warn!("[ecram_service_mgmt] taskkill ecram_service.exe failed: {e}");
+            }
             std::thread::sleep(std::time::Duration::from_secs(1));
 
             // Delete and recreate the service with the correct path.
             // Using `sc config binPath=` with quoted paths is unreliable;
-            // deleting and recreating is more robust.
-            let _ = std::process::Command::new("sc")
-                .args(["delete", SERVICE_NAME])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // deleting and recreating is more robust. DeleteService is
+            // asynchronous in the SCM: the sleeps below let a marked-for-
+            // delete entry settle before the recreate (the install path is
+            // the only user of this branch and runs elevated).
+            let _ = crate::util::win_service::delete(SERVICE_NAME);
             std::thread::sleep(std::time::Duration::from_secs(2));
 
             install_service(SERVICE_NAME, &target_exe)?;
@@ -446,17 +449,14 @@ fn find_driverstore_iot_service_exe() -> Option<String> {
     None
 }
 
-/// Check if a Windows service exists.
+/// Check if a Windows service exists: the SCM is the authority (`P1`: the
+/// named pipe is only evidence about the data path).
 fn service_exists(name: &str) -> bool {
     #[cfg(windows)]
     {
-        use std::process::Command;
-        let output = Command::new("sc")
-            .args(["query", name])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match output {
-            Ok(o) => o.status.success(),
+        match crate::util::win_service::query(name) {
+            // 1060 is the SCM's own answer; any other failure is NOT absence.
+            Ok(info) => info.state != crate::util::win_service::ServiceState::Absent,
             Err(_) => false,
         }
     }
@@ -467,34 +467,15 @@ fn service_exists(name: &str) -> bool {
     }
 }
 
-/// Get the binary path of a Windows service (from `sc qc`).
+/// Get the binary path of a Windows service (the stored BINARY_PATH_NAME,
+/// verbatim: quotes and trailing arguments kept).
 #[cfg(windows)]
 fn get_service_bin_path(name: &str) -> Option<String> {
-    use std::process::Command;
-    let output = Command::new("sc")
-        .args(["qc", name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Parse line: "        BINARY_PATH_NAME   : C:\path\to\exe.exe"
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("BINARY_PATH_NAME") {
-            if let Some(idx) = trimmed.rfind(':') {
-                let path = trimmed[idx + 1..].trim();
-                if !path.is_empty() {
-                    return Some(path.to_string());
-                }
-            }
-        }
-    }
-    None
+    // On error fall back to None exactly like the old parse did: the caller
+    // treats "unknown" as "does not match" and repairs the service.
+    crate::util::win_service::query(name)
+        .ok()
+        .and_then(|info| info.bin_path)
 }
 
 #[cfg(not(windows))]
@@ -502,56 +483,42 @@ fn get_service_bin_path(_name: &str) -> Option<String> {
     None
 }
 
-/// Install a Windows service.
+/// Install a Windows service (elevated; runs from the bridge service or the
+/// installer hook).
 #[cfg(windows)]
 fn install_service(name: &str, exe_path: &str) -> Result<(), String> {
-    use std::process::Command;
+    use crate::util::win_service::{self, CreateSpec, ServiceErrorControl, ServiceStartType};
 
     // Create the service. binPath MUST be the QUOTED path + `service` token —
     // empirically required on the live machine: a bare binPath (`X.exe`)
-    // makes `sc start` fail with error 2 "cannot find the file specified"
+    // makes the start fail with error 2 "cannot find the file specified"
     // even when the file exists. The quotes + token are the only form that
     // reliably reaches RUNNING (verified across installs/repairs).
     let bin_path = format!("\"{}\" service", exe_path);
-    let output = Command::new("sc")
-        .args([
-            "create",
-            name,
-            "binPath=",
-            &bin_path,
-            "start=",
-            "auto",
-            "DisplayName=",
-            "MiControl IoT Bridge Service",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to create service: {e}"))?;
+    win_service::create(
+        name,
+        &CreateSpec {
+            binary_path: bin_path,
+            display_name: "MiControl IoT Bridge Service".to_string(),
+            start_type: ServiceStartType::Auto,
+            error_control: ServiceErrorControl::Normal,
+            deps: Vec::new(),
+        },
+    )
+    // LocalSystem is the CreateServiceW default account: the old
+    // `sc config obj= LocalSystem` re-statement was redundant and is gone.
+    .map_err(|e| format!("Failed to create service: {e}"))?;
 
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let out = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("sc create failed: {err} {out}"));
+    // Failure actions to auto-restart (`sc failure reset= 86400 actions=
+    // restart/5000/restart/10000/restart/30000`); best-effort like before.
+    let actions = [
+        win_service::FailureAction::restart(5000),
+        win_service::FailureAction::restart(10000),
+        win_service::FailureAction::restart(30000),
+    ];
+    if let Err(e) = win_service::set_failure_actions(name, &actions, 86400) {
+        log::warn!("[ecram_service_mgmt] failure actions not set for {name}: {e}");
     }
-
-    // Set the service to run as LocalSystem
-    let _ = Command::new("sc")
-        .args(["config", name, "obj=", "LocalSystem"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    // Set failure actions to auto-restart
-    let _ = Command::new("sc")
-        .args([
-            "failure",
-            name,
-            "reset=",
-            "86400",
-            "actions=",
-            "restart/5000/restart/10000/restart/30000",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
 
     log::info!(
         "[ecram_service_mgmt] Service '{}' installed at {}",
@@ -566,27 +533,11 @@ fn install_service(_name: &str, _exe_path: &str) -> Result<(), String> {
     Err("Service installation is only supported on Windows".to_string())
 }
 
-/// Start a Windows service.
+/// Start a Windows service. `start` tolerates ERROR_SERVICE_ALREADY_RUNNING
+/// (1056) like the old `sc start` + text check did.
 #[cfg(windows)]
 fn start_service(name: &str) -> Result<(), String> {
-    use std::process::Command;
-
-    let output = Command::new("sc")
-        .args(["start", name])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Failed to start service: {e}"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        let out = String::from_utf8_lossy(&output.stdout);
-        // Service may already be running — check
-        if out.contains("already running") || out.contains("1056") || err.contains("1056") {
-            return Ok(());
-        }
-        return Err(format!("sc start failed: {err} {out}"));
-    }
-
+    crate::util::win_service::start(name).map_err(|e| format!("Failed to start service: {e}"))?;
     log::info!("[ecram_service_mgmt] Service '{}' started", name);
     Ok(())
 }
@@ -594,4 +545,69 @@ fn start_service(name: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 fn start_service(_name: &str) -> Result<(), String> {
     Err("Service management is only supported on Windows".to_string())
+}
+
+// ── C2a: bounded spawn tests ─────────────────────────────────────────────────
+
+#[cfg(all(test, windows))]
+mod ecram_service_mgmt_spawn_tests {
+    use crate::util::process_spawn::{self, SpawnError};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// A child sleeping past its budget answers SpawnError::Timeout and the
+    /// process is really dead, not orphaned behind the timed-out wait. This
+    /// pins the contract every taskkill in the recreation path now relies on.
+    #[test]
+    fn ecram_service_mgmt_timeout_kills_sleeping_child() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let start = Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, Duration::from_millis(500))
+            .expect_err("a sleeping child must hit the timeout");
+        assert!(
+            matches!(err, SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "kill took too long: {:?}",
+            start.elapsed()
+        );
+
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        assert!(
+            !out.stdout_str().contains("ping.exe"),
+            "ping.exe still alive after timeout kill: {}",
+            out.stdout_str()
+        );
+    }
+
+    /// The kill helper stays best-effort for a missing image (taskkill's
+    /// nonzero exit is a result, not a spawn error), and no direct child-wait
+    /// calls remain in this file: every spawn goes through process_spawn.
+    #[test]
+    fn ecram_service_mgmt_no_direct_child_waits() {
+        super::kill_process_image("mi_control_no_such_image_xyz")
+            .expect("taskkill on a missing image is not a spawn failure");
+
+        let src = include_str!("ecram_service_mgmt.rs");
+        // Assembled from parts so this test's own source text cannot match
+        // the tokens it forbids.
+        let direct_waits = [
+            format!(".{}{}{}", "out", "put", "()"),
+            format!(".{}{}{}", "sta", "tus", "()"),
+            format!(".{}{}", "wait", "()"),
+        ];
+        for token in &direct_waits {
+            assert!(
+                !src.contains(token.as_str()),
+                "direct child wait present: {token}"
+            );
+        }
+    }
 }

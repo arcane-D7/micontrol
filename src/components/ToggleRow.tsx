@@ -1,43 +1,38 @@
+import Switch from './ui/switch';
+
 interface ToggleRowProps {
   label: string;
   desc?: string;
+  /** Semântica escondida do controlo — vira um "i" ao lado do rótulo. */
+  hint?: string;
+  hintLabel?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   disabled?: boolean;
 }
 
-export default function ToggleRow({ label, desc, checked, onChange, disabled }: ToggleRowProps) {
+/**
+ * ToggleRow — agora uma linha do primitivo `Switch` (o dono único do controlo).
+ * A API não mudou: `label`/`desc`/`checked`/`onChange`/`disabled`.
+ */
+export default function ToggleRow({
+  label,
+  desc,
+  hint,
+  hintLabel,
+  checked,
+  onChange,
+  disabled,
+}: ToggleRowProps) {
   return (
-    <div
-      className="toggle"
-      role="switch"
-      tabIndex={disabled ? -1 : 0}
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => {
-        if (!disabled) onChange(!checked);
-      }}
-      onKeyDown={(e) => {
-        if (!disabled && (e.key === 'Enter' || e.key === ' ')) {
-          e.preventDefault();
-          onChange(!checked);
-        }
-      }}
-    >
-      <div className="toggle-info">
-        <div className="toggle-name">{label}</div>
-        {desc && <div className="toggle-desc">{desc}</div>}
-      </div>
-      <label className="toggle-switch" onClick={(e) => e.stopPropagation()}>
-        <input
-          type="checkbox"
-          checked={checked}
-          disabled={disabled}
-          onChange={(e) => onChange(e.target.checked)}
-        />
-        <span className="toggle-track" />
-        <span className="toggle-knob" />
-      </label>
-    </div>
+    <Switch
+      label={label}
+      desc={desc}
+      hint={hint}
+      hintLabel={hintLabel}
+      checked={checked}
+      onChange={onChange}
+      disabled={disabled}
+    />
   );
 }

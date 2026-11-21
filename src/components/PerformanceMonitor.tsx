@@ -1,5 +1,6 @@
 import { t } from '../hooks/useI18n';
 import type { FanInfo, SystemInfo, PerformanceMode, PerformanceResult } from '../types/hardware';
+import { Icon } from './ui/icons';
 
 interface Props {
   fan: FanInfo | null;
@@ -74,7 +75,7 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
 
   const cpuTemp = fan?.cpu_temp_celsius ?? null;
   const gpuTemp = fan?.gpu_temp_celsius ?? null;
-  const fanRpm = fan?.speed_rpm ?? 0;
+  const fanRpm = fan?.speed_rpm ?? null;
   const tdp = fan?.tdp_watts ?? null;
   const cpuLoad = systemInfo?.cpu_usage ?? null;
   const gpuLoad = systemInfo?.gpu_usage ?? null;
@@ -102,7 +103,7 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
 
   return (
     <div className="card">
-      <div className="card-title">{t('performance.monitor.title')}</div>
+      <h2 className="card-title">{t('performance.monitor.title')}</h2>
 
       <div
         style={{
@@ -170,17 +171,17 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
           }
         />
 
-        {/* Fan */}
+        {/* Fan — `null` RPM means "no sensor", which is not the same as 0 */}
         <Metric
           label={t('performance.monitor.fan')}
           value={
-            fanRpm > 0 ? (
+            fanRpm != null ? (
               <span style={{ color: 'var(--text)' }}>{fanRpm.toLocaleString()}</span>
             ) : (
               <span style={{ color: 'var(--text-dim)', fontSize: 16 }}>N/A</span>
             )
           }
-          sub={fanRpm > 0 ? t('performance.monitor.rpm') : t('performance.monitor.noWmiSensor')}
+          sub={fanRpm != null ? t('performance.monitor.rpm') : t('performance.monitor.noWmiSensor')}
         />
       </div>
 
@@ -199,9 +200,15 @@ export default function PerformanceMonitor({ fan, systemInfo, currentMode, lastR
           }}
         >
           <span className={`badge ${lastResult.success ? 'success' : 'error'}`}>
-            {lastResult.success
-              ? `✓ ${t('performance.monitor.modeActive')}`
-              : `✗ ${t('performance.monitor.failed')}`}
+            {lastResult.success ? (
+              <>
+                <Icon name="check" size={16} /> {t('performance.monitor.modeActive')}
+              </>
+            ) : (
+              <>
+                <Icon name="x" size={16} /> {t('performance.monitor.failed')}
+              </>
+            )}
           </span>
           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {t('performance.monitor.via')}{' '}

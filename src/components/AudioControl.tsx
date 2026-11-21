@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '../contexts/ToastContext';
 import { t } from '../hooks/useI18n';
+import { debounceCommit, resolveVolumeIntent } from '../lib/audioVolume';
 import type { AudioVolumeResult } from '../types/hardware';
+import { Icon } from './ui/icons';
 
 interface AudioDevice {
   name: string;
@@ -26,6 +28,9 @@ interface AudioControlProps {
   onSetDefaultDevice?: (deviceId: string) => Promise<void>;
 }
 
+/** One IPC write per gesture instead of one per pixel (audit P3). */
+const VOLUME_COMMIT_DELAY_MS = 150;
+
 export default function AudioControl({
   audioState,
   loading,
@@ -34,16 +39,84 @@ export default function AudioControl({
   onSetDefaultDevice,
 }: AudioControlProps) {
   const [devices, setDevices] = useState<AudioDeviceList | null>(null);
+  const [switchingId, setSwitchingId] = useState<string | null>(null);
+  // Value shown while the user drags. The parent only learns about the change
+  // after the debounced commit, so without this the thumb would snap back to
+  // the polled value mid-gesture.
+  const [dragVolume, setDragVolume] = useState<number | null>(null);
   const { addToast } = useToast();
-  // Dirty flag: while the user is dragging the slider, suppress poll-driven
-  // updates so the thumb doesn't jump back to the stale polled value.
-  const isAdjustingRef = useRef(false);
 
-  // Derive local state from the batched hardware poll (useHardware).
-  // While the user is actively dragging the slider, ignore polled updates so
-  // the thumb stays under the cursor until the optimistic update lands.
-  const volume = isAdjustingRef.current ? (audioState?.volume ?? 50) : (audioState?.volume ?? 50);
+  // Volume comes straight from the batched hardware poll (useHardware); the
+  // optimistic update in `setMasterVolume` keeps it in step after a commit.
+  const volume = audioState?.volume ?? 50;
   const muted = audioState?.muted ?? false;
+  const shownVolume = dragVolume ?? volume;
+
+  // Latest props for the debounced commit, which outlives the render that
+  // created it.
+  const latest = useRef({ muted, onVolumeChange, onMuteToggle });
+  useEffect(() => {
+    latest.current = { muted, onVolumeChange, onMuteToggle };
+  }, [muted, onVolumeChange, onMuteToggle]);
+
+  // Set once we unmute during a gesture: the polled `muted` flag lags behind
+  // the endpoint, so without this a second commit in the same drag would
+  // unmute again and toast twice.
+  const unmutedByDrag = useRef(false);
+  useEffect(() => {
+    if (!muted) unmutedByDrag.current = false;
+  }, [muted]);
+
+  const mounted = useRef(true);
+  useEffect(() => {
+    // Re-armed on every mount: StrictMode mounts, unmounts and mounts again.
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  /**
+   * Apply a slider value: unmute first when the endpoint is muted (Windows
+   * behaviour — dragging the slider is an explicit "I want to hear this"),
+   * then write the volume.
+   */
+  const commitVolume = useMemo(
+    () =>
+      debounceCommit<number>(async (next) => {
+        const {
+          muted: isMuted,
+          onVolumeChange: applyVolume,
+          onMuteToggle: applyMute,
+        } = latest.current;
+        const intent = resolveVolumeIntent(next, isMuted && !unmutedByDrag.current);
+        try {
+          if (intent.unmute) {
+            await applyMute(false);
+            unmutedByDrag.current = true;
+            addToast({ message: t('audio.unmutedByVolume'), type: 'info' });
+          }
+          await applyVolume(intent.volume / 100);
+        } catch (e) {
+          if (mounted.current) setDragVolume(null);
+          addToast({ message: `${t('audio.volumeError')}: ${String(e)}`, type: 'error' });
+        }
+      }, VOLUME_COMMIT_DELAY_MS),
+    [addToast],
+  );
+
+  // Never lose a queued change when the tab unmounts mid-gesture.
+  useEffect(
+    () => () => {
+      void commitVolume.flush();
+    },
+    [commitVolume],
+  );
+
+  // Drop the local override once the polled state agrees with it.
+  useEffect(() => {
+    if (dragVolume !== null && volume === dragVolume) setDragVolume(null);
+  }, [volume, dragVolume]);
 
   const loadAudioDevices = async () => {
     try {
@@ -61,20 +134,38 @@ export default function AudioControl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleVolumeChange = async (newVolume: number) => {
-    isAdjustingRef.current = true;
-    try {
-      // onVolumeChange expects 0-1 fraction (setMasterVolume contract)
-      await onVolumeChange(newVolume / 100);
-    } catch (e) {
-      addToast(`Volume error: ${String(e)}`, 'error');
-    } finally {
-      // Re-enable sync after a short delay to let the 2s poll catch up.
-      setTimeout(() => {
-        isAdjustingRef.current = false;
-      }, 500);
-    }
+  const handleSliderInput = (next: number) => {
+    setDragVolume(next);
+    commitVolume(next);
   };
+
+  const flushVolume = () => {
+    void commitVolume.flush();
+  };
+
+  /**
+   * Switch the default playback endpoint, then re-enumerate so the check mark moves to
+   * the device that actually became default (Windows may refuse or pick a
+   * different device than requested).
+   */
+  async function handleSetDefaultDevice(deviceId: string) {
+    if (!onSetDefaultDevice || switchingId !== null) return;
+    setSwitchingId(deviceId);
+    try {
+      await onSetDefaultDevice(deviceId);
+      await loadAudioDevices();
+    } catch {
+      addToast({
+        message: t('audio.setDefaultError'),
+        type: 'error',
+        onRetry: () => {
+          void handleSetDefaultDevice(deviceId);
+        },
+      });
+    } finally {
+      setSwitchingId(null);
+    }
+  }
 
   const handleMuteToggle = async () => {
     try {
@@ -84,11 +175,21 @@ export default function AudioControl({
     }
   };
 
-  const volumeIcon = muted ? '🔇' : volume > 66 ? '🔊' : volume > 33 ? '🔉' : '🔈';
+  const volumeIcon = muted ? (
+    <Icon name="volume-x" size={16} />
+  ) : volume > 66 ? (
+    <Icon name="volume-high" size={16} />
+  ) : volume > 33 ? (
+    <Icon name="volume-low" size={16} />
+  ) : (
+    <Icon name="volume-low" size={16} />
+  );
 
   return (
     <div className="card">
-      <div className="card-title">{t('audio.title')}</div>
+      <h2 className="card-title">
+        <Icon name="music" size={16} /> {t('audio.title')}
+      </h2>
       <p className="page-subtitle">{t('audio.subtitle')}</p>
 
       {/* Volume Slider */}
@@ -113,13 +214,27 @@ export default function AudioControl({
           type="range"
           min={0}
           max={100}
-          value={muted ? 0 : volume}
-          onChange={(e) => handleVolumeChange(Number(e.target.value))}
+          // Always the real volume: forcing 0 while muted made the thumb
+          // unusable (audit P2-C).
+          value={shownVolume}
+          onChange={(e) => handleSliderInput(Number(e.target.value))}
+          onPointerUp={flushVolume}
+          onKeyUp={flushVolume}
+          onBlur={flushVolume}
           disabled={loading}
+          aria-label={t('audio.volume')}
+          aria-valuetext={muted ? `${shownVolume}% — ${t('audio.muted')}` : `${shownVolume}%`}
           style={{ flex: 1, accentColor: 'var(--accent)' }}
         />
-        <span style={{ minWidth: 40, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-          {muted ? t('audio.muted') : `${volume}%`}
+        <span
+          style={{
+            minWidth: 72,
+            textAlign: 'right',
+            fontVariantNumeric: 'tabular-nums',
+            fontSize: 13,
+          }}
+        >
+          {muted ? `${shownVolume}% · ${t('audio.muted')}` : `${shownVolume}%`}
         </span>
       </div>
 
@@ -165,8 +280,13 @@ export default function AudioControl({
             <button
               key={d.id}
               className="stat-row"
-              disabled={d.is_default || !onSetDefaultDevice}
-              onClick={() => onSetDefaultDevice?.(d.id)}
+              disabled={d.is_default || !onSetDefaultDevice || switchingId !== null}
+              onClick={() => void handleSetDefaultDevice(d.id)}
+              aria-label={
+                d.is_default
+                  ? `${d.name} — ${t('audio.defaultDevice')}`
+                  : `${d.name} — ${t('audio.setAsDefault')}`
+              }
               style={{
                 padding: '6px 8px',
                 borderRadius: 'var(--r-xs)',
@@ -178,6 +298,7 @@ export default function AudioControl({
                 cursor: d.is_default || !onSetDefaultDevice ? 'default' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
+                opacity: switchingId === d.id ? 0.6 : 1,
               }}
             >
               <span style={{ flex: 1, fontSize: 13 }}>{d.name}</span>

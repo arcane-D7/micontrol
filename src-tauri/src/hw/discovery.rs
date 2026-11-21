@@ -721,13 +721,18 @@ fn probe_stylus_hid() -> Option<String> {
 }
 
 /// Try to open each known IoT pipe path and return the first that connects.
+///
+/// This field is consumed by the **binary MCPI** client
+/// (`iotservice::send_ipc_message`). Our custom `ecram_service` pipe speaks
+/// JSON and must NOT be listed here: sending a 16-byte MCPI header to it made
+/// the service wait forever for a `}`, which in turn made the app's recovery
+/// force-kill the service (SCM event 7031). It has its own probe,
+/// `ecram::is_pipe_broker_available()`.
 fn probe_iot_pipe() -> Option<String> {
     let candidates = [
         r"\\.\pipe\LOCAL\IoTService_IPC_Broker",
         r"\\.\pipe\IoTService",
         r"\\.\pipe\LOCAL\IoTDriver",
-        // Our custom ecram_service pipe — provides ECRAM access without XPM
-        r"\\.\pipe\ecram_service",
     ];
     for path in &candidates {
         if std::fs::metadata(path).is_ok() {

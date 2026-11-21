@@ -1,7 +1,7 @@
 //! System information queries (CPU, memory, OS version).
 //!
-//! Uses PDH for CPU usage and WMI for memory and OS details,
-//! with caching via `OnceLock` and periodic refresh.
+//! CPU and GPU usage come from the shared PDH engine (`util::pdh`), memory
+//! and OS details from WMI, with caching via `OnceLock` and periodic refresh.
 
 use crate::hw::errors::HardwareResult;
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,11 @@ use std::sync::{Mutex, OnceLock};
 // the intuitive number shown in Windows Task Manager Performance tab.
 //
 // NOTE: We deliberately do NOT use "% Processor Utility" because on Intel hybrid
-// architectures (Panther Lake, Meteor Lake, Arrow Lake — all with P-cores +
+// architectures (Panther Lake, Meteor Lake, Arrow Lake - all with P-cores +
 // E-cores + LP-E-cores), that counter normalises by each core's max-turbo
 // frequency.  When LP-E-cores run background OS tasks at moderate clock speeds,
 // their per-core "utility" contribution inflates the _Total aggregate far above
-// the scheduling-based percentage — producing readings like 38% when Task Manager
+// the scheduling-based percentage - producing readings like 38% when Task Manager
 // shows 6%.  % Processor Time is immune to this because it only tracks idle vs
 // non-idle time, independent of P-state frequency.
 // We use the same background PDH poller pattern as the GPU.
@@ -37,97 +37,34 @@ fn ensure_cpu_poller() {
 
 fn cpu_pdh_poller_thread() {
     #[cfg(windows)]
-    // SAFETY: Dynamic loading of pdh.dll via libloading and calling its FFI
-    // functions (PdhOpenQueryW, PdhAddEnglishCounterW, PdhCollectQueryData,
-    // PdhGetFormattedCounterValue, PdhCloseQuery). The function pointers are
-    // obtained from the Library::get calls and are valid for the library's
-    // lifetime (leaked via Box::leak). Path strings are null-terminated wide
-    // strings backed by Vecs. The query and counter handles are PDH-managed
-    // opaque types. The val_buf is sized to match the PDH_FMT_COUNTERVALUE
-    // layout (16 bytes on x64) and all reads go through safe from_ne_bytes.
-    unsafe {
-        use libloading::{Library, Symbol};
-        type FnOpenQuery =
-            unsafe extern "system" fn(*const std::ffi::c_void, usize, *mut isize) -> u32;
-        type FnAddCounter = unsafe extern "system" fn(isize, *const u16, usize, *mut isize) -> u32;
-        type FnCollect = unsafe extern "system" fn(isize) -> u32;
-        type FnGetValue = unsafe extern "system" fn(isize, u32, *mut u32, *mut u8) -> u32;
-        type FnClose = unsafe extern "system" fn(isize) -> u32;
+    {
+        use crate::util::pdh::{self, CounterPath};
 
-        let lib: &'static Library = match Library::new("pdh.dll") {
-            Ok(l) => Box::leak(Box::new(l)),
-            Err(_) => return,
-        };
-        let open_q: Symbol<'static, FnOpenQuery> = match lib.get(b"PdhOpenQueryW\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let add_c: Symbol<'static, FnAddCounter> = match lib.get(b"PdhAddEnglishCounterW\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let collect: Symbol<'static, FnCollect> = match lib.get(b"PdhCollectQueryData\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let get_val: Symbol<'static, FnGetValue> = match lib.get(b"PdhGetFormattedCounterValue\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let close_q: Symbol<'static, FnClose> = match lib.get(b"PdhCloseQuery\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-
-        let mut query: isize = 0;
-        if open_q(std::ptr::null(), 0, &mut query) != 0 {
+        // Single PDH engine (util::pdh): one query owned by this poller
+        // thread, no global lock, RAII close on every exit path.
+        let Ok(mut query) = pdh::PdhQuery::open() else {
             return;
-        }
+        };
+        // Primary: Processor Information provider (Vista+), scheduling-based
+        // %; fallback: legacy Processor provider (always available).
+        let counter = match query.add_english_counter(&CounterPath::cpu_processor_time()) {
+            Ok(c) => c,
+            Err(_) => match query.add_english_counter(&CounterPath::cpu_processor_time_legacy()) {
+                Ok(c) => c,
+                Err(_) => return, // query dropped here, closing the handle
+            },
+        };
 
-        // Primary: Processor Information provider (Vista+) — scheduling-based %.
-        let path: Vec<u16> = "\\Processor Information(_Total)\\% Processor Time\0"
-            .encode_utf16()
-            .collect();
-        let mut counter: isize = 0;
-        if add_c(query, path.as_ptr(), 0, &mut counter) != 0 {
-            // Fallback: legacy Processor provider (XP-era, always available)
-            let path2: Vec<u16> = "\\Processor(_Total)\\% Processor Time\0"
-                .encode_utf16()
-                .collect();
-            if add_c(query, path2.as_ptr(), 0, &mut counter) != 0 {
-                close_q(query);
-                return;
-            }
-        }
-
-        collect(query); // baseline for rate counter
-
-        // PDH_FMT_COUNTERVALUE (x64): CStatus u32 (4b) | pad (4b) | doubleValue f64 (8b)
-        const PDH_FMT_DOUBLE: u32 = 0x00000200;
-        let mut val_buf = [0u8; 16];
-        let mut dummy_type: u32 = 0;
-
+        query.collect().ok(); // baseline for rate counter
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            collect(query);
-            if get_val(
-                counter,
-                PDH_FMT_DOUBLE,
-                &mut dummy_type,
-                val_buf.as_mut_ptr(),
-            ) != 0
-            {
-                continue;
-            }
-            let c_status = u32::from_ne_bytes(val_buf[0..4].try_into().unwrap_or([1; 4]));
-            if c_status > 1 {
-                continue;
-            }
-            let pct = f64::from_ne_bytes(val_buf[8..16].try_into().unwrap_or([0; 8]));
-            if pct.is_finite() {
-                if let Some(cache) = CPU_USAGE_CACHE.get() {
-                    if let Ok(mut g) = cache.lock() {
-                        *g = pct.clamp(0.0, 100.0);
+            query.collect().ok();
+            if let Ok(value) = query.formatted_double(counter) {
+                if value.is_usable() {
+                    if let Some(cache) = CPU_USAGE_CACHE.get() {
+                        if let Ok(mut g) = cache.lock() {
+                            *g = value.value.clamp(0.0, 100.0);
+                        }
                     }
                 }
             }
@@ -164,164 +101,47 @@ fn ensure_gpu_poller() {
 
 fn gpu_pdh_poller_thread() {
     #[cfg(windows)]
-    // SAFETY: Dynamic loading of pdh.dll via libloading and calling its FFI
-    // functions (PdhOpenQueryW, PdhAddEnglishCounterW, PdhCollectQueryData,
-    // PdhGetFormattedCounterArrayW, PdhCloseQuery). Function pointers are
-    // obtained from Library::get and are valid for the library's lifetime
-    // (leaked via Box::leak). Path strings are null-terminated wide strings
-    // backed by Vecs. The query and counter handles are PDH-managed opaque
-    // types. Buffer reads use from_ne_bytes with fallback defaults. The
-    // instance name pointer (name_ptr) is validated to be within the buffer
-    // bounds before dereferencing, preventing out-of-bounds reads.
-    unsafe {
-        use libloading::{Library, Symbol};
+    {
+        use crate::util::pdh::{self, CounterPath};
 
-        // Function types from pdh.dll
-        type FnOpenQuery =
-            unsafe extern "system" fn(*const std::ffi::c_void, usize, *mut isize) -> u32;
-        type FnAddCounter = unsafe extern "system" fn(isize, *const u16, usize, *mut isize) -> u32;
-        type FnCollect = unsafe extern "system" fn(isize) -> u32;
-        type FnGetArray = unsafe extern "system" fn(isize, u32, *mut u32, *mut u32, *mut u8) -> u32;
-        type FnClose = unsafe extern "system" fn(isize) -> u32;
-
-        // Box::leak keeps the library loaded for the process lifetime (this
-        // thread never exits, so the lib is always needed).
-        let lib: &'static Library = match Library::new("pdh.dll") {
-            Ok(l) => Box::leak(Box::new(l)),
-            Err(_) => return,
-        };
-
-        let open_q: Symbol<'static, FnOpenQuery> = match lib.get(b"PdhOpenQueryW\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let add_c: Symbol<'static, FnAddCounter> = match lib.get(b"PdhAddEnglishCounterW\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let collect: Symbol<'static, FnCollect> = match lib.get(b"PdhCollectQueryData\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let get_arr: Symbol<'static, FnGetArray> = match lib.get(b"PdhGetFormattedCounterArrayW\0")
-        {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-        let close_q: Symbol<'static, FnClose> = match lib.get(b"PdhCloseQuery\0") {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-
-        let mut query: isize = 0;
-        if open_q(std::ptr::null(), 0, &mut query) != 0 {
+        // Single PDH engine (util::pdh): one persistent query on this thread
+        // samples every 1.5 s and writes the aggregated 3D-engine sum to the
+        // cache; get_system_info() reads the cache instantly.
+        let Ok(mut query) = pdh::PdhQuery::open() else {
             return;
-        }
+        };
+        // All GPU Engine instances (*); the loop below sums the 3D engines.
+        let Ok(counter) = query.add_english_counter(&CounterPath::gpu_engine_utilization()) else {
+            return; // query dropped here, closing the handle
+        };
 
-        // Use all GPU Engine instances (*) and filter for "3D" in the loop below
-        let path: Vec<u16> = "\\GPU Engine(*)\\Utilization Percentage\0"
-            .encode_utf16()
-            .collect();
-        let mut counter: isize = 0;
-        if add_c(query, path.as_ptr(), 0, &mut counter) != 0 {
-            close_q(query);
-            return;
-        }
-
-        // First collection establishes the baseline for rate counters
-        collect(query);
-
-        const PDH_FMT_DOUBLE: u32 = 0x00000200;
-        const PDH_MORE_DATA: u32 = 0x800007D2;
-        // PDH_FMT_COUNTERVALUE_ITEM_W layout on x64:
-        //   offset  0 : szName     LPWSTR (pointer, 8 bytes)
-        //   offset  8 : CStatus    DWORD  (4 bytes)
-        //   offset 12 : _pad               (4 bytes alignment)
-        //   offset 16 : doubleValue f64    (8 bytes)
-        //   total   24 bytes
-        const ITEM_SIZE: usize = 24;
+        // First collection establishes the baseline for rate counters.
+        query.collect().ok();
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            collect(query);
+            query.collect().ok();
 
-            // First call: get required buffer size.
-            // PdhGetFormattedCounterArrayW signature:
-            //   (hCounter, dwFormat, lpdwBufferSize, lpdwItemCount, ItemBuffer)
-            let mut buf_size: u32 = 0; // lpdwBufferSize — receives required bytes
-            let mut item_count: u32 = 0; // lpdwItemCount  — receives number of items
-            let st = get_arr(
-                counter,
-                PDH_FMT_DOUBLE,
-                &mut buf_size,
-                &mut item_count,
-                std::ptr::null_mut(),
-            );
-            if st != PDH_MORE_DATA || buf_size == 0 || item_count == 0 {
-                continue;
-            }
+            let items = match query.formatted_array(counter, pdh::MAX_ARRAY_BYTES) {
+                Ok(items) => items,
+                Err(_) => continue,
+            };
 
-            // Second call: fill the buffer (buf_size bytes allocated).
-            let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
-            if get_arr(
-                counter,
-                PDH_FMT_DOUBLE,
-                &mut buf_size,
-                &mut item_count,
-                buf.as_mut_ptr(),
-            ) != 0
-            {
-                continue;
-            }
-
-            let n = item_count as usize;
-            if buf.len() < n * ITEM_SIZE {
-                continue;
-            }
-
-            let buf_base = buf.as_ptr() as usize;
-            let mut total = 0.0f64;
-            for i in 0..n {
-                let base = i * ITEM_SIZE;
-                let c_status =
-                    u32::from_ne_bytes(buf[base + 8..base + 12].try_into().unwrap_or([0xff; 4]));
-                // Accept valid (0) or new (1) data
-                if c_status > 1 {
-                    continue;
-                }
-                let val =
-                    f64::from_ne_bytes(buf[base + 16..base + 24].try_into().unwrap_or([0; 8]));
-                if !val.is_finite() || val < 0.0 {
-                    continue;
-                }
-                // Filter: only 3D-engine instances.
-                // PDH \GPU Engine(*)\Utilization Percentage has one instance per
-                // (PID × LUID × phys × eng × engtype).  Summing all PID instances
-                // for the same physical engine gives the correct total scheduling
-                // time for that engine \u2014 equivalent to Task Manager's "GPU" column.
-                // Each process gets a time-slice on the shared hardware engine; the
-                // sum of their slices = total engine busy time.  Values are clamped
-                // to 100 below so simultaneous use across engines never over-reports.
-                let name_ptr =
-                    usize::from_ne_bytes(buf[base..base + 8].try_into().unwrap_or([0; 8]));
-                let contains_3d = if name_ptr >= buf_base && name_ptr + 2 <= buf_base + buf.len() {
-                    let off = name_ptr - buf_base;
-                    let wchars: Vec<u16> = buf[off..]
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .take(256)
-                        .map(|c| u16::from_ne_bytes(*c))
-                        .take_while(|&w| w != 0)
-                        .collect();
-                    String::from_utf16_lossy(&wchars).contains("3D")
-                } else {
-                    false
-                };
-                if contains_3d {
-                    total += val;
-                }
-            }
+            // Filter: only 3D-engine instances. PDH exposes one instance per
+            // (PID x LUID x phys x eng x engtype). Summing all PID instances
+            // for the same physical engine gives the correct total scheduling
+            // time for that engine, equivalent to Task Manager's "GPU" column:
+            // each process gets a time slice on the shared hardware engine and
+            // the sum of their slices is the total engine busy time. Values
+            // are clamped below so simultaneous use across engines never
+            // over-reports.
+            let total: f64 = items
+                .iter()
+                .filter(|item| pdh::is_usable_status(item.status))
+                .filter(|item| item.value.is_finite() && item.value >= 0.0)
+                .filter(|item| item.name.contains("3D"))
+                .map(|item| item.value)
+                .sum();
 
             let clamped = total.clamp(0.0, 100.0);
             if let Some(cache) = GPU_USAGE_CACHE.get() {
@@ -368,7 +188,7 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
 
         let info = wmi_cache::with_cimv2(|wmi| {
             // ── Static CPU identity (name, cores, threads) ────────────────────
-            // Each WMI query is independent — a failure in one should NOT fail
+            // Each WMI query is independent - a failure in one should NOT fail
             // the entire SystemInfo struct. We log and use fallback values.
             let cpus: Vec<HashMap<String, wmi::Variant>> = wmi
                 .raw_query(
@@ -380,7 +200,7 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
                 });
             let cpu = cpus.into_iter().next().unwrap_or_default();
 
-            // ── CPU usage — PDH "% Processor Utility" matches Task Manager ──────
+            // ── CPU usage - PDH "% Processor Utility" matches Task Manager ──────
             // Unlike WMI Win32_PerfFormattedData_PerfOS_Processor which reports raw
             // idle-vs-busy time, % Processor Utility accounts for P-state frequency
             // scaling, matching the value shown in Windows 11 Task Manager.
@@ -408,7 +228,7 @@ pub fn get_system_info() -> HardwareResult<SystemInfo> {
             // ── Dedicated VRAM used ───────────────────────────────────────────
             // The correct class name is Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory
             // (not Win32_PerfFormattedData_GPUAdapterMemory_GPUAdapter which doesn't exist)
-            // This class may not exist on systems without GPU perf counter drivers —
+            // This class may not exist on systems without GPU perf counter drivers -
             // don't fail the entire struct if it's missing.
             let vram_used_mb = wmi
                 .raw_query::<HashMap<String, wmi::Variant>>(

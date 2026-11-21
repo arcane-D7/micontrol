@@ -18,6 +18,7 @@
 mod ctx;
 mod elev;
 mod install;
+mod marker;
 mod payload;
 mod shortcut;
 mod sys;
