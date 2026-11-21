@@ -57,6 +57,7 @@ describe('ChargingProtection feedback', () => {
         applied: true,
         source: 'firmware',
         detail: null,
+        last_verified_ms: Date.now(),
       },
     });
 
@@ -81,6 +82,7 @@ describe('ChargingProtection feedback', () => {
         applied: false,
         source: 'firmware',
         detail: null,
+        last_verified_ms: Date.now(),
       },
     });
 
@@ -108,12 +110,39 @@ describe('ChargingProtection feedback', () => {
         applied: false,
         source: 'registry',
         detail: 'WMAA read failed: Access is denied. (0x80070005)',
+        last_verified_ms: null,
       },
     });
 
     expect(screen.getByTestId('limit-not-applied')).toHaveTextContent(
       t('charging.state.unconfirmed'),
     );
+  });
+
+  it('shows the age of the last confirmation when a cached value covers a failed read-back', () => {
+    // O cenário f13: o read-back ao vivo falhou (pipe ocupado + tarefa
+    // ausente), mas uma confirmação de há 4 min ainda descreve o hardware.
+    setup({
+      threshold: 80,
+      level: 94,
+      care: true,
+      battery: { level: 94, is_charging: false, is_plugged: true },
+      limitState: {
+        requested_threshold: 80,
+        hardware_threshold: null,
+        hardware_code: null,
+        applied: false,
+        source: 'cache',
+        detail: 'charge_limit_read refused: unknown op',
+        last_verified_ms: Date.now() - 4 * 60_000,
+      },
+    });
+
+    expect(screen.getByTestId('limit-not-applied')).toHaveTextContent(
+      t('charging.state.unconfirmedCached', { minutes: 4 }),
+    );
+    // Nunca a mensagem antiga sem idade quando há cache.
+    expect(screen.queryByText(t('charging.state.unconfirmed'))).not.toBeInTheDocument();
   });
 
   it('reports charging up to the limit when the level is below it', () => {

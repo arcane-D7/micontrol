@@ -604,7 +604,8 @@
       "unplugged": "Running on battery",
       "why": "The battery is at {level}%, above the {limit}% limit, so charging stays paused. It resumes when the level drops below {limit}%.",
       "notApplied": "Not applied: the firmware reports {hardware}%, you asked for {limit}%. The embedded controller did not take the new limit.",
-      "unconfirmed": "Could not read the limit back from the firmware — it may not be applied."
+      "unconfirmed": "Could not read the limit back from the firmware — it may not be applied.",
+      "unconfirmedCached": "Last confirmed {minutes} min ago by a firmware read-back since then unavailable. The limit is probably still applied; retry to confirm."
     },
     "appliedLimit": "Limit of {level}% applied at {time} — charging stops at {level}%",
     "appliedCareOn": "Battery protection on at {time} — charging stops at {limit}%",

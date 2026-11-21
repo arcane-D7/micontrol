@@ -181,6 +181,12 @@ export default function ChargingProtection({
   const paused = careEnabled && display < 100 && currentLevel > display && applied === true;
   // Pedido ≠ hardware: ou o firmware respondeu outra coisa, ou não respondeu.
   const notApplied = careEnabled && display < 100 && applied === false;
+  // Idade da última confirmação honesta (com cache, a confirmação tem minutos).
+  const verifiedAgeMin = (() => {
+    const at = limitState?.last_verified_ms;
+    if (limitState?.source !== 'cache' || at == null) return null;
+    return Math.max(0, Math.round((Date.now() - at) / 60000));
+  })();
 
   const derived = (() => {
     if (failure) return null;
@@ -299,7 +305,9 @@ export default function ChargingProtection({
                   hardware: limitState?.hardware_threshold ?? 100,
                   limit: display,
                 })
-              : t('charging.state.unconfirmed')}
+              : verifiedAgeMin != null
+                ? t('charging.state.unconfirmedCached', { minutes: verifiedAgeMin })
+                : t('charging.state.unconfirmed')}
           </span>
         </div>
       )}

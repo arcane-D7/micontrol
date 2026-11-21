@@ -80,10 +80,16 @@ pub struct ChargeLimitState {
     pub hardware_code: Option<u8>,
     /// True only when the firmware read succeeded and equals the request.
     pub applied: bool,
-    /// `firmware` | `registry` (read failed) — how much of this is real.
+    /// `firmware` (live read) | `cache` (last confirmed value, see
+    /// `last_verified_ms`) | `registry` (nothing read) — how much is real.
     pub source: String,
-    /// Why the hardware value is unknown, when it is.
+    /// Why the hardware value is unknown or stale, when it is.
     pub detail: Option<String>,
+    /// When the firmware value was last confirmed by a real read (ms since
+    /// epoch). `None` = never confirmed. Lets the UI say how old the
+    /// confirmation is instead of presenting a cached value as fresh.
+    #[serde(default)]
+    pub last_verified_ms: Option<u64>,
 }
 
 /// Map a user-facing percentage to the firmware level code.
@@ -234,6 +240,10 @@ pub fn set_charging_threshold(threshold: u8) -> HardwareResult<ChargingResult> {
 /// Never fails: an unreadable firmware is reported as
 /// `hardware_threshold: None, applied: false, detail: Some(..)` so the UI can
 /// say "not confirmed on the hardware" instead of inventing a value.
+///
+/// Runs inside the elevated dispatcher (`get_charge_limit_state` command), so
+/// this is the direct WMAA read. The app-side fast path (ecram_service pipe
+/// first, cache second) is [`read_charge_limit_state_app`].
 pub fn get_charge_limit_state() -> ChargeLimitState {
     let requested = get_requested_threshold();
     match read_hardware_threshold() {
@@ -244,6 +254,7 @@ pub fn get_charge_limit_state() -> ChargeLimitState {
             applied: hardware == requested,
             source: "firmware".to_string(),
             detail: None,
+            last_verified_ms: Some(crate::util::auth::now_ms()),
         },
         Err(e) => ChargeLimitState {
             requested_threshold: requested,
@@ -252,6 +263,7 @@ pub fn get_charge_limit_state() -> ChargeLimitState {
             applied: false,
             source: "registry".to_string(),
             detail: Some(e.to_string()),
+            last_verified_ms: None,
         },
     }
 }
@@ -276,6 +288,181 @@ pub fn get_requested_threshold() -> u8 {
 /// whether the hardware accepted it.
 pub fn get_charging_threshold() -> HardwareResult<u8> {
     Ok(get_requested_threshold())
+}
+
+// ── App-side readback: the ecram_service pipe first ─────────────────────────
+//
+// The WMAA read needs admin (`MICommonInterface` instance queries answer
+// 0x80041003 to non-elevated callers), so the readback used to travel the
+// whole elevated ladder: bridge pipe -> scheduled task. Production evidence
+// (tauri-app.log, 2026-11-21 05:47-06:49): seven `wmi_ec_read failed after
+// 1258-2676 ms` with "scheduled task 'MiControlElevated' is unavailable" while
+// the SAME minute's bridge dispatches answered the identical read in 8-620 ms.
+// The pipe client fails fast when all bridge pipe instances are busy (the
+// slow-poll bursts open several connections at once), the retry burns out, the
+// task is missing, and the whole read is lost. The UI then rendered "Could not
+// be read back from the firmware" although the driver and the WMI provider
+// were healthy throughout.
+//
+// `ecram_service` is a second, independent SYSTEM transport that is already
+// alive (IoTSvc): it answers the same WMAA read over `\\.\pipe\ecram_service`
+// (op `charge_limit_read`) in single-digit milliseconds. The app reads the
+// limit through that pipe first and only falls back to the elevated ladder
+// when the service pipe cannot answer (service down, or an old deploy without
+// the op). Every successful read still lands in the firmware cache, so the
+// hold supervisor and the UI keep working across a transient outage.
+
+/// Attempts for the service-pipe readback. Two tries cover a busy accept
+/// window; each miss is cheap (the pipe answers in ~1-10 ms or fails fast),
+/// and the elevated fallback keeps the total well inside the command budget.
+#[cfg(windows)]
+pub const SERVICE_PIPE_READ_ATTEMPTS: u32 = 2;
+/// Pause between the two service-pipe attempts.
+#[cfg(windows)]
+pub const SERVICE_PIPE_READ_RETRY_DELAY_MS: u64 = 150;
+
+/// Parse the `ecram_service` `charge_limit_read` response (pure, unit-tested).
+///
+/// Response shape: `{"ok":true,"cmd":"charge_limit_read","percent":80,"code":1}`.
+/// `ok:false` carries the service-side reason verbatim (which is how an old
+/// deployed service without the op reports itself: "unknown op").
+#[cfg(windows)]
+pub fn parse_service_pipe_limit_response(response: &str) -> HardwareResult<u8> {
+    let value: serde_json::Value = serde_json::from_str(response.trim()).map_err(|e| {
+        HardwareError::Ecram(format!(
+            "charge_limit_read: invalid JSON from ecram_service: {e}"
+        ))
+    })?;
+    if value.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        let reason = value
+            .get("error")
+            .and_then(|s| s.as_str())
+            .unwrap_or("ecram_service refused without a reason");
+        return Err(HardwareError::Ecram(format!(
+            "charge_limit_read refused: {reason}"
+        )));
+    }
+    let percent = value
+        .get("percent")
+        .and_then(|p| p.as_u64())
+        .ok_or_else(|| {
+            HardwareError::Ecram("charge_limit_read answered without a percent".to_string())
+        })?;
+    let percent = u8::try_from(percent).map_err(|_| {
+        HardwareError::Ecram(format!(
+            "charge_limit_read returned invalid percent {percent}"
+        ))
+    })?;
+    // The percentage must round-trip through the firmware's expressible set;
+    // anything else is a firmware surprise, not a limit.
+    if percent_to_code(percent).is_none() {
+        return Err(HardwareError::Ecram(format!(
+            "charge_limit_read returned invalid percent {percent}"
+        )));
+    }
+    Ok(percent)
+}
+
+/// Read the charge limit from the firmware through the `ecram_service` pipe.
+///
+/// Blocking named-pipe IO: callers must not run this on the async runtime
+/// (wrap in the fixed pool, like every other sync read). A successful read
+/// refreshes the app-process firmware cache. Retries cover only transport
+/// failures; a final `ok:false` from the service (bad answer, unknown op on an
+/// old deploy) is returned as-is so the caller can fall back or report.
+#[cfg(windows)]
+pub fn read_hardware_threshold_via_service_pipe() -> HardwareResult<u8> {
+    const REQUEST: &str = r#"{"op":"charge_limit_read"}"#;
+    let mut last_err = "ecram_service pipe did not answer".to_string();
+    for attempt in 0..SERVICE_PIPE_READ_ATTEMPTS {
+        match crate::hw::ecram::send_pipe_request(REQUEST) {
+            Ok(response) => {
+                // A definitive service answer (success or error) is final:
+                // retrying cannot change it.
+                let percent = parse_service_pipe_limit_response(&response)?;
+                note_firmware_value(percent);
+                return Ok(percent);
+            }
+            Err(e) => {
+                last_err = format!("ecram_service pipe: {e}");
+                if attempt + 1 < SERVICE_PIPE_READ_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        SERVICE_PIPE_READ_RETRY_DELAY_MS,
+                    ));
+                }
+            }
+        }
+    }
+    Err(HardwareError::Ecram(last_err))
+}
+
+/// Build the app-facing [`ChargeLimitState`] from one read attempt plus the
+/// last confirmed value (pure, clock-injected, unit-tested).
+///
+/// * a successful read is `firmware` truth, stamped now;
+/// * a failed read falls back to a still-fresh cache value, reported as
+///   `cache` with its ORIGINAL confirmation time (never re-stamped);
+/// * nothing readable at all is the honest `registry` state.
+fn charge_limit_state_from(
+    requested: u8,
+    read: HardwareResult<u8>,
+    now_ms: u64,
+    cached: Option<(u8, u64)>,
+) -> ChargeLimitState {
+    match read {
+        Ok(hardware) => ChargeLimitState {
+            requested_threshold: requested,
+            hardware_threshold: Some(hardware),
+            hardware_code: percent_to_code(hardware),
+            applied: hardware == requested,
+            source: "firmware".to_string(),
+            detail: None,
+            last_verified_ms: Some(now_ms),
+        },
+        Err(e) => {
+            if let Some((value, at)) = cached {
+                ChargeLimitState {
+                    requested_threshold: requested,
+                    hardware_threshold: Some(value),
+                    hardware_code: percent_to_code(value),
+                    applied: value == requested,
+                    source: "cache".to_string(),
+                    detail: Some(e.to_string()),
+                    last_verified_ms: Some(at),
+                }
+            } else {
+                ChargeLimitState {
+                    requested_threshold: requested,
+                    hardware_threshold: None,
+                    hardware_code: None,
+                    applied: false,
+                    source: "registry".to_string(),
+                    detail: Some(e.to_string()),
+                    last_verified_ms: None,
+                }
+            }
+        }
+    }
+}
+
+/// The app-side charge-limit read: ecram_service pipe first, cached value
+/// second, nothing invented.
+///
+/// `source: "registry"` means neither the pipe nor the cache could answer and
+/// the caller should consider the elevated fallback. Blocking (pipe IO): run
+/// through the fixed pool.
+#[cfg(windows)]
+pub fn read_charge_limit_state_app() -> ChargeLimitState {
+    let requested = get_requested_threshold();
+    let now = crate::util::auth::now_ms();
+    let cached = last_firmware(now);
+    let read = read_hardware_threshold_via_service_pipe();
+    charge_limit_state_from(requested, read, now, cached)
+}
+
+#[cfg(not(windows))]
+pub fn read_charge_limit_state_app() -> ChargeLimitState {
+    get_charge_limit_state()
 }
 
 // ── Reconciliation (P1-2, recheck 2026-11-11) ───────────────────────────────
@@ -629,11 +816,18 @@ fn firmware_cache() -> std::sync::MutexGuard<'static, Option<(u8, u64)>> {
 /// The WMAA read runs in the *elevated* process, so the app process cannot
 /// observe it directly; every path that receives a [`ChargeLimitState`] from
 /// the bridge must call this, otherwise the hold state falls back to `Unknown`.
+///
+/// A state that carries `last_verified_ms` is recorded with THAT time, never
+/// re-stamped: re-stamping a cached value on every poll would inflate its
+/// freshness forever and hide a dead read path behind "confirmed 1 min ago".
 pub fn note_firmware_state(state: &ChargeLimitState) {
     #[cfg(windows)]
     {
         if let Some(value) = state.hardware_threshold {
-            *firmware_cache() = Some((value, crate::util::auth::now_ms()));
+            let at = state
+                .last_verified_ms
+                .unwrap_or_else(crate::util::auth::now_ms);
+            *firmware_cache() = Some((value, at));
         }
     }
     #[cfg(not(windows))]
@@ -717,29 +911,44 @@ pub async fn reconcile_charge_limit(trigger: &str) -> ReconcileAction {
 pub async fn reconcile_charge_limit_with(trigger: &str, force: bool) -> ReconcileAction {
     use crate::elev_bridge;
 
-    // Read the truth. A failed read is not a reason to write.
-    let state: ChargeLimitState =
-        match elev_bridge::run_elevated_no_prompt("get_charge_limit_state", serde_json::json!({}))
+    // Read the truth. The ecram_service pipe answers in single-digit ms with
+    // no elevation; the elevated ladder stays as the fallback for a service
+    // that is down or predates the `charge_limit_read` op. The pipe read is
+    // blocking IO, so it goes through the fixed pool (S69).
+    let state: ChargeLimitState = match crate::util::fixed_pool::run_blocking_timeout(
+        std::time::Duration::from_secs(8),
+        read_charge_limit_state_app,
+    )
+    .await
+    {
+        Ok(state) if state.source != "registry" => state,
+        _ => {
+            match elev_bridge::run_elevated_no_prompt(
+                "get_charge_limit_state",
+                serde_json::json!({}),
+            )
             .await
-        {
-            Ok(raw) => match serde_json::from_value(raw) {
-                Ok(state) => state,
+            {
+                Ok(raw) => match serde_json::from_value(raw) {
+                    Ok(state) => state,
+                    Err(e) => {
+                        log::debug!(
+                            target: "hw::charging",
+                            "[charge_limit] reconcile ({trigger}): unreadable state ({e})"
+                        );
+                        return ReconcileAction::Unreadable;
+                    }
+                },
                 Err(e) => {
                     log::debug!(
                         target: "hw::charging",
-                        "[charge_limit] reconcile ({trigger}): unreadable state ({e})"
+                        "[charge_limit] reconcile ({trigger}): state read failed ({e})"
                     );
                     return ReconcileAction::Unreadable;
                 }
-            },
-            Err(e) => {
-                log::debug!(
-                    target: "hw::charging",
-                    "[charge_limit] reconcile ({trigger}): state read failed ({e})"
-                );
-                return ReconcileAction::Unreadable;
             }
-        };
+        }
+    };
 
     // Every read refreshes the cache the hold state renders from.
     note_firmware_state(&state);
@@ -1110,10 +1319,12 @@ mod tests {
             applied: false,
             source: "registry".into(),
             detail: Some("ECRAM blocked".into()),
+            last_verified_ms: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["applied"], serde_json::json!(false));
         assert_eq!(v["source"], serde_json::json!("registry"));
+        assert_eq!(v["last_verified_ms"], serde_json::Value::Null);
     }
 
     // ── P1-2: the reconciler ────────────────────────────────────────────────
@@ -1408,5 +1619,148 @@ mod tests {
         });
         assert_eq!(load_threshold_from(&holder, Some(65)), Some(65));
         assert_eq!(load_threshold_from(&holder, None), None);
+    }
+
+    // ── Service-pipe readback (f13) ─────────────────────────────────────────
+
+    #[test]
+    fn service_pipe_response_parses_to_a_percent() {
+        let ok = r#"{"ok":true,"cmd":"charge_limit_read","percent":80,"code":1}"#;
+        assert_eq!(parse_service_pipe_limit_response(ok).unwrap(), 80);
+        // 100 (care off) is a valid reading.
+        let off = r#"{"ok":true,"cmd":"charge_limit_read","percent":100,"code":0}"#;
+        assert_eq!(parse_service_pipe_limit_response(off).unwrap(), 100);
+    }
+
+    #[test]
+    fn service_pipe_response_rejects_impossible_percentages() {
+        // A percent the firmware cannot express is a protocol surprise from
+        // the service side and must be refused, not trusted. (The live
+        // validation is the caller's own parse; this pins the contract.)
+        for bad in [0u8, 1, 39, 79, 81, 95, 99, 101, 255] {
+            let body = format!(r#"{{"ok":true,"percent":{bad},"code":0}}"#);
+            assert!(
+                parse_service_pipe_limit_response(&body).is_err(),
+                "{bad}% must not parse as a readback"
+            );
+        }
+    }
+
+    #[test]
+    fn service_pipe_refusals_carry_the_service_reason() {
+        let refused = r#"{"ok":false,"error":"charge_limit_read refused: WMI broken"}"#;
+        let err = parse_service_pipe_limit_response(refused).unwrap_err();
+        assert!(err.to_string().contains("WMI broken"), "{err}");
+        // Non-JSON (an empty read, a half-written response) is an error too.
+        assert!(parse_service_pipe_limit_response("").is_err());
+        assert!(parse_service_pipe_limit_response("{\"ok\":true,").is_err());
+    }
+
+    #[test]
+    fn a_live_read_is_source_firmware_and_stamped_now() {
+        let now: u64 = 1_700_000_000_000;
+        let state = charge_limit_state_from(80, Ok(80), now, Some((80, now - 60_000)));
+        assert_eq!(state.source, "firmware");
+        assert!(state.applied);
+        assert_eq!(state.hardware_threshold, Some(80));
+        assert_eq!(state.last_verified_ms, Some(now));
+    }
+
+    #[test]
+    fn a_failed_read_falls_back_to_the_cache_with_its_original_age() {
+        // Cache confirmed 3 min before the failed read: the state says so and
+        // KEEPS the old stamp so age can be rendered honestly.
+        let now: u64 = 1_700_000_000_000;
+        let confirmed_at = now - 3 * 60_000;
+        let state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            now,
+            Some((80, confirmed_at)),
+        );
+        assert_eq!(state.source, "cache");
+        assert_eq!(state.hardware_threshold, Some(80));
+        assert_eq!(state.last_verified_ms, Some(confirmed_at));
+        assert!(state.detail.as_deref().unwrap().contains("pipe down"));
+    }
+
+    #[test]
+    fn a_failed_read_without_cache_is_registry_only() {
+        let state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            1_700_000_000_000,
+            None,
+        );
+        assert_eq!(state.source, "registry");
+        assert_eq!(state.hardware_threshold, None);
+        assert!(!state.applied);
+        assert_eq!(state.last_verified_ms, None);
+    }
+
+    /// The cached state must honestly disagree with the request: a live read
+    /// that FAILED with a cached 100% readback and a DRAFTED 80% request is
+    /// "not applied" (the cache still reports 100%), never "ok".
+    #[test]
+    fn a_cached_value_that_disagrees_is_not_applied() {
+        let state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            1_000,
+            Some((100, 5_000)),
+        );
+        assert_eq!(state.source, "cache");
+        assert!(!state.applied);
+        assert_eq!(state.hardware_threshold, Some(100));
+    }
+
+    /// A live read outranks the cache even when the two disagree: the read is
+    /// the freshest truth, the cache only covers FAILED reads.
+    #[test]
+    fn a_live_read_outranks_a_disagreeing_cache() {
+        let state = charge_limit_state_from(80, Ok(80), 1_000, Some((100, 5_000)));
+        assert_eq!(state.source, "firmware");
+        assert!(state.applied);
+        assert_eq!(state.hardware_threshold, Some(80));
+    }
+
+    #[test]
+    fn a_serialized_cache_state_keeps_the_verification_stamp() {
+        let mut state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            1_000,
+            Some((80, 999)),
+        );
+        state.last_verified_ms = Some(999);
+        let v = serde_json::to_value(&state).unwrap();
+        assert_eq!(v["last_verified_ms"], serde_json::json!(999));
+        assert_eq!(v["source"], serde_json::json!("cache"));
+    }
+
+    /// Integration (run with `cargo test -- --ignored`): apply the limit
+    /// through the real dispatcher and read it back through the real
+    /// ecram_service pipe. Only meaningful on the owner machine with IoTSvc
+    /// RUNNING; needs an interactive session for the WMI provider.
+    #[test]
+    #[ignore = "live hardware: applies a charge limit (writes the EC) and requires IoTSvc running"]
+    fn live_charge_limit_pipe_readback_roundtrip() {
+        let requested = get_requested_threshold();
+        let probe = read_charge_limit_state_app();
+        println!(
+            "live pipe readback: source={} hardware={:?} requested={requested} detail={:?}",
+            probe.source, probe.hardware_threshold, probe.detail
+        );
+        assert_eq!(
+            probe.source, "firmware",
+            "ecram_service pipe must answer on the owner machine (detail: {:?})",
+            probe.detail
+        );
+        assert_eq!(
+            probe.last_verified_ms.map(|_| ()),
+            Some(()),
+            "a live read is always stamped"
+        );
+        assert!(VALID_THRESHOLDS.contains(&probe.hardware_threshold.unwrap_or(0)));
     }
 }

@@ -604,7 +604,8 @@
       "unplugged": "Usando la batería",
       "why": "La batería está al {level}%, por encima del límite del {limit}%, así que la carga sigue en pausa. Se reanuda cuando el nivel baje del {limit}%.",
       "notApplied": "No aplicado: el firmware informa {hardware}% y pediste {limit}%. El controlador embebido no aceptó el nuevo límite.",
-      "unconfirmed": "No se pudo releer el límite del firmware — puede que no esté aplicado."
+      "unconfirmed": "No se pudo releer el límite del firmware — puede que no esté aplicado.",
+      "unconfirmedCached": "Última confirmación hace {minutes} min; la lectura de confirmación no está disponible desde entonces. El límite debería seguir aplicado; reintenta para confirmar."
     },
     "appliedLimit": "Límite del {level}% aplicado a las {time} — deja de cargar al {level}%",
     "appliedCareOn": "Protección de la batería activada a las {time} — la carga se detiene al {limit}%",

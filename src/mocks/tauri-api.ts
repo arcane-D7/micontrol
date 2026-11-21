@@ -581,6 +581,7 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         applied: true,
         source: 'firmware',
         detail: null,
+        last_verified_ms: Date.now(),
       } as unknown as T;
 
     // ── Task manager ───────────────────────────────────────────────────────
