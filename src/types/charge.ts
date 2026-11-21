@@ -10,9 +10,14 @@ export interface ChargeLimitState {
   hardware_threshold: number | null;
   hardware_code: number | null;
   applied: boolean;
-  /** `firmware` quando a leitura do hardware funcionou; `registry` quando não. */
-  source: 'firmware' | 'registry' | string;
+  /**
+   * `firmware` = leitura ao vivo; `cache` = última confirmação dentro do TTL
+   * (`last_verified_ms` diz a idade); `registry` = nada lido.
+   */
+  source: 'firmware' | 'cache' | 'registry' | string;
   detail: string | null;
+  /** Quando o firmware foi confirmado pela última vez (epoch ms); null = nunca. */
+  last_verified_ms: number | null;
 }
 
 /**

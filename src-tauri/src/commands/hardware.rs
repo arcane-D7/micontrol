@@ -72,6 +72,13 @@ pub async fn get_charging_threshold(_state: State<'_, AppState>) -> Result<u8, E
 
 /// Firmware truth: requested vs applied-on-hardware, plus why not.
 ///
+/// The readback prefers the `ecram_service` pipe (SYSTEM, always alive,
+/// single-digit ms, no elevation) and falls back to the elevated ladder only
+/// when the service pipe cannot answer (service down, or an old deploy
+/// without the `charge_limit_read` op). Before this, every readback was an
+/// elevated round-trip, and a busy bridge pipe plus a missing scheduled task
+/// turned a 10 ms read into "Could not be read back from the firmware".
+///
 /// P1-2 (recheck 2026-11-11): a read that comes back `applied=false` while
 /// care is on is *also* the cheapest place to notice a drift, so it kicks off
 /// the gated reconciler. The reconcile is fire-and-forget — the read must not
@@ -80,13 +87,27 @@ pub async fn get_charging_threshold(_state: State<'_, AppState>) -> Result<u8, E
 #[tauri::command]
 pub async fn get_charge_limit_state() -> Result<crate::hw::charging::ChargeLimitState, ErrorResponse>
 {
-    let raw = elev_bridge::run_elevated("get_charge_limit_state", serde_json::json!({})).await?;
-    let state: crate::hw::charging::ChargeLimitState = serde_json::from_value(raw)
-        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))?;
+    // The pipe read is blocking IO: fixed pool, never the async runtime.
+    let via_pipe = run_blocking(move || {
+        Ok::<crate::hw::charging::ChargeLimitState, crate::hw::errors::HardwareError>(
+            crate::hw::charging::read_charge_limit_state_app(),
+        )
+    })
+    .await
+    .map_err(ErrorResponse::from)?;
 
-    // Refresh the app-side cache the hold state renders from: the read itself
-    // runs in the elevated helper, so this is the only place the app process
-    // learns the firmware value.
+    let state = if via_pipe.source != "registry" {
+        via_pipe
+    } else {
+        let raw =
+            elev_bridge::run_elevated("get_charge_limit_state", serde_json::json!({})).await?;
+        serde_json::from_value(raw)
+            .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))?
+    };
+
+    // Refresh the app-side cache the hold state renders from: this is where
+    // the app process learns the firmware value. Cached states keep their
+    // original confirmation time (note_firmware_state never re-stamps).
     crate::hw::charging::note_firmware_state(&state);
 
     if !state.applied && state.requested_threshold < 100 {

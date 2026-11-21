@@ -943,6 +943,43 @@ mod ec_command {
         Err(CHARGE_UNAVAILABLE.to_string())
     }
 
+    // ── charge_limit_read (WMAA 0x1000/0x02, READ-ONLY) ────────────────────────
+    //
+    // The ERAM path is dead (driver-blocked above), but this SYSTEM service CAN
+    // read the limit the honest way: MICommonInterface instance queries are
+    // admin-only, and this service is SYSTEM. `micontrol_lib::hw::charging`
+    // owns the WMAA contract (FUN2=0x1000 / FUN3=0x02, SGER check, level-code
+    // validation, percent mapping), so the service and the app cannot drift.
+    //
+    // This is what makes the battery readback fast and independent of the
+    // bridge pipe: the app reads the limit here first and never needs a
+    // scheduled task for it.
+    //
+    // READ-ONLY by protocol policy: setting the limit stays with the app's
+    // elevated allowlist path, and `iot_set_charging_threshold` above keeps
+    // refusing (writes are impersonated + consent-gated, reads are not).
+
+    /// Answer one `charge_limit_read` request as a JSON response string.
+    pub fn charge_limit_read_response() -> String {
+        format_charge_limit_read(
+            micontrol_lib::hw::charging::read_hardware_threshold().map_err(|e| e.to_string()),
+        )
+    }
+
+    /// Format a pre-computed read result into the wire response (pure, so the
+    /// shape is unit-tested without touching WMI).
+    fn format_charge_limit_read(read: Result<u8, String>) -> String {
+        match read {
+            Ok(percent) => {
+                let code = micontrol_lib::hw::charging::percent_to_code(percent).unwrap_or(0);
+                format!(
+                    r#"{{"ok":true,"cmd":"charge_limit_read","percent":{percent},"code":{code}}}"#
+                )
+            }
+            Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1060,6 +1097,30 @@ mod ec_command {
             item[8..11].copy_from_slice(&[0, 0, 0]);
             let (ssid, ..) = parse_wifi_item(&item).unwrap();
             assert_eq!(ssid, "Foo");
+        }
+
+        #[test]
+        fn charge_limit_read_answer_has_the_wire_shape() {
+            let ok = super::format_charge_limit_read(Ok(80));
+            assert_eq!(
+                ok,
+                "{\"ok\":true,\"cmd\":\"charge_limit_read\",\"percent\":80,\"code\":1}"
+            );
+            for (percent, code) in [
+                (40u8, 8u8),
+                (50, 7),
+                (60, 6),
+                (70, 5),
+                (80, 1),
+                (90, 4),
+                (100, 0),
+            ] {
+                let body = super::format_charge_limit_read(Ok(percent));
+                assert!(body.contains(&format!("\"percent\":{percent}")), "{body}");
+                assert!(body.contains(&format!("\"code\":{code}")), "{body}");
+            }
+            let refused = super::format_charge_limit_read(Err("WMI down".into()));
+            assert_eq!(refused, "{\"ok\":false,\"error\":\"WMI down\"}");
         }
 
         #[test]
@@ -2033,6 +2094,11 @@ mod pipe_server {
                     Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
                 }
             }
+            // READ-ONLY charge-limit readback, served through the WMI WMAA
+            // method this SYSTEM service can call (see ec_command comment).
+            // No threshold, no shell data: the response carries only the
+            // firmware level in percent + code.
+            "charge_limit_read" => ec_command::charge_limit_read_response(),
             "iot_get_charging_threshold" => match ec_command::get_charging_threshold() {
                 Ok((care, threshold)) => format!(
                     r#"{{"ok":true,"cmd":"get_charging_threshold","battery_care_enabled":{care},"threshold":{threshold}}}"#
@@ -2041,7 +2107,7 @@ mod pipe_server {
             },
             "ping" => r#"{"ok":true,"pong":true}"#.to_string(),
             _ => format!(
-                r#"{{"ok":false,"error":"unknown op '{op}' — valid: read, write, read_region, ping, iot_get, iot_reset_device, iot_empty_wifi, iot_connect_wifi, iot_send_laptop_status, iot_write_wifi_item, iot_delete_wifi_item, iot_set_device_status, iot_set_charging_threshold, iot_get_charging_threshold"}}"#
+                r#"{{"ok":false,"error":"unknown op '{op}' — valid: read, write, read_region, ping, charge_limit_read, iot_get, iot_reset_device, iot_empty_wifi, iot_connect_wifi, iot_send_laptop_status, iot_write_wifi_item, iot_delete_wifi_item, iot_set_device_status, iot_set_charging_threshold, iot_get_charging_threshold"}}"#
             ),
         }
     }
@@ -2061,6 +2127,17 @@ mod pipe_server {
 
     #[cfg(test)]
     mod tests {
+
+        #[test]
+        fn charge_limit_read_op_is_dispatched() {
+            let response = super::process_request(r#"{"op":"charge_limit_read"}"#);
+            assert!(
+                response.contains("\"ok\":true") || response.contains("\"ok\":false"),
+                "{response}"
+            );
+            assert!(!response.contains("unknown op"), "{response}");
+        }
+
         use super::*;
 
         /// A 16-byte MCPI header (magic "MCPI") must be classified as binary

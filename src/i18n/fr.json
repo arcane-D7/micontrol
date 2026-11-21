@@ -604,7 +604,8 @@
       "unplugged": "Sur batterie",
       "why": "La batterie est à {level} %, au-dessus de la limite de {limit} %, la charge reste donc en pause. Elle reprend quand le niveau descend sous {limit} %.",
       "notApplied": "Non appliqué : le firmware indique {hardware} % et vous avez demandé {limit} %. Le contrôleur embarqué n’a pas accepté la nouvelle limite.",
-      "unconfirmed": "Impossible de relire la limite depuis le firmware — elle n’est peut-être pas appliquée."
+      "unconfirmed": "Impossible de relire la limite depuis le firmware — elle n’est peut-être pas appliquée.",
+      "unconfirmedCached": "Dernière confirmation il y a {minutes} min ; la lecture de confirmation est indisponible depuis. La limite devrait toujours être appliquée ; réessaie pour confirmer."
     },
     "appliedLimit": "Limite de {level} % appliquée à {time} — la charge s’arrête à {level} %",
     "appliedCareOn": "Protection de la batterie activée à {time} — la charge s’arrête à {limit} %",
