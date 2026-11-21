@@ -968,7 +968,7 @@ mod ec_command {
 
     /// Format a pre-computed read result into the wire response (pure, so the
     /// shape is unit-tested without touching WMI).
-    fn format_charge_limit_read(read: Result<u8, String>) -> String {
+    fn format_charge_limit_read<E: std::fmt::Display>(read: Result<u8, E>) -> String {
         match read {
             Ok(percent) => {
                 let code = micontrol_lib::hw::charging::percent_to_code(percent).unwrap_or(0);
@@ -1101,7 +1101,7 @@ mod ec_command {
 
         #[test]
         fn charge_limit_read_answer_has_the_wire_shape() {
-            let ok = super::format_charge_limit_read(Ok(80));
+            let ok = super::format_charge_limit_read::<String>(Ok(80));
             assert_eq!(
                 ok,
                 "{\"ok\":true,\"cmd\":\"charge_limit_read\",\"percent\":80,\"code\":1}"
@@ -1115,11 +1115,11 @@ mod ec_command {
                 (90, 4),
                 (100, 0),
             ] {
-                let body = super::format_charge_limit_read(Ok(percent));
+                let body = super::format_charge_limit_read::<String>(Ok(percent));
                 assert!(body.contains(&format!("\"percent\":{percent}")), "{body}");
                 assert!(body.contains(&format!("\"code\":{code}")), "{body}");
             }
-            let refused = super::format_charge_limit_read(Err("WMI down".into()));
+            let refused = super::format_charge_limit_read::<String>(Err("WMI down".into()));
             assert_eq!(refused, "{\"ok\":false,\"error\":\"WMI down\"}");
         }
 
