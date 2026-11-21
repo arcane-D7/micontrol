@@ -12,13 +12,6 @@ use crate::hw::screen_cast::{
     casting_error_status_name, merge_devices, probe_conclusion, state_from_devices, CastDevice,
 };
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
-
 fn row(id: &str, connected: Option<bool>) -> CastDevice {
     CastDevice {
         name: id.to_string(),
