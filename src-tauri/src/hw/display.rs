@@ -600,6 +600,11 @@ pub struct DisplayInfo {
     pub ai_brightness_config: AiBrightnessConfig,
     /// Current ambient illuminance from the light sensor (lux). None when unavailable.
     pub ambient_lux: Option<f32>,
+    /// Sensor diagnosis (available / no_sensor / frozen_report / unknown) so
+    /// the UI can say "no sensor on this device" or "present but not
+    /// reporting (last reading D Mon)" instead of a generic unavailable.
+    #[serde(default)]
+    pub ambient_sensor: AmbientSensorInfo,
     /// Which backend actually writes brightness: "igcl", "wmi-fallback" or
     /// "unknown" (P10). When it is "wmi-fallback" the UI can explain that
     /// hardware brightness control is unavailable on this driver.
@@ -1107,6 +1112,7 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
         ai_brightness,
         ai_brightness_config,
         ambient_lux,
+        ambient_sensor: ambient_sensor_info(),
         brightness_source: brightness_source().to_string(),
     })
 }
@@ -1193,14 +1199,115 @@ fn write_display_dword(name: &str, value: u32) -> HardwareResult<()> {
     Ok(())
 }
 
+// ── Curve/smart mode persistence (state store, registry imported once) ────────
+//
+// The mode used to live ONLY in the HKLM `AiBrightnessMode` value, which a
+// non-elevated user process cannot write: the choice silently reverted on
+// machines where the write was refused. The `brightness_mode` state store is
+// the source of truth now; the HKLM value is imported once (read-only) on the
+// first load and mirrored best-effort on every change (external tools may
+// still read it), never the other way around.
+
+/// In-process cache of the persisted mode: `get_ai_brightness_config` runs
+/// every 2 s in the adaptive loop, and each read would otherwise re-open the
+/// state file. `None` = not loaded yet.
+static BRIGHTNESS_MODE_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// Registry DWORD → mode string (pure, unit-tested).
+fn mode_from_registry_dword(value: u32) -> &'static str {
+    if value == 1 {
+        "smart"
+    } else {
+        "curve"
+    }
+}
+
+/// Load the persisted mode, running the one-time HKLM import when the store
+/// is empty. Store failures degrade to the default ("curve") and never wedge
+/// the adaptive loop.
+fn load_brightness_mode() -> String {
+    let store = match state_store::brightness_mode_store() {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!("[display] brightness mode store unavailable: {e}");
+            return "curve".to_string();
+        }
+    };
+    match store.load() {
+        Ok(Some(state)) => state.mode,
+        Ok(None) => {
+            // One-time import: whatever the HKLM value says (0 curve / 1
+            // smart); a missing value means the user never chose, so the
+            // default curve is imported and becomes the persisted baseline.
+            let mode = mode_from_registry_dword(read_display_dword(AI_BRIGHTNESS_MODE_VALUE, 0));
+            let state = state_store::BrightnessModeState {
+                mode: mode.to_string(),
+                updated_at_ms: now_ms(),
+            };
+            if let Err(e) = store.save(&state) {
+                log::warn!("[display] brightness mode import save failed: {e}");
+            } else {
+                log::info!(
+                    "[display] imported brightness mode '{mode}' from the registry into the state store"
+                );
+            }
+            mode.to_string()
+        }
+        Err(e) => {
+            log::warn!("[display] brightness mode state unreadable, using default: {e}");
+            "curve".to_string()
+        }
+    }
+}
+
+/// Cached persisted mode ("curve" | "smart"). Test helper
+/// [`reset_brightness_mode_cache_for_tests`] simulates a restart by clearing it.
+fn brightness_mode_cached() -> String {
+    let cache = BRIGHTNESS_MODE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = crate::util::panic::lock_or_recover(cache);
+    if guard.is_none() {
+        *guard = Some(load_brightness_mode());
+    }
+    guard
+        .as_ref()
+        .expect("brightness mode cache initialised")
+        .clone()
+}
+
+/// Persist the mode through the store and refresh the in-process cache.
+fn save_brightness_mode(mode: &str) -> HardwareResult<()> {
+    let state = state_store::BrightnessModeState {
+        mode: mode.to_string(),
+        updated_at_ms: now_ms(),
+    };
+    let store = state_store::brightness_mode_store()
+        .map_err(|e| HardwareError::Registry(format!("brightness mode store unavailable: {e}")))?;
+    store
+        .save(&state)
+        .map_err(|e| HardwareError::Registry(format!("brightness mode save failed: {e}")))?;
+    let cache = BRIGHTNESS_MODE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    *crate::util::panic::lock_or_recover(cache) = Some(mode.to_string());
+    log::info!("[display] brightness mode persisted: {mode}");
+    Ok(())
+}
+
+/// Clear the in-process mode cache (tests use this to simulate a restart:
+/// the next read must come from the persisted store again).
+#[cfg(test)]
+fn reset_brightness_mode_cache_for_tests() {
+    if let Some(cache) = BRIGHTNESS_MODE_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
 pub fn get_ai_brightness_config() -> AiBrightnessConfig {
     let enabled = get_ai_brightness_registry().unwrap_or(false);
     let min_b = (read_display_dword(AI_BRIGHTNESS_MIN_VALUE, 10) as u8).clamp(5, 80);
     let max_b = (read_display_dword(AI_BRIGHTNESS_MAX_VALUE, 100) as u8).clamp(min_b + 5, 100);
-    let mode = match read_display_dword(AI_BRIGHTNESS_MODE_VALUE, 0) {
-        1 => "smart".to_string(),
-        _ => "curve".to_string(),
-    };
+    let mode = brightness_mode_cached();
     AiBrightnessConfig {
         enabled,
         min_brightness: min_b,
@@ -1212,13 +1319,31 @@ pub fn get_ai_brightness_config() -> AiBrightnessConfig {
 }
 
 pub fn set_ai_brightness_config(config: AiBrightnessConfig) -> HardwareResult<()> {
+    // Mode FIRST, through the user-writable state store: every later HKLM
+    // write (the enabled flag, the mirror, min/max/sens/smoothing) can be
+    // refused for a non-elevated process, and the old order silently dropped
+    // the user's Smart/Formula choice exactly on those machines. The mode
+    // save must not depend on any registry write succeeding.
+    let mode = if config.mode == "smart" {
+        "smart"
+    } else {
+        "curve"
+    };
+    save_brightness_mode(mode)?;
     persist_ai_brightness_registry(config.enabled)?;
+    // Best-effort HKLM mirror for external tooling; a refusal is logged at
+    // DEBUG and never fails the save.
+    let mirror = write_display_dword(
+        AI_BRIGHTNESS_MODE_VALUE,
+        if config.mode == "smart" { 1 } else { 0 },
+    );
+    if let Err(e) = mirror {
+        log::debug!("[display] brightness mode registry mirror skipped (best-effort): {e}");
+    }
     write_display_dword(AI_BRIGHTNESS_MIN_VALUE, config.min_brightness as u32)?;
     write_display_dword(AI_BRIGHTNESS_MAX_VALUE, config.max_brightness as u32)?;
     write_display_dword(AI_BRIGHTNESS_SENS_VALUE, config.sensitivity as u32)?;
     write_display_dword(AI_BRIGHTNESS_SMTH_VALUE, config.smoothing as u32)?;
-    let mode_dword: u32 = if config.mode == "smart" { 1 } else { 0 };
-    write_display_dword(AI_BRIGHTNESS_MODE_VALUE, mode_dword)?;
     Ok(())
 }
 
@@ -1543,6 +1668,12 @@ pub fn record_smart_sample(lux: f32, brightness: u8) {
         bin.min = bin.min.min(brightness);
         bin.max = bin.max.max(brightness);
         let _ = bin;
+        // Session guard: the load-time migration only trims an oversized
+        // model at startup; a long-lived process can still grow past the
+        // caps (30 samples/min at the audit's old rate). Prune BEFORE the
+        // persist below so the store file never outgrows its ceiling
+        // mid-session and the sample count stays a rolling window.
+        prune_smart_model(m);
     });
     let model = get_smart_model();
     // Persist outside the lock to avoid holding it during file I/O.
@@ -1616,6 +1747,224 @@ pub fn smart_predict_brightness(lux: f32) -> Option<u8> {
 
 // ── Ambient light sensor ──────────────────────────────────────────────────────
 
+/// Sensor availability, so the UI says "this device has no ambient light
+/// sensor" (permanent) instead of "unavailable" (transient) for a machine
+/// that simply has none, and so the adaptive loop stops burning reset
+/// requests on a sensor that exists on paper but never delivers data.
+///
+/// States, classified by [`classify_sensor_probe`] from one fresh probe of
+/// the process's committed backend (COM and WinRT are never mixed in one
+/// process, see `LuxBackend`):
+///   Available    — the backend returned a fresh, plausible reading.
+///   NoSensor     — the backend cannot even see a sensor device (no
+///                  enumeration / GetDefault() fails). Permanent in practice:
+///                  the machine has no ALS hardware or its driver is disabled.
+///   FrozenReport — sensor devices enumerate and answer, but no fresh data
+///                  arrives (timestamp does not advance, lux stays at the
+///                  0-lux placeholder). The hardware exists but the
+///                  driver/fusion stack never delivers data; found in
+///                  production on the TCS3408 (reports frozen for 4+ days,
+///                  surviving device restarts and reset requests). Treating
+///                  this as a NEW probe every cycle (the old behaviour) made
+///                  the health supervisor and the loop request sensor resets
+///                  forever; treating it as a state lets the UI say "sensor
+///                  present but not reporting" and lets the loop idle.
+///   Unknown      — not probed yet in this process; settled lazily.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbientSensorState {
+    /// A backend returned a fresh, plausible lux reading.
+    Available,
+    /// No sensor device visible to the committed backend (no ALS here).
+    NoSensor,
+    /// Sensor devices enumerate but never deliver a fresh report (frozen
+    /// timestamp / permanent 0 lux).
+    FrozenReport,
+    /// Not probed yet in this process (the honest unset value).
+    #[default]
+    Unknown,
+}
+
+impl AmbientSensorState {
+    /// Dense wire code for the process-local atomic (`0` Unknown, `1`
+    /// Available, `2` NoSensor, `3` FrozenReport).
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            AmbientSensorState::Available => 1,
+            AmbientSensorState::NoSensor => 2,
+            AmbientSensorState::FrozenReport => 3,
+            AmbientSensorState::Unknown => 0,
+        }
+    }
+
+    pub const fn from_code(v: u8) -> Self {
+        match v {
+            1 => AmbientSensorState::Available,
+            2 => AmbientSensorState::NoSensor,
+            3 => AmbientSensorState::FrozenReport,
+            _ => AmbientSensorState::Unknown,
+        }
+    }
+
+    /// States whose diagnosis is stable enough that poking the stack with
+    /// reset requests is provably useless (production: the resets fired every
+    /// 30 s for days against a frozen TCS3408 and changed nothing).
+    pub fn is_diagnosed(self) -> bool {
+        matches!(
+            self,
+            AmbientSensorState::FrozenReport | AmbientSensorState::NoSensor
+        )
+    }
+}
+
+/// One probe of the committed backend: the lux reading (already passed
+/// through the per-sensor selection) plus whether the backend could see
+/// sensor DEVICES at all (the NoSensor vs FrozenReport discriminator).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AmbientProbe {
+    lux: Option<f32>,
+    devices_seen: bool,
+}
+
+/// Latest probe of the persistent sensor state.
+static SENSOR_STATE: AtomicU8 = AtomicU8::new(AmbientSensorState::Unknown.code());
+/// Wall-clock ms of the last REAL backend probe (suppression-window base).
+static SENSOR_LAST_PROBE_MS: AtomicU64 = AtomicU64::new(0);
+
+/// How long a diagnosed (`FrozenReport`/`NoSensor`) sensor goes without a
+/// real backend probe. Between probes `get_ambient_lux` answers `None`
+/// without touching COM/WinRT, so a dead sensor stops costing a stack
+/// round-trip every 2 s; one probe per window still notices a driver fix.
+const SENSOR_DIAGNOSED_REPROBE_SECS: u64 = 900;
+
+/// Latest sensor diagnosis, for the loop / supervisor / `DisplayInfo`.
+pub fn ambient_sensor_state() -> AmbientSensorState {
+    AmbientSensorState::from_code(SENSOR_STATE.load(Ordering::Relaxed))
+}
+
+/// Pure classification of one probe (unit-testable, no COM/WinRT contact):
+/// fresh lux wins; devices seen but no fresh data = frozen; nothing
+/// enumerated = no sensor on this machine.
+fn classify_sensor_probe(lux: Option<f32>, devices_seen: bool) -> AmbientSensorState {
+    match lux {
+        Some(v) if v.is_finite() && v > MIN_PLAUSIBLE_LUX => AmbientSensorState::Available,
+        _ if devices_seen => AmbientSensorState::FrozenReport,
+        _ => AmbientSensorState::NoSensor,
+    }
+}
+
+/// Pure suppression-window check: a diagnosed sensor is re-probed at most
+/// once per `SENSOR_DIAGNOSED_REPROBE_SECS`; `last_probe_ms == 0` means
+/// "never probed" and always probes (the first diagnosis must be real).
+fn probe_suppressed(state: AmbientSensorState, last_probe_ms: u64, now_ms: u64) -> bool {
+    if !state.is_diagnosed() {
+        return false;
+    }
+    last_probe_ms != 0
+        && now_ms.saturating_sub(last_probe_ms) < SENSOR_DIAGNOSED_REPROBE_SECS * 1000
+}
+
+/// Store a settled state and log TRANSITIONS only (the Available probe runs
+/// every 2 s; logging every settle would spam the log the old resets did).
+fn settle_sensor_state(probe: AmbientProbe) -> AmbientSensorState {
+    let settled = classify_sensor_probe(probe.lux, probe.devices_seen);
+    let previous = SENSOR_STATE.swap(settled.code(), Ordering::Relaxed);
+    if previous != settled.code() {
+        log::info!(
+            "[display] ambient sensor state: {:?} (was {:?}, lux={:?} devices_seen={})",
+            settled,
+            AmbientSensorState::from_code(previous),
+            probe.lux,
+            probe.devices_seen
+        );
+    }
+    settled
+}
+
+// ── Last fresh reading (persisted, hour resolution) ───────────────────────────
+
+/// Wall-clock ms of the last FRESH lux reading this process has seen. `0`
+/// until hydration from the `ambient_sensor` store (so the frozen-sensor
+/// message can show a date from a previous session, e.g. "18 Nov").
+static AMBIENT_LAST_FRESH_MS: AtomicU64 = AtomicU64::new(0);
+/// One-time hydration guard for the persisted last-fresh timestamp.
+static AMBIENT_FRESH_HYDRATED: AtomicBool = AtomicBool::new(false);
+/// Wall-clock ms last WRITTEN to the store; throttles persistence to one
+/// write per hour (a healthy sensor produces a fresh reading every 2 s and
+/// must not turn an atomic-rename state file into a write hotspot).
+static AMBIENT_FRESH_PERSISTED_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Persist the last-fresh stamp at most once per hour (`prev == 0` = never
+/// persisted, always allowed). Pure, so tests can pin the throttle.
+fn should_persist_fresh_stamp(prev_persisted_ms: u64, now_ms: u64) -> bool {
+    prev_persisted_ms == 0 || now_ms.saturating_sub(prev_persisted_ms) >= 3_600_000
+}
+
+/// Persisted last-fresh timestamp for `DisplayInfo` / the UI message. Loads
+/// the store once per process, then tracks the in-session value.
+pub fn ambient_last_fresh_ms() -> Option<u64> {
+    if !AMBIENT_FRESH_HYDRATED.swap(true, Ordering::Relaxed) {
+        match state_store::ambient_sensor_store().and_then(|store| store.load()) {
+            Ok(Some(record)) if record.last_fresh_ms > 0 => {
+                // Never overwrite a value a fresh probe already recorded.
+                AMBIENT_LAST_FRESH_MS
+                    .compare_exchange(
+                        0,
+                        record.last_fresh_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .ok();
+                AMBIENT_FRESH_PERSISTED_MS.store(record.last_fresh_ms, Ordering::Relaxed);
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("[display] ambient sensor record unreadable: {e}"),
+        }
+    }
+    let v = AMBIENT_LAST_FRESH_MS.load(Ordering::Relaxed);
+    (v != 0).then_some(v)
+}
+
+/// Record a fresh (plausible) lux reading and persist the wall-clock stamp
+/// through the `ambient_sensor` store at most once per hour. Failures only
+/// log: the timestamp is diagnostic metadata, never control state.
+fn note_fresh_lux(lux: f32) {
+    if !lux.is_finite() || lux <= MIN_PLAUSIBLE_LUX {
+        return;
+    }
+    let now = now_ms();
+    AMBIENT_LAST_FRESH_MS.store(now, Ordering::Relaxed);
+    if !should_persist_fresh_stamp(AMBIENT_FRESH_PERSISTED_MS.load(Ordering::Relaxed), now) {
+        return;
+    }
+    AMBIENT_FRESH_PERSISTED_MS.store(now, Ordering::Relaxed);
+    let record = state_store::AmbientSensorRecord { last_fresh_ms: now };
+    match state_store::ambient_sensor_store().and_then(|store| store.save(&record)) {
+        Ok(()) => log::debug!("[display] persisted ambient last-fresh stamp ({now}ms)"),
+        Err(e) => log::warn!("[display] could not persist ambient last-fresh stamp: {e}"),
+    }
+}
+
+/// Wire shape for `DisplayInfo.ambient_sensor`: the diagnosis plus the
+/// persisted last-fresh timestamp the UI renders as "last reading D Mon".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AmbientSensorInfo {
+    /// The current diagnosis (available / no_sensor / frozen_report / unknown).
+    pub state: AmbientSensorState,
+    /// Wall-clock ms of the last fresh lux reading (survives restarts, hour
+    /// resolution). `None` = no fresh reading ever recorded.
+    pub last_fresh_ms: Option<u64>,
+}
+
+/// Snapshot for `get_display_info`.
+fn ambient_sensor_info() -> AmbientSensorInfo {
+    AmbientSensorInfo {
+        state: ambient_sensor_state(),
+        last_fresh_ms: ambient_last_fresh_ms(),
+    }
+}
+
 /// Global flag to force sensor re-initialization on next read.
 /// Set to `true` when a power-resume event is detected so the sensor
 /// instance is re-created instead of returning stale `None`.
@@ -1627,7 +1976,21 @@ static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// degraded/stuck sensor (health supervisor, adaptive-brightness watchdog) is
 /// DEBUG noise. This used to log "(power resume event)" for every caller,
 /// which put six fake resumes in a 7 h window with no suspend at all.
+///
+/// Diagnosed-stable states (FrozenReport / NoSensor) suppress the request
+/// entirely: re-creating those stacks cannot make them deliver data
+/// (production proof: the TCS3408 froze for 4+ days while reset requests kept
+/// firing every 5 cycles). Gating here protects every caller, including the
+/// resume path: a healthy sensor still resets normally on resume, a frozen
+/// one just wastes the attempt.
 pub fn request_sensor_reset(reason: &str) {
+    let state = ambient_sensor_state();
+    if state.is_diagnosed() {
+        log::debug!(
+            "[display] sensor reset suppressed ({reason}): ambient sensor state is {state:?}"
+        );
+        return;
+    }
     SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
     log::debug!("[display] Sensor reset requested ({reason})");
 }
@@ -1665,6 +2028,9 @@ fn ambient_sensor_disabled(path: &str) -> bool {
 }
 
 #[cfg(windows)]
+static WINRT_DEVICES_SEEN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
 fn get_ambient_lux_winrt() -> Option<f32> {
     use windows::Devices::Sensors::LightSensor;
 
@@ -1690,10 +2056,12 @@ fn get_ambient_lux_winrt() -> Option<f32> {
                         "found"
                     }
                 );
+                WINRT_DEVICES_SEEN.store(true, Ordering::Relaxed);
                 *guard = Some(sensor);
             }
             Err(_) => {
                 log::debug!("[display] WinRT ambient light sensor not available");
+                WINRT_DEVICES_SEEN.store(false, Ordering::Relaxed);
                 *guard = None;
                 return None;
             }
@@ -1722,6 +2090,13 @@ thread_local! {
     };
 }
 
+/// Whether the LAST COM stack creation succeeded in enumerating at least one
+/// ambient-light sensor. The WinRT side sets the same flag when
+/// `GetDefault()` returns a sensor. This is the NoSensor-vs-FrozenReport
+/// discriminator of `classify_sensor_probe`.
+#[cfg(windows)]
+static COM_DEVICES_SEEN: AtomicBool = AtomicBool::new(false);
+
 /// Lazily-created COM sensor manager + ambient-light collection.
 #[cfg(windows)]
 struct ComSensorStack {
@@ -1734,12 +2109,18 @@ struct ComSensorStack {
 impl ComSensorStack {
     /// (Re)create the sensor stack. Returns None on any failure path so the
     /// caller falls back to WinRT / sensor-off.
+    ///
+    /// Whether the backend can see sensor DEVICES at all is recorded
+    /// process-wide (`COM_DEVICES_SEEN`: the stack itself is per-thread, the
+    /// diagnosis is not) so `classify_sensor_probe` can tell NoSensor
+    /// (nothing enumerated) from FrozenReport (devices present, no data).
     fn new() -> Option<Self> {
         use windows::Win32::Devices::Sensors::{
             ISensorManager, SensorManager as CLSID_SensorManager, SENSOR_TYPE_AMBIENT_LIGHT,
         };
         use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 
+        COM_DEVICES_SEEN.store(false, Ordering::Relaxed);
         // SAFETY: COM objects released on drop; pointers remain valid within the call.
         unsafe {
             let manager: ISensorManager = CoCreateInstance(&CLSID_SensorManager, None, CLSCTX_ALL)
@@ -1755,6 +2136,7 @@ impl ComSensorStack {
                 return None;
             }
             log::debug!("[display] COM SensorManager cached ({count} sensors)");
+            COM_DEVICES_SEEN.store(true, Ordering::Relaxed);
             Some(Self { collection })
         }
     }
@@ -2005,32 +2387,72 @@ fn com_sensor_stack_available() -> bool {
     })
 }
 
+/// One classified probe of the committed lux backend.
+#[cfg(windows)]
+fn probe_ambient_backend(backend: LuxBackend) -> AmbientProbe {
+    AmbientProbe {
+        lux: run_lux_backend(backend),
+        devices_seen: COM_DEVICES_SEEN.load(Ordering::Relaxed)
+            || WINRT_DEVICES_SEEN.load(Ordering::Relaxed),
+    }
+}
+
+/// The process's committed ambient-light backend. One decision, one scope:
+/// COM and WinRT both reach the same sensorservice singleton and mixing the
+/// two stacks in one process is the access-violation trigger, so every real
+/// probe goes through this single choice.
+#[cfg(windows)]
+static COMMITTED_BACKEND: std::sync::OnceLock<LuxBackend> = std::sync::OnceLock::new();
+
 #[cfg(windows)]
 fn get_ambient_lux() -> Option<f32> {
-    static BACKEND: std::sync::OnceLock<LuxBackend> = std::sync::OnceLock::new();
-
-    // The backend is decided ONCE per process and never revisited: COM's
-    // ISensorManager and WinRT's LightSensor both reach the same sensorservice
-    // singleton, and initializing both in one process crashed with
-    // STATUS_ACCESS_VIOLATION in the display tests (each backend alone is
-    // fine). An explicit MICONTROL_AMBIENT_SENSOR_BACKEND wins; otherwise the
+    // The backend is decided once, on the first probe, and never revisited:
+    // an explicit MICONTROL_AMBIENT_SENSOR_BACKEND wins, otherwise the
     // classic COM stack is adopted when it enumerates, with WinRT as the
     // fallback for machines where it does not.
-    let chosen = *BACKEND.get_or_init(|| {
-        if let Some(forced) = lux_backend_override() {
-            return forced;
-        }
-        if com_sensor_stack_available() {
-            LuxBackend::Com
-        } else {
-            LuxBackend::Winrt
-        }
+    let backend = *COMMITTED_BACKEND.get_or_init(|| {
+        lux_backend_override().unwrap_or_else(|| {
+            if com_sensor_stack_available() {
+                LuxBackend::Com
+            } else {
+                LuxBackend::Winrt
+            }
+        })
     });
-    run_lux_backend(chosen)
+
+    // Diagnosed-stale gate: while the sensor is diagnosed FrozenReport or
+    // NoSensor, only one REAL probe per re-probe window reaches the sensor
+    // stack; every other call in the window answers `None` without touching
+    // COM/WinRT. This is what ends both cost centres of the old probe-per-
+    // call behaviour: the health supervisor's every-30 s reset requests and
+    // the loop's per-2 s stack round-trips against a sensor that does not
+    // deliver data.
+    let now = now_ms();
+    let last = SENSOR_LAST_PROBE_MS.swap(now, Ordering::Relaxed);
+    if probe_suppressed(ambient_sensor_state(), last, now) {
+        return None;
+    }
+
+    let probe = probe_ambient_backend(backend);
+    settle_sensor_state(probe);
+    let lux = probe
+        .lux
+        .filter(|v| v.is_finite() && *v > MIN_PLAUSIBLE_LUX);
+    if let Some(v) = lux {
+        // Persist the last-fresh stamp (hour resolution) so the frozen-
+        // sensor message can later show a real date ("last reading 18 Nov").
+        note_fresh_lux(v);
+    }
+    lux
 }
 
 #[cfg(not(windows))]
 fn get_ambient_lux() -> Option<f32> {
+    // No COM/WinRT stacks on this platform: honestly NoSensor.
+    settle_sensor_state(AmbientProbe {
+        lux: None,
+        devices_seen: false,
+    });
     None
 }
 
@@ -2232,12 +2654,23 @@ pub async fn adaptive_brightness_loop() {
             Ok(Some(_)) => {
                 consecutive_invalid_reads = consecutive_invalid_reads.saturating_add(1);
                 if consecutive_invalid_reads >= STUCK_SENSOR_RESET_AFTER {
-                    log::warn!(
-                        "[adaptive_brightness] sensor stuck ({} consecutive invalid \
-                         readings) — requesting sensor reset",
-                        consecutive_invalid_reads
-                    );
-                    request_sensor_reset("sensor stuck (invalid readings)");
+                    let state = ambient_sensor_state();
+                    if state.is_diagnosed() {
+                        // {FrozenReport, NoSensor}: resetting the stacks cannot
+                        // make a diagnosed-dead sensor deliver data (production
+                        // proof: the TCS3408 froze for 4+ days while the reset
+                        // requests kept firing every 5 cycles). Idle quietly.
+                        log::debug!(
+                            "[adaptive_brightness] sensor diagnosed {state:?} — reset suppressed"
+                        );
+                    } else {
+                        log::warn!(
+                            "[adaptive_brightness] sensor stuck ({} consecutive invalid \
+                             readings) — requesting sensor reset",
+                            consecutive_invalid_reads
+                        );
+                        request_sensor_reset("sensor stuck (invalid readings)");
+                    }
                     consecutive_invalid_reads = 0;
                 }
                 continue;
@@ -2245,21 +2678,37 @@ pub async fn adaptive_brightness_loop() {
             Ok(None) => {
                 consecutive_invalid_reads = consecutive_invalid_reads.saturating_add(1);
                 if consecutive_invalid_reads >= STUCK_SENSOR_RESET_AFTER {
-                    log::warn!(
-                        "[adaptive_brightness] no valid sensor reading for {} cycles — \
-                         requesting sensor reset",
-                        consecutive_invalid_reads
-                    );
-                    request_sensor_reset("sensor stuck (no reading)");
+                    let state = ambient_sensor_state();
+                    if state.is_diagnosed() {
+                        log::debug!(
+                            "[adaptive_brightness] sensor diagnosed {state:?} — reset suppressed"
+                        );
+                    } else {
+                        log::warn!(
+                            "[adaptive_brightness] no valid sensor reading for {} cycles — \
+                             requesting sensor reset",
+                            consecutive_invalid_reads
+                        );
+                        request_sensor_reset("sensor stuck (no reading)");
+                    }
                     consecutive_invalid_reads = 0;
                 }
                 if !no_sensor_warned {
-                    log::warn!(
-                        "adaptive_brightness: no ambient light sensor found — loop idle. \
-                         LightSensor::GetDefault() returned None. \
-                         Check: (1) sensor driver installed, (2) sensor enabled in Device Manager, \
-                         (3) Devices_Sensors feature in Cargo.toml (confirmed present)."
-                    );
+                    // One line per session, honest about WHICH absence this is:
+                    // a machine with no ALS at all is not the same failure as a
+                    // present-but-frozen sensor.
+                    match ambient_sensor_state() {
+                        AmbientSensorState::FrozenReport => log::info!(
+                            "[adaptive_brightness] ambient sensor present but not reporting — \
+                             loop idle (no reset requests)"
+                        ),
+                        _ => log::warn!(
+                            "adaptive_brightness: no ambient light sensor found — loop idle. \
+                             LightSensor::GetDefault() returned None. \
+                             Check: (1) sensor driver installed, (2) sensor enabled in Device \
+                             Manager, (3) Devices_Sensors feature in Cargo.toml (confirmed present)."
+                        ),
+                    }
                     no_sensor_warned = true;
                 }
                 continue;
@@ -4685,5 +5134,421 @@ mod tests {
         // Unknown timestamps never invent a state.
         assert!(!drrs_pending_reboot(None, Some(boot)));
         assert!(!drrs_pending_reboot(Some(boot + 1), None));
+    }
+
+    // ── Ambient sensor states: Available / NoSensor / FrozenReport ───────────
+
+    #[test]
+    fn sensor_probe_classification() {
+        // Fresh, plausible lux → Available.
+        assert_eq!(
+            classify_sensor_probe(Some(120.0), true),
+            AmbientSensorState::Available
+        );
+        // Fresh lux wins even before the devices flag is set.
+        assert_eq!(
+            classify_sensor_probe(Some(120.0), false),
+            AmbientSensorState::Available
+        );
+        // Devices enumerate but no fresh data → FrozenReport (the TCS3408 case:
+        // 0.0 lux placeholder, frozen timestamp).
+        assert_eq!(
+            classify_sensor_probe(Some(0.0), true),
+            AmbientSensorState::FrozenReport
+        );
+        assert_eq!(
+            classify_sensor_probe(None, true),
+            AmbientSensorState::FrozenReport
+        );
+        // Nothing enumerated at all → NoSensor.
+        assert_eq!(
+            classify_sensor_probe(None, false),
+            AmbientSensorState::NoSensor
+        );
+        // A NaN reading is not fresh data.
+        assert_eq!(
+            classify_sensor_probe(Some(f32::NAN), false),
+            AmbientSensorState::NoSensor
+        );
+        // The placeholder at/under the plausibility floor with devices present
+        // is frozen, not available.
+        assert_eq!(
+            classify_sensor_probe(Some(MIN_PLAUSIBLE_LUX), true),
+            AmbientSensorState::FrozenReport
+        );
+    }
+
+    #[test]
+    fn sensor_state_code_roundtrip() {
+        for state in [
+            AmbientSensorState::Available,
+            AmbientSensorState::NoSensor,
+            AmbientSensorState::FrozenReport,
+            AmbientSensorState::Unknown,
+        ] {
+            assert_eq!(
+                AmbientSensorState::from_code(state.code()),
+                state,
+                "{state:?} code must round-trip"
+            );
+        }
+        // Distinct codes: the atomic cannot alias two states.
+        let codes = [
+            AmbientSensorState::Available,
+            AmbientSensorState::NoSensor,
+            AmbientSensorState::FrozenReport,
+            AmbientSensorState::Unknown,
+        ]
+        .map(|s| s.code());
+        for i in 0..codes.len() {
+            for j in (i + 1)..codes.len() {
+                assert_ne!(codes[i], codes[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn diagnosed_states_suppress_probe_and_resets() {
+        // Suppression window: a diagnosed sensor is re-probed at most once
+        // per window; Unknown/Available are never suppressed.
+        assert!(!probe_suppressed(
+            AmbientSensorState::Available,
+            1_000,
+            2_000
+        ));
+        assert!(!probe_suppressed(AmbientSensorState::Unknown, 1_000, 2_000));
+        // Never probed: the first diagnosis must be real.
+        assert!(!probe_suppressed(
+            AmbientSensorState::FrozenReport,
+            0,
+            1_000_000
+        ));
+        let last = 1_000_000u64;
+        let window_ms = SENSOR_DIAGNOSED_REPROBE_SECS * 1000;
+        assert!(probe_suppressed(
+            AmbientSensorState::FrozenReport,
+            last,
+            last + window_ms - 1
+        ));
+        assert!(!probe_suppressed(
+            AmbientSensorState::FrozenReport,
+            last,
+            last + window_ms
+        ));
+        assert!(!probe_suppressed(
+            AmbientSensorState::NoSensor,
+            last,
+            last + window_ms
+        ));
+    }
+
+    #[test]
+    fn reset_requests_stop_for_diagnosed_sensors() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = SENSOR_STATE.load(Ordering::Relaxed);
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+        // FrozenReport: every 5 cycles the loop used to re-request a reset
+        // that provably could not help. It must be refused.
+        SENSOR_STATE.store(AmbientSensorState::FrozenReport.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test frozen");
+        assert!(
+            !SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
+            "a FrozenReport sensor must not receive reset requests"
+        );
+        // NoSensor: nothing exists to reset.
+        SENSOR_STATE.store(AmbientSensorState::NoSensor.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test no sensor");
+        assert!(!SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
+        // Available/Unknown: reset requests keep working (real recovery path).
+        SENSOR_STATE.store(AmbientSensorState::Available.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test available");
+        assert!(SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
+        // Restore the global for the other tests in this binary.
+        SENSOR_STATE.store(previous, Ordering::Relaxed);
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn last_fresh_stamp_persists_at_most_once_per_hour() {
+        assert!(
+            should_persist_fresh_stamp(0, 1_000),
+            "never persisted → write"
+        );
+        let persisted = 10_000_000u64;
+        assert!(!should_persist_fresh_stamp(persisted, persisted + 60_000));
+        assert!(should_persist_fresh_stamp(persisted, persisted + 3_600_000));
+    }
+
+    // ── Curve/smart mode persistence ──────────────────────────────────────────
+
+    #[test]
+    fn mode_from_registry_dword_maps_known_values() {
+        assert_eq!(mode_from_registry_dword(0), "curve");
+        assert_eq!(mode_from_registry_dword(1), "smart");
+        // Anything else is not a mode the UI offers; curve is the default.
+        assert_eq!(mode_from_registry_dword(7), "curve");
+    }
+
+    #[test]
+    fn brightness_mode_persists_across_restart() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_brightness_mode_cache_for_tests();
+
+        // The user picks Smart in the UI: the config save persists the mode.
+        save_brightness_mode("smart").expect("mode save");
+        // The store file exists under the redirected state root.
+        let root = isolated_state_root();
+        let store_path = state_store::StoreRegistry::resolve_in(
+            state_store::StoreRoot::User,
+            &root,
+            "brightness_mode",
+        );
+        assert!(
+            store_path.exists(),
+            "store file missing: {}",
+            store_path.display()
+        );
+
+        // RESTART: a new process has an empty cache; the mode must come back
+        // from the store, not from the (unwritable-by-users) HKLM registry.
+        reset_brightness_mode_cache_for_tests();
+        assert_eq!(
+            brightness_mode_cached(),
+            "smart",
+            "smart mode must survive a restart"
+        );
+        // And the raw store agrees.
+        let store = state_store::brightness_mode_store_in(&root);
+        let loaded = store.load().expect("reload store").expect("mode present");
+        assert_eq!(loaded.mode, "smart");
+
+        // Switching back to Formula persists too.
+        save_brightness_mode("curve").expect("mode save curve");
+        reset_brightness_mode_cache_for_tests();
+        assert_eq!(brightness_mode_cached(), "curve");
+        // Leave the cache clean for the other tests in this binary.
+        reset_brightness_mode_cache_for_tests();
+        cleanup_state_root(&root);
+    }
+
+    #[test]
+    fn set_config_persists_the_mode_before_any_registry_write() {
+        // Order proof for the production defect: the mode is written to the
+        // store BEFORE the HKLM writes (the mirror + min/max/sens/smth) that
+        // a non-elevated process cannot perform. Exercised through the real
+        // config path, then read back from the store itself.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_brightness_mode_cache_for_tests();
+        set_ai_brightness_config(AiBrightnessConfig {
+            enabled: false,
+            min_brightness: 10,
+            max_brightness: 100,
+            sensitivity: 100,
+            smoothing: 30,
+            mode: "smart".into(),
+        })
+        .unwrap_or_else(|e| {
+            // An HKLM refusal (non-elevated host) is acceptable AFTER the
+            // mode save; anything else is a real regression.
+            let msg = e.to_string();
+            assert!(
+                msg.contains("display settings key") || msg.contains("AI brightness"),
+                "unexpected config failure (the mode save must have succeeded first): {e}"
+            );
+            log::debug!("HKLM write refused in the test host: {e}");
+        });
+        let root = isolated_state_root();
+        let store = state_store::brightness_mode_store_in(&root);
+        let loaded = store.load().expect("reload store").expect("mode present");
+        assert_eq!(
+            loaded.mode, "smart",
+            "the mode must persist in the store even when the HKLM writes are refused"
+        );
+        reset_brightness_mode_cache_for_tests();
+        cleanup_state_root(&root);
+    }
+
+    // ── Smart-model prune: production size fits, oversize is trimmed ──────────
+
+    /// The production model shape measured on 2026-11-21: 201 buckets,
+    /// 295 920 samples, 15 441 B serialized. 200 buckets at 1 472 samples
+    /// plus one at 1 520.
+    fn production_shaped_model() -> SmartModel {
+        let mut model = SmartModel::new();
+        for idx in 0..200u32 {
+            model.bins.insert(
+                idx * 10,
+                SmartBin {
+                    n: 1_472,
+                    mean: 42.0,
+                    m2: 100.0,
+                    min: 30,
+                    max: 55,
+                },
+            );
+        }
+        model.bins.insert(
+            2_000,
+            SmartBin {
+                n: 1_520,
+                mean: 60.0,
+                m2: 200.0,
+                min: 45,
+                max: 80,
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn prune_leaves_the_production_sized_model_untouched() {
+        let mut model = production_shaped_model();
+        assert_eq!(model.total_samples(), 295_920);
+        assert_eq!(model.bins.len(), 201);
+        assert!(
+            !prune_smart_model(&mut model),
+            "a model inside both caps (295 920 ≤ 302 400 total, every bucket ≤ 20 000) \
+             must not be decayed"
+        );
+        assert_eq!(model.total_samples(), 295_920, "no samples lost");
+        assert_eq!(model.bins.len(), 201, "no buckets dropped");
+        // The serialized payload fits the store ceiling with room to spare
+        // (production measured 15 441 B against a 64 KiB max_bytes).
+        let bytes = serde_json::to_vec(&model).expect("serialize").len() as u64;
+        assert!(
+            bytes < state_store::DEFAULT_STATE_MAX_BYTES,
+            "serialized model is {bytes} B, must stay under the {} B store ceiling",
+            state_store::DEFAULT_STATE_MAX_BYTES
+        );
+        assert!(bytes >= 10_000, "shape sanity: got {bytes} B");
+    }
+
+    #[test]
+    fn prune_decays_a_hot_bucket_in_exact_halvings() {
+        // The audit's hot bucket: 283 355 samples at 4 lux. The per-bin cap
+        // is 20 000: 283 355 → 141 677 → 70 838 → 35 419 → 17 709 (four
+        // halvings), mean and variance preserved.
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            0,
+            SmartBin {
+                n: 283_355,
+                mean: 4.0,
+                m2: 8_000.0,
+                min: 0,
+                max: 30,
+            },
+        );
+        assert!(prune_smart_model(&mut model));
+        let bin = model.bins.get(&0).expect("hot bucket kept");
+        assert_eq!(bin.n, 17_709);
+        assert!(bin.n <= SMART_MAX_SAMPLES_PER_BIN);
+        assert_eq!(bin.mean, 4.0, "decay must not move the bucket mean");
+    }
+
+    #[test]
+    fn prune_pulls_the_oversized_audit_model_inside_both_caps() {
+        // Audit shape: 1 315 938-ish samples, one hot bucket 283 355, the
+        // rest spread across 200 buckets.
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            0,
+            SmartBin {
+                n: 283_355,
+                mean: 4.0,
+                m2: 8_000.0,
+                min: 0,
+                max: 30,
+            },
+        );
+        for idx in 1..=200u32 {
+            model.bins.insert(
+                idx * 10,
+                SmartBin {
+                    n: 5_163,
+                    mean: 40.0,
+                    m2: 120.0,
+                    min: 20,
+                    max: 70,
+                },
+            );
+        }
+        let before = model.total_samples();
+        assert_eq!(before, 283_355 + 200 * 5_163);
+        assert!(prune_smart_model(&mut model), "oversized model must change");
+        assert!(
+            model.total_samples() <= SMART_MAX_TOTAL_SAMPLES,
+            "total {} exceeds the {} cap",
+            model.total_samples(),
+            SMART_MAX_TOTAL_SAMPLES
+        );
+        assert_eq!(model.bins.len(), 201, "decay never deletes buckets");
+        for (idx, bin) in &model.bins {
+            assert!(
+                bin.n <= SMART_MAX_SAMPLES_PER_BIN,
+                "bucket {idx} holds {} samples over the {} cap",
+                bin.n,
+                SMART_MAX_SAMPLES_PER_BIN
+            );
+            // Decay preserves the learned mean per bucket: the model keeps
+            // its shape (which buckets are hot), only the mass shrinks.
+            let expected = if *idx == 0 { 4.0 } else { 40.0 };
+            assert_eq!(bin.mean, expected, "bucket {idx} mean drifted");
+        }
+    }
+
+    #[test]
+    fn record_smart_sample_keeps_a_long_session_inside_the_caps() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        // Seed the cache with a model already over the per-bin cap, as if it
+        // had grown past it in a long-lived session (the load-time migration
+        // only runs at startup).
+        let cache = SMART_MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+        {
+            let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(SmartModel {
+                schema: 1,
+                bins: [(
+                    4u32,
+                    SmartBin {
+                        n: 302_401,
+                        mean: 42.0,
+                        m2: 100.0,
+                        min: 20,
+                        max: 70,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            });
+        }
+        record_smart_sample(45.0, 50);
+        let model = get_smart_model();
+        assert!(
+            model.total_samples() <= SMART_MAX_TOTAL_SAMPLES,
+            "session growth must be pruned: total {}",
+            model.total_samples()
+        );
+        for (idx, bin) in &model.bins {
+            assert!(
+                bin.n <= SMART_MAX_SAMPLES_PER_BIN,
+                "bucket {idx} holds {} samples over the cap",
+                bin.n
+            );
+        }
+        // The persisted file fits the store ceiling too.
+        let path = state_store::smart_model_spec().expect("spec").path;
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or_default();
+        assert!(
+            size < state_store::DEFAULT_STATE_MAX_BYTES,
+            "persisted smart model is {size} B, over the {} B ceiling",
+            state_store::DEFAULT_STATE_MAX_BYTES
+        );
+        cleanup_state_root(&isolated_state_root());
     }
 }

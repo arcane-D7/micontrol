@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { t } from '../hooks/useI18n';
+import { t, getLanguage } from '../hooks/useI18n';
 import type { DisplayInfo, HardwareCapabilities, AiBrightnessConfig } from '../types/hardware';
 import {
   BRIGHTNESS_PRESETS,
@@ -19,6 +19,23 @@ interface Props {
   onAiBrightnessConfigChange: (config: AiBrightnessConfig) => Promise<void>;
   onRefreshRateChange?: (hz: number) => Promise<void>;
   onAdaptiveRefreshRateChange?: (enabled: boolean) => Promise<void>;
+}
+
+/** DisplayInfo.ambient_sensor as serialized by hw::display (camelCase by
+ * serde's rename_all; unknown future states fall back to "unknown"). */
+export type AmbientSensorStateWire = 'available' | 'no_sensor' | 'frozen_report' | 'unknown';
+
+export function parseAmbientSensorState(value: unknown): AmbientSensorStateWire {
+  return value === 'available' || value === 'no_sensor' || value === 'frozen_report'
+    ? value
+    : 'unknown';
+}
+
+/** i18n date formatting: "21 Nov" (pt) / "Nov 21" (en) style, never numeric-
+ * only (the owner reads brightness diagnostics by day). */
+function formatSensorDate(ms: number): string {
+  const locale = getLanguage() === 'pt' ? 'pt-PT' : getLanguage();
+  return new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'short' }).format(new Date(ms));
 }
 
 export default function DisplaySettings({
@@ -202,7 +219,7 @@ export default function DisplaySettings({
                 <span style={{ fontSize: 12, fontWeight: 600 }}>
                   {display.ambient_lux != null
                     ? `${display.ambient_lux.toFixed(0)} lux`
-                    : t('display.luxNotAvailable')}
+                    : ambientSensorNote(display.ambient_sensor)}
                 </span>
               </div>
 
@@ -524,6 +541,26 @@ export default function DisplaySettings({
       )}{' '}
     </div>
   );
+}
+
+// ── Ambient sensor note ──────────────────────────────────────────────────────
+
+/** Text under the "Ambient light" row when there is no live lux reading,
+ * driven by the backend diagnosis instead of a generic "unavailable": a
+ * machine with no ALS says so; a machine whose sensor froze names the date
+ * of the last real reading. */
+function ambientSensorNote(sensor: DisplayInfo['ambient_sensor']): string {
+  const state = parseAmbientSensorState(sensor?.state);
+  if (state === 'no_sensor') {
+    return t('display.sensorNoAmbient');
+  }
+  if (state === 'frozen_report') {
+    const ms = sensor?.last_fresh_ms;
+    return typeof ms === 'number' && ms > 0
+      ? t('display.sensorFrozen', { date: formatSensorDate(ms) })
+      : t('display.sensorFrozen', { date: t('display.luxNotAvailable') });
+  }
+  return t('display.luxNotAvailable');
 }
 
 // ── Smart model info panel ──────────────────────────────────────────────────

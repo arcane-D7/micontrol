@@ -132,6 +132,11 @@ export interface DisplayInfo {
   ai_brightness_config: AiBrightnessConfig;
   /** Current ambient illuminance from the light sensor (lux). Null when unavailable. */
   ambient_lux: number | null;
+  /** Sensor diagnosis + persisted last-fresh reading (absent on older payloads). */
+  ambient_sensor?: {
+    state: 'available' | 'no_sensor' | 'frozen_report' | 'unknown';
+    last_fresh_ms: number | null;
+  };
   /**
    * Which backend actually writes brightness (P10). `wmi-fallback` means the
    * Intel driver loaded ControlLib.dll but exposed no IGCL device, so hardware

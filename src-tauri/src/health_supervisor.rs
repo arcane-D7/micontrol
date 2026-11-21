@@ -310,26 +310,44 @@ async fn check_ambient_sensor() {
     .await
     .ok();
     let at = now_ms();
-    let healthy = result
-        .as_ref()
-        .and_then(|display| display.ambient_lux)
-        .is_some_and(|lux| lux.is_finite() && lux > 0.5);
-
+    // The diagnosis (Available / NoSensor / FrozenReport) decides what a
+    // failed reading MEANS. A diagnosed-stable sensor must not accumulate
+    // consecutive_failures forever or trigger reset bursts: the hardware is
+    // known (production proof: the TCS3408 froze for 4+ days while the
+    // supervisor requested a reset every cycle).
+    let sensor_state = crate::hw::display::ambient_sensor_state();
+    let diagnosed = sensor_state.is_diagnosed();
+    let healthy = result.as_ref().is_some_and(|d| {
+        d.ambient_lux
+            .is_some_and(|lux| lux.is_finite() && lux > 0.5)
+    });
+    let mut should_request_reset = false;
     if let Ok(mut snapshot) = state().lock() {
         begin_check(&mut snapshot.ambient_sensor, at);
         if healthy {
             mark_healthy(&mut snapshot.ambient_sensor, at);
+        } else if diagnosed {
+            snapshot.ambient_sensor.state = HealthState::Degraded;
+            snapshot.ambient_sensor.last_error = Some(match sensor_state {
+                crate::hw::display::AmbientSensorState::FrozenReport => {
+                    "ambient sensor present but not reporting (frozen reports)".to_string()
+                }
+                _ => "this device has no ambient light sensor".to_string(),
+            });
         } else {
+            // Undiagnosed (Unknown / transient Available): keep the old
+            // behaviour — count failures and reset after the burst.
             snapshot.ambient_sensor.state = HealthState::Degraded;
             snapshot.ambient_sensor.consecutive_failures = snapshot
                 .ambient_sensor
                 .consecutive_failures
                 .saturating_add(1);
-            snapshot.ambient_sensor.last_error = Some("ambient sensor reading unavailable".into());
+            snapshot.ambient_sensor.last_error =
+                Some("ambient sensor reading unavailable".to_string());
+            should_request_reset = true;
         }
     }
-
-    if !healthy {
+    if should_request_reset {
         crate::hw::display::request_sensor_reset("ambient sensor degraded");
     }
 }

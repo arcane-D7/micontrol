@@ -667,7 +667,9 @@
     "psr2ToastOff": "PSR2 DRRS desativado no registo do driver — efetivo após reinício.",
     "psr2ToastError": "Taxa de atualização adaptativa: {error}",
     "psr2Note": "PSR2 DRRS ≠ «Taxa de atualização dinâmica» do Windows. O DRR do Windows exige um ecrã compatível com VRR. O PSR2 DRRS é uma funcionalidade do driver Intel que comuta a taxa de atualização do painel internamente — o Windows indica sempre o máximo configurado (atualmente {hz} Hz), mesmo com o PSR2 ativo.",
-    "presetResetError": "Repor modelo inteligente: {error}"
+    "presetResetError": "Repor modelo inteligente: {error}",
+    "sensorNoAmbient": "Este dispositivo não tem sensor de luz ambiente.",
+    "sensorFrozen": "Sensor presente mas sem reportar (última leitura a {date})."
   },
   "fan": {
     "title": "Ventoinha",

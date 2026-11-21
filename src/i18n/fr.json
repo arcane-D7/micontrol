@@ -667,7 +667,9 @@
     "psr2ToastOff": "PSR2 DRRS désactivé dans le registre du pilote — effectif après redémarrage.",
     "psr2ToastError": "Fréquence de rafraîchissement adaptative : {error}",
     "psr2Note": "PSR2 DRRS ≠ « Fréquence de rafraîchissement dynamique » de Windows. Le DRR de Windows exige un écran compatible VRR. PSR2 DRRS est une fonction du pilote Intel qui commute la fréquence de la dalle en interne — Windows indique toujours le maximum configuré (actuellement {hz} Hz), même lorsque PSR2 est actif.",
-    "presetResetError": "Réinitialiser le modèle intelligent : {error}"
+    "presetResetError": "Réinitialiser le modèle intelligent : {error}",
+    "sensorNoAmbient": "Cet appareil n'a pas de capteur de lumière ambiante.",
+    "sensorFrozen": "Capteur présent mais sans rapport (dernière lecture le {date})."
   },
   "fan": {
     "title": "Ventilateur",
