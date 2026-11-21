@@ -1938,7 +1938,12 @@
     "disclaimer": "No existe una calibración «perfecta» universal: los paneles OLED varían de una unidad a otra. Un perfil de análisis mejora la media, pero no sustituye a una sonda.",
     "hdrIgnoresProfile": "El HDR está activado: Windows ignora los perfiles ICC y el gamma SDR en esta pantalla, así que aplicar un perfil ahora no tendrá efecto visible.",
     "installedProfiles": "Perfiles instalados",
-    "noCatalog": "Ningún perfil seleccionado se aplica a este panel."
+    "noCatalog": "Ningún perfil seleccionado se aplica a este panel.",
+    "resetDone": "Pantalla restablecida al perfil sRGB",
+    "applyFailed": "El perfil no se aplicó",
+    "searchOpened": "Búsqueda abierta en el navegador",
+    "wizardLaunched": "Asistente de calibración iniciado",
+    "resetTosRGBHint": "Devuelve esta pantalla al perfil sRGB estándar."
   },
   "cleanup": {
     "title": "Limpieza del Sistema",

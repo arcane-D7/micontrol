@@ -27,6 +27,7 @@ pub mod registry;
 pub mod retry;
 pub mod schtasks;
 pub mod session_marker;
+pub mod shell_open;
 pub mod state_store;
 pub mod webview_retry;
 pub mod win_handle;

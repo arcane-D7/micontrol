@@ -5,6 +5,8 @@
 
 pub mod ai;
 pub mod ai_logs;
+#[cfg(test)]
+pub mod color_command_tests;
 pub mod credentials;
 pub mod crossdevice;
 #[cfg(windows)]

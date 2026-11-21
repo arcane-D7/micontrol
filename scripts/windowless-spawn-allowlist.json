@@ -1,5 +1,5 @@
 {
   "generated": "2026-11-21",
-  "note": "baseline do gate B7 (ratchet): VAZIA desde 2026-11-21. Todos os spawns de producao passam pelo helper util/process_spawn (CREATE_NO_WINDOW por defeito); qualquer spawn novo fora do helper falha o build. Os 16 flashes C0a e os 8 residuais (ai_logs, face, privacy, icc_catalog, scrcpy_bridge) sairam.",
+  "note": "gate B7 ratchet",
   "entries": []
 }

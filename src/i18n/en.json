@@ -1938,7 +1938,12 @@
     "disclaimer": "There is no universal “perfect” calibration: OLED panels vary unit to unit. A review profile improves the average but does not replace a colorimeter.",
     "hdrIgnoresProfile": "HDR is on — Windows ignores ICC profiles and SDR gamma for this display, so applying a profile now has no visible effect.",
     "installedProfiles": "Installed profiles",
-    "noCatalog": "No curated profile applies to this panel."
+    "noCatalog": "No curated profile applies to this panel.",
+    "resetDone": "Display reset to the sRGB profile",
+    "applyFailed": "The profile was not applied",
+    "searchOpened": "Search opened in your browser",
+    "wizardLaunched": "Calibration wizard started",
+    "resetTosRGBHint": "Sets this display back to the standard sRGB profile."
   },
   "cleanup": {
     "title": "System Cleanup",

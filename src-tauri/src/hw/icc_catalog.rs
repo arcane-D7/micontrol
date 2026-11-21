@@ -19,7 +19,6 @@
 //! (`color_calibration::load_icc_profile`).
 
 use crate::hw::panel_edid::MonitorIdentity;
-use crate::util::process_spawn::{self, SpawnPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -817,8 +816,11 @@ pub fn profile_search_url(kind: &str, query: &str) -> Result<String, String> {
     }
     let encoded = query.replace(' ', "%20");
     match kind {
+        // NotebookCheck's site search is a Google custom-search page; the
+        // old `search.html?q=` template answers HTTP 404 (verified in a real
+        // browser), so searches never landed anywhere.
         "notebookcheck" => Ok(format!(
-            "https://www.notebookcheck.net/search.html?q={encoded}"
+            "https://www.notebookcheck.net/Google-Search.36690.0.html?q={encoded}"
         )),
         "panelook" => Ok(format!(
             "https://www.panelook.com/modelsearch.php?keyword={encoded}"
@@ -827,17 +829,12 @@ pub fn profile_search_url(kind: &str, query: &str) -> Result<String, String> {
     }
 }
 
-/// Open a research search in the default browser (no shell interpolation —
-/// `rundll32 url.dll,FileProtocolHandler` takes the URL as one argument).
+/// Open a research search in the default browser through `ShellExecuteW`:
+/// the shell resolves the browser and no console window is ever created
+/// (owner rule B7); the URL is passed as one argument, never to a shell.
 pub fn open_profile_search(kind: &str, query: &str) -> Result<(), String> {
     let url = profile_search_url(kind, query)?;
-    // B7: spawn through the windowless helper. rundll32 is a console binary;
-    // Quiet removes the flash, the browser window it opens is unaffected.
-    let mut cmd = std::process::Command::new("rundll32.exe");
-    cmd.args(["url.dll,FileProtocolHandler", &url]);
-    process_spawn::spawn_detached(&mut cmd, SpawnPolicy::Quiet)
-        .map(|_| ())
-        .map_err(|e| format!("cannot open browser: {e}"))
+    crate::util::shell_open::open_url(&url).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1141,7 +1138,7 @@ mod tests {
     fn builds_the_two_real_search_urls() {
         assert_eq!(
             profile_search_url("notebookcheck", "EDO4503").unwrap(),
-            "https://www.notebookcheck.net/search.html?q=EDO4503"
+            "https://www.notebookcheck.net/Google-Search.36690.0.html?q=EDO4503"
         );
         assert_eq!(
             profile_search_url("panelook", "LG ULTRAGEAR").unwrap(),

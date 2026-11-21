@@ -219,9 +219,46 @@ pub fn load_icc_profile(display: &str, profile_path: &str) -> HardwareResult<()>
         }
         let canonical = simplify_extended_path(&canonical);
 
-        wcs::associate_profile(display, &canonical)
+        // Latch the default profile through WCS. On this Windows build the
+        // association family (`AssociateColorProfileWithDeviceW`) returns TRUE
+        // without changing anything the colour pipeline reads back (verified
+        // live on build 26200: set xiaomi via Associate, WcsGetDefaultColorProfile
+        // kept reporting the old profile), which is why Apply used to report
+        // success while no profile ever took effect. `WcsSetDefaultColorProfile`
+        // is the channel both the readback and Windows Settings follow; it takes
+        // the bare profile file name, not the full path.
+        let file_name = canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| HardwareError::Other("ICC path has no file name".to_string()))?;
+        wcs::set_default_profile(display, &file_name)
             .map_err(|e| HardwareError::Other(format!("Failed to load ICC profile: {e}")))?;
-        log::info!("Loaded ICC profile {} for {}", canonical.display(), display);
+
+        // Keep the legacy association list in sync when the export exists. It
+        // no longer drives the default profile on this build; older GDI ICM
+        // consumers may still look at it, and its failure is not fatal.
+        if let Err(e) = wcs::associate_profile(display, &canonical) {
+            log::warn!("[color] legacy association failed (non-fatal): {e}");
+        }
+
+        // Success is only claimed when the readback agrees: the exact contract
+        // the UI's "Current Profile" line and Windows Settings use.
+        let read_back = wcs::default_profile_name(display).ok_or_else(|| {
+            HardwareError::Other(format!(
+                "profile did not apply: WcsGetDefaultColorProfile reports no default profile for {display} after setting {file_name}"
+            ))
+        })?;
+        if !read_back.eq_ignore_ascii_case(&file_name) {
+            return Err(HardwareError::Other(format!(
+                "profile did not apply: set {file_name} for {display} but the system reports {read_back}"
+            )));
+        }
+
+        log::info!(
+            "Loaded ICC profile {} for {} (verified via WcsGetDefaultColorProfile)",
+            canonical.display(),
+            display
+        );
         Ok(())
     }
     #[cfg(not(windows))]
@@ -270,14 +307,7 @@ pub fn unload_icc_profile(display: &str) -> HardwareResult<()> {
 pub fn open_color_management_settings() -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", "ms-settings:colormanagement"])
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .map_err(|e| {
-                HardwareError::Other(format!("Failed to open color management settings: {e}"))
-            })?;
-        Ok(())
+        crate::util::shell_open::open_url("ms-settings:colormanagement")
     }
     #[cfg(not(windows))]
     Err(HardwareError::NotSupported(
@@ -478,6 +508,7 @@ fn get_srgb_profile_path() -> HardwareResult<String> {
 /// ```
 #[cfg(windows)]
 mod wcs {
+    use crate::hw::errors::{HardwareError, HardwareResult};
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
@@ -592,6 +623,66 @@ mod wcs {
             }
         }
         Err(last_error)
+    }
+
+    /// `WcsSetDefaultColorProfile(CURRENT_USER, device, CPT_ICC, CPST_NONE, 0,
+    /// name)` latches `profile_name` (the bare file name of an installed
+    /// profile) as the display's default ICC profile.
+    ///
+    /// This is the write twin of [`default_profile_name`]: set and readback use
+    /// the same store, so a successful set is immediately visible to the UI and
+    /// to Windows Settings. Verified on build 26200: a name that is not an
+    /// installed profile returns FALSE (and the previous default stays), which
+    /// the caller turns into an honest error.
+    pub fn set_default_profile(device: &str, profile_name: &str) -> HardwareResult<()> {
+        let profile_name_w = wide(profile_name);
+        let mut last_error: Option<String> = None;
+        for name in device_names(device) {
+            let device_w = wide(name);
+            // HardwareResult keeps this helper out of the legacy string-error
+            // ratchet (check-error-catalog gate).
+            let result = (|| -> HardwareResult<()> {
+                let mscms = Mscms::load().map_err(HardwareError::Other)?;
+                let proc = mscms
+                    .export("WcsSetDefaultColorProfile", s!("WcsSetDefaultColorProfile"))
+                    .map_err(HardwareError::Other)?;
+                // BOOL WcsSetDefaultColorProfile(scope, device, cpt, cpst, id, name)
+                let set_profile: unsafe extern "system" fn(
+                    u32,
+                    *const u16,
+                    u32,
+                    u32,
+                    u32,
+                    *const u16,
+                ) -> i32 = unsafe { std::mem::transmute(proc) };
+                let ok = unsafe {
+                    set_profile(
+                        SCOPE_CURRENT_USER,
+                        device_w.as_ptr(),
+                        CPT_ICC,
+                        CPST_NONE,
+                        0,
+                        profile_name_w.as_ptr(),
+                    )
+                };
+                if ok != 0 {
+                    Ok(())
+                } else {
+                    Err(HardwareError::Other(format!(
+                        "WcsSetDefaultColorProfile failed for {name} with '{profile_name}' \
+                         (is it an installed profile?) (error {})",
+                        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+                    )))
+                }
+            })();
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => last_error = Some(e.to_string()),
+            }
+        }
+        Err(HardwareError::Other(last_error.unwrap_or_else(|| {
+            format!("no candidate device name for {device}")
+        })))
     }
 
     /// `DisassociateColorProfileFromDeviceW(NULL, profile, device)` — removes one
@@ -722,9 +813,6 @@ mod wcs {
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 #[cfg(windows)]
 fn profiles_for_devices(
@@ -1155,13 +1243,14 @@ mod live_profile_tests {
                     }
                 }
                 None => {
-                    // Found with nothing associated — hand the display back to
-                    // Windows' default instead of leaving sRGB pinned to it.
-                    if let Some(current) = get_icm_profile_gdi(DISPLAY) {
-                        if let Err(e) = wcs::disassociate_profile(DISPLAY, Path::new(&current)) {
-                            eprintln!("live test: could not clear {current}: {e}");
-                        }
-                    }
+                    // Found with no default profile: there is no WCS "remove"
+                    // export on this build (WcsSetDefaultColorProfile with a
+                    // NULL name returns FALSE, verified live), so the best
+                    // restore is an explicit note instead of a silent lie.
+                    eprintln!(
+                        "live test: {DISPLAY} had no default profile before; the reset-to-sRGB \
+                         state from this test is left in place"
+                    );
                 }
             }
         }

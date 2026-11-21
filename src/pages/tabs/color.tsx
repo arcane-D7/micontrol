@@ -165,19 +165,31 @@ export default function ColorTab() {
     const profile = selectedProfiles[display];
     if (!profile) return;
     try {
+      // The command only succeeds when the WCS readback confirms the new
+      // default profile, so re-fetching afterwards really shows it.
       await invoke('load_icc_profile', { display, profilePath: profile });
-      void fetchStatus();
+      setErrorMsg(null);
+      await fetchStatus();
+      addToast({ message: t('color.applied'), type: 'success' });
     } catch (e) {
-      setErrorMsg(`${t('color.loadProfile')}: ${errorMessage(e)}`);
+      const msg = errorMessage(e);
+      setErrorMsg(`${t('color.loadProfile')}: ${msg}`);
+      addToast({ message: `${t('color.loadProfile')}: ${msg}`, type: 'error' });
     }
   };
 
   const handleUnloadProfile = async (display: string) => {
     try {
+      // Reset to sRGB: same readback contract, the sRGB profile must be
+      // reported as current before success is toasted.
       await invoke('unload_icc_profile', { display });
-      void fetchStatus();
+      setErrorMsg(null);
+      await fetchStatus();
+      addToast({ message: t('color.resetDone'), type: 'success' });
     } catch (e) {
-      setErrorMsg(`${t('color.unloadProfile')}: ${errorMessage(e)}`);
+      const msg = errorMessage(e);
+      setErrorMsg(`${t('color.unloadProfile')}: ${msg}`);
+      addToast({ message: `${t('color.unloadProfile')}: ${msg}`, type: 'error' });
     }
   };
 
@@ -205,9 +217,12 @@ export default function ColorTab() {
     setBusyEntry(entry.id);
     setErrorMsg(null);
     try {
+      // apply_color_profile only returns success when the backend read the
+      // default profile back (WCS); the banner the user sees therefore
+      // reflects the system state, not an unchecked API return value.
       await invoke('apply_color_profile', { display, entryId: entry.id });
       addToast({ message: t('color.applied'), type: 'success' });
-      void fetchStatus();
+      await fetchStatus();
     } catch (e) {
       const msg = errorMessage(e);
       setErrorMsg(`${t('color.applyProfile')}: ${msg}`);

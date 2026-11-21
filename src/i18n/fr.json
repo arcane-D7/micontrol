@@ -1938,7 +1938,12 @@
     "disclaimer": "Il n'existe pas de calibration « parfaite » universelle : les dalles OLED varient d'une unité à l'autre. Un profil de test améliore la moyenne, mais ne remplace pas une sonde.",
     "hdrIgnoresProfile": "Le HDR est activé — Windows ignore les profils ICC et le gamma SDR sur cet écran ; appliquer un profil maintenant n'a donc aucun effet visible.",
     "installedProfiles": "Profils installés",
-    "noCatalog": "Aucun profil sélectionné ne s'applique à cette dalle."
+    "noCatalog": "Aucun profil sélectionné ne s'applique à cette dalle.",
+    "resetDone": "Écran rétabli sur le profil sRGB",
+    "applyFailed": "Le profil n'a pas été appliqué",
+    "searchOpened": "Recherche ouverte dans le navigateur",
+    "wizardLaunched": "Assistant de calibrage démarré",
+    "resetTosRGBHint": "Rétablit cet écran sur le profil sRGB standard."
   },
   "cleanup": {
     "title": "Nettoyage Système",
