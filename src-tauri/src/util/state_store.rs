@@ -1248,6 +1248,220 @@ pub fn governor_policy_store_in(program_root: &Path) -> Store<GovernorPolicyStat
     ))
 }
 
+// ---- C3b stores ------------------------------------------------------------
+
+/// Remove a legacy state file after the store has taken over its content.
+/// Callers must only invoke this AFTER a successful store save, so a failure
+/// here never loses data; it leaves the legacy file in place and logs.
+pub fn retire_legacy_state_file(legacy: &Path) {
+    if let Err(e) = fs::remove_file(legacy) {
+        if e.kind() != io::ErrorKind::NotFound {
+            log::warn!(
+                target: "util::state_store",
+                "could not remove legacy state file {}: {e}",
+                legacy.display()
+            );
+        }
+    }
+}
+
+// Store: os_turbo_log. Anonymous bounded OS Turbo action log. The payload
+// type (`ActionLogState`) lives in `hw::os_turbo_log` next to `ActionRecord`;
+// only the location decision is made here. Ceiling: the log caps itself at
+// 256 KiB of records; the envelope overhead fits inside 512 KiB.
+
+/// Production os_turbo_log spec: `%LOCALAPPDATA%\MiControl\state\os_turbo_log.json`.
+pub fn os_turbo_log_spec() -> Result<StoreSpec, StoreError> {
+    StoreRegistry::spec(
+        StoreRoot::User,
+        "os_turbo_log",
+        1,
+        AclPolicy::User,
+        512 * 1024,
+    )
+}
+
+/// os_turbo_log spec under an explicit root (tests).
+pub fn os_turbo_log_spec_in(root: &Path) -> StoreSpec {
+    StoreRegistry::spec_in(
+        StoreRoot::User,
+        root,
+        "os_turbo_log",
+        1,
+        AclPolicy::User,
+        512 * 1024,
+    )
+}
+
+// Store: face_consent. The DPAPI-encrypted enrollment gallery shared by the
+// app (writes) and the SYSTEM face service (reads, LogonUI authentication).
+// Machine scope (`StoreRoot::ProgramData`) is REQUIRED: the service answers
+// at the logon screen before any user session exists. The ACL stays untouched
+// (`User` policy = inherit), matching the legacy `faces.dat` behavior; the
+// ProgramData ACL question remains SEC-04, owned elsewhere.
+
+/// Opaque gallery payload: the DPAPI machine-scope blob, base64-encoded so it
+/// travels inside the JSON envelope byte-exact. The plaintext never touches
+/// the envelope; the encryption boundary stays in `hw::face::store`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FaceGalleryState {
+    /// Base64 of the DPAPI-protected gallery blob (magic + encrypted JSON).
+    pub blob_b64: String,
+}
+
+/// Production face_consent store: `%PROGRAMDATA%\MiControl\face_consent.json`.
+pub fn face_consent_store() -> Result<Store<FaceGalleryState>, StoreError> {
+    Ok(Store::new(StoreRegistry::spec(
+        StoreRoot::ProgramData,
+        "face_consent",
+        1,
+        AclPolicy::User,
+        1024 * 1024,
+    )?))
+}
+
+/// face_consent store under an explicit PROGRAMDATA root (tests).
+pub fn face_consent_store_in(program_root: &Path) -> Store<FaceGalleryState> {
+    Store::new(StoreRegistry::spec_in(
+        StoreRoot::ProgramData,
+        program_root,
+        "face_consent",
+        1,
+        AclPolicy::User,
+        1024 * 1024,
+    ))
+}
+
+/// Legacy enrollment gallery written by pre-store builds (app AND service).
+pub fn legacy_face_gallery_path() -> PathBuf {
+    match std::env::var_os("PROGRAMDATA") {
+        Some(base) => legacy_face_gallery_path_in(&PathBuf::from(base)),
+        None => PathBuf::from(r"C:\ProgramData\MiControl\face\faces.dat"),
+    }
+}
+
+/// Legacy gallery path under an explicit PROGRAMDATA root (tests).
+pub fn legacy_face_gallery_path_in(program_root: &Path) -> PathBuf {
+    program_root
+        .join("MiControl")
+        .join("face")
+        .join("faces.dat")
+}
+
+// Store: charging. The user's requested charging limit. Replaces the HKLM
+// `ChargingThreshold` cache, which a non-elevated app could not even write;
+// the legacy registry value is imported read-only on first load.
+
+/// Requested charging limit persisted for crash survival and as the fallback
+/// when the firmware read fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ChargingThresholdState {
+    /// Requested limit in percent (clamped to 40..=100 by the caller).
+    pub threshold: u8,
+}
+
+/// Production charging store: `%LOCALAPPDATA%\MiControl\state\charging.json`.
+pub fn charging_store() -> Result<Store<ChargingThresholdState>, StoreError> {
+    Ok(Store::new(StoreRegistry::spec(
+        StoreRoot::User,
+        "charging",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    )?))
+}
+
+/// Charging store under an explicit root (tests).
+pub fn charging_store_in(root: &Path) -> Store<ChargingThresholdState> {
+    Store::new(StoreRegistry::spec_in(
+        StoreRoot::User,
+        root,
+        "charging",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    ))
+}
+
+// Store: eye_protection. Enabled flag + intensity for the gamma-ramp filter.
+// Replaces the HKCU `EyeProtection` registry values.
+
+/// Eye protection persisted state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct EyeProtectionState {
+    /// Whether the warm gamma ramp is currently applied.
+    pub enabled: bool,
+    /// 0-100 filter intensity (0 = no filter).
+    pub intensity: u8,
+}
+
+/// Production eye_protection store:
+/// `%LOCALAPPDATA%\MiControl\state\eye_protection.json`.
+pub fn eye_protection_store() -> Result<Store<EyeProtectionState>, StoreError> {
+    Ok(Store::new(StoreRegistry::spec(
+        StoreRoot::User,
+        "eye_protection",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    )?))
+}
+
+/// eye_protection store under an explicit root (tests).
+pub fn eye_protection_store_in(root: &Path) -> Store<EyeProtectionState> {
+    Store::new(StoreRegistry::spec_in(
+        StoreRoot::User,
+        root,
+        "eye_protection",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    ))
+}
+
+// Store: audio_effects. The three saved-but-not-applied audio preferences.
+// Each field stays `Option<bool>` so "never set" remains distinguishable from
+// "explicitly off": the legacy gap-fill migration only fills never-set slots
+// and must not overwrite an explicit off with a stranded SYSTEM-hive value.
+
+/// Audio effects persisted state (`None` = the user never set the toggle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AudioEffectsState {
+    /// Mic noise canceling preference.
+    #[serde(default)]
+    pub mic_noise_canceling: Option<bool>,
+    /// Speaker noise canceling preference.
+    #[serde(default)]
+    pub speaker_noise_canceling: Option<bool>,
+    /// Voice focus preference.
+    #[serde(default)]
+    pub voice_focus: Option<bool>,
+}
+
+/// Production audio_effects store:
+/// `%LOCALAPPDATA%\MiControl\state\audio_effects.json`.
+pub fn audio_effects_store() -> Result<Store<AudioEffectsState>, StoreError> {
+    Ok(Store::new(StoreRegistry::spec(
+        StoreRoot::User,
+        "audio_effects",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    )?))
+}
+
+/// audio_effects store under an explicit root (tests).
+pub fn audio_effects_store_in(root: &Path) -> Store<AudioEffectsState> {
+    Store::new(StoreRegistry::spec_in(
+        StoreRoot::User,
+        root,
+        "audio_effects",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    ))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1852,6 +2066,61 @@ mod tests {
         let result = super::apply_sddl(path, "D:(A;OICI;FA;;;OW)");
         if let Err(e) = result {
             panic!("could not restore owner control on {}: {e}", path.display());
+        }
+    }
+
+    /// C3b static gate: the modules migrated onto the state store must not
+    /// write state files directly anymore. Only the production prefix of each
+    /// file is checked: the `#[cfg(test)]` sections create fixtures
+    /// legitimately and the state-writes ratchet already ignores them. The
+    /// tokens below are assembled dynamically so this source file itself
+    /// never contains a literal match for the ratchet's patterns.
+    #[test]
+    fn migrated_modules_have_no_direct_state_writes() {
+        let fs_write = concat!("fs:", ":write(");
+        let file_create = concat!("File", "::create(");
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let migrated = [
+            "src/hw/audio_effects.rs",
+            "src/hw/eye_protection.rs",
+            "src/hw/charging.rs",
+            "src/hw/os_turbo_log.rs",
+            "src/hw/face/store.rs",
+            "src/bin/micontrol_face_svc.rs",
+        ];
+        for rel in migrated {
+            let path = manifest.join(rel);
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+            let marker = concat!("#[cfg", "(test)]");
+            let production = text.split(marker).next().expect("prefix");
+            assert!(
+                !production.contains(fs_write) && !production.contains(file_create),
+                "{rel} still writes files directly; route it through util::state_store"
+            );
+        }
+    }
+
+    /// C3b static gate: each migrated module actually consumes the state
+    /// store (or the shared face gallery helpers that wrap it).
+    #[test]
+    fn migrated_modules_reference_the_state_store() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let adoption = [
+            ("src/hw/audio_effects.rs", "state_store"),
+            ("src/hw/eye_protection.rs", "state_store"),
+            ("src/hw/charging.rs", "state_store"),
+            ("src/hw/os_turbo_log.rs", "state_store"),
+            ("src/hw/face/store.rs", "state_store"),
+            ("src/bin/micontrol_face_svc.rs", "load_gallery"),
+        ];
+        for (rel, marker) in adoption {
+            let text = std::fs::read_to_string(manifest.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+            assert!(
+                text.contains(marker),
+                "{rel} does not reference {marker}; the migration regressed"
+            );
         }
     }
 }

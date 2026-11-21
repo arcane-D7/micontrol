@@ -50,10 +50,6 @@ const AUDIO_EFFECTS_REG_KEY: &str = r"SOFTWARE\MiControl\AudioEffects";
 #[cfg(any(windows, test))]
 const LEGACY_SYSTEM_SUBKEY: &str = r"S-1-5-18\SOFTWARE\MiControl\AudioEffects";
 
-/// Value name marking that the one-time SYSTEM-hive migration already ran.
-#[cfg(any(windows, test))]
-const MIGRATION_MARKER: &str = "MigratedFromSystemHive";
-
 /// Registry value names.
 const MIC_NC_VALUE: &str = "MicNoiseCanceling";
 const SPK_NC_VALUE: &str = "SpeakerNoiseCanceling";
@@ -182,10 +178,41 @@ fn plan_migration(
     (copy, count)
 }
 
-/// Interpret a persisted DWORD as an on/off preference.
-#[cfg(any(windows, test))]
+/// Interpret a persisted DWORD as an on/off preference. Still the semantic
+/// the registry fallback readers rely on through `bool_slot`.
+#[cfg(test)]
 fn effect_enabled(value: Option<u32>) -> bool {
     value.is_some_and(|v| v != 0)
+}
+
+/// Registry DWORD slot -> store state field (`None` stays "never set").
+#[cfg(any(windows, test))]
+fn bool_slot(value: Option<u32>) -> Option<bool> {
+    value.map(|v| v != 0)
+}
+
+/// Registry DWORD slots -> store state fields (`None` stays "never set").
+#[cfg(any(windows, test))]
+fn state_from_values(
+    values: [Option<u32>; EFFECT_COUNT],
+) -> crate::util::state_store::AudioEffectsState {
+    crate::util::state_store::AudioEffectsState {
+        mic_noise_canceling: bool_slot(values[0]),
+        speaker_noise_canceling: bool_slot(values[1]),
+        voice_focus: bool_slot(values[2]),
+    }
+}
+
+/// Store state field -> registry DWORD slot (only for the legacy readers).
+#[cfg(any(windows, test))]
+fn values_from_state(
+    state: &crate::util::state_store::AudioEffectsState,
+) -> [Option<bool>; EFFECT_COUNT] {
+    [
+        state.mic_noise_canceling,
+        state.speaker_noise_canceling,
+        state.voice_focus,
+    ]
 }
 
 // ── Public read path ─────────────────────────────────────────────────────────
@@ -194,26 +221,17 @@ fn effect_enabled(value: Option<u32>) -> bool {
 pub fn get_audio_effects() -> HardwareResult<AudioEffectsStatus> {
     #[cfg(windows)]
     {
-        use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
-
-        // Idempotent, marker-guarded: recovers the state older builds stranded
+        // Import-once: recovers the state older builds stranded in HKCU and
         // in the SYSTEM hive before reporting it, so the first paint of the
         // card matches what the user configured historically.
-        migrate_legacy_system_effects();
-
-        let values = RegKeyGuard::open_read(HKEY_CURRENT_USER, AUDIO_EFFECTS_REG_KEY)
-            .ok()
-            .flatten()
-            .map(|key| read_values(&key))
-            .unwrap_or([None; EFFECT_COUNT]);
+        let values = audio_effect_bools();
 
         let clarity = detect_voice_clarity();
 
         Ok(AudioEffectsStatus {
-            mic_noise_canceling: effect_enabled(values[0]),
-            speaker_noise_canceling: effect_enabled(values[1]),
-            voice_focus: effect_enabled(values[2]),
+            mic_noise_canceling: values[0].unwrap_or(false),
+            speaker_noise_canceling: values[1].unwrap_or(false),
+            voice_focus: values[2].unwrap_or(false),
             voice_clarity_available: clarity.available(),
             voice_clarity_reason: clarity.reason().to_string(),
             applies_to_audio: APPLIES_TO_AUDIO,
@@ -273,23 +291,64 @@ pub fn set_voice_focus(enabled: bool) -> HardwareResult<()> {
     Ok(())
 }
 
-/// Persist an audio effect setting to the **current user's** registry hive.
+/// Persist an audio effect setting through the state store.
 ///
 /// Must stay in-process (never routed through the elevated bridge): the bridge
-/// runs as LocalSystem, so an elevated `HKEY_CURRENT_USER` write lands in
-/// `HKU\S-1-5-18` and is invisible to [`get_audio_effects`].
+/// runs as LocalSystem, so an elevated `HKEY_CURRENT_USER` write historically
+/// landed in `HKU\S-1-5-18` and was invisible to [`get_audio_effects`]. The
+/// import-on-first-write also keeps values an older build left in HKCU from
+/// being lost to a single-field save.
 #[cfg(windows)]
 fn persist_audio_effect(name: &str, enabled: bool) -> HardwareResult<()> {
-    use crate::util::registry::RegKeyGuard;
-    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    use crate::util::state_store;
 
-    let key = RegKeyGuard::create_write(HKEY_CURRENT_USER, AUDIO_EFFECTS_REG_KEY)
-        .map_err(|e| HardwareError::Registry(format!("Create audio effects key: {e}")))?;
+    let store = state_store::audio_effects_store()
+        .map_err(|e| state_store_error("audio effects store", e))?;
+    let mut state = match store.load() {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            // First write before any read: seed from the legacy HKCU values
+            // and (when readable) the SYSTEM-hive gap-fill.
+            let user = read_hive_values(
+                windows::Win32::System::Registry::HKEY_CURRENT_USER,
+                AUDIO_EFFECTS_REG_KEY,
+            );
+            let merged = match read_system_hive_values() {
+                Some(system) => plan_migration(user, system).0,
+                None => user,
+            };
+            state_from_values(merged)
+        }
+        Err(e) => {
+            // Corrupt store: warn and overwrite with just this effect. The
+            // other two slots were unreadable anyway, and the next read
+            // re-imports any gap from the registry values.
+            log::warn!(
+                target: "hw::audio_effects",
+                "audio effects store unreadable ({e}); saving only the changed effect"
+            );
+            state_store::AudioEffectsState::default()
+        }
+    };
+    match name {
+        MIC_NC_VALUE => state.mic_noise_canceling = Some(enabled),
+        SPK_NC_VALUE => state.speaker_noise_canceling = Some(enabled),
+        VOICE_FOCUS_VALUE => state.voice_focus = Some(enabled),
+        other => {
+            return Err(HardwareError::InvalidConfig(format!(
+                "unknown audio effect value name: {other}"
+            )))
+        }
+    }
+    store
+        .save(&state)
+        .map_err(|e| state_store_error("audio effects save", e))
+}
 
-    key.write_u32(name, if enabled { 1 } else { 0 })
-        .map_err(|e| HardwareError::Registry(format!("Write {name}: {e}")))?;
-
-    Ok(())
+/// Map a state-store failure into the catalog-classified IO error.
+#[cfg(windows)]
+fn state_store_error(context: &str, e: crate::util::state_store::StoreError) -> HardwareError {
+    HardwareError::Io(std::io::Error::other(format!("{context}: {e}")))
 }
 
 #[cfg(not(windows))]
@@ -308,59 +367,100 @@ fn read_values(key: &crate::util::registry::RegKeyGuard) -> [Option<u32>; EFFECT
     values
 }
 
-/// Copy the three preferences stranded in the SYSTEM hive into the user's hive.
-///
-/// * Runs at most once (marker value [`MIGRATION_MARKER`]).
-/// * Never overwrites a value the user already has — see [`plan_migration`].
-/// * A blocked/failed read of the legacy key leaves the marker unset so a later
-///   launch retries; because only gaps are filled, a retry has no side effects.
+/// The three preferences as `Some(bool)` slots (`None` = never set).
 #[cfg(windows)]
-fn migrate_legacy_system_effects() {
-    use crate::util::registry::RegKeyGuard;
-    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_USERS};
+type EffectBools = [Option<bool>; EFFECT_COUNT];
 
-    let Ok(dst) = RegKeyGuard::create_write(HKEY_CURRENT_USER, AUDIO_EFFECTS_REG_KEY) else {
-        log::warn!(
-            target: "hw::audio_effects",
-            "Migration skipped: cannot open the user's AudioEffects key"
-        );
-        return;
-    };
-    if dst.read_u32(MIGRATION_MARKER).ok().flatten().is_some() {
-        return;
-    }
+/// Read the preferences through the state store, importing the legacy HKCU
+/// values and the SYSTEM-hive gap-fill on the first read.
+///
+/// Retry semantics carried over from the registry marker: when the SYSTEM
+/// hive cannot be read this launch, the import is NOT saved (the store stays
+/// empty) so a later launch retries; only gaps are filled, so a retry is
+/// side-effect free.
+#[cfg(windows)]
+fn audio_effect_bools() -> EffectBools {
+    use crate::util::state_store;
 
-    let Ok(Some(src)) = RegKeyGuard::open_read(HKEY_USERS, LEGACY_SYSTEM_SUBKEY) else {
-        // Nothing to migrate, or the SYSTEM hive is not readable in this
-        // context. The marker stays unset so a later launch can still recover
-        // the values; re-running is harmless because only gaps are filled.
-        return;
-    };
-
-    let (copy, count) = plan_migration(read_values(&dst), read_values(&src));
-    for index in 0..EFFECT_COUNT {
-        let Some(value) = copy[index] else { continue };
-        if let Err(e) = dst.write_u32(EFFECT_VALUES[index], value) {
+    let store = match state_store::audio_effects_store() {
+        Ok(store) => store,
+        Err(e) => {
             log::warn!(
                 target: "hw::audio_effects",
-                "Migration of {} failed: {e}; will retry next launch",
-                EFFECT_VALUES[index]
+                "audio effects store unavailable ({e}); reading the registry values"
             );
-            return;
+            return read_hive_values(
+                windows::Win32::System::Registry::HKEY_CURRENT_USER,
+                AUDIO_EFFECTS_REG_KEY,
+            )
+            .map(bool_slot);
+        }
+    };
+    match store.load() {
+        Ok(Some(state)) => values_from_state(&state),
+        Ok(None) => {
+            let user = read_hive_values(
+                windows::Win32::System::Registry::HKEY_CURRENT_USER,
+                AUDIO_EFFECTS_REG_KEY,
+            );
+            match read_system_hive_values() {
+                Some(system) => {
+                    let (merged, count) = plan_migration(user, system);
+                    let _ = store.save(&state_from_values(merged));
+                    if count > 0 {
+                        log::info!(
+                            target: "hw::audio_effects",
+                            "Migrated {count} audio effect preference(s) from the registry hives into the state store"
+                        );
+                    }
+                    merged.map(bool_slot)
+                }
+                None => {
+                    // SYSTEM hive blocked this launch: serve the HKCU values,
+                    // keep the store empty so the import retries later.
+                    user.map(bool_slot)
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                target: "hw::audio_effects",
+                "audio effects store unreadable ({e}); reading the registry values"
+            );
+            read_hive_values(
+                windows::Win32::System::Registry::HKEY_CURRENT_USER,
+                AUDIO_EFFECTS_REG_KEY,
+            )
+            .map(bool_slot)
         }
     }
+}
 
-    let _ = dst.write_u32(MIGRATION_MARKER, 1);
-    if count > 0 {
-        log::info!(
-            target: "hw::audio_effects",
-            "Migrated {count} audio effect preference(s) from the SYSTEM hive into HKCU"
-        );
-    } else {
-        log::info!(
-            target: "hw::audio_effects",
-            "No audio effect preferences needed migrating from the SYSTEM hive"
-        );
+/// Read one hive key into the fixed-order DWORD slots.
+#[cfg(windows)]
+fn read_hive_values(
+    parent: windows::Win32::System::Registry::HKEY,
+    subkey: &str,
+) -> [Option<u32>; EFFECT_COUNT] {
+    use crate::util::registry::RegKeyGuard;
+    RegKeyGuard::open_read(parent, subkey)
+        .ok()
+        .flatten()
+        .map(|key| read_values(&key))
+        .unwrap_or([None; EFFECT_COUNT])
+}
+
+/// The stranded SYSTEM-hive values. `None` = the read was BLOCKED this launch
+/// (retry later); a missing legacy key is a completed no-op import.
+#[cfg(windows)]
+fn read_system_hive_values() -> Option<[Option<u32>; EFFECT_COUNT]> {
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_USERS;
+
+    match RegKeyGuard::open_read(HKEY_USERS, LEGACY_SYSTEM_SUBKEY) {
+        Ok(Some(key)) => Some(read_values(&key)),
+        Ok(None) => Some([None; EFFECT_COUNT]),
+        Err(_) => None,
     }
 }
 
@@ -561,5 +661,64 @@ mod tests {
     fn os_build_probe_reads_a_plausible_build_number() {
         let build = windows_build_number().expect("CurrentBuildNumber must be readable");
         assert!(build >= 10240, "implausible Windows build number: {build}");
+    }
+
+    /// Unique per-test scratch state root.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "micontrol-audio-effects-{}-{}-{}",
+            tag,
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch root");
+        dir
+    }
+
+    #[test]
+    fn state_mapping_preserves_never_set_vs_explicit_off() {
+        let values: [Option<u32>; EFFECT_COUNT] = [Some(0), Some(1), None];
+        let state = state_from_values(values);
+        assert_eq!(state.mic_noise_canceling, Some(false));
+        assert_eq!(state.speaker_noise_canceling, Some(true));
+        assert_eq!(state.voice_focus, None);
+        let bools = values_from_state(&state);
+        assert_eq!(bools, [Some(false), Some(true), None]);
+    }
+
+    #[test]
+    fn audio_effects_state_roundtrips_through_the_store() {
+        let root = scratch_root("roundtrip");
+        let store = crate::util::state_store::audio_effects_store_in(&root);
+        store
+            .save(&crate::util::state_store::AudioEffectsState {
+                mic_noise_canceling: Some(true),
+                speaker_noise_canceling: Some(false),
+                voice_focus: None,
+            })
+            .expect("save");
+        let loaded = store.load().expect("load").expect("state");
+        assert_eq!(loaded.mic_noise_canceling, Some(true));
+        assert_eq!(loaded.speaker_noise_canceling, Some(false));
+        assert_eq!(loaded.voice_focus, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_audio_effects_store_reads_as_default() {
+        let root = scratch_root("corrupt");
+        let store = crate::util::state_store::audio_effects_store_in(&root);
+        std::fs::create_dir_all(store.path().parent().expect("parent")).expect("dir");
+        std::fs::write(store.path(), "{corrupt").expect("corrupt fixture");
+        assert!(store.load().is_err(), "corrupt payload must surface");
+        // A following save heals the file (warn-and-degrade in production).
+        store
+            .save(&crate::util::state_store::AudioEffectsState::default())
+            .expect("save heals");
+        assert!(store.load().expect("load").is_some());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

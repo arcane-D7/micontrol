@@ -1135,11 +1135,6 @@ fn persist_os_turbo(enabled: bool) -> HardwareResult<()> {
     }
 }
 
-/// `%LOCALAPPDATA%\MiControl` — where the anonymous action log lives.
-fn action_log_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| std::path::PathBuf::from(base).join("MiControl"))
-}
-
 /// Coarse bucket for the current hour (UTC). The log deliberately carries no
 /// exact timestamp; see `hw::os_turbo_log`.
 fn current_time_bucket() -> crate::hw::os_turbo_log::TimeBucket {
@@ -1159,15 +1154,12 @@ fn current_time_bucket() -> crate::hw::os_turbo_log::TimeBucket {
 fn record_os_turbo_action(build: impl FnOnce() -> crate::hw::os_turbo_log::ActionRecord) {
     use crate::hw::os_turbo_log::{load_action_log, save_action_log, ActionLog};
 
-    let Some(dir) = action_log_dir() else {
-        return;
-    };
     static ACTION_LOG: std::sync::OnceLock<std::sync::Mutex<ActionLog>> =
         std::sync::OnceLock::new();
-    let log = ACTION_LOG.get_or_init(|| std::sync::Mutex::new(load_action_log(&dir, true)));
+    let log = ACTION_LOG.get_or_init(|| std::sync::Mutex::new(load_action_log(true)));
     let mut guard = log.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.push(build());
-    if let Err(error) = save_action_log(&dir, &guard) {
+    if let Err(error) = save_action_log(&guard) {
         log::warn!("[os_turbo] action log write failed: {error}");
     }
 }

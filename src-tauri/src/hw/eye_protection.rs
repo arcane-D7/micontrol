@@ -67,36 +67,19 @@ windows_targets::link!("user32.dll" "system" fn GetDC(hwnd: *mut std::ffi::c_voi
 #[cfg(windows)]
 windows_targets::link!("user32.dll" "system" fn ReleaseDC(hwnd: *mut std::ffi::c_void, hdc: *mut std::ffi::c_void) -> i32);
 
-/// Get the current eye protection state from registry.
+/// Get the current eye protection state: the state store first, with a
+/// one-time read-only import of the legacy HKCU values on the first miss.
+/// Corrupt or unavailable state degrades to the legacy registry read.
 pub fn get_eye_protection() -> HardwareResult<EyeProtectionStatus> {
     #[cfg(windows)]
     {
-        use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
-
-        let key = RegKeyGuard::open_read(HKEY_CURRENT_USER, EYE_PROTECTION_REG_KEY)
-            .ok()
-            .flatten();
-
-        let (enabled, intensity) = if let Some(k) = key {
-            let enabled = k
-                .read_u32(EYE_PROTECTION_ENABLED_VALUE)
-                .ok()
-                .flatten()
-                .map(|v| v != 0)
-                .unwrap_or(false);
-            let intensity = k
-                .read_u32(EYE_PROTECTION_INTENSITY_VALUE)
-                .ok()
-                .flatten()
-                .map(|v| v.clamp(0, 100) as u8)
-                .unwrap_or(DEFAULT_INTENSITY);
-            (enabled, intensity)
-        } else {
-            (false, DEFAULT_INTENSITY)
-        };
-
-        Ok(EyeProtectionStatus { enabled, intensity })
+        let store = crate::util::state_store::eye_protection_store();
+        let legacy = legacy_eye_protection_state();
+        let loaded = load_eye_from(&store, legacy);
+        match loaded {
+            Some(status) => Ok(status),
+            None => get_eye_protection_registry(),
+        }
     }
     #[cfg(not(windows))]
     {
@@ -105,6 +88,73 @@ pub fn get_eye_protection() -> HardwareResult<EyeProtectionStatus> {
             intensity: DEFAULT_INTENSITY,
         })
     }
+}
+
+/// Shared load path (explicit store + injected legacy state for tests).
+/// `Ok(Some(status))` from the store wins; the legacy import runs once on a
+/// store miss; anything unreadable returns `None` and the caller falls back.
+#[cfg(any(windows, test))]
+fn load_eye_from(
+    store: &Result<
+        crate::util::state_store::Store<crate::util::state_store::EyeProtectionState>,
+        crate::util::state_store::StoreError,
+    >,
+    legacy: Option<crate::util::state_store::EyeProtectionState>,
+) -> Option<EyeProtectionStatus> {
+    let Ok(store) = store else {
+        return legacy.map(EyeProtectionStatus::from_state);
+    };
+    match store.load() {
+        Ok(Some(state)) => Some(EyeProtectionStatus::from_state(state)),
+        Ok(None) => {
+            if let Some(state) = legacy {
+                let _ = store.save(&state);
+                return Some(EyeProtectionStatus::from_state(state));
+            }
+            None
+        }
+        Err(e) => {
+            log::warn!(
+                target: "hw::eye_protection",
+                "eye protection store unreadable ({e}); falling back to the registry values"
+            );
+            legacy.map(EyeProtectionStatus::from_state)
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl EyeProtectionStatus {
+    fn from_state(state: crate::util::state_store::EyeProtectionState) -> Self {
+        Self {
+            enabled: state.enabled,
+            intensity: state.intensity,
+        }
+    }
+}
+
+/// Legacy HKCU values written by pre-store builds (read-only import source).
+#[cfg(windows)]
+fn legacy_eye_protection_state() -> Option<crate::util::state_store::EyeProtectionState> {
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+
+    let key = RegKeyGuard::open_read(HKEY_CURRENT_USER, EYE_PROTECTION_REG_KEY)
+        .ok()
+        .flatten()?;
+    let enabled = key
+        .read_u32(EYE_PROTECTION_ENABLED_VALUE)
+        .ok()
+        .flatten()
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    let intensity = key
+        .read_u32(EYE_PROTECTION_INTENSITY_VALUE)
+        .ok()
+        .flatten()
+        .map(|v| v.clamp(0, 100) as u8)
+        .unwrap_or(DEFAULT_INTENSITY);
+    Some(crate::util::state_store::EyeProtectionState { enabled, intensity })
 }
 
 /// Enable or disable eye protection.
@@ -123,7 +173,6 @@ pub fn set_eye_protection(enabled: bool, intensity: Option<u8>) -> HardwareResul
 
     // Persist state
     persist_eye_protection(enabled, intensity)?;
-
     log::info!(
         target: "hw::eye_protection",
         "Eye protection {} (intensity={})",
@@ -226,26 +275,134 @@ fn apply_ramp_via_ffi(ramp: &mut GammaRamp) -> HardwareResult<()> {
     }
 }
 
-/// Persist eye protection state to registry.
+/// Persist eye protection state through the state store. The legacy HKCU
+/// values are imported read-only on the next get and left in place (nothing
+/// reads them once the store exists; deleting registry values the app does
+/// not own is riskier than leaving a dead DWORD).
 fn persist_eye_protection(enabled: bool, intensity: u8) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+    let store = crate::util::state_store::eye_protection_store()
+        .map_err(|e| state_store_error("eye protection store", e))?;
+    let state = crate::util::state_store::EyeProtectionState { enabled, intensity };
+    store
+        .save(&state)
+        .map_err(|e| state_store_error("eye protection save", e))
+}
 
-        let key = RegKeyGuard::create_write(HKEY_CURRENT_USER, EYE_PROTECTION_REG_KEY)
-            .map_err(|e| HardwareError::Registry(format!("Create eye protection key: {e}")))?;
+/// Map a state-store failure into the catalog-classified IO error.
+fn state_store_error(context: &str, e: crate::util::state_store::StoreError) -> HardwareError {
+    HardwareError::Io(std::io::Error::other(format!("{context}: {e}")))
+}
 
-        key.write_u32(EYE_PROTECTION_ENABLED_VALUE, if enabled { 1 } else { 0 })
-            .map_err(|e| HardwareError::Registry(format!("Write eye protection enabled: {e}")))?;
+/// Registry-only read used as the degradation path when the store is
+/// unreadable (and for the not-yet-imported legacy values).
+#[cfg(windows)]
+fn get_eye_protection_registry() -> HardwareResult<EyeProtectionStatus> {
+    use crate::util::registry::RegKeyGuard;
+    use windows::Win32::System::Registry::HKEY_CURRENT_USER;
 
-        key.write_u32(EYE_PROTECTION_INTENSITY_VALUE, intensity as u32)
-            .map_err(|e| HardwareError::Registry(format!("Write eye protection intensity: {e}")))?;
+    let key = RegKeyGuard::open_read(HKEY_CURRENT_USER, EYE_PROTECTION_REG_KEY)
+        .ok()
+        .flatten();
 
-        Ok(())
+    let (enabled, intensity) = if let Some(k) = key {
+        let enabled = k
+            .read_u32(EYE_PROTECTION_ENABLED_VALUE)
+            .ok()
+            .flatten()
+            .map(|v| v != 0)
+            .unwrap_or(false);
+        let intensity = k
+            .read_u32(EYE_PROTECTION_INTENSITY_VALUE)
+            .ok()
+            .flatten()
+            .map(|v| v.clamp(0, 100) as u8)
+            .unwrap_or(DEFAULT_INTENSITY);
+        (enabled, intensity)
+    } else {
+        (false, DEFAULT_INTENSITY)
+    };
+
+    Ok(EyeProtectionStatus { enabled, intensity })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unique per-test scratch state root.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "micontrol-eye-protection-{}-{}-{}",
+            tag,
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch root");
+        dir
     }
-    #[cfg(not(windows))]
-    {
-        Ok(())
+
+    #[test]
+    fn eye_state_roundtrips_through_the_store() {
+        let root = scratch_root("roundtrip");
+        let store = crate::util::state_store::eye_protection_store_in(&root);
+        store
+            .save(&crate::util::state_store::EyeProtectionState {
+                enabled: true,
+                intensity: 65,
+            })
+            .expect("save");
+        let holder = Ok(store);
+        let status = load_eye_from(&holder, None).expect("stored state");
+        assert!(status.enabled);
+        assert_eq!(status.intensity, 65);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_registry_values_are_imported_once() {
+        let root = scratch_root("import");
+        let store = crate::util::state_store::eye_protection_store_in(&root);
+        let legacy = crate::util::state_store::EyeProtectionState {
+            enabled: true,
+            intensity: 40,
+        };
+        let holder = Ok(store);
+        let status = load_eye_from(&holder, Some(legacy)).expect("legacy import");
+        assert!(status.enabled);
+        assert_eq!(status.intensity, 40);
+        let reloaded = crate::util::state_store::eye_protection_store_in(&root);
+        let state = reloaded.load().expect("load").expect("imported state");
+        assert_eq!(state.intensity, 40);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_store_degrades_to_legacy_state() {
+        let root = scratch_root("corrupt");
+        let spec = crate::util::state_store::eye_protection_store_in(&root);
+        std::fs::create_dir_all(spec.path().parent().expect("parent")).expect("dir");
+        std::fs::write(spec.path(), "{corrupt").expect("corrupt fixture");
+        let store = crate::util::state_store::eye_protection_store_in(&root);
+        let legacy = crate::util::state_store::EyeProtectionState {
+            enabled: false,
+            intensity: 30,
+        };
+        let holder = Ok(store);
+        let status = load_eye_from(&holder, Some(legacy)).expect("legacy fallback");
+        assert!(!status.enabled);
+        assert_eq!(status.intensity, 30);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_everywhere_maps_to_none() {
+        let root = scratch_root("absent");
+        let store = crate::util::state_store::eye_protection_store_in(&root);
+        let holder = Ok(store);
+        assert!(load_eye_from(&holder, None).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
