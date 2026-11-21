@@ -16,12 +16,14 @@ use crate::hw::performance::{
     PerformanceResult,
 };
 use crate::hw::screen_cast::{
-    list_cast_devices as hw_list_cast, start_casting as hw_start_cast,
-    stop_casting as hw_stop_cast, CastDevice, CastResult,
+    list_cast_devices as hw_list_cast, open_cast_panel as hw_open_cast_panel,
+    probe_cast_capabilities as hw_probe_cast, scan_cast_devices as hw_scan_cast,
+    start_casting as hw_start_cast, stop_casting as hw_stop_cast, CastCapabilityReport, CastDevice,
+    CastResult, CastScanReport, CastState,
 };
 use crate::hw::wifi::{self, WifiNetwork, WifiStatus};
 use crate::state::{AppState, PerformanceMode};
-use crate::util::blocking::run_blocking;
+use crate::util::blocking::{run_blocking, run_blocking_timeout};
 use crate::util::panic::lock_or_recover;
 use tauri::State;
 
@@ -666,7 +668,7 @@ pub async fn set_audio_default_endpoint(device_id: String) -> Result<(), ErrorRe
 
 // ── Screen Cast commands ──────────────────────────────────────────────────
 
-/// List available Miracast/WiDi receivers.
+/// List known projection endpoints with their live connection state.
 #[tauri::command]
 pub async fn get_cast_devices() -> Result<Vec<CastDevice>, ErrorResponse> {
     run_blocking(hw_list_cast)
@@ -674,15 +676,54 @@ pub async fn get_cast_devices() -> Result<Vec<CastDevice>, ErrorResponse> {
         .map_err(ErrorResponse::from)
 }
 
-/// Start casting to a device.
+/// Bounded discovery run (DeviceWatcher). The picker selector needs a ~30 s
+/// discovery window on this host (probed), so the command carries its own
+/// timeout instead of the 15 s default.
 #[tauri::command]
-pub async fn start_casting(device_id: String) -> Result<CastResult, ErrorResponse> {
-    run_blocking(move || hw_start_cast(&device_id))
+pub async fn scan_cast_devices() -> Result<CastScanReport, ErrorResponse> {
+    run_blocking_timeout(std::time::Duration::from_secs(45), hw_scan_cast)
         .await
         .map_err(ErrorResponse::from)
 }
 
-/// Stop casting.
+/// Attempt a real connection to a device. Windows takes up to ~30 s to
+/// answer a cast request on this host (probed), so the command carries its
+/// own timeout instead of the 15 s default.
+#[tauri::command]
+pub async fn start_casting(device_id: String) -> Result<CastResult, ErrorResponse> {
+    run_blocking_timeout(std::time::Duration::from_secs(45), move || {
+        hw_start_cast(&device_id)
+    })
+    .await
+    .map_err(ErrorResponse::from)
+}
+
+/// Open the Windows projection panel (Win+K equivalent). Explicit fallback.
+#[tauri::command]
+pub async fn open_cast_panel() -> Result<CastResult, ErrorResponse> {
+    run_blocking(hw_open_cast_panel)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Session state summary (per-endpoint IsConnected + last attempt).
+#[tauri::command]
+pub async fn get_cast_state() -> Result<CastState, ErrorResponse> {
+    run_blocking(crate::hw::screen_cast::get_cast_state)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Live capability probe with per-API evidence (cached per process). The
+/// first run includes a real cast attempt (~30 s on this host).
+#[tauri::command]
+pub async fn probe_cast_capabilities() -> Result<CastCapabilityReport, ErrorResponse> {
+    run_blocking_timeout(std::time::Duration::from_secs(60), hw_probe_cast)
+        .await
+        .map_err(ErrorResponse::from)
+}
+
+/// Stop casting (closes the Windows Connect panel).
 #[tauri::command]
 pub async fn stop_casting() -> Result<CastResult, ErrorResponse> {
     run_blocking(hw_stop_cast)

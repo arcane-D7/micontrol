@@ -138,6 +138,7 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio_Endpoints",
   "Win32_NetworkManagement_WiFi",
   "Media_Casting",
+  "Media_Playback",
   "Devices_Enumeration",
   "Foundation",
   "Foundation_Collections",
