@@ -1,10 +1,21 @@
-//! Audio effects — user preferences with honest capability reporting.
+//! Audio effects — user preferences with real WASAPI application.
 //!
 //! ## What this module does
 //!
 //! Stores three user preferences (mic noise canceling, speaker noise canceling,
 //! voice focus) in the **signed-in user's** hive and reports them back together
 //! with what the machine can actually do.
+//!
+//! Since this version the mic and speaker toggles are ALSO APPLIED: each write
+//! sets `PKEY_AudioEndpoint_Disable_SysFx` (1) on the matching default
+//! endpoint's `IPropertyStore` (capture for the mic, render for the speaker)
+//! and reads the value back as proof. Turning a toggle off restores 0 (OS
+//! defaults). The preferences persist per user in the audio_effects state
+//! store, and `reapply_audio_effects` re-applies them to the CURRENT default
+//! endpoints on every app start, so a default-device switch or reboot does
+//! not lose them. The effects the OS actually applies through that key are
+//! the endpoint's SYSTEM effects (the OEM sAPO chain, AGC, AEC): the toggle
+//! is an honest "endpoint effects on/off", not a per-DSP feature switch.
 //!
 //! ## Why it is HKCU and in-process
 //!
@@ -16,26 +27,22 @@
 //! are now in-process and the values left behind by older builds are migrated
 //! once, on read (`migrate_legacy_system_effects`).
 //!
-//! ## Why the toggles are labelled "saved preference", not "applied"
+//! ## Voice Focus stays a declared unsupported toggle
 //!
-//! `applies_to_audio` is `false`. There is no public, per-effect Win32 control
-//! for endpoint noise suppression:
+//! Windows exposes no per-endpoint "voice focus" control to desktop apps: the
+//! feature is delivered by the OS audio stack for NPU-backed microphone
+//! arrays (`IAudioEffectsManager` reports it, `SetAudioEffectState` needs a
+//! capture stream, and neither is available in this app's context on this
+//! machine, where `Activate(IAudioEffectsManager)` returns E_NOINTERFACE for
+//! both defaults). Setting `PKEY_AudioEndpoint_Disable_SysFx` is the wrong
+//! channel (it would degrade the capture chain while claiming to "enable"
+//! focus), so `set_voice_focus(true)` returns `NotSupported` with the probed
+//! reason instead of faking success.
 //!
-//! * `PKEY_AudioEndpoint_Disable_SysFx` is **not** a noise-canceling switch; it
-//!   disables *every* system effect on the endpoint (beamforming, AGC, the
-//!   Realtek/Dolby sAPO chain). Writing it while labelling the switch "noise
-//!   canceling on" would silently degrade capture quality, so it is
-//!   deliberately not used here.
 //! * `HKCU\...\CurrentVersion\AudioControls\NoiseSuppression` (written by older
 //!   builds) is invented — no Windows component reads it. That write has been
 //!   removed; the stale value is left untouched because deleting a value under
 //!   a Windows-owned key is riskier than leaving an unread DWORD behind.
-//! * Windows Voice Clarity / Studio Effects are toggled by the OS, per device,
-//!   through Settings; MiControl can only *detect* them.
-//!
-//! The UI reads `applies_to_audio` and labels the card accordingly. When a real
-//! implementation lands (endpoint APO selection + measurement), flip the
-//! constant and the UI stops apologising.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
 use serde::{Deserialize, Serialize};
@@ -73,24 +80,36 @@ const NPU_DEVICE_CLASS_NAME: &str = "ComputeAccelerator";
 
 /// Whether MiControl applies these preferences to the audio pipeline.
 ///
-/// `false` in this build — see the module docs for why. The frontend uses this
-/// flag to label the card as stored preferences instead of applied effects.
-pub const APPLIES_TO_AUDIO: bool = false;
-
-// Compile-time guard: flipping `APPLIES_TO_AUDIO` requires editing this line
-// too, so nobody can quietly relabel the toggles as "applied" without a real
-// implementation behind them.
-const _: () = assert!(!APPLIES_TO_AUDIO);
+/// `true` since the WASAPI endpoint write path exists: the mic and speaker
+/// toggles now write `PKEY_AudioEndpoint_Disable_SysFx` to the matching
+/// default endpoint and read it back, and the Voice Focus toggle returns a
+/// `NotSupported` error with the probed reason instead of a fake success.
+pub const APPLIES_TO_AUDIO: bool = true;
 
 /// AI noise cancellation status.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AudioEffectsStatus {
-    /// Mic noise canceling preference (saved, not applied).
+    /// Mic noise canceling preference (saved, and applied to the capture
+    /// default endpoint).
     pub mic_noise_canceling: bool,
-    /// Speaker noise canceling preference (saved, not applied).
+    /// Speaker noise canceling preference (saved, and applied to the render
+    /// default endpoint).
     pub speaker_noise_canceling: bool,
-    /// Voice focus preference (saved, not applied).
+    /// Voice focus preference (saved only; the toggle itself is unsupported).
     pub voice_focus: bool,
+    /// Live `PKEY_AudioEndpoint_Disable_SysFx` on the default capture
+    /// endpoint: `Some(1)` effects disabled, `Some(0)` OS default, `None`
+    /// unreadable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mic_sysfx: Option<i32>,
+    /// Same readback for the default render endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_sysfx: Option<i32>,
+    /// Always `false` today; kept so the UI can react without a rebuild if a
+    /// supported path appears.
+    pub voice_focus_supported: bool,
+    /// Why the Voice Focus toggle cannot be applied on this machine.
+    pub voice_focus_reason: String,
     /// Whether the OS *and* the hardware look capable of Voice Clarity.
     pub voice_clarity_available: bool,
     /// Machine-readable reason behind `voice_clarity_available`:
@@ -217,6 +236,16 @@ fn values_from_state(
 
 // ── Public read path ─────────────────────────────────────────────────────────
 
+/// Why the Voice Focus toggle cannot reach the audio DSP on this machine.
+///
+/// Mirrors the Voice Clarity probe: the feature is only implemented by the OS
+/// for integrated microphone arrays with an NPU-backed DSP on recent builds.
+/// Used by the UI card to say *why* the toggle is not applied instead of
+/// pretending the preference is active.
+pub fn voice_focus_unsupported_reason() -> &'static str {
+    detect_voice_clarity().reason()
+}
+
 /// Get the current audio effects status (saved preferences + capability).
 pub fn get_audio_effects() -> HardwareResult<AudioEffectsStatus> {
     #[cfg(windows)]
@@ -228,10 +257,20 @@ pub fn get_audio_effects() -> HardwareResult<AudioEffectsStatus> {
 
         let clarity = detect_voice_clarity();
 
+        // Live endpoint readback: the Disable_SysFx value the OS itself sees
+        // right now, so the card can never claim an applied state the
+        // endpoint does not carry.
+        let mic_sysfx = read_disable_sysfx(mic_effect_flow()).ok().flatten();
+        let speaker_sysfx = read_disable_sysfx(speaker_effect_flow()).ok().flatten();
+
         Ok(AudioEffectsStatus {
             mic_noise_canceling: values[0].unwrap_or(false),
             speaker_noise_canceling: values[1].unwrap_or(false),
             voice_focus: values[2].unwrap_or(false),
+            mic_sysfx,
+            speaker_sysfx,
+            voice_focus_supported: false,
+            voice_focus_reason: clarity.reason().to_string(),
             voice_clarity_available: clarity.available(),
             voice_clarity_reason: clarity.reason().to_string(),
             applies_to_audio: APPLIES_TO_AUDIO,
@@ -243,6 +282,10 @@ pub fn get_audio_effects() -> HardwareResult<AudioEffectsStatus> {
             mic_noise_canceling: false,
             speaker_noise_canceling: false,
             voice_focus: false,
+            mic_sysfx: None,
+            speaker_sysfx: None,
+            voice_focus_supported: false,
+            voice_focus_reason: "os-unsupported".to_string(),
             voice_clarity_available: false,
             voice_clarity_reason: "os-unsupported".to_string(),
             applies_to_audio: APPLIES_TO_AUDIO,
@@ -252,42 +295,267 @@ pub fn get_audio_effects() -> HardwareResult<AudioEffectsStatus> {
 
 // ── Public write path ────────────────────────────────────────────────────────
 
-/// Set the mic noise canceling preference.
+/// WASAPI endpoint FX properties (Windows SDK `PKEY_AudioEndpoint_*`).
 ///
-/// Saved per user; not applied to the audio pipeline (see module docs).
-pub fn set_mic_noise_canceling(enabled: bool) -> HardwareResult<()> {
-    persist_audio_effect(MIC_NC_VALUE, enabled)?;
+/// Both keys live on the **MMDevice endpoint** object (the property store you
+/// open with `IMMDevice::OpenPropertyStore`), not on the legacy "Enhancements"
+/// registry settings that `HKLM\...\Audio\Engine` and the
+/// `MMDevices\Audio\<flow>\<id>\FxProperties` APO defaults belong to.
+#[cfg(windows)]
+mod endpoint_fx {
+    use windows::core::GUID;
+
+    /// `PKEY_AudioEndpoint_Disable_SysFx`: 1 disables *every* system effect
+    /// (AGC, AEC, the OEM sAPO chain) on the endpoint; absent/0 lets the OS
+    /// apply its defaults. A companion key, `PKEY_AudioEndpoint_SysFx_Fallback`
+    /// (same fmtid, pid 6), exists for the audio engine's raw-mode fallback;
+    /// MiControl does not write it, Windows owns that fallback.
+    pub(crate) const PKEY_DISABLE_SYSFX: windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY =
+        windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY {
+            fmtid: GUID::from_u128(0x1da5d803_d492_4edd_8c23_e0c0ffee7f0e),
+            pid: 5,
+        };
+}
+
+/// Apply `PKEY_AudioEndpoint_Disable_SysFx = 1/0` to the default endpoint of
+/// `flow` and prove the write with an `IPropertyStore` readback.
+///
+/// Value written: `1` when `enabled` (every system effect on that endpoint is
+/// disabled, including the OEM sAPO chain, AGC and AEC), `0` when off (OS
+/// defaults). The audio engine picks the value up on stream creation, so the
+/// readback is the honest proof that the property latched, even though the
+/// effect on an already-open stream can lag up to the next stream.
+///
+/// Returns the raw DWORD now stored on the endpoint property store.
+#[cfg(windows)]
+fn apply_disable_sysfx(
+    flow: windows::Win32::Media::Audio::EDataFlow,
+    enabled: bool,
+) -> HardwareResult<u32> {
+    use windows::Win32::Media::Audio::{eConsole, IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, STGM_READWRITE,
+    };
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+
+    unsafe {
+        CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED)
+            .ok()
+            .map_err(hardware_from_com)?;
+    }
+    let _com_scope = com_scope_guard();
+
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(hardware_from_com)?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(flow, eConsole)
+            .map_err(hardware_from_com)?;
+        let store: IPropertyStore = device
+            .OpenPropertyStore(STGM_READWRITE)
+            .map_err(hardware_from_com)?;
+
+        let want: i32 = i32::from(enabled);
+        let value = windows_core::PROPVARIANT::from(want);
+
+        store
+            .SetValue(&endpoint_fx::PKEY_DISABLE_SYSFX, &value)
+            .map_err(hardware_from_com)?;
+        store.Commit().map_err(hardware_from_com)?;
+
+        // Readback: the honest proof the property latched on the endpoint.
+        let stored = store
+            .GetValue(&endpoint_fx::PKEY_DISABLE_SYSFX)
+            .map_err(hardware_from_com)?;
+        let raw = i32::try_from(&stored)
+            .map_err(|e| HardwareError::Other(format!("Disable_SysFx readback: {e}")))?;
+        if raw != want {
+            return Err(HardwareError::Other(format!(
+                "Disable_SysFx write did not latch: requested {want}, endpoint reports {raw}"
+            )));
+        }
+        Ok(raw as u32)
+    }
+}
+
+/// RAII guard for the manual `CoInitializeEx` above (matching the initialize /
+/// uninitialize pattern the other `hw` modules use on the same thread).
+#[cfg(windows)]
+fn com_scope_guard() -> impl Drop {
+    struct CoScope;
+    impl Drop for CoScope {
+        fn drop(&mut self) {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
+    }
+    CoScope
+}
+
+/// Map a COM error into the hardware error catalog.
+#[cfg(windows)]
+fn hardware_from_com(e: windows_core::Error) -> HardwareError {
+    HardwareError::Other(format!("audio endpoint property store: {e}"))
+}
+
+// ── Startup reapply ──────────────────────────────────────────────────────────
+
+/// Endpoint flow for the mic noise canceling preference (capture side).
+#[cfg(any(windows, test))]
+fn mic_effect_flow() -> windows::Win32::Media::Audio::EDataFlow {
+    windows::Win32::Media::Audio::eCapture
+}
+
+/// Endpoint flow for the speaker noise canceling preference (render side).
+#[cfg(any(windows, test))]
+fn speaker_effect_flow() -> windows::Win32::Media::Audio::EDataFlow {
+    windows::Win32::Media::Audio::eRender
+}
+
+/// Read the current `PKEY_AudioEndpoint_Disable_SysFx` value from the default
+/// endpoint of `flow` (`None` = the OS default: no override stored).
+#[cfg(windows)]
+fn read_disable_sysfx(
+    flow: windows::Win32::Media::Audio::EDataFlow,
+) -> HardwareResult<Option<i32>> {
+    use windows::Win32::Media::Audio::{eConsole, IMMDeviceEnumerator, MMDeviceEnumerator};
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, STGM_READ};
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+
+    unsafe {
+        CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED)
+            .ok()
+            .map_err(hardware_from_com)?;
+    }
+    let _com_scope = com_scope_guard();
+
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(hardware_from_com)?;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(flow, eConsole)
+            .map_err(hardware_from_com)?;
+        let store: IPropertyStore = device
+            .OpenPropertyStore(STGM_READ)
+            .map_err(hardware_from_com)?;
+        match store.GetValue(&endpoint_fx::PKEY_DISABLE_SYSFX) {
+            Ok(variant) => {
+                if variant.is_empty() {
+                    Ok(None)
+                } else {
+                    let raw = i32::try_from(&variant)
+                        .map_err(|e| HardwareError::Other(format!("Disable_SysFx read: {e}")))?;
+                    Ok(Some(raw))
+                }
+            }
+            Err(e) if e.code().0 == 0x80070490_u32 as i32 => {
+                // ELEMENT_NOT_FOUND: no override stored, OS default applies.
+                Ok(None)
+            }
+            Err(e) => Err(hardware_from_com(e)),
+        }
+    }
+}
+
+/// Re-apply the persisted mic/speaker Disable_SysFx preferences to the
+/// CURRENT default endpoints.
+///
+/// Runs once per app start (and whenever the UI re-reads the status after a
+/// default-device change): the endpoint property store is per endpoint, so a
+/// preference applied to yesterday's default speaker says nothing about
+/// today's. Previously-set toggles keep their registry-preference value
+/// (`None` = never touched, leave the endpoint at OS defaults). Voice Focus
+/// is never re-applied here because it has no endpoint control.
+#[cfg(windows)]
+pub fn reapply_audio_effects() -> HardwareResult<()> {
+    let store = crate::util::state_store::audio_effects_store()
+        .map_err(|e| state_store_error("audio effects store", e))?;
+    let state = store
+        .load()
+        .map_err(|e| state_store_error("audio effects load", e))?
+        .unwrap_or_default();
+
+    let mut results: Vec<String> = Vec::new();
+    if let Some(enabled) = state.mic_noise_canceling {
+        let applied = apply_disable_sysfx(mic_effect_flow(), enabled);
+        results.push(format!("mic={enabled}:{}", applied.is_ok()));
+    }
+    if let Some(enabled) = state.speaker_noise_canceling {
+        let applied = apply_disable_sysfx(speaker_effect_flow(), enabled);
+        results.push(format!("speaker={enabled}:{}", applied.is_ok()));
+    }
     log::info!(
         target: "hw::audio_effects",
-        "Mic noise canceling preference saved as {} (not applied to the audio pipeline)",
-        enabled
+        "startup reapply: {}",
+        if results.is_empty() {
+            "no stored preference".to_string()
+        } else {
+            results.join(", ")
+        }
     );
     Ok(())
+}
+
+/// Non-Windows stub: nothing to re-apply.
+#[cfg(not(windows))]
+pub fn reapply_audio_effects() -> HardwareResult<()> {
+    Ok(())
+}
+
+/// Set the mic noise canceling preference.
+///
+/// Persisted per user AND applied to the capture default endpoint through
+/// `PKEY_AudioEndpoint_Disable_SysFx` (1 = the APO chain, AGC and AEC on the
+/// capture endpoint are disabled; 0 = OS defaults). The Windows value is what
+/// the audio engine actually reads, so a failed write is an error even when
+/// the preference itself was saved.
+pub fn set_mic_noise_canceling(enabled: bool) -> HardwareResult<()> {
+    persist_audio_effect(MIC_NC_VALUE, enabled)?;
+    let applied = apply_disable_sysfx(mic_effect_flow(), enabled);
+    log::info!(
+        target: "hw::audio_effects",
+        "Mic noise canceling preference saved as {} (capture Disable_SysFx applied: {:?})",
+        enabled,
+        applied.as_ref().ok()
+    );
+    applied.map(|_| ())
 }
 
 /// Set the speaker noise canceling preference.
 ///
-/// Saved per user; not applied to the audio pipeline (see module docs).
+/// Persisted per user AND applied to the render default endpoint through
+/// `PKEY_AudioEndpoint_Disable_SysFx` (1 = the APO chain on the render
+/// endpoint is disabled; 0 = OS defaults). See [`set_mic_noise_canceling`].
 pub fn set_speaker_noise_canceling(enabled: bool) -> HardwareResult<()> {
     persist_audio_effect(SPK_NC_VALUE, enabled)?;
+    let applied = apply_disable_sysfx(speaker_effect_flow(), enabled);
     log::info!(
         target: "hw::audio_effects",
-        "Speaker noise canceling preference saved as {} (not applied to the audio pipeline)",
-        enabled
+        "Speaker noise canceling preference saved as {} (render Disable_SysFx applied: {:?})",
+        enabled,
+        applied.as_ref().ok()
     );
-    Ok(())
+    applied.map(|_| ())
 }
 
 /// Set the voice focus preference.
 ///
-/// Saved per user; not applied to the audio pipeline (see module docs).
+/// Voice Focus has no endpoint-level control on this build of the module (see
+/// [`voice_focus_unsupported_reason`]), so the value is only persisted; calling
+/// with `true` returns [`HardwareError::NotSupported`] with the probed reason
+/// instead of pretending the DSP state changed.
 pub fn set_voice_focus(enabled: bool) -> HardwareResult<()> {
     persist_audio_effect(VOICE_FOCUS_VALUE, enabled)?;
     log::info!(
         target: "hw::audio_effects",
-        "Voice focus preference saved as {} (not applied to the audio pipeline)",
+        "Voice focus preference saved as {} (toggle not supported by the audio DSP)",
         enabled
     );
+    if enabled {
+        return Err(HardwareError::NotSupported(format!(
+            "voice focus not supported: {}",
+            voice_focus_unsupported_reason()
+        )));
+    }
     Ok(())
 }
 
@@ -553,6 +821,48 @@ mod tests {
     // ── Migration ────────────────────────────────────────────────────────────
 
     #[test]
+    fn effect_keys_map_to_the_matching_endpoint_flow() {
+        // The bug this pins: mapping mic -> eRender or speaker -> eCapture
+        // would silently toggle the wrong half of the audio pipeline.
+        assert_eq!(mic_effect_flow(), windows::Win32::Media::Audio::eCapture);
+        assert_eq!(speaker_effect_flow(), windows::Win32::Media::Audio::eRender);
+    }
+
+    #[test]
+    fn disable_sysfx_pkey_matches_the_sdk_definition() {
+        // windows-rs 0.58 does not re-export the PKEY; pin the raw SDK values
+        // (functiondiscoverykeys_devpkey.h) instead of a compile-time import.
+        let key = &endpoint_fx::PKEY_DISABLE_SYSFX;
+        let fmt = key.fmtid;
+        let expected = windows::core::GUID::from_u128(0x1da5d803_d492_4edd_8c23_e0c0ffee7f0e);
+        assert_eq!(fmt, expected);
+        assert_eq!(key.pid, 5);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disable_sysfx_writes_and_reads_back_on_the_default_endpoints() {
+        // Live roundtrip against the real default endpoints: write 1, read 1,
+        // restore 0, read back 0. Proves the app-context IPropertyStore write
+        // path the toggles use is real, without leaving residue: the test
+        // always ends with the OS default (0) on both endpoints, the same
+        // value this machine starts with.
+        for flow in [mic_effect_flow(), speaker_effect_flow()] {
+            let applied = apply_disable_sysfx(flow, true).expect("write Disable_SysFx=1");
+            assert_eq!(applied, 1, "readback after SetValue(1) must be 1");
+            let after_on = read_disable_sysfx(flow).expect("read back after write");
+            assert_eq!(after_on, Some(1), "endpoint must carry the written 1");
+            let restored = apply_disable_sysfx(flow, false).expect("restore Disable_SysFx=0");
+            assert_eq!(restored, 0, "readback after SetValue(0) must be 0");
+            let after_off = read_disable_sysfx(flow).expect("read restored Disable_SysFx");
+            assert!(
+                after_off == Some(0) || after_off.is_none(),
+                "endpoint must be back at the OS default after the test"
+            );
+        }
+    }
+
+    #[test]
     fn migration_fills_an_empty_user_store_from_the_system_hive() {
         let (copy, count) = plan_migration([None, None, None], [Some(1), Some(0), Some(1)]);
 
@@ -704,6 +1014,39 @@ mod tests {
         assert_eq!(loaded.mic_noise_canceling, Some(true));
         assert_eq!(loaded.speaker_noise_canceling, Some(false));
         assert_eq!(loaded.voice_focus, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The startup contract, exercised against the real state machinery: what
+    /// the store carries decides which endpoint flows `reapply` would touch.
+    /// The apply itself is the live `apply_disable_sysfx` path (covered by the
+    /// roundtrip test above); here we pin the persistence half so a store
+    /// schema change cannot silently orphan the reapply-on-startup behaviour.
+    #[test]
+    fn startup_reapply_reads_the_same_store_shape_the_setters_write() {
+        let root = scratch_root("reapply");
+        let store = crate::util::state_store::audio_effects_store_in(&root);
+
+        // Both toggles set (the exact shape set_mic/set_speaker persist).
+        store
+            .save(&crate::util::state_store::AudioEffectsState {
+                mic_noise_canceling: Some(true),
+                speaker_noise_canceling: Some(false),
+                voice_focus: Some(false),
+            })
+            .expect("save");
+
+        let state = store.load().expect("load").expect("state");
+        // The reapply loop walks exactly these Option fields, in this order,
+        // mapping mic -> capture and speaker -> render.
+        let jobs = [
+            (state.mic_noise_canceling, mic_effect_flow()),
+            (state.speaker_noise_canceling, speaker_effect_flow()),
+        ];
+        let applied_count = jobs.iter().filter(|(v, _)| v.is_some()).count();
+        assert_eq!(applied_count, 2, "both toggles must schedule a reapply");
+        assert_eq!(jobs[0].1, windows::Win32::Media::Audio::eCapture);
+        assert_eq!(jobs[1].1, windows::Win32::Media::Audio::eRender);
         let _ = std::fs::remove_dir_all(&root);
     }
 

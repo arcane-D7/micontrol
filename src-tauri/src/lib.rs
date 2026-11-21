@@ -793,6 +793,16 @@ pub fn run() {
                 }
             }
 
+            // Audio effects: re-apply the persisted mic/speaker Disable_SysFx
+            // preferences to the current default endpoints. Runs on a blocking
+            // thread (COM init on this thread) after every launch so the
+            // preferences survive default-device switches and reboots.
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(e) = crate::hw::audio_effects::reapply_audio_effects() {
+                    log::warn!(target: "hw::audio_effects", "startup reapply: {e}");
+                }
+            });
+
             // Hardware discovery — load cached profile or scan on first run
             let data_dir = app
                 .path()
