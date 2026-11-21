@@ -174,9 +174,9 @@ pub async fn face_service_install() -> Result<serde_json::Value, FaceErrorRespon
     {
         // S42-020: route through the elevated helper (autonomous bridge
         // service → scheduled task → UAC). Installing an SCM service requires
-        // admin; the raw Command::new() path below used to fail with
+        // admin; the raw direct-spawn path below used to fail with
         // "Access is denied." (OpenSCManager ERROR_ACCESS_DENIED) whenever the
-        // app UI ran unelevated — leaving the Face Unlock UI dead.
+        // app UI ran unelevated, leaving the Face Unlock UI dead.
         let result =
             crate::elev_bridge::run_elevated("face_service_install", serde_json::json!({}))
                 .await

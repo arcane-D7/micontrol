@@ -19,6 +19,7 @@
 //! (`color_calibration::load_icc_profile`).
 
 use crate::hw::panel_edid::MonitorIdentity;
+use crate::util::process_spawn::{self, SpawnPolicy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -830,9 +831,11 @@ pub fn profile_search_url(kind: &str, query: &str) -> Result<String, String> {
 /// `rundll32 url.dll,FileProtocolHandler` takes the URL as one argument).
 pub fn open_profile_search(kind: &str, query: &str) -> Result<(), String> {
     let url = profile_search_url(kind, query)?;
-    std::process::Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .spawn()
+    // B7: spawn through the windowless helper. rundll32 is a console binary;
+    // Quiet removes the flash, the browser window it opens is unaffected.
+    let mut cmd = std::process::Command::new("rundll32.exe");
+    cmd.args(["url.dll,FileProtocolHandler", &url]);
+    process_spawn::spawn_detached(&mut cmd, SpawnPolicy::Quiet)
         .map(|_| ())
         .map_err(|e| format!("cannot open browser: {e}"))
 }
