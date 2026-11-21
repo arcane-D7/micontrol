@@ -22,11 +22,15 @@ fn apply_disabled_when_hdr_is_on_is_a_stable_frontend_contract() {
     // The frontend disables Apply with `display.hdr_enabled`; the same fact
     // must reach it through get_color_status (one source of truth).
     let status: ColorCalibrationStatus = color_calibration::get_color_status().unwrap();
-    assert!(status
-        .displays
-        .iter()
-        .all(|d| d.hdr_enabled || !d.hdr_enabled)); // field always present
-                                                    // The copy contract: one translatable string explains why.
+    // The field must reach the frontend on every display: serialise and look.
+    let json = serde_json::to_value(&status).expect("status serialises");
+    for d in json["displays"].as_array().expect("displays array") {
+        assert!(
+            d.get("hdr_enabled").is_some(),
+            "every display must carry hdr_enabled (Apply is gated on it)"
+        );
+    }
+    // The copy contract: one translatable string explains why.
     let msg = color_calibration::WizardBlock::HdrEnabled.message();
     assert!(msg.contains("HDR"));
 }
