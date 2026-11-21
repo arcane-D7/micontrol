@@ -1577,9 +1577,6 @@
       "deleteLog": "Supprimer cette entrée de journal"
     }
   },
-  "shortcuts": {
-    "tabSwitch": "Alt+1 à Alt+9 pour changer d'onglet"
-  },
   "audio": {
     "volume": "Volume",
     "unmutedByVolume": "Son réactivé — le volume a changé alors que le son était coupé",
@@ -2268,6 +2265,7 @@
   "main": {
     "tray": "Zone de notification",
     "themeTitle": "Thème : {theme}",
+    "themeToggle": "Changer de thème",
     "previewTray": "Aperçu de la fenêtre de notification",
     "by": "Par : {name}",
     "previewHint": "Aperçu — cliquez à l'extérieur pour fermer",

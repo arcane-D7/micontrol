@@ -3,6 +3,8 @@ import { t } from '../hooks/useI18n';
 import type { StringKey } from '../hooks/useI18n';
 import type { AppSettings } from '../types/settings';
 import { DEFAULT_SETTINGS } from '../hooks/useSettings';
+import { Button } from './ui';
+import { IconButton } from './ui/icon-button';
 import { Icon } from './ui/icons';
 
 interface AiConfigFormProps {
@@ -147,14 +149,11 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
             autoComplete="off"
             style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
           />
-          <button
+          <IconButton
+            icon={showKey ? 'eye-off' : 'eye'}
+            label={showKey ? t('settings.hideKey') : t('settings.showKey')}
             onClick={() => setShowKey((v) => !v)}
-            className="btn-ghost btn-sm"
-            title={showKey ? t('settings.hideKey') : t('settings.showKey')}
-            aria-label={showKey ? t('settings.hideKey') : t('settings.showKey')}
-          >
-            {showKey ? <Icon name="eye-off" size={16} /> : <Icon name="eye" size={16} />}
-          </button>
+          />
         </div>
         {draft.openai_api_key && (
           <div
@@ -213,13 +212,15 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
           }}
         >
           {PRESET_MODELS.map((m) => (
-            <button
+            <Button
               key={m.value}
+              size="sm"
+              variant={selectedPreset === m.value ? 'secondary' : 'ghost'}
+              aria-pressed={selectedPreset === m.value}
               onClick={() => handlePresetChange(m.value)}
-              className={`chip-btn ${selectedPreset === m.value ? 'active' : ''}`}
             >
               {t(m.labelKey)}
-            </button>
+            </Button>
           ))}
         </div>
         {selectedPreset === 'custom' && (
@@ -236,19 +237,19 @@ export default function AiConfigForm({ settings, onUpdate, onTestConnection }: A
 
       {/* Actions */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button className="btn-primary" disabled={!dirty} onClick={handleSave}>
+        <Button variant="primary" disabled={!dirty} onClick={handleSave}>
           {t('settings.save')}
-        </button>
-        <button
-          className="btn-ghost"
+        </Button>
+        <Button
+          variant="ghost"
           disabled={!draft.openai_api_key.trim() || testStatus === 'testing'}
           onClick={() => void handleTest()}
         >
           {testStatus === 'testing' ? t('settings.testing') : t('settings.testConnection')}
-        </button>
-        <button className="btn-ghost btn-sm" onClick={handleReset}>
+        </Button>
+        <Button variant="ghost" size="sm" onClick={handleReset}>
           {t('settings.reset')}
-        </button>
+        </Button>
       </div>
 
       {/* Test result */}

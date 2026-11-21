@@ -85,6 +85,11 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'security', icon: 'shield', label: 'nav.security' },
       { id: 'cleanup', icon: 'broom', label: 'nav.cleanup' },
       { id: 'ai_analysis', icon: 'bot', label: 'nav.aiAnalysis' },
+      // EC Debug é ferramenta de desenvolvimento: só existe em DEV e vive na
+      // lista rolável; o fundo fixo da sidebar passou a ser Settings + Acerca.
+      ...(import.meta.env.DEV
+        ? [{ id: 'ecrdebug', icon: 'wrench' as IconName, label: 'nav.ecrdebug' as NavKey }]
+        : []),
     ],
   },
   {
@@ -121,21 +126,13 @@ const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
-const PINNED_GROUP: NavGroup = {
-  id: 'settings',
-  label: 'nav.groups.settings',
-  items: [
-    { id: 'settings', icon: 'gear', label: 'nav.settings' },
-    { id: 'about', icon: 'info', label: 'nav.about' },
-    ...(import.meta.env.DEV
-      ? [{ id: 'ecrdebug', icon: 'wrench' as IconName, label: 'nav.ecrdebug' as NavKey }]
-      : []),
-  ],
-};
+/** Destinos fixos no fundo da sidebar, fora do scroll (audit P1-3). */
+const FOOT_SETTINGS: NavItem = { id: 'settings', icon: 'gear', label: 'nav.settings' };
+const FOOT_ABOUT: NavItem = { id: 'about', icon: 'info', label: 'nav.about' };
 
-const NAV_ITEMS: NavItem[] = [...NAV_GROUPS.flatMap((g) => g.items), ...PINNED_GROUP.items];
+const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
-/** Alt+1..9 keeps the pre-grouping order — muscle memory must survive the
+/** Alt+1..9 keeps the pre-grouping order, muscle memory must survive the
  *  reorganisation (audit §4.5: memorability is the weakest axis). */
 const SHORTCUT_TABS = [
   'overview',
@@ -149,49 +146,11 @@ const SHORTCUT_TABS = [
   'cast',
 ];
 
-function ThemeIcon({ mode }: { mode: ThemeMode }) {
-  if (mode === 'light')
-    return (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 16 16"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      >
-        <circle cx="8" cy="8" r="2.8" />
-        <line x1="8" y1="1.5" x2="8" y2="3" />
-        <line x1="8" y1="13" x2="8" y2="14.5" />
-        <line x1="1.5" y1="8" x2="3" y2="8" />
-        <line x1="13" y1="8" x2="14.5" y2="8" />
-        <line x1="3.5" y1="3.5" x2="4.5" y2="4.5" />
-        <line x1="11.5" y1="11.5" x2="12.5" y2="12.5" />
-        <line x1="12.5" y1="3.5" x2="11.5" y2="4.5" />
-        <line x1="4.5" y1="11.5" x2="3.5" y2="12.5" />
-      </svg>
-    );
-  if (mode === 'dark')
-    return (
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M7.5 2a6 6 0 1 0 6.5 8.5A5 5 0 0 1 7.5 2z" />
-      </svg>
-    );
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-    >
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M8 2.5 A5.5 5.5 0 0 1 8 13.5" fill="currentColor" stroke="none" />
-    </svg>
-  );
+/** Glifo por modo, do catálogo SVG: sol (claro), lua (escuro), contraste (auto). */
+function themeGlyph(mode: ThemeMode): IconName {
+  if (mode === 'light') return 'sun';
+  if (mode === 'dark') return 'moon';
+  return 'contrast';
 }
 
 function getThemeLabel(mode: ThemeMode): string {
@@ -205,11 +164,12 @@ interface SidebarProps {
   toggleTheme: () => void;
   hardware: Hardware;
   setShowTrayPreview: (v: boolean) => void;
-  /** Abre o painel "System log" — o erro vive lá, nunca nesta navegação. */
+  /** Abre o painel "System log", o erro vive lá, nunca nesta navegação. */
   onOpenSystemLog: () => void;
 }
 
-const Sidebar = memo(function Sidebar({
+/** Exportado para os testes do rodapé/fundo fixo da sidebar. */
+export const Sidebar = memo(function Sidebar({
   activeTab,
   onTabChange,
   themeMode,
@@ -224,7 +184,7 @@ const Sidebar = memo(function Sidebar({
 
   // Keep the active destination in view: the list scrolls internally, so a
   // tab change from a shortcut or the tray must not leave the marker offscreen
-  // (audit §4.3 #7 — the active item used to stay below the fold).
+  // (audit §4.3 #7, the active item used to stay below the fold).
   useEffect(() => {
     if (!q) activeRef.current?.scrollIntoView({ block: 'nearest' });
   }, [activeTab, q]);
@@ -250,9 +210,10 @@ const Sidebar = memo(function Sidebar({
 
   const matches = (item: NavItem) => !q || t(item.label).toLowerCase().includes(q);
   const results = q ? NAV_ITEMS.filter(matches) : null;
-  // While filtering, every match (pinned ones included) is rendered in the
-  // single result list — keeping the pinned group would duplicate Settings.
-  const pinnedItems = q ? [] : PINNED_GROUP.items;
+  // While filtering, Settings and About appear in the single result list ,
+  // keeping them in the fixed foot would duplicate the destinations. The
+  // theme toggle stays: it is an action, not a destination.
+  const showFootDestinations = !q;
 
   return (
     <nav aria-label={t('nav.label')} className="sidebar">
@@ -310,77 +271,62 @@ const Sidebar = memo(function Sidebar({
         )}
       </div>
 
-      {pinnedItems.length > 0 && (
-        <div className="sidebar-pinned">
-          <div className="sidebar-group" role="group" aria-label={t(PINNED_GROUP.label)}>
-            <div className="sidebar-group-label" aria-hidden="true">
-              {t(PINNED_GROUP.label)}
+      {/* Rodapé: só existe quando há um erro vivo (botão "System log") ou em
+          DEV (pré-visualização do tray). Sem erro, em produção, não chega a
+          renderizar: o fundo fixo abaixo é a última linha da sidebar. */}
+      {(hardware.error || import.meta.env.DEV) && (
+        <div className="sidebar-footer">
+          {hardware.error && (
+            <div className="sidebar-statusrow">
+              <span className="sidebar-statusrow__spacer" />
+              <span className="sidebar-logbtn sidebar-logbtn--active">
+                <IconButton
+                  icon="alert-triangle"
+                  label={t('systemLog.title')}
+                  onClick={onOpenSystemLog}
+                />
+              </span>
             </div>
-            {pinnedItems.map(renderItem)}
-          </div>
+          )}
+          {import.meta.env.DEV && (
+            <button
+              className="theme-toggle"
+              onClick={() => setShowTrayPreview(true)}
+              title={t('main.previewTray')}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="1" y="10" width="14" height="5" rx="1" />
+                <rect x="1" y="1" width="14" height="7" rx="1" />
+                <line x1="4" y1="12.5" x2="4" y2="12.5" strokeWidth="2" />
+                <line x1="7" y1="12.5" x2="7" y2="12.5" strokeWidth="2" />
+              </svg>
+              <span>{t('main.tray')}</span>
+            </button>
+          )}
         </div>
       )}
 
-      <div className="sidebar-footer">
-        {/* Estado discreto: o erro vive no painel "System log" (regra do dono:
-            a sidebar não é um log). Botão de 32 px em tinta neutra; só ganha a
-            tinta de aviso quando há um erro vivo. */}
-        <div className="sidebar-statusrow">
-          {hardware.loading && (
-            <span className="sidebar-statusrow__note">{t('common.loading')}</span>
-          )}
-          <span className="sidebar-statusrow__spacer" />
-          <span className={`sidebar-logbtn${hardware.error ? ' sidebar-logbtn--active' : ''}`}>
-            <IconButton
-              icon="alert-triangle"
-              label={t('systemLog.title')}
-              onClick={onOpenSystemLog}
-            />
-          </span>
-        </div>
-        <div
-          style={{
-            padding: '4px 8px',
-            fontSize: 10,
-            color: 'var(--color-text-muted)',
-            opacity: 0.6,
-            textAlign: 'center',
-          }}
-        >
-          {t('shortcuts.tabSwitch')}
-        </div>
-        <button
-          className="theme-toggle"
+      {/* Fundo fixo, fora do scroll: Definições + toggle de tema (28 px,
+          imediatamente à esquerda do Acerca), com separador hairline. */}
+      <div className="sidebar-foot">
+        {showFootDestinations && renderItem(FOOT_SETTINGS)}
+        <IconButton
+          compact
+          icon={themeGlyph(themeMode)}
+          label={t('main.themeToggle')}
+          title={t('main.themeTitle', { theme: getThemeLabel(themeMode) })}
           onClick={toggleTheme}
-          title={t('main.themeTitle', { theme: themeMode })}
-        >
-          <ThemeIcon mode={themeMode} />
-          <span>{getThemeLabel(themeMode)}</span>
-        </button>
-        {import.meta.env.DEV && (
-          <button
-            className="theme-toggle"
-            onClick={() => setShowTrayPreview(true)}
-            title={t('main.previewTray')}
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="1" y="10" width="14" height="5" rx="1" />
-              <rect x="1" y="1" width="14" height="7" rx="1" />
-              <line x1="4" y1="12.5" x2="4" y2="12.5" strokeWidth="2" />
-              <line x1="7" y1="12.5" x2="7" y2="12.5" strokeWidth="2" />
-            </svg>
-            <span>{t('main.tray')}</span>
-          </button>
-        )}
+        />
+        {showFootDestinations && renderItem(FOOT_ABOUT)}
       </div>
     </nav>
   );
@@ -396,7 +342,7 @@ export default function MainWindow({
   const aiSettings = useSettings();
   // P2-6: the Power Profiles toggle must outlive tab switches. The hook lives
   // in the shell (mounted once), not in the Performance tab, and the actual
-  // AC/DC application happens in Rust (`hw::scenario_rules`) — the UI only
+  // AC/DC application happens in Rust (`hw::scenario_rules`), the UI only
   // mirrors config + subscribes to status.
   const powerProfiles = usePowerProfiles(aiSettings.settings, aiSettings.updateKey);
   const appUpdate = useAutoUpdate();
@@ -665,7 +611,7 @@ export default function MainWindow({
       {/* First-run onboarding wizard */}
       {!onboardingCompleted && <OnboardingWizard onFinish={handleFinishOnboarding} />}
 
-      {/* System log — o sítio próprio dos erros (aberto pelo botão da sidebar). */}
+      {/* System log, o sítio próprio dos erros (aberto pelo botão da sidebar). */}
       <SystemLogPanel
         open={showSystemLog}
         onClose={() => setShowSystemLog(false)}

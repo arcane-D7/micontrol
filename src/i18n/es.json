@@ -1577,9 +1577,6 @@
       "deleteLog": "Eliminar esta entrada de registro"
     }
   },
-  "shortcuts": {
-    "tabSwitch": "Alt+1 a Alt+9 para cambiar de pestaña"
-  },
   "audio": {
     "volume": "Volumen",
     "unmutedByVolume": "Sonido reactivado — el volumen cambió con el audio silenciado",
@@ -2268,6 +2265,7 @@
   "main": {
     "tray": "Bandeja",
     "themeTitle": "Tema: {theme}",
+    "themeToggle": "Cambiar tema",
     "previewTray": "Vista previa del panel de la bandeja",
     "by": "Por: {name}",
     "previewHint": "Vista previa: haga clic fuera para cerrar",

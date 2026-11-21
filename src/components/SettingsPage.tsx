@@ -4,7 +4,6 @@ import type { AppSettings } from '../types/settings';
 import { invoke } from '@tauri-apps/api/core';
 import AiConfigForm from './AiConfigForm';
 import PrivacyConsentSection from './PrivacyConsentSection';
-import { Icon } from './ui/icons';
 import { Button, Switch } from './ui';
 
 interface DeleteDataReport {
@@ -78,7 +77,7 @@ export default function SettingsPage({
     void invoke<boolean>('mcp_get_enabled')
       .then(setMcpEnabled)
       .catch(() => {});
-    // MiControl's own autostart entry — the only startup switch that belongs
+    // MiControl's own autostart entry, the only startup switch that belongs
     // to Settings; everything else is on the Startup tab.
     void invoke<boolean>('get_autostart')
       .then(setAutostart)
@@ -162,18 +161,20 @@ export default function SettingsPage({
         </p>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           {supported.map((loc) => (
-            <button
+            <Button
               key={loc.code}
-              className={`chip-btn ${locale === loc.code ? 'active' : ''}`}
+              size="sm"
+              variant={locale === loc.code ? 'secondary' : 'ghost'}
+              aria-pressed={locale === loc.code}
               onClick={() => setLanguage(loc.code)}
             >
               {loc.nativeLabel}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
 
-      {/* General — MiControl's own behaviour */}
+      {/* General, MiControl's own behaviour */}
       <div className="card" style={{ marginBottom: 16 }}>
         <h2 className="card-title">{t('settings.general')}</h2>
         <Switch
@@ -242,12 +243,22 @@ export default function SettingsPage({
           </div>
         )}
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button className="btn btn-secondary" onClick={() => void handleViewErrorLog()}>
-            <Icon name="clipboard" size={16} /> {t('settings.errorLogView')}
-          </button>
-          <button className="btn btn-secondary" onClick={() => void handleClearErrorLog()}>
-            <Icon name="trash" size={16} /> {t('settings.errorLogClear')}
-          </button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="clipboard"
+            onClick={() => void handleViewErrorLog()}
+          >
+            {t('settings.errorLogView')}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="trash"
+            onClick={() => void handleClearErrorLog()}
+          >
+            {t('settings.errorLogClear')}
+          </Button>
         </div>
         {showErrorLog && (
           <div style={{ marginTop: 12 }}>
@@ -268,13 +279,9 @@ export default function SettingsPage({
             >
               {errorLogContent}
             </pre>
-            <button
-              className="btn btn-secondary"
-              style={{ marginTop: 8 }}
-              onClick={() => setShowErrorLog(false)}
-            >
+            <Button variant="secondary" size="sm" onClick={() => setShowErrorLog(false)}>
               {t('common.close')}
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -326,9 +333,9 @@ export default function SettingsPage({
         <p className="text-sm" style={{ color: 'var(--color-text-muted)', marginBottom: 12 }}>
           {t('settings.onboardingDesc')}
         </p>
-        <button className="btn btn-secondary" onClick={onReplayOnboarding}>
+        <Button variant="secondary" size="sm" onClick={onReplayOnboarding}>
           {t('settings.replayOnboarding')}
-        </button>
+        </Button>
       </div>
     </>
   );

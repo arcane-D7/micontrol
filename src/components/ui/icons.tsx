@@ -2,14 +2,14 @@
  * Ícones SVG da app (spec §5.8).
  *
  * Regras da casa:
- *  - 24×24 viewBox, stroke 1,5, `currentColor` — herdam o tema, ao contrário
+ *  - 24×24 viewBox, stroke 1,5, `currentColor`, herdam o tema, ao contrário
  *    dos glifos emoji que a app ainda tinha;
  *  - `aria-hidden` por omissão: o nome acessível vive no `aria-label` do botão;
  *    com `title` o SVG passa a `role="img"` nomeado;
  *  - tamanhos 20 (linha de dados) / 16 (botão inline) / 24 (herói). Nunca
  *    escalar 16 → 64.
  *
- * `refresh` não está na lista de 6 da spec — é o 7º, exigido pelo estado
+ * `refresh` não está na lista de 6 da spec, é o 7º, exigido pelo estado
  * "sem leitura desde HH:MM" (§5.5, estado 3), que precisa de um botão de retry.
  * `x` e `fan` vêm do sistema de ícones do theme-core (diálogos e ventoinha) e
  * ficam aqui para o merge não deixar consumidores sem glifo.
@@ -83,6 +83,8 @@ export type IconName =
   | 'skull'
   | 'leaf'
   | 'sun'
+  | 'moon'
+  | 'contrast'
   | 'virus'
   | 'building'
   // ficheiros / dados
@@ -405,6 +407,13 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <circle cx="12" cy="12" r="4" />
       <path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4" />
+    </>
+  ),
+  moon: <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z" />,
+  contrast: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none" />
     </>
   ),
   virus: (

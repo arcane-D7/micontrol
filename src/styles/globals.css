@@ -347,8 +347,8 @@ body {
   border-right: 1px solid var(--border);
   box-shadow: var(--shadow-glass);
   /* The sidebar itself never scrolls: only `.sidebar-scroll` does, so the
-     pinned Settings group and the theme footer stay on screen at 950×660 and
-     at the 600×560 minimum (audit P1-3). */
+     fixed Settings/About foot and the error-only status row stay on screen at
+     950×660 and at the 600×560 minimum (audit P1-3). */
   overflow: hidden;
   transition:
     background var(--t-slow) var(--ease),
@@ -370,10 +370,25 @@ body {
   scrollbar-color: var(--accent-glow) transparent;
 }
 
-.sidebar-pinned {
+/* Fundo fixo da sidebar: Definições e Acerca fora do scroll, com separador
+   hairline (audit P1-3: sempre alcançáveis a 950×660 e a 600×560). O toggle
+   de tema (28 px) vive entre eles, imediatamente à esquerda do Acerca. */
+.sidebar-foot {
   flex: 0 0 auto;
-  padding-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  padding-top: 6px;
   border-top: 1px solid var(--border);
+}
+.sidebar-foot .sidebar-item {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.sidebar-foot .mc-iconbtn {
+  flex: 0 0 auto;
 }
 
 .sidebar-group {
@@ -564,8 +579,10 @@ body {
   color: var(--text-muted);
 }
 
-/* Rodapé da sidebar — linha de estado discreta: nota de leitura à esquerda e
-   o botão "System log" (32 px) à direita. O erro vive no painel, nunca aqui. */
+/* Rodapé da sidebar — só existe quando há um erro vivo (botão "System log"
+   à direita) ou em DEV (pré-visualização do tray). Sem erro, em produção,
+   o rodapé não chega a renderizar: não reserva linha. O erro vive no painel,
+   nunca aqui. */
 .sidebar-statusrow {
   display: flex;
   align-items: center;
