@@ -8,27 +8,23 @@
 
 use crate::hw::face::config::{DATA_DIR, PIPE_NAME};
 use crate::hw::face::errors::FaceErrorResponse;
-use crate::hw::face::store::{load_store, save_store};
+use crate::hw::face::store::{load_gallery, save_gallery};
 use crate::hw::face::FaceSettings;
 use serde::Serialize;
 use tauri::Emitter;
 
-/// Path to the on-disk face gallery.
-fn store_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(DATA_DIR).join("faces.dat")
-}
-
-/// Ensure the data directory exists before writing the gallery.
-/// Without this, `face_set_settings` / `face_enroll` / `face_delete_template`
-/// fail on fresh installs with `write tmp: The system cannot find the path
-/// specified (os error 3)` because `C:\ProgramData\MiControl\face` is only
-/// created by the face service when it starts.
-fn ensure_data_dir() -> Result<(), FaceErrorResponse> {
-    std::fs::create_dir_all(DATA_DIR).map_err(|e| FaceErrorResponse {
-        code: "store".into(),
-        message: format!("create data dir: {e}"),
+/// Degrading gallery read for REPORT-ONLY commands: a missing or corrupt
+/// gallery is logged and reported as empty. Never used by mutating commands,
+/// which must refuse on a record they cannot read.
+fn load_gallery_degraded() -> crate::hw::face::store::FaceStore {
+    load_gallery().unwrap_or_else(|e| {
+        log::warn!(target: "commands::face", "gallery unreadable, reporting empty: {e}");
+        Default::default()
     })
 }
+
+// The gallery directory is created by the state store on save; the face
+// service also creates it at startup for its own log file.
 
 #[derive(Debug, Serialize)]
 pub struct FaceStatus {
@@ -149,7 +145,7 @@ pub async fn face_health() -> bool {
 /// Current Face Unlock status for the UI.
 #[tauri::command]
 pub async fn face_status() -> Result<FaceStatus, FaceErrorResponse> {
-    let store = load_store(&store_path()).unwrap_or_default();
+    let store = load_gallery_degraded();
     let camera_available = camera_available();
     Ok(FaceStatus {
         service_installed: service_installed(),
@@ -525,11 +521,7 @@ pub async fn face_models_remove_all(
 pub async fn face_camera_preview_start(
     index: Option<u32>,
 ) -> Result<serde_json::Value, FaceErrorResponse> {
-    let idx = index.unwrap_or(
-        load_store(&store_path())
-            .map(|s| s.settings.camera_index)
-            .unwrap_or(0),
-    );
+    let idx = index.unwrap_or_else(|| load_gallery_degraded().settings.camera_index);
     crate::hw::face::preview::start(idx).map_err(FaceErrorResponse::from)?;
     Ok(serde_json::json!({ "ok": true, "index": idx }))
 }
@@ -559,7 +551,7 @@ pub async fn face_camera_preview_frame() -> Result<serde_json::Value, FaceErrorR
 /// List enrolled face profiles (names + template counts).
 #[tauri::command]
 pub async fn face_list_templates() -> Result<serde_json::Value, FaceErrorResponse> {
-    let store = load_store(&store_path()).unwrap_or_default();
+    let store = load_gallery_degraded();
     let profiles: Vec<serde_json::Value> = store
         .profiles
         .iter()
@@ -580,19 +572,20 @@ pub async fn face_delete_template(
     name: String,
     index: usize,
 ) -> Result<serde_json::Value, FaceErrorResponse> {
-    ensure_data_dir()?;
-    let mut store = load_store(&store_path()).unwrap_or_default();
+    // Mutating op on biometric state: a gallery we cannot read must REFUSE,
+    // never be treated as empty (a silent empty default would wipe it).
+    let mut store = load_gallery().map_err(FaceErrorResponse::from)?;
     store
         .remove_template(&name, index)
         .map_err(FaceErrorResponse::from)?;
-    save_store(&store_path(), &store).map_err(FaceErrorResponse::from)?;
+    save_gallery(&store).map_err(FaceErrorResponse::from)?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
 /// Get the current face settings.
 #[tauri::command]
 pub async fn face_get_settings() -> Result<FaceSettings, FaceErrorResponse> {
-    let store = load_store(&store_path()).unwrap_or_default();
+    let store = load_gallery_degraded();
     Ok(store.settings)
 }
 
@@ -601,12 +594,12 @@ pub async fn face_get_settings() -> Result<FaceSettings, FaceErrorResponse> {
 pub async fn face_set_settings(
     settings: serde_json::Value,
 ) -> Result<serde_json::Value, FaceErrorResponse> {
-    ensure_data_dir()?;
-    let mut store = load_store(&store_path()).unwrap_or_default();
+    // Mutating op on biometric state: refuse on an unreadable gallery.
+    let mut store = load_gallery().map_err(FaceErrorResponse::from)?;
     let obj = settings.as_object().cloned().unwrap_or_default();
     let (sanitized, rejected) = FaceSettings::sanitize(&obj);
     store.settings = sanitized;
-    save_store(&store_path(), &store).map_err(FaceErrorResponse::from)?;
+    save_gallery(&store).map_err(FaceErrorResponse::from)?;
     Ok(serde_json::json!({ "ok": true, "rejected": rejected }))
 }
 
@@ -732,7 +725,7 @@ pub async fn face_hello_verify(
 /// Simple diagnostics: service state, pipe, gallery, models.
 #[tauri::command]
 pub async fn face_diagnostics() -> Result<serde_json::Value, FaceErrorResponse> {
-    let store = load_store(&store_path()).unwrap_or_default();
+    let store = load_gallery_degraded();
     Ok(serde_json::json!({
         "service_installed": service_installed(),
         "service_running": service_running(),
@@ -762,13 +755,14 @@ pub async fn face_enroll(
     let n_frames = frames.unwrap_or(4).clamp(1, 16);
     let label = label.unwrap_or_else(|| "front".to_string());
 
-    ensure_data_dir()?;
-    let mut store = load_store(&store_path()).unwrap_or_default();
+    // Mutating op on biometric state: refuse on an unreadable gallery (the
+    // save below would otherwise replace it with a single new template).
+    let mut store = load_gallery().map_err(FaceErrorResponse::from)?;
     let embedding = enroll_embedding(&name, n_frames).map_err(FaceErrorResponse::from)?;
     store
         .add_template(&name, embedding, &label)
         .map_err(FaceErrorResponse::from)?;
-    save_store(&store_path(), &store).map_err(FaceErrorResponse::from)?;
+    save_gallery(&store).map_err(FaceErrorResponse::from)?;
     Ok(serde_json::json!({ "ok": true, "name": name, "label": label, "frames": n_frames }))
 }
 
@@ -784,9 +778,7 @@ fn enroll_embedding(
     let mut detector = FaceDetector::default();
     detector.add_models_dir(&models_staging_extract().display().to_string());
     detector.load()?;
-    let cam_index = load_store(&store_path())
-        .map(|s| s.settings.camera_index)
-        .unwrap_or(0);
+    let cam_index = load_gallery_degraded().settings.camera_index;
     let mut camera = Camera::open(cam_index, 20.0)?;
     let mut sum = vec![0.0f32; crate::hw::face::config::EMBEDDING_DIM];
     let mut count = 0u32;

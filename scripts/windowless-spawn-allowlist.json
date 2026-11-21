@@ -9,8 +9,8 @@
     },
     {
       "file": "src-tauri/src/commands/face.rs",
-      "line": 181,
-      "reason": "baseline 2026-11-20"
+      "line": 177,
+      "reason": "baseline 2026-11-20 (line moved by C3b face.rs cleanup)"
     },
     {
       "file": "src-tauri/src/commands/privacy.rs",

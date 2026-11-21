@@ -187,7 +187,7 @@ pub fn set_charging_threshold(threshold: u8) -> HardwareResult<ChargingResult> {
         // a failure of the ECWT itself, so SGER alone is not proof. Read back.
         match read_hardware_threshold() {
             Ok(actual) if actual == threshold => {
-                persist_threshold_registry(threshold).ok();
+                persist_threshold(threshold);
                 log::info!(
                     target: "hw::charging",
                     "charging limit {threshold}% applied on firmware (WMAA 0x1000/0x02, code {code})"
@@ -262,9 +262,7 @@ pub fn get_charge_limit_state() -> ChargeLimitState {
 pub fn get_requested_threshold() -> u8 {
     #[cfg(windows)]
     {
-        read_threshold_registry()
-            .and_then(|r| r.ok())
-            .unwrap_or(100)
+        load_threshold_state().unwrap_or(100)
     }
     #[cfg(not(windows))]
     {
@@ -944,42 +942,92 @@ pub fn set_battery_care(enabled: bool, limit: u8) -> HardwareResult<ChargingResu
     set_charging_threshold(target)
 }
 
-// ── Registry persistence (requested value only) ─────────────────────────────
+// ── Requested-value persistence (state store) ───────────────────────────────
+//
+// The requested threshold used to be cached in an HKLM registry value, which
+// a non-elevated app process could not even write (the save silently failed
+// with a debug line). The value now lives in the user's state store
+// (`%LOCALAPPDATA%\MiControl\state\charging.json`). The stale HKLM value is
+// imported read-only on the first store miss and then left in place: only a
+// SYSTEM context could delete it, and nothing reads it anymore.
 
-fn persist_threshold_registry(threshold: u8) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-        match RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY) {
-            Ok(key) => {
-                key.write_u32(CHARGE_REG_VALUE, threshold as u32)
-                    .map_err(|e| {
-                        HardwareError::Registry(format!(
-                            "Write charging threshold to registry: {e}"
-                        ))
-                    })?;
-            }
-            Err(e) => {
-                log::debug!("Cannot open charging registry key for write: {e}");
+/// Persist the requested threshold through the state store. Best-effort by
+/// design: this is a preference cache, not enforcement state; a failed save
+/// only loses the fallback value.
+fn persist_threshold(threshold: u8) {
+    let store = crate::util::state_store::charging_store();
+    let state = crate::util::state_store::ChargingThresholdState { threshold };
+    match store {
+        Ok(store) => {
+            if let Err(e) = store.save(&state) {
+                log::debug!(
+                    target: "hw::charging",
+                    "charging threshold store save failed: {e}"
+                );
             }
         }
+        Err(e) => log::debug!(target: "hw::charging", "charging store unavailable: {e}"),
     }
-    Ok(())
 }
 
+/// The user's requested limit fallback: the state store, with a one-time
+/// read-only import of the legacy HKLM cache on the first miss. Corrupt or
+/// unavailable state degrades to the legacy value (or unset), never an error.
+fn load_threshold_state() -> Option<u8> {
+    let store = crate::util::state_store::charging_store();
+    load_threshold_from(&store, legacy_threshold_value())
+}
+
+/// Shared load path (explicit store + injected legacy value for tests).
+fn load_threshold_from(
+    store: &Result<
+        crate::util::state_store::Store<crate::util::state_store::ChargingThresholdState>,
+        crate::util::state_store::StoreError,
+    >,
+    legacy: Option<u8>,
+) -> Option<u8> {
+    let Ok(store) = store else {
+        return legacy;
+    };
+    match store.load() {
+        Ok(Some(state)) => Some(state.threshold.clamp(40, 100)),
+        Ok(None) => {
+            // First run after the migration: import the legacy HKLM cache
+            // once. The stale value itself cannot be deleted without
+            // elevation and nothing reads it anymore.
+            if let Some(value) = legacy {
+                let state = crate::util::state_store::ChargingThresholdState { threshold: value };
+                let _ = store.save(&state);
+            }
+            legacy
+        }
+        Err(e) => {
+            log::warn!(
+                target: "hw::charging",
+                "charging store unreadable ({e}); falling back to the legacy registry value"
+            );
+            legacy
+        }
+    }
+}
+
+/// Legacy HKLM cache written by pre-store builds. Read-only import source;
+/// non-elevated processes usually cannot create it either, so a `None` here
+/// is the normal case.
 #[cfg(windows)]
-fn read_threshold_registry() -> Option<HardwareResult<u8>> {
+fn legacy_threshold_value() -> Option<u8> {
     use crate::util::registry::RegKeyGuard;
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
     let key = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY).ok()??;
     match key.read_u32(CHARGE_REG_VALUE) {
-        Ok(Some(data)) => Some(Ok(data.clamp(40, 100) as u8)),
-        Ok(None) => None,
-        Err(e) => Some(Err(HardwareError::Registry(format!(
-            "Read charging threshold: {e}"
-        )))),
+        Ok(Some(data)) => Some(data.clamp(40, 100) as u8),
+        Ok(None) | Err(_) => None,
     }
+}
+
+#[cfg(not(windows))]
+fn legacy_threshold_value() -> Option<u8> {
+    None
 }
 
 #[cfg(test)]
@@ -1294,5 +1342,71 @@ mod tests {
             gate.decide_forced(0, 100, Some(80)),
             ReconcileAction::CareOff
         );
+    }
+
+    /// Unique per-test scratch state root.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "micontrol-charging-{}-{}-{}",
+            tag,
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch root");
+        dir
+    }
+
+    #[test]
+    fn threshold_state_roundtrips_through_the_store() {
+        let root = scratch_root("roundtrip");
+        let store = crate::util::state_store::charging_store_in(&root);
+        store
+            .save(&crate::util::state_store::ChargingThresholdState { threshold: 80 })
+            .expect("save");
+        let holder = Ok(store);
+        assert_eq!(load_threshold_from(&holder, None), Some(80));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_registry_value_is_imported_once() {
+        let root = scratch_root("import");
+        let store = crate::util::state_store::charging_store_in(&root);
+        // First read with the store empty: the legacy value is returned AND
+        // saved into the store so the import never has to run again.
+        let holder = Ok(store);
+        assert_eq!(load_threshold_from(&holder, Some(60)), Some(60));
+        let reloaded = crate::util::state_store::charging_store_in(&root);
+        let state = reloaded.load().expect("load").expect("imported state");
+        assert_eq!(state.threshold, 60);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_store_degrades_to_legacy_value() {
+        let root = scratch_root("corrupt");
+        let spec = crate::util::state_store::charging_store_in(&root);
+        std::fs::create_dir_all(spec.path().parent().expect("parent")).expect("dir");
+        std::fs::write(spec.path(), "{corrupt").expect("corrupt fixture");
+        let store = crate::util::state_store::charging_store_in(&root);
+        let holder = Ok(store);
+        assert_eq!(load_threshold_from(&holder, Some(70)), Some(70));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unavailable_store_falls_back_to_legacy_value() {
+        let holder: Result<
+            crate::util::state_store::Store<crate::util::state_store::ChargingThresholdState>,
+            crate::util::state_store::StoreError,
+        > = Err(crate::util::state_store::StoreError::Corrupt {
+            path: std::path::PathBuf::from("charging"),
+            reason: "fixture".into(),
+        });
+        assert_eq!(load_threshold_from(&holder, Some(65)), Some(65));
+        assert_eq!(load_threshold_from(&holder, None), None);
     }
 }

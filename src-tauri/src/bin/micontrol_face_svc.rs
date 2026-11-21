@@ -20,7 +20,7 @@
 
 use micontrol_lib::hw::face::config::DATA_DIR;
 use micontrol_lib::hw::face::pipe_server;
-use micontrol_lib::hw::face::store::{load_store, FaceStore};
+use micontrol_lib::hw::face::store::{load_gallery, FaceStore};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -142,7 +142,7 @@ impl AuthRunner {
     }
 
     /// Start an auth attempt on a background thread (non-blocking).
-    fn start(&self, store_path: &str) {
+    fn start(&self) {
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = now_unix();
         // Lockout check.
@@ -162,11 +162,10 @@ impl AuthRunner {
         st.result = None;
         drop(st);
 
-        let path = store_path.to_string();
         let runner = Arc::new(Self::new());
         let runner_clone = runner.clone();
         let _ = std::thread::spawn(move || {
-            run_auth_once(&runner_clone, &path);
+            run_auth_once(&runner_clone);
         });
         let _ = runner;
     }
@@ -181,12 +180,11 @@ fn now_unix() -> i64 {
 
 /// One full auth attempt: load store, run the pipeline (via the shared
 /// library's AuthSession), set the runner state.
-fn run_auth_once(runner: &Arc<AuthRunner>, store_path: &str) {
+fn run_auth_once(runner: &Arc<AuthRunner>) {
     use micontrol_lib::hw::face::service::AuthSession;
 
     let result = (|| -> Result<AuthResultJson, String> {
-        let store: FaceStore =
-            load_store(std::path::Path::new(store_path)).map_err(|e| format!("store load: {e}"))?;
+        let store: FaceStore = load_gallery().map_err(|e| format!("store load: {e}"))?;
         if store.is_empty() {
             return Ok(AuthResultJson {
                 success: false,
@@ -394,7 +392,7 @@ fn estimate_pose_metrics(face: &micontrol_lib::hw::face::models::DetectedFace) -
 
 // ── Pipe handler ────────────────────────────────────────────────────────────
 
-fn handle_request(req: &Value, runner: &Arc<AuthRunner>, store_path: &str) -> Value {
+fn handle_request(req: &Value, runner: &Arc<AuthRunner>) -> Value {
     let cmd = req.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
     match cmd {
         "ping" => {
@@ -408,7 +406,7 @@ fn handle_request(req: &Value, runner: &Arc<AuthRunner>, store_path: &str) -> Va
             })
         }
         "auth_start" => {
-            runner.start(store_path);
+            runner.start();
             json!({ "ok": true, "done": false })
         }
         "auth_poll" => runner.snapshot(),
@@ -478,12 +476,12 @@ fn run_main_loop(shutdown: &AtomicBool) {
         env!("CARGO_PKG_VERSION")
     );
 
-    let store_path = format!(r"{DATA_DIR}\faces.dat");
     let runner = Arc::new(AuthRunner::new());
 
-    // Warm up the store (load once; fail-open to an empty store).
-    match load_store(std::path::Path::new(&store_path)) {
-        Ok(_) => log::info!("[store] gallery loaded from {store_path}"),
+    // Warm up the gallery (load once; failures are logged and retried per
+    // auth attempt, which fails closed on an unreadable gallery).
+    match load_gallery() {
+        Ok(_) => log::info!("[store] gallery loaded from the state store"),
         Err(e) => log::warn!("[store] initial load failed ({e}); will retry per auth"),
     }
 
@@ -495,7 +493,7 @@ fn run_main_loop(shutdown: &AtomicBool) {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let handler = |req: &Value| handle_request(req, &runner, &store_path);
+        let handler = |req: &Value| handle_request(req, &runner);
         match pipe_server::serve_one(&handler, shutdown) {
             Ok(true) => {}
             Ok(false) => break, // shutdown
