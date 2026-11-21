@@ -16,6 +16,10 @@ interface AudioEffectsStatus {
   mic_noise_canceling: boolean;
   speaker_noise_canceling: boolean;
   voice_focus: boolean;
+  mic_sysfx: number | null;
+  speaker_sysfx: number | null;
+  voice_focus_supported: boolean;
+  voice_focus_reason: string;
   voice_clarity_available: boolean;
   voice_clarity_reason: string;
   applies_to_audio: boolean;
@@ -35,8 +39,8 @@ const EFFECT_COMMANDS: Record<EffectKey, string> = {
  * blanket "not available" line.
  */
 function clarityMessage(effects: AudioEffectsStatus): string {
-  if (effects.voice_clarity_available) return t('audio.voiceClarityAvailable');
-  switch (effects.voice_clarity_reason) {
+  if (effects.voice_focus_supported) return t('audio.voiceClarityAvailable');
+  switch (effects.voice_focus_reason) {
     case 'no-npu':
       return t('audio.voiceClarityNoNpu');
     case 'os-unsupported':
@@ -44,6 +48,13 @@ function clarityMessage(effects: AudioEffectsStatus): string {
     default:
       return t('audio.voiceClarityUnknown');
   }
+}
+
+/** Live endpoint Disable_SysFx readback as a human label (honest liveness). */
+function sysfxLabel(value: number | null): string {
+  if (value === 1) return t('audio.sysfxDisabled');
+  if (value === 0) return t('audio.sysfxDefault');
+  return t('audio.sysfxUnknown');
 }
 
 interface Props {
@@ -115,11 +126,6 @@ function AudioTab({ hw }: Props) {
           <p className="text-muted">{t('common.loading')}</p>
         ) : effects ? (
           <>
-            {!effects.applies_to_audio && (
-              <div className="alert alert-warn" style={{ marginBottom: 12 }} role="status">
-                <Icon name="info" size={16} /> {t('audio.preferenceOnly')}
-              </div>
-            )}
             <p className="text-muted" style={{ fontSize: 12, marginBottom: 8 }}>
               {clarityMessage(effects)}
             </p>
@@ -137,7 +143,8 @@ function AudioTab({ hw }: Props) {
                 <div>
                   <div>{t('audio.micNoiseCanceling')}</div>
                   <span className="text-muted" style={{ fontSize: 12 }}>
-                    {t('audio.micNoiseCancelingDesc')}
+                    {t('audio.micNoiseCancelingDesc')}{' '}
+                    {t('audio.endpointState', { state: sysfxLabel(effects.mic_sysfx) })}
                   </span>
                 </div>
               </label>
@@ -154,7 +161,8 @@ function AudioTab({ hw }: Props) {
                 <div>
                   <div>{t('audio.speakerNoiseCanceling')}</div>
                   <span className="text-muted" style={{ fontSize: 12 }}>
-                    {t('audio.speakerNoiseCancelingDesc')}
+                    {t('audio.speakerNoiseCancelingDesc')}{' '}
+                    {t('audio.endpointState', { state: sysfxLabel(effects.speaker_sysfx) })}
                   </span>
                 </div>
               </label>
@@ -165,13 +173,15 @@ function AudioTab({ hw }: Props) {
                 <ToggleSwitch
                   checked={effects.voice_focus}
                   onChange={(next) => void handleToggle('voice_focus', next)}
-                  disabled={pendingKey !== null}
+                  disabled={pendingKey !== null || !effects.voice_focus_supported}
                   ariaLabel={t('audio.voiceFocus')}
                 />
                 <div>
                   <div>{t('audio.voiceFocus')}</div>
                   <span className="text-muted" style={{ fontSize: 12 }}>
-                    {t('audio.voiceFocusDesc')}
+                    {effects.voice_focus_supported
+                      ? t('audio.voiceFocusDesc')
+                      : clarityMessage(effects)}
                   </span>
                 </div>
               </label>
