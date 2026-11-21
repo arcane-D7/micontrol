@@ -28,11 +28,6 @@
       "reason": "baseline 2026-11-20"
     },
     {
-      "file": "src-tauri/src/hw/icc_catalog.rs",
-      "line": 833,
-      "reason": "baseline 2026-11-20"
-    },
-    {
       "file": "src-tauri/src/hw/scrcpy_bridge.rs",
       "line": 72,
       "reason": "baseline 2026-11-20"
