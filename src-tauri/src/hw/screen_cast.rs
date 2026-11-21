@@ -370,40 +370,43 @@ mod win {
     /// `CastingConnectionErrorStatus` name Windows reported, or the error text.
     /// A `Succeeded` here would be a REAL streaming session (not expected for
     /// an empty source); anything else is a refusal with a name.
-    pub fn attempt_cast(device_id: &str) -> Result<String, String> {
+    pub fn attempt_cast(device_id: &str) -> HardwareResult<String> {
         use windows::Media::Casting::{CastingConnectionErrorStatus, CastingDevice};
 
         let op = CastingDevice::FromIdAsync(&HSTRING::from(device_id))
-            .map_err(|e| format!("FromIdAsync failed: {e}"))?;
+            .map_err(|e| HardwareError::Other(format!("FromIdAsync failed: {e}")))?;
         let device = op
             .get()
-            .map_err(|e| format!("FromIdAsync timed out / failed: {e}"))?;
+            .map_err(|e| HardwareError::Other(format!("FromIdAsync timed out / failed: {e}")))?;
         let friendly = device
             .FriendlyName()
             .map(|n| n.to_string())
             .unwrap_or_else(|_| "<unknown>".into());
 
-        let connection = device
-            .CreateCastingConnection()
-            .map_err(|e| format!("{friendly}: CreateCastingConnection failed: {e}"))?;
+        let connection = device.CreateCastingConnection().map_err(|e| {
+            HardwareError::Other(format!("{friendly}: CreateCastingConnection failed: {e}"))
+        })?;
 
         let source = {
             use windows::Media::Playback::MediaPlayer;
-            let player = MediaPlayer::new()
-                .map_err(|e| format!("{friendly}: MediaPlayer init failed: {e}"))?;
-            let src = player
-                .GetAsCastingSource()
-                .map_err(|e| format!("{friendly}: GetAsCastingSource failed: {e}"))?;
+            let player = MediaPlayer::new().map_err(|e| {
+                HardwareError::Other(format!("{friendly}: MediaPlayer init failed: {e}"))
+            })?;
+            let src = player.GetAsCastingSource().map_err(|e| {
+                HardwareError::Other(format!("{friendly}: GetAsCastingSource failed: {e}"))
+            })?;
             let _ = player.Close();
             src
         };
 
-        let req = connection
-            .RequestStartCastingAsync(&source)
-            .map_err(|e| format!("{friendly}: RequestStartCastingAsync failed: {e}"))?;
-        let status = req
-            .get()
-            .map_err(|e| format!("{friendly}: awaiting RequestStartCastingAsync failed: {e}"))?;
+        let req = connection.RequestStartCastingAsync(&source).map_err(|e| {
+            HardwareError::Other(format!("{friendly}: RequestStartCastingAsync failed: {e}"))
+        })?;
+        let status = req.get().map_err(|e| {
+            HardwareError::Other(format!(
+                "{friendly}: awaiting RequestStartCastingAsync failed: {e}"
+            ))
+        })?;
         let name = super::casting_error_status_name(status.0);
         if status == CastingConnectionErrorStatus::Succeeded {
             // Do not leave a live session behind from a probe path.
@@ -679,7 +682,7 @@ pub fn probe_cast_capabilities() -> HardwareResult<CastCapabilityReport> {
                 probes.push(CastApiProbe {
                     api: format!("RequestStartCastingAsync({})", d.name),
                     status: "failed".into(),
-                    detail: e,
+                    detail: e.to_string(),
                 });
                 None
             }
