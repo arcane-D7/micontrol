@@ -1577,9 +1577,6 @@
       "deleteLog": "Eliminar esta entrada de registo"
     }
   },
-  "shortcuts": {
-    "tabSwitch": "Alt+1 a Alt+9 para alternar separadores"
-  },
   "audio": {
     "volume": "Volume",
     "unmutedByVolume": "Som reativado — o volume mudou com o áudio silenciado",
@@ -2268,6 +2265,7 @@
   "main": {
     "tray": "Bandeja",
     "themeTitle": "Tema: {theme}",
+    "themeToggle": "Alternar tema",
     "previewTray": "Pré-visualizar popup da bandeja",
     "by": "Por: {name}",
     "previewHint": "Pré-visualização — clique fora para fechar",

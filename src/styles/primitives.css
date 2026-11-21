@@ -300,6 +300,130 @@
   cursor: not-allowed;
 }
 
+/* Variante compacta: alvo de 28 px (o chamador baixa o glifo para 16 px).
+   Mantém o mesmo círculo de hover, só o alcance encolhe. */
+.mc-iconbtn--sm {
+  width: 28px;
+  height: 28px;
+}
+.mc-iconbtn--sm::before {
+  width: 24px;
+  height: 24px;
+}
+
+/* ═══ Botão ════════════════════════════════════════════════════════════════ */
+/* 32 px de altura, raio 8, 1 px hairline, press de 3%. Primário é TINTA
+   (--ink), não accent: o accent só pinta estado (spec §5.4). Zero sombra. */
+.mc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  height: 32px;
+  padding: 0 14px;
+  border: var(--hair) solid var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: var(--t-body);
+  font-weight: var(--w-strong);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--d-fast) var(--ease-out),
+    border-color var(--d-fast) var(--ease-out),
+    color var(--d-fast) var(--ease-out);
+}
+.mc-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--hairline-2);
+}
+.mc-btn:active:not(:disabled) {
+  /* press de 3%: escurece a superfície, sem sombra nem deslocamento. */
+  background: color-mix(in oklab, var(--surface-2) 97%, black);
+}
+.mc-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.mc-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Primário: tinta cheia; press escurece a tinta 3%. */
+.mc-btn--primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+}
+.mc-btn--primary:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--ink) 94%, white);
+  border-color: color-mix(in oklab, var(--ink) 94%, white);
+}
+.mc-btn--primary:active:not(:disabled) {
+  background: color-mix(in oklab, var(--ink) 97%, black);
+  border-color: color-mix(in oklab, var(--ink) 97%, black);
+}
+
+/* Secundário: é a base (superfície-2 + hairline). */
+.mc-btn--secondary {
+  background: var(--surface-2);
+  border-color: var(--hairline);
+  color: var(--ink);
+}
+
+/* Ghost: tinta silenciada sobre transparente. */
+.mc-btn--ghost {
+  background: transparent;
+  border-color: var(--hairline);
+  color: var(--ink-muted);
+}
+.mc-btn--ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+/* Danger: pastel de perigo como superfície, tinta de perigo como texto. */
+.mc-btn--danger {
+  background: var(--danger-soft);
+  border-color: color-mix(in oklab, var(--danger) 25%, transparent);
+  color: var(--danger);
+}
+.mc-btn--danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--danger) 12%, var(--danger-soft));
+}
+
+.mc-btn--sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--t-meta);
+}
+.mc-btn--lg {
+  height: 40px;
+  padding: 0 18px;
+  font-size: var(--t-body-lg);
+}
+.mc-btn--full {
+  width: 100%;
+}
+
+.mc-btn__spinner {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid color-mix(in oklab, currentColor 30%, transparent);
+  border-top-color: currentColor;
+  border-radius: var(--r-pill);
+  animation: mc-btn-spin 0.7s linear infinite;
+}
+@keyframes mc-btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ═══ Herói ════════════════════════════════════════════════════════════════ */
 .mc-hero {
   display: flex;
