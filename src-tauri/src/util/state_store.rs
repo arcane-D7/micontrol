@@ -1462,6 +1462,84 @@ pub fn audio_effects_store_in(root: &Path) -> Store<AudioEffectsState> {
     ))
 }
 
+// Store: brightness_mode. The adaptive-brightness curve mode ("curve" =
+// fixed formula, "smart" = learned user preference). It used to live only in
+// the HKLM `AiBrightnessMode` value, which a non-elevated user process cannot
+// write, so the choice silently reverted on machines where the registry write
+// was refused. The store is the source of truth from now on; the registry
+// value is imported once (read-only) by the owning module and mirrored
+// best-effort on every change.
+
+/// Adaptive-brightness mode persisted across restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BrightnessModeState {
+    /// "curve" or "smart" (same wire strings as `AiBrightnessConfig.mode`).
+    pub mode: String,
+    /// Wall-clock ms (since UNIX epoch) of the last change.
+    pub updated_at_ms: u64,
+}
+
+/// Production brightness-mode store:
+/// `%LOCALAPPDATA%\MiControl\state\brightness_mode.json`.
+pub fn brightness_mode_store() -> Result<Store<BrightnessModeState>, StoreError> {
+    Ok(Store::new(StoreRegistry::spec(
+        StoreRoot::User,
+        "brightness_mode",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    )?))
+}
+
+/// Brightness-mode store under an explicit root (tests).
+pub fn brightness_mode_store_in(root: &Path) -> Store<BrightnessModeState> {
+    Store::new(StoreRegistry::spec_in(
+        StoreRoot::User,
+        root,
+        "brightness_mode",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    ))
+}
+
+// Store: ambient_sensor. One record: the wall-clock timestamp of the last
+// FRESH (plausible) ambient-light reading. Written at most once per hour, so
+// the "sensor present but not reporting (last reading D Mon)" message stays
+// truthful across restarts on a machine whose sensor froze days ago without
+// turning the store into a write hotspot.
+
+/// Ambient-light sensor record persisted across restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AmbientSensorRecord {
+    /// Wall-clock ms of the last fresh lux reading; `0` = never seen one.
+    pub last_fresh_ms: u64,
+}
+
+/// Production ambient-sensor store:
+/// `%LOCALAPPDATA%\MiControl\state\ambient_sensor.json`.
+pub fn ambient_sensor_store() -> Result<Store<AmbientSensorRecord>, StoreError> {
+    Ok(Store::new(StoreRegistry::spec(
+        StoreRoot::User,
+        "ambient_sensor",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    )?))
+}
+
+/// Ambient-sensor store under an explicit root (tests).
+pub fn ambient_sensor_store_in(root: &Path) -> Store<AmbientSensorRecord> {
+    Store::new(StoreRegistry::spec_in(
+        StoreRoot::User,
+        root,
+        "ambient_sensor",
+        1,
+        AclPolicy::User,
+        DEFAULT_STATE_MAX_BYTES,
+    ))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2122,5 +2200,51 @@ mod tests {
                 "{rel} does not reference {marker}; the migration regressed"
             );
         }
+    }
+
+    #[test]
+    fn brightness_mode_roundtrip_survives_store_recreation() {
+        let root = scratch_root("brightness-mode");
+        {
+            let store = brightness_mode_store_in(&root);
+            store
+                .save(&BrightnessModeState {
+                    mode: "smart".into(),
+                    updated_at_ms: 1_000,
+                })
+                .expect("save smart");
+        }
+        // A new process builds a fresh Store handle over the same root; the
+        // mode must survive (restart survival is the whole point of the
+        // store; the registry read-only import is only the initial seed).
+        {
+            let store = brightness_mode_store_in(&root);
+            let loaded = store.load().expect("load after restart");
+            assert_eq!(
+                loaded.map(|s| s.mode).as_deref(),
+                Some("smart"),
+                "brightness mode must survive store recreation"
+            );
+        }
+        cleanup(&root);
+    }
+
+    #[test]
+    fn ambient_sensor_record_roundtrip() {
+        let root = scratch_root("ambient-sensor");
+        let store = ambient_sensor_store_in(&root);
+        assert_eq!(store.load().expect("load empty"), None);
+        store
+            .save(&AmbientSensorRecord {
+                last_fresh_ms: 1_234_567,
+            })
+            .expect("save");
+        let loaded = store.load().expect("load");
+        assert_eq!(
+            loaded.map(|r| r.last_fresh_ms),
+            Some(1_234_567),
+            "last-fresh timestamp must survive a reload"
+        );
+        cleanup(&root);
     }
 }

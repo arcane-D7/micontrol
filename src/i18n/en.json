@@ -667,7 +667,9 @@
     "psr2ToastOff": "PSR2 DRRS disabled in the driver registry — effective after reboot.",
     "psr2ToastError": "Adaptive refresh rate: {error}",
     "psr2Note": "PSR2 DRRS ≠ Windows “Dynamic Refresh Rate”. Windows DRR requires a VRR-capable display. PSR2 DRRS is an Intel driver feature that switches the panel refresh rate internally — Windows always reports the max configured Hz (currently {hz} Hz), even when PSR2 is active.",
-    "presetResetError": "Reset smart model: {error}"
+    "presetResetError": "Reset smart model: {error}",
+    "sensorNoAmbient": "This device has no ambient light sensor.",
+    "sensorFrozen": "Sensor present but not reporting (last reading {date})."
   },
   "fan": {
     "title": "Fan",

@@ -416,6 +416,7 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         ai_brightness: _aiBrightness,
         ai_brightness_config: { ..._aiBrightnessConfig },
         ambient_lux: 342.0,
+        ambient_sensor: { state: 'available', last_fresh_ms: Date.now() },
         brightness_source: 'igcl',
       } as T;
 
