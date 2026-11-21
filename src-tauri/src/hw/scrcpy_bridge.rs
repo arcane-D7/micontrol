@@ -28,6 +28,11 @@ use serde::Serialize;
 /// 10 s covers a loaded system without stalling camera start/stop.
 const TOOL_SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// winget install budget: a normal install finishes in about a minute; 5 min
+/// covers slow mirrors so a hung install dies with its whole tree instead of
+/// stalling the caller forever (the old unbounded `.output()` wait).
+const WINGET_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+
 const APP_DATA_SUBDIR: &str = "scrcpy";
 const PID_FILE: &str = "scrcpy.pid";
 
@@ -69,7 +74,11 @@ pub fn find_binary() -> Result<Option<PathBuf>, String> {
     } else {
         "scrcpy"
     };
-    let out = Command::new(exe).arg("--version").output();
+    // B7: version probe through the windowless helper. An absent binary
+    // (NotFound) still maps to Ok(None), like the old `.output()` call.
+    let mut cmd = Command::new(exe);
+    cmd.arg("--version");
+    let out = process_spawn::run_capture(&mut cmd, TOOL_SPAWN_TIMEOUT);
     Ok(match out {
         Ok(o) if o.status.success() => Some(PathBuf::from(exe)),
         _ => None,
@@ -84,22 +93,21 @@ pub fn find_binary() -> Result<Option<PathBuf>, String> {
 /// expected to invoke this on a blocking task (it can take a minute).
 #[cfg(windows)]
 pub fn install_scrcpy() -> Result<(), String> {
-    let out = Command::new("winget")
-        .args([
-            "install",
-            "--id",
-            "Genymobile.scrcpy",
-            "--exact",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--disable-interactivity",
-        ])
-        .stdin(Stdio::null())
-        .output()
+    // B7: winget is a console binary, Quiet removes the flash.
+    let mut cmd = Command::new("winget");
+    cmd.args([
+        "install",
+        "--id",
+        "Genymobile.scrcpy",
+        "--exact",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ]);
+    let out = process_spawn::run_capture(&mut cmd, WINGET_INSTALL_TIMEOUT)
         .map_err(|e| format!("Failed to run winget (is it installed?): {e}"))?;
 
-    let combined = String::from_utf8_lossy(&out.stdout).trim().to_string()
-        + String::from_utf8_lossy(&out.stderr).trim();
+    let combined = out.stdout_str().trim().to_string() + out.stderr_str().trim();
     if out.status.success() {
         Ok(())
     } else {
