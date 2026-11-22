@@ -1276,6 +1276,16 @@ fn brightness_mode_cached() -> String {
 }
 
 /// Persist the mode through the store and refresh the in-process cache.
+/// Persist the Smart/Formula choice from the user process.
+///
+/// The elevated helper runs under a different profile, so routing the mode
+/// through elevation wrote the store where the app never reads it: the user
+/// picked Smart, the UI came back as Formula on every update. The mode is
+/// user-writable state; only the HKLM mirror needs elevation.
+pub fn persist_brightness_mode_for_user(mode: &str) -> HardwareResult<()> {
+    save_brightness_mode(if mode == "smart" { "smart" } else { "curve" })
+}
+
 fn save_brightness_mode(mode: &str) -> HardwareResult<()> {
     let state = state_store::BrightnessModeState {
         mode: mode.to_string(),

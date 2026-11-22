@@ -175,13 +175,23 @@ pub async fn get_ai_brightness_config() -> Result<AiBrightnessConfig, ErrorRespo
 pub async fn set_ai_brightness_config(config: AiBrightnessConfig) -> Result<(), ErrorResponse> {
     // Config change invalidates the old offset (different curve parameters).
     crate::hw::display::clear_user_brightness_override();
-    elev_bridge::run_elevated(
+    // The mode is user state: persist it in THIS process first. Routing it
+    // through the elevated helper wrote it under another profile, which is
+    // why Smart always came back as Formula after an update.
+    crate::hw::display::persist_brightness_mode_for_user(&config.mode)
+        .map_err(ErrorResponse::from)?;
+    let registry = elev_bridge::run_elevated(
         "set_ai_brightness_config",
         serde_json::json!({ "config": config }),
     )
-    .await
-    .map(|_| ())
-    .map_err(ErrorResponse::from)
+    .await;
+    if let Err(e) = registry {
+        // The mode already landed; the HKLM mirror is what failed. Say so
+        // without pretending the whole save failed (the UI reads the mode
+        // from the user store).
+        log::warn!("[display] brightness registry mirror failed after the mode was saved: {e}");
+    }
+    Ok(())
 }
 
 /// Get the smart-brightness learned model (for the Display settings stats bar).
