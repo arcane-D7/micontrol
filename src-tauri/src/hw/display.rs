@@ -1859,12 +1859,40 @@ static SENSOR_STATE: AtomicU8 = AtomicU8::new(AmbientSensorState::Unknown.code()
 // timestamps): the sensor thread feeds it probe evidence and it answers
 // what to do next. Tests simulate stale reports, recovery and the whole
 // ladder without sleeping.
+//
+// Freshness policy (revised the same day, after the installed build proved
+// the opposite failure): a WORKING on-change sensor sat silent for 115 s
+// with valid lux, the 30 s heuristic called it stale, and from 17:41 to
+// 17:55 the log shows a recreation every 30-60 s (auto and forced) while lux
+// kept coming back at 47-51. So the machine must heal DEAD reports and never
+// punish QUIET ones. Wedge evidence now needs four things at once: the stack
+// is NOT handing back plausible lux, the startup grace has expired, the SAME
+// report has been seen three times in a row, and it is older than 3 minutes
+// (the two time gates are configurable). External reset requests may never
+// tear down a stack that is serving fresh data.
 
-/// A committed stack is WEDGED when its newest report timestamp has not
-/// advanced for this long. 30 s is generous for a 2 s poll cycle: fifteen
-/// missed polls in a row is not a transient glitch, it is the frozen-stack
-/// signature (the report timestamp literally stops moving).
-const SENSOR_STALE_AFTER_MS: u64 = 30_000;
+/// Default freshness threshold: a committed stack is WEDGED when its newest
+/// report timestamp has not advanced for this long. 3 minutes, not 30 s: the
+/// 2026-11-23 production proof showed an on-change ALS sitting silent for
+/// 115 s while serving perfectly valid lux, and the 30 s heuristic turned
+/// that silence into a rebuild storm (a recreation every 30 s for 15 min).
+/// Silence is not a wedge; only a timestamp that never moves is.
+/// Overridable with `MICONTROL_SENSOR_STALE_AFTER_MS` (milliseconds).
+const SENSOR_STALE_AFTER_MS: u64 = 180_000;
+
+/// Startup grace: no wedge is declared during the first 3 minutes of the
+/// sensor thread, however old the banked report timestamp looks. The FIRST
+/// report of a freshly created stack is legitimately old (an on-change
+/// driver hands back the reading it took when the device powered up), so
+/// age alone cannot be evidence that early.
+/// Overridable with `MICONTROL_SENSOR_GRACE_MS` (milliseconds).
+const SENSOR_STARTUP_GRACE_MS: u64 = 180_000;
+
+/// Consecutive observations in which the newest report timestamp must have
+/// stayed EXACTLY the same before a wedge may be declared. One stuck reading
+/// is a slow sensor; three in a row is the frozen-stack signature. A
+/// timestamp that advances is alive, even at 0 lux in a covered dark room.
+const SENSOR_WEDGE_OBSERVATIONS: u32 = 3;
 
 /// Rebuild backoff ladder. First wedge evidence rebuilds IMMEDIATELY (the
 /// ladder starts armed), then 1 min, 5 min, 15 min, capped at 15 min. A
@@ -1874,13 +1902,92 @@ const SENSOR_REBUILD_BACKOFF_MS: [u64; 3] = [60_000, 300_000, 900_000];
 /// Floor between FORCED rebuilds (external reset requests: power resume,
 /// health supervisor). Forced rebuilds bypass the backoff ladder but not
 /// this floor, so a chatty caller cannot turn the heal into a COM hammer.
-const SENSOR_FORCED_REBUILD_FLOOR_MS: u64 = SENSOR_STALE_AFTER_MS;
+/// 3 minutes: the 2026-11-23 log shows a forced recreation every 30 s while
+/// the sensor was happily Available (lux 47-51), which is churn, not healing.
+/// Independent of the stale threshold on purpose: lowering the freshness
+/// window for diagnostics must not re-open the forced-rebuild floodgates.
+const SENSOR_FORCED_REBUILD_FLOOR_MS: u64 = 180_000;
+
+/// Environment override for the freshness threshold (milliseconds).
+const SENSOR_STALE_AFTER_ENV: &str = "MICONTROL_SENSOR_STALE_AFTER_MS";
+
+/// Environment override for the startup grace (milliseconds).
+const SENSOR_GRACE_ENV: &str = "MICONTROL_SENSOR_GRACE_MS";
 
 /// A NoSensor diagnosis (nothing enumerated) is retried at most once per
 /// this window: the machine either has no ALS or its driver is disabled,
 /// and re-creating a stack that cannot enumerate anything is pointless
 /// churn. Deliberately equal to the last backoff step.
 const SENSOR_NOSENSOR_RETRY_MS: u64 = 900_000;
+
+/// The freshness policy the heal machine applies, resolved once per process.
+/// Everything has a sane default and the two time gates are configurable,
+/// so a diagnostics run can tighten them without a code change.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SensorFreshnessPolicy {
+    /// How long the newest report may stay unmoving before it is a wedge.
+    stale_after_ms: u64,
+    /// How long after the thread starts no wedge may be declared at all.
+    grace_ms: u64,
+    /// How many consecutive observations of the SAME report the wedge needs.
+    wedge_observations: u32,
+}
+
+#[cfg(any(windows, test))]
+impl SensorFreshnessPolicy {
+    const fn defaults() -> Self {
+        Self {
+            stale_after_ms: SENSOR_STALE_AFTER_MS,
+            grace_ms: SENSOR_STARTUP_GRACE_MS,
+            wedge_observations: SENSOR_WEDGE_OBSERVATIONS,
+        }
+    }
+}
+
+/// Parse one millisecond override. Absent, empty or unparsable keeps the
+/// default; a valid number is honoured as-is, including `0` (a diagnostics
+/// run that wants the gate gone).
+#[cfg(any(windows, test))]
+fn parse_ms_override(raw: Option<&str>, default_ms: u64) -> u64 {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => v.parse::<u64>().unwrap_or(default_ms),
+        None => default_ms,
+    }
+}
+
+/// Resolve the policy from the two environment values. Pure (the values are
+/// injected) so the parsing contract is unit-testable without a process.
+#[cfg(any(windows, test))]
+fn policy_from_env_values(stale_after: Option<&str>, grace: Option<&str>) -> SensorFreshnessPolicy {
+    SensorFreshnessPolicy {
+        stale_after_ms: parse_ms_override(stale_after, SENSOR_STALE_AFTER_MS),
+        grace_ms: parse_ms_override(grace, SENSOR_STARTUP_GRACE_MS),
+        wedge_observations: SENSOR_WEDGE_OBSERVATIONS,
+    }
+}
+
+/// Process-wide policy, read once (same OnceLock pattern as the other
+/// ambient-sensor kill switches).
+#[cfg(windows)]
+fn sensor_freshness_policy() -> SensorFreshnessPolicy {
+    static POLICY: std::sync::OnceLock<SensorFreshnessPolicy> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(|| {
+        let stale = std::env::var(SENSOR_STALE_AFTER_ENV).ok();
+        let grace = std::env::var(SENSOR_GRACE_ENV).ok();
+        let policy = policy_from_env_values(stale.as_deref(), grace.as_deref());
+        if policy != SensorFreshnessPolicy::defaults() {
+            log::info!(
+                "[display] ambient sensor freshness policy overridden: \
+                 stale_after={} ms grace={} ms observations={}",
+                policy.stale_after_ms,
+                policy.grace_ms,
+                policy.wedge_observations
+            );
+        }
+        policy
+    })
+}
 
 /// What the heal machine makes of one wedge evaluation.
 #[cfg(any(windows, test))]
@@ -1974,14 +2081,26 @@ enum ReadDecision {
 #[derive(Debug, Clone)]
 struct SensorOwnerCore {
     heal: SensorHeal,
+    /// The freshness policy (threshold, grace, observation count) in force.
+    policy: SensorFreshnessPolicy,
     /// The committed backend saw sensor DEVICES on its last attempt.
     devices_seen: bool,
     /// At least one real creation/probe attempt has been made.
     attempted: bool,
     last_attempt_ms: u64,
     last_rebuild_ms: u64,
+    /// Wall-clock ms the sensor thread started: the grace-period anchor.
+    started_ms: u64,
     /// Wall-clock ms claimed by the newest report the stack has produced.
     report_ms: Option<u64>,
+    /// Consecutive observations that found `report_ms` EXACTLY unchanged (or
+    /// still absent). Reset the instant a report advances: this counter is
+    /// what separates a slow on-change sensor from a frozen stack.
+    stalled_observations: u32,
+    /// Wall-clock ms of the FIRST observation of the current stalled run
+    /// (`0` = no stalled run). Ages the no-timestamp fallback, which has no
+    /// report timestamp to measure against.
+    stalled_since_ms: u64,
     /// The last probe returned a plausible lux value.
     fresh_lux: bool,
     /// The current stale episode has been logged (log the transition once).
@@ -1990,38 +2109,94 @@ struct SensorOwnerCore {
 
 #[cfg(any(windows, test))]
 impl SensorOwnerCore {
-    const fn new() -> Self {
+    /// Core with an explicit policy and an explicit grace anchor: the sensor
+    /// thread builds this from the environment and its own start time, tests
+    /// build it with injected clocks.
+    fn with_policy(started_ms: u64, policy: SensorFreshnessPolicy) -> Self {
         Self {
             heal: SensorHeal::new(),
+            policy,
             devices_seen: false,
             attempted: false,
             last_attempt_ms: 0,
             last_rebuild_ms: 0,
+            started_ms,
             report_ms: None,
+            stalled_observations: 0,
+            stalled_since_ms: 0,
             fresh_lux: false,
             stale_logged: false,
         }
     }
 
-    /// Wedge evidence: a report timestamp that stopped advancing. When the
-    /// driver never fills a timestamp (neither SENSOR_DATA_TYPE_TIMESTAMP
-    /// nor ISensorDataReport.GetTimestamp answered), fall back to the old
-    /// lux-based evidence: devices present but no plausible reading is the
-    /// FrozenReport signature.
-    fn wedged(&self, now_ms: u64) -> bool {
+    /// How long the current freshness evidence has been unmoving. With a
+    /// report timestamp it is the report's own age; without one (a driver
+    /// that never fills `SENSOR_DATA_TYPE_TIMESTAMP`) it is how long the
+    /// stack has been producing no plausible reading at all.
+    fn stall_age_ms(&self, now_ms: u64) -> u64 {
         match self.report_ms {
-            Some(ts) => now_ms.saturating_sub(ts) >= SENSOR_STALE_AFTER_MS,
-            None => self.devices_seen && !self.fresh_lux,
+            Some(ts) => now_ms.saturating_sub(ts),
+            None => now_ms.saturating_sub(self.stalled_since_ms),
         }
+    }
+
+    /// Wedge evidence: the stack is delivering NOTHING new, by both axes.
+    ///
+    /// Four gates, ALL required (2026-11-23 policy revision):
+    ///
+    /// 1. No plausible lux. A stack that keeps handing over a real reading IS
+    ///    delivering data, whatever its report timestamp claims. An on-change
+    ///    ALS in a steady room sits on one reading for minutes, and recreating
+    ///    it is the churn the installed build proved (lux 47-51, report 115 s
+    ///    old, a rebuild every 30 s for 15 min).
+    /// 2. The startup grace has expired, so the timestamp is not simply the
+    ///    legitimately-old first report of a fresh stack.
+    /// 3. The SAME evidence has been observed `policy.wedge_observations`
+    ///    times in a row, so a sensor that reports slowly is never called
+    ///    wedged.
+    /// 4. The evidence is older than `policy.stale_after_ms`.
+    ///
+    /// When the driver never fills a timestamp (neither
+    /// SENSOR_DATA_TYPE_TIMESTAMP nor ISensorDataReport.GetTimestamp
+    /// answered), gate 4 ages the no-plausible-reading episode instead, and
+    /// devices present with no reading is the FrozenReport signature.
+    fn wedged(&self, now_ms: u64) -> bool {
+        if self.fresh_lux {
+            return false;
+        }
+        if now_ms.saturating_sub(self.started_ms) < self.policy.grace_ms {
+            return false;
+        }
+        if self.stalled_observations < self.policy.wedge_observations {
+            return false;
+        }
+        if self.stall_age_ms(now_ms) < self.policy.stale_after_ms {
+            return false;
+        }
+        match self.report_ms {
+            Some(_) => true,
+            None => self.devices_seen,
+        }
+    }
+
+    /// Does the core's own evidence justify tearing the stack down on an
+    /// EXTERNAL request? Only when it is not serving fresh data: an
+    /// Available stack must never be recreated because a chatty caller asked
+    /// (2026-11-23 proof: a forced recreation every 30 s while lux kept
+    /// coming back at 47-51).
+    fn accepts_forced_rebuild(&self) -> bool {
+        !self.fresh_lux
     }
 
     /// Decide what this read does. `reset_pending` is the consumed-later
     /// flag set by `request_sensor_reset` (power resume, supervisor).
     fn decide(&self, reset_pending: bool, now_ms: u64) -> ReadDecision {
-        // An external reset request forces a rebuild, floor-gated so a
-        // chatty caller cannot hammer COM. Inside the floor the flag stays
-        // pending and the normal ladder logic answers instead.
+        // An external reset request forces a rebuild, evidence-gated (never
+        // on an Available stack) and floor-gated so a chatty caller cannot
+        // hammer COM. Inside the floor the flag stays pending and the normal
+        // ladder logic answers instead.
         if reset_pending
+            && self.accepts_forced_rebuild()
             && now_ms.saturating_sub(self.last_rebuild_ms) >= SENSOR_FORCED_REBUILD_FLOOR_MS
         {
             return ReadDecision::Recreate { forced: true };
@@ -2055,7 +2230,7 @@ impl SensorOwnerCore {
         self.devices_seen = devices_seen;
         self.last_attempt_ms = now_ms;
         self.fresh_lux = fresh_lux;
-        self.report_ms = match (report_ms, fresh_lux) {
+        let banked = match (report_ms, fresh_lux) {
             // Report timestamps must advance; never let a glitch walk the
             // evidence backwards (a driver restart reporting an old time).
             (Some(ts), _) => Some(self.report_ms.unwrap_or(ts).max(ts)),
@@ -2065,7 +2240,26 @@ impl SensorOwnerCore {
             // Neither: keep whatever evidence already exists.
             (None, false) => self.report_ms,
         };
-        if !self.wedged(now_ms) {
+        let advanced = banked != self.report_ms;
+        self.report_ms = banked;
+        if advanced {
+            // Life: the newest report moved, so the stalled run is over and
+            // the observation counter starts again at one sighting of THIS
+            // report (it is itself a candidate for a future stalled run).
+            self.stalled_observations = 1;
+            self.stalled_since_ms = now_ms;
+        } else {
+            self.stalled_observations = self.stalled_observations.saturating_add(1);
+            if self.stalled_since_ms == 0 {
+                self.stalled_since_ms = now_ms;
+            }
+        }
+        // Only SIGNS OF LIFE disarm the ladder: a report that moved, or a
+        // plausible reading. "Not wedged" is not enough, because the startup
+        // grace and a stalled run shorter than three sightings are also "not
+        // wedged" while the stack is still dead; disarming there would put
+        // the backoff back to "immediate" on every poll.
+        if advanced || fresh_lux {
             self.heal.note_fresh();
             self.stale_logged = false;
         }
@@ -2076,9 +2270,13 @@ impl SensorOwnerCore {
     fn note_rebuild(&mut self, forced: bool, now_ms: u64) -> u64 {
         self.last_rebuild_ms = now_ms;
         let delay = self.heal.note_rebuild(forced, now_ms);
-        // The new stack has not reported yet: start with no timestamp
-        // evidence and let this tick's probe fill it.
-        self.report_ms = None;
+        // The freshness evidence belongs to the DRIVER, not to the stack
+        // object, so it is KEPT across a recreation: a re-created stack that
+        // hands over the same unmoving timestamp has not shown life, and the
+        // ladder must keep walking instead of restarting at "armed".
+        // Only the lux flag resets (the new stack has not read yet); the
+        // stale episode stays logged, so the "stale" line appears once per
+        // episode and not again on every ladder step.
         self.fresh_lux = false;
         delay
     }
@@ -2214,20 +2412,39 @@ static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// log "(power resume event)" for every caller, which put six fake resumes
 /// in a 7 h window with no suspend at all.
 ///
-/// Only `NoSensor` suppresses the request: there is no device to re-create.
-/// `FrozenReport` deliberately ACCEPTS resets now: the 2026-11-23 proof
-/// showed that a wedged cached stack heals when it is discarded and
-/// re-created (killing the process revived the sensor; the hardware was
-/// never broken). The floor in `SensorOwnerCore::decide` keeps chatty
+/// Only `FrozenReport` and `Unknown` ACCEPT a request (2026-11-23 policy):
+///   NoSensor     : there is no device to re-create, the request is refused.
+///   Available    : the stack is serving fresh data; tearing it down and
+///                  re-enumerating COM on somebody's schedule is pure churn.
+///                  The heal machine still owns real wedge evidence, so a
+///                  stack that genuinely dies is recreated on its own ladder.
+///   FrozenReport : the 2026-11-23 proof showed that a wedged cached stack
+///                  heals when it is discarded and re-created (killing the
+///                  process revived the sensor; the hardware was never
+///                  broken), so a request here is a legitimate nudge.
+///   Unknown      : nothing has been diagnosed yet; the request is the honest
+///                  "go look again" a resume or a degraded supervisor wants.
+/// The evidence gate and the floor in `SensorOwnerCore::decide` keep chatty
 /// callers from turning forced rebuilds into COM hammering.
 pub fn request_sensor_reset(reason: &str) {
     let state = ambient_sensor_state();
-    if state == AmbientSensorState::NoSensor {
-        log::debug!("[display] sensor reset suppressed ({reason}): no sensor device to re-create");
-        return;
+    match state {
+        AmbientSensorState::NoSensor => {
+            log::debug!(
+                "[display] sensor reset suppressed ({reason}): no sensor device to re-create"
+            );
+        }
+        AmbientSensorState::Available => {
+            log::debug!(
+                "[display] sensor reset suppressed ({reason}): sensor is Available, \
+                 recreating a working stack is churn"
+            );
+        }
+        AmbientSensorState::FrozenReport | AmbientSensorState::Unknown => {
+            SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
+            log::debug!("[display] Sensor reset requested ({reason}, state {state:?})");
+        }
     }
-    SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
-    log::debug!("[display] Sensor reset requested ({reason})");
 }
 
 /// FILETIME epoch (1601-01-01 UTC) expressed in 100 ns ticks up to the UNIX
@@ -2609,7 +2826,10 @@ struct SensorOwner {
 impl SensorOwner {
     fn new() -> Self {
         Self {
-            core: SensorOwnerCore::new(),
+            // The grace clock starts HERE, on the thread that owns the
+            // stacks: the first report this thread sees may legitimately
+            // carry an old timestamp.
+            core: SensorOwnerCore::with_policy(now_ms(), sensor_freshness_policy()),
             backend: None,
             com: None,
             winrt: None,
@@ -2743,7 +2963,20 @@ impl SensorOwner {
     /// only when the machine says so, and report the evidence back.
     fn handle_read(&mut self) -> SensorReadout {
         let now = now_ms();
-        let reset_pending = SENSOR_RESET_REQUESTED.load(Ordering::SeqCst);
+        let mut reset_pending = SENSOR_RESET_REQUESTED.load(Ordering::SeqCst);
+        if reset_pending && !self.core.accepts_forced_rebuild() {
+            // The stack is serving fresh data: an external request would be
+            // churn, not a heal. DROP the flag instead of leaving it pending,
+            // or the next legitimate wedge would be answered by a caller's
+            // stale request rather than by the ladder.
+            SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+            log::debug!(
+                "[display] ambient sensor reset request dropped: the stack is \
+                 serving fresh data (state {:?})",
+                ambient_sensor_state()
+            );
+            reset_pending = false;
+        }
         let decision = self.core.decide(reset_pending, now);
         let mut rebuilt = false;
         // Rebuild number of THIS tick (0 when no rebuild happens).
@@ -2759,15 +2992,14 @@ impl SensorOwner {
             ReadDecision::Recreate { forced } => {
                 if self.core.wedged(now) && !self.core.stale_logged {
                     self.core.stale_logged = true;
-                    let age = self
-                        .core
-                        .report_ms
-                        .map(|ts| now.saturating_sub(ts))
-                        .unwrap_or(0);
+                    let age = self.core.stall_age_ms(now);
                     log::info!(
                         "[display] ambient sensor stale: newest report is {age} ms old \
-                         (threshold {} ms), recreating the cached stack",
-                        SENSOR_STALE_AFTER_MS
+                         (threshold {} ms, {} consecutive observations of the same report, \
+                         minimum {}), recreating the cached stack",
+                        self.core.policy.stale_after_ms,
+                        self.core.stalled_observations,
+                        self.core.policy.wedge_observations
                     );
                 }
                 if forced {
@@ -5694,7 +5926,37 @@ mod tests {
         }
     }
 
-    // ── Auto-heal: stale reports rebuild the cached stack ────────────────────
+    // ── Auto-heal: freshness policy (grace, sightings, age, evidence gate) ───
+    //
+    // Every test below injects its own clock: `BASE` is an arbitrary
+    // wall-clock ms and `POLL_MS` the real 2 s adaptive-loop cadence, so the
+    // grace period, the three-sighting rule and the backoff ladder are all
+    // exercised without sleeping.
+
+    /// Arbitrary wall-clock origin for the injected test clocks.
+    const BASE: u64 = 10_000_000;
+    /// The adaptive loop's real poll cadence, used to space observations.
+    const POLL_MS: u64 = 2_000;
+
+    /// A core that is already PAST its startup grace: these tests exercise
+    /// the sighting/age gates, not the grace window (which has its own test).
+    fn mature_core() -> SensorOwnerCore {
+        SensorOwnerCore::with_policy(
+            BASE - SENSOR_STARTUP_GRACE_MS,
+            SensorFreshnessPolicy::defaults(),
+        )
+    }
+
+    /// Drive `n` observations of the SAME (dead) report timestamp `ts`, 2 s
+    /// apart, starting at `first`. Returns the wall-clock of the last one.
+    fn observe_dead_report(core: &mut SensorOwnerCore, ts: u64, first: u64, n: u32) -> u64 {
+        let mut now = first;
+        for _ in 0..n {
+            core.note_probe(true, Some(ts), false, now);
+            now += POLL_MS;
+        }
+        now - POLL_MS
+    }
 
     #[test]
     fn filetime_ticks_convert_to_wall_clock_ms() {
@@ -5713,21 +5975,76 @@ mod tests {
     }
 
     #[test]
-    fn stale_report_timestamp_triggers_recreation() {
-        let mut core = SensorOwnerCore::new();
+    fn freshness_policy_defaults_are_three_minutes_and_three_sightings() {
+        // The 2026-11-23 revision, pinned: the old 30 s window turned a quiet
+        // on-change sensor into a rebuild storm.
+        assert_eq!(SENSOR_STALE_AFTER_MS, 180_000);
+        assert_eq!(SENSOR_STARTUP_GRACE_MS, 180_000);
+        assert_eq!(SENSOR_WEDGE_OBSERVATIONS, 3);
+        assert_eq!(SENSOR_FORCED_REBUILD_FLOOR_MS, 180_000);
+        // The automatic ladder keeps its 1/5/15 min shape.
+        assert_eq!(SENSOR_REBUILD_BACKOFF_MS, [60_000, 300_000, 900_000]);
+        let d = SensorFreshnessPolicy::defaults();
+        assert_eq!(d.stale_after_ms, 180_000);
+        assert_eq!(d.grace_ms, 180_000);
+        assert_eq!(d.wedge_observations, 3);
+    }
+
+    #[test]
+    fn freshness_policy_is_configurable_from_the_environment() {
+        let d = SensorFreshnessPolicy::defaults();
+        // Unset, empty or garbage: the defaults stand.
+        assert_eq!(policy_from_env_values(None, None), d);
+        assert_eq!(policy_from_env_values(Some(""), Some("   ")), d);
+        assert_eq!(policy_from_env_values(Some("not-a-number"), Some("-1")), d);
+        // A real override is honoured, whitespace trimmed.
+        let p = policy_from_env_values(Some(" 45000 "), Some("900000"));
+        assert_eq!(p.stale_after_ms, 45_000);
+        assert_eq!(p.grace_ms, 900_000);
+        // Zero is a valid value: a diagnostics run that wants a gate off.
+        let z = policy_from_env_values(Some("0"), Some("0"));
+        assert_eq!(z.stale_after_ms, 0);
+        assert_eq!(z.grace_ms, 0);
+        // The sighting count is NOT tunable: it is the anti-churn signature.
+        assert_eq!(p.wedge_observations, SENSOR_WEDGE_OBSERVATIONS);
+        // The env var names are part of the contract the docs promise.
+        assert_eq!(SENSOR_STALE_AFTER_ENV, "MICONTROL_SENSOR_STALE_AFTER_MS");
+        assert_eq!(SENSOR_GRACE_ENV, "MICONTROL_SENSOR_GRACE_MS");
+    }
+
+    #[test]
+    fn stuck_report_timestamp_triggers_recreation_after_three_sightings() {
+        let mut core = mature_core();
         // A healthy stack reporting fresh lux: no wedge evidence, normal probes.
-        core.note_probe(true, Some(1_000_000), true, 1_000_000);
-        assert!(!core.wedged(1_000_000));
-        assert_eq!(core.decide(false, 1_000_000), ReadDecision::Probe);
-        // The stack keeps answering but the REPORT TIMESTAMP stops moving:
-        // the frozen-stack signature (2026-11-22 production, FrozenReport).
-        // 29.999 s of the same stuck timestamp is still tolerated...
-        let almost = 1_000_000 + SENSOR_STALE_AFTER_MS - 1;
-        assert!(!core.wedged(almost));
-        assert_eq!(core.decide(false, almost), ReadDecision::Probe);
-        // ...30 s of it is a wedge, and the ladder starts ARMED: the first
-        // evidence discards and re-creates the cached stack immediately.
-        let stale = 1_000_000 + SENSOR_STALE_AFTER_MS;
+        core.note_probe(true, Some(BASE), true, BASE);
+        assert!(!core.wedged(BASE));
+        assert_eq!(core.decide(false, BASE), ReadDecision::Probe);
+        // The stack keeps answering but the REPORT TIMESTAMP stops moving and
+        // no plausible lux arrives: the frozen-stack signature (2026-11-22
+        // production, FrozenReport, lux=None).
+        let ts = BASE + 1_000;
+        let one = observe_dead_report(&mut core, ts, BASE + 2_000, 1);
+        assert!(!core.wedged(one), "one sighting of a report is not a wedge");
+        assert_eq!(core.decide(false, one), ReadDecision::Probe);
+        let two = observe_dead_report(&mut core, ts, one + POLL_MS, 1);
+        assert!(!core.wedged(two), "two sightings are still not a wedge");
+        let three = observe_dead_report(&mut core, ts, two + POLL_MS, 1);
+        assert!(
+            three - ts < SENSOR_STALE_AFTER_MS,
+            "the third sighting must still land inside the age gate"
+        );
+        assert!(
+            !core.wedged(three),
+            "three sightings inside 3 min are not a wedge"
+        );
+        assert_eq!(core.decide(false, three), ReadDecision::Probe);
+        // Same report, past 3 min: a wedge. The ladder starts ARMED, so the
+        // first evidence discards and re-creates the cached stack immediately.
+        let stale = ts + SENSOR_STALE_AFTER_MS;
+        assert!(
+            !core.wedged(stale - 1),
+            "one millisecond short is not a wedge"
+        );
         assert!(core.wedged(stale));
         assert_eq!(
             core.decide(false, stale),
@@ -5736,21 +6053,204 @@ mod tests {
     }
 
     #[test]
+    fn three_sightings_are_required_even_past_the_age_gate() {
+        // The sighting rule on its own: a report older than the threshold is
+        // NOT yet a wedge, because the very first observation of it may be
+        // the moment the driver caught up. One and two sightings of the same
+        // dead report must keep probing.
+        let mut core = mature_core();
+        let ts = BASE;
+        let aged = ts + SENSOR_STALE_AFTER_MS + 1_000; // past the age gate
+        let one = observe_dead_report(&mut core, ts, aged, 1);
+        assert_eq!(core.stalled_observations, 1);
+        assert!(
+            !core.wedged(one),
+            "one sighting at {} ms of age is not a wedge",
+            one - ts
+        );
+        assert_eq!(core.decide(false, one), ReadDecision::Probe);
+        let two = observe_dead_report(&mut core, ts, one + POLL_MS, 1);
+        assert_eq!(core.stalled_observations, 2);
+        assert!(!core.wedged(two), "two sightings are still not a wedge");
+        assert_eq!(core.decide(false, two), ReadDecision::Probe);
+        // The third sighting of the SAME dead report declares it.
+        let three = observe_dead_report(&mut core, ts, two + POLL_MS, 1);
+        assert_eq!(core.stalled_observations, 3);
+        assert!(core.wedged(three));
+        assert_eq!(
+            core.decide(false, three),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn a_silent_sensor_with_valid_lux_is_never_recreated() {
+        // The 2026-11-23T17:41 production case, to the letter. The installed
+        // build logged:
+        //   ambient sensor state: Available (lux=Some(51.0))
+        // and 244 ms later
+        //   ambient sensor stale: newest report is 114989 ms old
+        //   (threshold 30000 ms), recreating the cached stack
+        // then a recreation every 30-60 s for 15 min while lux kept coming
+        // back at 47-51. The ALS is an on-change device: it sits silent while
+        // the room light does not change, and the report it hands out is
+        // legitimately old. SILENCE WITH VALID LUX IS NOT A WEDGE.
+        let mut core = mature_core();
+        let ts = BASE; // the newest report the driver has produced
+        let mut now = ts + 114_989; // 115 s of silence, the exact production age
+        for i in 0..40 {
+            core.note_probe(true, Some(ts), true, now);
+            assert!(
+                !core.wedged(now),
+                "valid lux at observation {i} is not a wedge"
+            );
+            assert_eq!(
+                core.decide(false, now),
+                ReadDecision::Probe,
+                "a quiet working stack must keep being probed"
+            );
+            now += POLL_MS;
+        }
+        // Past the age gate too: plausible lux is life, whatever the timestamp
+        // claims, so the machine never tears a working stack down.
+        assert!(now - ts >= SENSOR_STALE_AFTER_MS);
+        assert!(!core.wedged(now));
+        assert_eq!(core.decide(false, now), ReadDecision::Probe);
+        // And an Available stack refuses a FORCED rebuild as well (the
+        // "forced by reset request" half of the same production churn).
+        assert!(!core.accepts_forced_rebuild());
+        assert_eq!(core.decide(true, now), ReadDecision::Probe);
+    }
+
+    #[test]
+    fn advancing_timestamp_in_a_dark_room_is_not_a_wedge() {
+        // Regression guard: lux below the plausibility floor (covered sensor,
+        // night) with an ADVANCING timestamp must never trigger rebuilds, or
+        // the heal machine would hammer COM in every dark room.
+        let mut core = mature_core();
+        let mut now = BASE;
+        for i in 0..40 {
+            let ts = BASE + i as u64 * POLL_MS;
+            core.note_probe(true, Some(ts), false, now);
+            assert!(!core.wedged(now), "a moving timestamp at {i} is alive");
+            assert_eq!(core.decide(false, now), ReadDecision::Probe);
+            now += POLL_MS;
+        }
+        // The reports then stop moving: two more sightings of the SAME one
+        // past the age gate, and only then it IS a wedge.
+        let stuck = now - POLL_MS;
+        let almost =
+            observe_dead_report(&mut core, stuck, stuck + SENSOR_STALE_AFTER_MS - POLL_MS, 1);
+        assert!(
+            !core.wedged(almost),
+            "two sightings of a dead report: no wedge"
+        );
+        let dead = observe_dead_report(&mut core, stuck, almost + POLL_MS, 1);
+        assert!(
+            core.wedged(dead),
+            "three sightings past 3 min is the signature"
+        );
+        assert_eq!(
+            core.decide(false, dead),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn the_age_gate_is_three_minutes_not_thirty_seconds() {
+        // The threshold itself, isolated from the lux veto: a DEAD report
+        // (no plausible lux, timestamp unmoving) at the exact production age
+        // of 115 s must survive, because that long of silence is what an
+        // on-change ALS does. The old 30 s window called it stale.
+        let mut core = mature_core();
+        let ts = BASE;
+        let quiet = observe_dead_report(&mut core, ts, ts + 114_989, 3);
+        assert!(
+            !core.wedged(quiet),
+            "{} ms of dead reports is still inside the 3 min window",
+            quiet - ts
+        );
+        assert_eq!(core.decide(false, quiet), ReadDecision::Probe);
+        // The same evidence past 3 min IS the frozen-stack signature.
+        let aged = observe_dead_report(&mut core, ts, ts + SENSOR_STALE_AFTER_MS, 1);
+        assert!(core.wedged(aged), "a dead report past 3 min is a wedge");
+        assert_eq!(
+            core.decide(false, aged),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn startup_grace_never_declares_a_wedge() {
+        // The first report of a freshly created stack is legitimately old: an
+        // on-change driver hands back the reading it took when the device
+        // powered up. For 3 minutes after startup no wedge may be declared,
+        // however old that timestamp is.
+        let t0 = BASE;
+        let mut core = SensorOwnerCore::with_policy(t0, SensorFreshnessPolicy::defaults());
+        // grace until t0 + 180 s
+        let ts = t0 - 600_000; // a ten-minute-old report, no plausible lux
+        let mut now = t0;
+        let mut inside_grace = 0u32;
+        for i in 0..90 {
+            core.note_probe(true, Some(ts), false, now);
+            if now.saturating_sub(t0) < SENSOR_STARTUP_GRACE_MS {
+                inside_grace = inside_grace.saturating_add(1);
+                assert!(
+                    !core.wedged(now),
+                    "grace must hold at observation {i} ({} ms after start)",
+                    now - t0
+                );
+                assert_eq!(core.decide(false, now), ReadDecision::Probe);
+            }
+            now += POLL_MS;
+        }
+        assert!(
+            inside_grace >= 3,
+            "the run must really have observed inside the grace window (grace {} ms)",
+            SENSOR_STARTUP_GRACE_MS
+        );
+        // The report is now far past the age gate AND seen many times over,
+        // but the grace only just expired: the next observation declares it.
+        let after = t0 + SENSOR_STARTUP_GRACE_MS;
+        core.note_probe(true, Some(ts), false, after);
+        assert!(
+            core.wedged(after),
+            "once the grace expires the evidence stands"
+        );
+        assert_eq!(
+            core.decide(false, after),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
     fn rebuild_backoff_ladder_is_1_5_15_minutes_then_caps() {
-        let mut core = SensorOwnerCore::new();
-        let t0 = 10_000_000u64;
-        core.note_probe(true, Some(t0), true, t0);
-        let mut now = t0 + SENSOR_STALE_AFTER_MS;
-        // First wedge evidence: ladder armed, rebuild without waiting.
+        let mut core = mature_core();
+        let ts = BASE;
+        // Establish the wedge: three sightings of one dead report, past 3 min.
+        let first = ts + SENSOR_STALE_AFTER_MS;
+        let now = observe_dead_report(&mut core, ts, first, 3);
+        assert!(core.wedged(now));
+        // Ladder armed: the first evidence rebuilds without waiting.
         assert_eq!(
             core.decide(false, now),
             ReadDecision::Recreate { forced: false }
         );
         // Every rebuild is followed by a probe that STILL finds the stuck
         // timestamp: the ladder walks 1 min, 5 min, 15 min, then caps at 15.
+        let mut now = now;
         for (i, delay) in [60_000u64, 300_000, 900_000, 900_000].iter().enumerate() {
             core.note_rebuild(false, now);
-            core.note_probe(true, Some(t0), false, now);
+            // The re-created stack answers the SAME dead report: that is not
+            // life, and it must NOT re-arm the ladder (otherwise a frozen
+            // sensor would rebuild every poll instead of backing off).
+            core.note_probe(true, Some(ts), false, now + 1);
+            assert!(
+                !core.heal.armed(),
+                "dead evidence after rebuild #{} must keep the ladder walking",
+                i + 1
+            );
             // Inside the step: hold, no stack contact (the cost guarantee).
             assert_eq!(
                 core.decide(false, now + delay - 1),
@@ -5771,21 +6271,26 @@ mod tests {
 
     #[test]
     fn fresh_reading_restores_available_without_a_restart() {
-        let mut core = SensorOwnerCore::new();
-        let t0 = 10_000_000u64;
-        core.note_probe(true, Some(t0), true, t0);
-        let stale = t0 + SENSOR_STALE_AFTER_MS;
-        // Wedged: rebuild #1 fires; the re-created stack answers FRESH.
+        let mut core = mature_core();
+        let ts = BASE;
+        // Wedge evidence: three sightings of one dead report past 3 min.
+        let first = ts + SENSOR_STALE_AFTER_MS;
+        let stale = observe_dead_report(&mut core, ts, first, 3);
         assert_eq!(
             core.decide(false, stale),
             ReadDecision::Recreate { forced: false }
         );
         core.note_rebuild(false, stale);
+        // The re-created stack answers with a NEW report and plausible lux.
         core.note_probe(true, Some(stale), true, stale);
-        // Fresh evidence: no wedge, ladder disarmed, normal probing resumes.
+        // Signs of life: no wedge, ladder disarmed, normal probing resumes.
         assert!(!core.wedged(stale));
         assert_eq!(core.decide(false, stale), ReadDecision::Probe);
         assert!(core.heal.armed(), "a fresh reading must disarm the ladder");
+        assert!(
+            !core.accepts_forced_rebuild(),
+            "a stack answering fresh must refuse forced rebuilds"
+        );
         // And the diagnosis layer settles Available from the same evidence:
         // the state returns on its own, no app restart involved.
         assert_eq!(
@@ -5795,38 +6300,40 @@ mod tests {
     }
 
     #[test]
-    fn advancing_timestamp_in_a_dark_room_is_not_a_wedge() {
-        // Regression guard: lux below the plausibility floor (covered sensor,
-        // night) with an ADVANCING timestamp must never trigger rebuilds, or
-        // the heal machine would hammer COM in every dark room.
-        let mut core = SensorOwnerCore::new();
-        let t0 = 10_000_000u64;
-        core.note_probe(true, Some(t0), false, t0);
-        let almost = t0 + SENSOR_STALE_AFTER_MS - 1_000;
-        assert!(!core.wedged(almost), "timestamp still advancing");
-        assert_eq!(core.decide(false, almost), ReadDecision::Probe);
-        // The moment reports stop advancing for 30 s, it IS a wedge.
-        assert!(core.wedged(t0 + SENSOR_STALE_AFTER_MS));
-    }
-
-    #[test]
     fn driver_without_timestamps_falls_back_to_frozen_evidence() {
         // A driver that never fills SENSOR_DATA_TYPE_TIMESTAMP and fails
-        // GetTimestamp: the old lux-based evidence still drives the heal.
-        let mut core = SensorOwnerCore::new();
-        let t0 = 10_000_000u64;
-        core.note_probe(true, None, false, t0); // devices seen, no plausible lux
-        assert!(core.wedged(t0));
+        // GetTimestamp: the lux-based evidence still drives the heal, under
+        // the same sighting and age gates (the episode is aged from the first
+        // dead observation).
+        let mut core = mature_core();
+        let t0 = BASE;
+        core.note_probe(true, None, false, t0);
+        assert!(!core.wedged(t0), "one dead observation is not a wedge");
+        assert_eq!(core.decide(false, t0), ReadDecision::Probe);
+        core.note_probe(true, None, false, t0 + POLL_MS);
+        assert!(!core.wedged(t0 + POLL_MS), "two are not a wedge either");
+        let three = t0 + 2 * POLL_MS;
+        core.note_probe(true, None, false, three);
+        assert!(
+            !core.wedged(three),
+            "the age gate must hold at three sightings"
+        );
+        let aged = t0 + SENSOR_STALE_AFTER_MS;
+        core.note_probe(true, None, false, aged);
+        assert!(
+            core.wedged(aged),
+            "devices seen and no plausible reading for 3 min is FrozenReport"
+        );
         assert_eq!(
-            core.decide(false, t0),
+            core.decide(false, aged),
             ReadDecision::Recreate { forced: false }
         );
-        // After the rebuild the same evidence re-arms the ladder at 1 min.
-        core.note_rebuild(false, t0);
-        core.note_probe(true, None, false, t0);
-        assert_eq!(core.decide(false, t0 + 1_000), ReadDecision::Suppress);
+        // After the rebuild the same dead evidence keeps the ladder walking.
+        core.note_rebuild(false, aged);
+        core.note_probe(true, None, false, aged + 1);
+        assert_eq!(core.decide(false, aged + 1_000), ReadDecision::Suppress);
         assert_eq!(
-            core.decide(false, t0 + SENSOR_REBUILD_BACKOFF_MS[0]),
+            core.decide(false, aged + SENSOR_REBUILD_BACKOFF_MS[0]),
             ReadDecision::Recreate { forced: false }
         );
     }
@@ -5835,8 +6342,8 @@ mod tests {
     fn nosensor_retries_are_rate_limited() {
         // Nothing enumerated: re-creating a stack that sees no device is
         // pointless churn, so one real attempt per retry window.
-        let mut core = SensorOwnerCore::new();
-        let t0 = 10_000_000u64;
+        let mut core = mature_core();
+        let t0 = BASE;
         core.note_probe(false, None, false, t0);
         assert!(!core.wedged(t0), "a missing sensor is not a wedge");
         assert_eq!(core.decide(false, t0 + 1_000), ReadDecision::Suppress);
@@ -5852,23 +6359,34 @@ mod tests {
     }
 
     #[test]
-    fn forced_rebuilds_bypass_the_ladder_but_not_the_floor() {
-        let mut core = SensorOwnerCore::new();
-        let t0 = 10_000_000u64;
+    fn forced_rebuilds_need_dead_evidence_and_a_three_minute_floor() {
+        let mut core = mature_core();
+        let t0 = BASE;
         core.note_probe(true, Some(t0), true, t0);
-        // A reset request (power resume) rebuilds even a HEALTHY stack,
-        // immediately on a fresh core (last_rebuild_ms == 0 meets the floor).
+        // An AVAILABLE stack refuses a forced rebuild, however long the
+        // caller waits: the sensor thread drops the request instead of
+        // turning a working stack into COM churn (2026-11-23 log: a forced
+        // recreation every 30 s while lux came back at 47-51).
+        assert!(!core.accepts_forced_rebuild());
+        assert_eq!(
+            core.decide(true, t0 + 10 * SENSOR_FORCED_REBUILD_FLOOR_MS),
+            ReadDecision::Probe
+        );
+        // Dead evidence (no plausible lux) accepts the request. A core that
+        // never rebuilt trivially meets the floor (last_rebuild_ms == 0).
+        core.note_probe(true, Some(t0), false, t0);
+        assert!(core.accepts_forced_rebuild());
         assert_eq!(
             core.decide(true, t0),
             ReadDecision::Recreate { forced: true }
         );
         core.note_rebuild(true, t0);
-        core.note_probe(true, Some(t0), true, t0); // resume found a fresh stack
-                                                   // Inside the floor a second request is DEFERRED (the flag stays
-                                                   // pending): normal logic answers instead, no caller can hammer COM.
+        // Inside the floor a second request is DEFERRED (the flag stays
+        // pending): normal logic answers instead, no caller can hammer COM.
         assert_eq!(
             core.decide(true, t0 + SENSOR_FORCED_REBUILD_FLOOR_MS - 1),
-            ReadDecision::Probe
+            ReadDecision::Probe,
+            "inside the floor a forced request is deferred"
         );
         // Past the floor the pending request executes as a forced rebuild.
         let t1 = t0 + SENSOR_FORCED_REBUILD_FLOOR_MS;
@@ -5877,25 +6395,33 @@ mod tests {
             ReadDecision::Recreate { forced: true }
         );
         core.note_rebuild(true, t1);
+        // The stack answers fresh again: the request path goes back to
+        // refusing, and the ladder disarms.
         core.note_probe(true, Some(t1), true, t1);
-        // A forced rebuild restarts the ladder from armed: a FUTURE wedge
-        // rebuilds immediately again instead of waiting behind 1 min.
-        assert!(core.heal.armed());
-        let t2 = t1 + SENSOR_STALE_AFTER_MS;
+        assert!(core.heal.armed(), "a fresh reading must disarm the ladder");
+        assert!(
+            !core.accepts_forced_rebuild(),
+            "a stack answering fresh must refuse forced rebuilds"
+        );
+        // A FUTURE wedge (three sightings past the age gate) rebuilds
+        // immediately again: the ladder is armed, not stuck behind 1 min.
+        let w = observe_dead_report(&mut core, t1, t1 + SENSOR_STALE_AFTER_MS, 3);
         assert_eq!(
-            core.decide(false, t2),
-            ReadDecision::Recreate { forced: false }
+            core.decide(false, w),
+            ReadDecision::Recreate { forced: false },
+            "an armed ladder must answer a fresh wedge without waiting"
         );
     }
 
     #[test]
-    fn reset_requests_reach_frozen_sensors_but_not_missing_ones() {
+    fn reset_requests_reach_dead_sensors_but_not_working_or_missing_ones() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = SENSOR_STATE.load(Ordering::Relaxed);
         SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
         // FrozenReport is NOT terminal: the 2026-11-23 proof showed the
         // wedged CACHED STACK is the failure, and a reset request is exactly
-        // what discards and re-creates it (floor-gated on the sensor thread).
+        // what discards and re-creates it (floor- and evidence-gated on the
+        // sensor thread).
         SENSOR_STATE.store(AmbientSensorState::FrozenReport.code(), Ordering::Relaxed);
         request_sensor_reset("unit test frozen");
         assert!(
@@ -5903,14 +6429,27 @@ mod tests {
             "a FrozenReport sensor must accept rebuild requests: recreation is the recovery"
         );
         SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+        // Unknown: nothing diagnosed yet, the request is the honest nudge.
+        SENSOR_STATE.store(AmbientSensorState::Unknown.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test unknown");
+        assert!(
+            SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
+            "an undiagnosed sensor must accept a reset request (power resume)"
+        );
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
         // NoSensor: nothing exists to re-create, the request is refused.
         SENSOR_STATE.store(AmbientSensorState::NoSensor.code(), Ordering::Relaxed);
         request_sensor_reset("unit test no sensor");
         assert!(!SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
-        // Available/Unknown: reset requests keep working (real recovery path).
+        // Available: the 2026-11-23 churn. A working stack is NEVER torn
+        // down because a chatty caller asked; the heal machine owns real
+        // wedge evidence on its own ladder.
         SENSOR_STATE.store(AmbientSensorState::Available.code(), Ordering::Relaxed);
         request_sensor_reset("unit test available");
-        assert!(SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
+        assert!(
+            !SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
+            "an Available sensor must refuse forced rebuilds: recreation is churn"
+        );
         // Restore the globals for the other tests in this binary.
         SENSOR_STATE.store(previous, Ordering::Relaxed);
         SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
@@ -5918,10 +6457,10 @@ mod tests {
 
     // ── Live proof on real hardware (deliberately ignored) ──────────────────
     //
-    // Run with: cargo test --lib -- --ignored --nocapture live_ambient_heal_proof
-    // It touches the REAL sensor stack on this machine and echoes the
-    // transition log lines (recreating -> available after rebuild), proving
-    // the heal end to end the way the owner proved the restart cure.
+    // Run with: cargo test --lib -- --ignored --nocapture live_ambient
+    // These touch the REAL sensor stack on this machine and echo every log
+    // line, so the freshness policy is proven against the hardware the unit
+    // tests only simulate.
 
     /// Logger that captures AND echoes every log line during the closure.
     /// Returns (result, captured lines, logger_installed).
@@ -5953,57 +6492,73 @@ mod tests {
         (out, lines, installed)
     }
 
+    /// The live quiet-sensor proof: an on-change ALS in a steady room sits on
+    /// one report for minutes WHILE SERVING VALID LUX. That is the exact
+    /// condition the installed build of 2026-11-23 misread as staleness and
+    /// rebuilt every 30 s. Past the whole startup grace the policy must still
+    /// recreate nothing, and a chatty caller must be refused.
     #[cfg(windows)]
     #[test]
-    #[ignore = "touches the live sensor stack; run deliberately with --ignored --nocapture"]
-    fn live_ambient_heal_proof() {
+    #[ignore = "polls the live sensor stack past the startup grace (~200 s); run deliberately with --ignored --nocapture"]
+    fn live_ambient_quiet_sensor_is_never_recreated() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (lux_b, state_b, lux_a, state_a) = {
-            let ((a, b, c, d), lines, installed) = capture_live_logs(|| {
-                let lux_b = get_ambient_lux();
-                let state_b = ambient_sensor_state();
-                // Force a rebuild through the PUBLIC request path (the same
-                // call the power listener makes on resume).
-                request_sensor_reset("live heal proof (forced rebuild)");
-                let lux_a = get_ambient_lux();
-                let state_a = ambient_sensor_state();
-                (lux_b, state_b, lux_a, state_a)
-            });
-            if !installed {
-                println!("WARN: another logger was already installed, line capture skipped");
-            } else {
-                assert!(
-                    lines
-                        .iter()
-                        .any(|l| l.contains("recreating") && l.contains("forced")),
-                    "the forced recreation must be logged: {lines:?}"
-                );
-                assert!(
-                    lines.iter().any(|l| l.contains("available after rebuild")),
-                    "the restore after recreation must be logged: {lines:?}"
-                );
+        // Longer than SENSOR_STARTUP_GRACE_MS, so the grace expiring is not
+        // what keeps the log clean for the second half of the run.
+        const LIVE_PROOF_MS: u64 = 200_000;
+        let started = now_ms();
+        let (samples, lines, installed) = capture_live_logs(|| {
+            let mut samples = Vec::new();
+            while now_ms().saturating_sub(started) < LIVE_PROOF_MS {
+                let lux = get_ambient_lux();
+                samples.push((ambient_sensor_state(), lux));
+                // A caller that asks for a rebuild every cycle (the health
+                // supervisor's cadence) must be refused while the stack works.
+                request_sensor_reset("live proof: chatty caller");
+                std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
             }
-            (a, b, c, d)
-        };
-        // (1) The live hardware serves fresh lux (owner proof: 30.0 lux on
-        // 2026-11-23 after the restart; the heal must do it WITHOUT one).
-        assert_eq!(
-            state_b,
-            AmbientSensorState::Available,
-            "the live sensor must start Available (lux={lux_b:?})"
+            samples
+        });
+        if !installed {
+            println!("WARN: another logger was already installed, line capture skipped");
+        } else {
+            assert!(
+                !lines.iter().any(|l| l.contains("recreating")),
+                "a working live sensor must never be recreated: {lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.contains("sensor reset suppressed")),
+                "every chatty request must be logged as suppressed: {lines:?}"
+            );
+        }
+        assert!(
+            !samples.is_empty(),
+            "the live proof must have polled at least once"
         );
-        // (2) The forced rebuild ran ON the sensor thread, discarded the
-        // cached stack, re-created it, and readings came back immediately:
-        // no app restart involved.
+        let last_state = samples.last().map(|(s, _)| *s);
+        let fresh = samples.iter().filter(|(_, l)| l.is_some()).count();
+        println!(
+            "live proof: {} polls, {fresh} with a reading, final state {last_state:?}, \
+             elapsed {} ms",
+            samples.len(),
+            now_ms().saturating_sub(started)
+        );
+        // The hardware on this machine serves real lux (owner proof: 30-51
+        // lux on 2026-11-23), so the honest expectation is Available with a
+        // reading. A FrozenReport machine is a different diagnosis and the
+        // heal ladder owns it; either way the run above proved NO rebuild.
         assert_eq!(
-            state_a,
-            AmbientSensorState::Available,
-            "after a forced rebuild the live sensor must serve readings again"
+            last_state,
+            Some(AmbientSensorState::Available),
+            "the live sensor must stay Available across the whole window"
         );
         assert!(
-            lux_a.is_some_and(|v| v > MIN_PLAUSIBLE_LUX),
-            "lux after rebuild: {lux_a:?}"
+            samples
+                .iter()
+                .all(|(_, lux)| lux.is_none_or(|v| v > MIN_PLAUSIBLE_LUX)),
+            "no poll may hand back an implausible reading"
         );
+        // The refused requests must not have left a pending flag behind.
+        assert!(!SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
     }
 
     #[test]
