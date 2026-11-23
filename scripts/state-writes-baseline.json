@@ -1,6 +1,6 @@
 {
   "comment": "Per-file counts of fs::write/File::create under src-tauri/src. Ratchet baseline for scripts/check-state-writes.mjs; regenerate with --update.",
-  "total": 44,
+  "total": 43,
   "files": {
     "src-tauri/src/bin/micontrol_bridge.rs": 1,
     "src-tauri/src/bootstrap.rs": 1,
@@ -12,7 +12,7 @@
     "src-tauri/src/elevated.rs": 4,
     "src-tauri/src/hw/crash_recovery.rs": 5,
     "src-tauri/src/hw/discovery.rs": 2,
-    "src-tauri/src/hw/display.rs": 2,
+    "src-tauri/src/hw/display.rs": 1,
     "src-tauri/src/hw/event_log.rs": 1,
     "src-tauri/src/hw/hotkeys/mod.rs": 1,
     "src-tauri/src/hw/icc_catalog.rs": 3,
