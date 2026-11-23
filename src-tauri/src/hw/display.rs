@@ -1817,9 +1817,14 @@ impl AmbientSensorState {
         }
     }
 
-    /// States whose diagnosis is stable enough that poking the stack with
-    /// reset requests is provably useless (production: the resets fired every
-    /// 30 s for days against a frozen TCS3408 and changed nothing).
+    /// States whose diagnosis means "poking the stack every cycle is
+    /// provably useless": `NoSensor` has nothing to re-create, and a
+    /// `FrozenReport` stack is held by the rebuild backoff ladder instead
+    /// of per-cycle reset requests (production proof: the TCS3408 froze
+    /// for 4+ days while resets fired every 30 s and changed nothing).
+    /// FrozenReport is NOT terminal: the auto-heal machine re-creates the
+    /// cached stack on its own ladder (see `SENSOR_REBUILD_BACKOFF_MS`),
+    /// which the 2026-11-23 proof showed is what actually revives it.
     pub fn is_diagnosed(self) -> bool {
         matches!(
             self,
@@ -1839,14 +1844,245 @@ struct AmbientProbe {
 
 /// Latest probe of the persistent sensor state.
 static SENSOR_STATE: AtomicU8 = AtomicU8::new(AmbientSensorState::Unknown.code());
-/// Wall-clock ms of the last REAL backend probe (suppression-window base).
-static SENSOR_LAST_PROBE_MS: AtomicU64 = AtomicU64::new(0);
+// ── Auto-heal machine (pure logic, unit-tested) ─────────────────────────────
+//
+// Production proof (2026-11-23): the ALS hardware is fine, but the cached
+// COM/WinRT stack inside a long-lived process stops delivering NEW reports.
+// The frozen state survived from 2026-11-22T00:37 (FrozenReport, lux=None)
+// until the app was killed and reopened (2026-11-23T16:23, Available,
+// lux=30.0). The wedge lives in the stack objects, not in the driver or the
+// device. Therefore a wedged stack must be DISCARDED and RECREATED, with a
+// backoff ladder, and FrozenReport is no longer a terminal diagnosis: the
+// loop never sits idle forever, the heal machine keeps retrying on its own.
+//
+// The machine below is pure logic (no COM/WinRT contact, injected
+// timestamps): the sensor thread feeds it probe evidence and it answers
+// what to do next. Tests simulate stale reports, recovery and the whole
+// ladder without sleeping.
 
-/// How long a diagnosed (`FrozenReport`/`NoSensor`) sensor goes without a
-/// real backend probe. Between probes `get_ambient_lux` answers `None`
-/// without touching COM/WinRT, so a dead sensor stops costing a stack
-/// round-trip every 2 s; one probe per window still notices a driver fix.
-const SENSOR_DIAGNOSED_REPROBE_SECS: u64 = 900;
+/// A committed stack is WEDGED when its newest report timestamp has not
+/// advanced for this long. 30 s is generous for a 2 s poll cycle: fifteen
+/// missed polls in a row is not a transient glitch, it is the frozen-stack
+/// signature (the report timestamp literally stops moving).
+const SENSOR_STALE_AFTER_MS: u64 = 30_000;
+
+/// Rebuild backoff ladder. First wedge evidence rebuilds IMMEDIATELY (the
+/// ladder starts armed), then 1 min, 5 min, 15 min, capped at 15 min. A
+/// fresh probe disarms the ladder back to "immediate".
+const SENSOR_REBUILD_BACKOFF_MS: [u64; 3] = [60_000, 300_000, 900_000];
+
+/// Floor between FORCED rebuilds (external reset requests: power resume,
+/// health supervisor). Forced rebuilds bypass the backoff ladder but not
+/// this floor, so a chatty caller cannot turn the heal into a COM hammer.
+const SENSOR_FORCED_REBUILD_FLOOR_MS: u64 = SENSOR_STALE_AFTER_MS;
+
+/// A NoSensor diagnosis (nothing enumerated) is retried at most once per
+/// this window: the machine either has no ALS or its driver is disabled,
+/// and re-creating a stack that cannot enumerate anything is pointless
+/// churn. Deliberately equal to the last backoff step.
+const SENSOR_NOSENSOR_RETRY_MS: u64 = 900_000;
+
+/// What the heal machine makes of one wedge evaluation.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealStep {
+    /// No wedge evidence: normal probing.
+    Healthy,
+    /// Wedged and the ladder is due: discard and recreate the stack now.
+    Rebuild,
+    /// Wedged but inside a backoff step: hold, do not touch the stack.
+    Hold,
+}
+
+/// Pure backoff ladder for stack recreations. `next_rebuild_at_ms == 0`
+/// means ARMED: the next wedge evidence rebuilds without waiting.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SensorHeal {
+    rebuilds: u64,
+    next_rebuild_at_ms: u64,
+}
+
+#[cfg(any(windows, test))]
+impl SensorHeal {
+    const fn new() -> Self {
+        Self {
+            rebuilds: 0,
+            next_rebuild_at_ms: 0,
+        }
+    }
+
+    /// Armed = a fresh wedge rebuilds immediately instead of waiting.
+    fn armed(&self) -> bool {
+        self.next_rebuild_at_ms == 0
+    }
+
+    fn step(&self, wedged: bool, now_ms: u64) -> HealStep {
+        if !wedged {
+            return HealStep::Healthy;
+        }
+        if self.armed() || now_ms >= self.next_rebuild_at_ms {
+            HealStep::Rebuild
+        } else {
+            HealStep::Hold
+        }
+    }
+
+    /// Record a rebuild that just happened. `forced` (external request)
+    /// restarts the ladder from step one; a stale-driven rebuild walks it
+    /// 1 min, 5 min, 15 min, 15 min. Returns the delay to the next attempt.
+    fn note_rebuild(&mut self, forced: bool, now_ms: u64) -> u64 {
+        if forced {
+            self.rebuilds = 0;
+        }
+        self.rebuilds += 1;
+        let idx = (self.rebuilds - 1).min(SENSOR_REBUILD_BACKOFF_MS.len() as u64 - 1) as usize;
+        let delay = SENSOR_REBUILD_BACKOFF_MS[idx];
+        self.next_rebuild_at_ms = now_ms.saturating_add(delay);
+        delay
+    }
+
+    /// A fresh probe disarms the ladder: any future wedge rebuilds
+    /// immediately again.
+    fn note_fresh(&mut self) {
+        self.rebuilds = 0;
+        self.next_rebuild_at_ms = 0;
+    }
+
+    /// Ms until the next scheduled attempt (0 when armed).
+    fn retry_in_ms(&self, now_ms: u64) -> u64 {
+        self.next_rebuild_at_ms.saturating_sub(now_ms)
+    }
+}
+
+/// What one read of the sensor thread should do with the stack.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadDecision {
+    /// Discard the cached stack objects and re-create them before probing.
+    Recreate { forced: bool },
+    /// Probe the existing stack (creating it on first contact).
+    Probe,
+    /// Answer without any stack contact (backoff hold / NoSensor window).
+    Suppress,
+}
+
+/// Worker-confined evidence and healing state of the sensor stack. Pure
+/// data (no COM/WinRT types), so the whole heal contract (staleness, ladder,
+/// floors, retry windows) is unit-testable with injected timestamps.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone)]
+struct SensorOwnerCore {
+    heal: SensorHeal,
+    /// The committed backend saw sensor DEVICES on its last attempt.
+    devices_seen: bool,
+    /// At least one real creation/probe attempt has been made.
+    attempted: bool,
+    last_attempt_ms: u64,
+    last_rebuild_ms: u64,
+    /// Wall-clock ms claimed by the newest report the stack has produced.
+    report_ms: Option<u64>,
+    /// The last probe returned a plausible lux value.
+    fresh_lux: bool,
+    /// The current stale episode has been logged (log the transition once).
+    stale_logged: bool,
+}
+
+#[cfg(any(windows, test))]
+impl SensorOwnerCore {
+    const fn new() -> Self {
+        Self {
+            heal: SensorHeal::new(),
+            devices_seen: false,
+            attempted: false,
+            last_attempt_ms: 0,
+            last_rebuild_ms: 0,
+            report_ms: None,
+            fresh_lux: false,
+            stale_logged: false,
+        }
+    }
+
+    /// Wedge evidence: a report timestamp that stopped advancing. When the
+    /// driver never fills a timestamp (neither SENSOR_DATA_TYPE_TIMESTAMP
+    /// nor ISensorDataReport.GetTimestamp answered), fall back to the old
+    /// lux-based evidence: devices present but no plausible reading is the
+    /// FrozenReport signature.
+    fn wedged(&self, now_ms: u64) -> bool {
+        match self.report_ms {
+            Some(ts) => now_ms.saturating_sub(ts) >= SENSOR_STALE_AFTER_MS,
+            None => self.devices_seen && !self.fresh_lux,
+        }
+    }
+
+    /// Decide what this read does. `reset_pending` is the consumed-later
+    /// flag set by `request_sensor_reset` (power resume, supervisor).
+    fn decide(&self, reset_pending: bool, now_ms: u64) -> ReadDecision {
+        // An external reset request forces a rebuild, floor-gated so a
+        // chatty caller cannot hammer COM. Inside the floor the flag stays
+        // pending and the normal ladder logic answers instead.
+        if reset_pending
+            && now_ms.saturating_sub(self.last_rebuild_ms) >= SENSOR_FORCED_REBUILD_FLOOR_MS
+        {
+            return ReadDecision::Recreate { forced: true };
+        }
+        if self.wedged(now_ms) {
+            return match self.heal.step(true, now_ms) {
+                HealStep::Rebuild => ReadDecision::Recreate { forced: false },
+                _ => ReadDecision::Suppress,
+            };
+        }
+        // NoSensor cost window: one real attempt per retry window.
+        if self.attempted
+            && !self.devices_seen
+            && self.last_attempt_ms != 0
+            && now_ms.saturating_sub(self.last_attempt_ms) < SENSOR_NOSENSOR_RETRY_MS
+        {
+            return ReadDecision::Suppress;
+        }
+        ReadDecision::Probe
+    }
+
+    /// Feed one real probe result into the evidence bank.
+    fn note_probe(
+        &mut self,
+        devices_seen: bool,
+        report_ms: Option<u64>,
+        fresh_lux: bool,
+        now_ms: u64,
+    ) {
+        self.attempted = true;
+        self.devices_seen = devices_seen;
+        self.last_attempt_ms = now_ms;
+        self.fresh_lux = fresh_lux;
+        self.report_ms = match (report_ms, fresh_lux) {
+            // Report timestamps must advance; never let a glitch walk the
+            // evidence backwards (a driver restart reporting an old time).
+            (Some(ts), _) => Some(self.report_ms.unwrap_or(ts).max(ts)),
+            // No timestamp but a plausible lux: the report IS fresh by
+            // content (dark room with a working sensor still counts).
+            (None, true) => Some(now_ms),
+            // Neither: keep whatever evidence already exists.
+            (None, false) => self.report_ms,
+        };
+        if !self.wedged(now_ms) {
+            self.heal.note_fresh();
+            self.stale_logged = false;
+        }
+    }
+
+    /// Record that the cached stack was discarded and re-created just now.
+    /// Returns the delay to the next scheduled attempt.
+    fn note_rebuild(&mut self, forced: bool, now_ms: u64) -> u64 {
+        self.last_rebuild_ms = now_ms;
+        let delay = self.heal.note_rebuild(forced, now_ms);
+        // The new stack has not reported yet: start with no timestamp
+        // evidence and let this tick's probe fill it.
+        self.report_ms = None;
+        self.fresh_lux = false;
+        delay
+    }
+}
 
 /// Latest sensor diagnosis, for the loop / supervisor / `DisplayInfo`.
 pub fn ambient_sensor_state() -> AmbientSensorState {
@@ -1862,17 +2098,6 @@ fn classify_sensor_probe(lux: Option<f32>, devices_seen: bool) -> AmbientSensorS
         _ if devices_seen => AmbientSensorState::FrozenReport,
         _ => AmbientSensorState::NoSensor,
     }
-}
-
-/// Pure suppression-window check: a diagnosed sensor is re-probed at most
-/// once per `SENSOR_DIAGNOSED_REPROBE_SECS`; `last_probe_ms == 0` means
-/// "never probed" and always probes (the first diagnosis must be real).
-fn probe_suppressed(state: AmbientSensorState, last_probe_ms: u64, now_ms: u64) -> bool {
-    if !state.is_diagnosed() {
-        return false;
-    }
-    last_probe_ms != 0
-        && now_ms.saturating_sub(last_probe_ms) < SENSOR_DIAGNOSED_REPROBE_SECS * 1000
 }
 
 /// Store a settled state and log TRANSITIONS only (the Available probe runs
@@ -1975,47 +2200,55 @@ fn ambient_sensor_info() -> AmbientSensorInfo {
     }
 }
 
-/// Global flag to force sensor re-initialization on next read.
-/// Set to `true` when a power-resume event is detected so the sensor
-/// instance is re-created instead of returning stale `None`.
+/// Pending flag: request a sensor stack REBUILD on the next polling cycle.
+/// Set to `true` when a power-resume event is detected so the cached sensor
+/// instance is discarded and re-created instead of returning stale `None`.
+/// Consumed by the sensor thread's forced-rebuild path (floor-gated, see
+/// `SensorOwnerCore::decide`), NOT by the stack readers themselves.
 static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Request a sensor reset on the next polling cycle.
+/// Request a sensor stack rebuild on the next polling cycle.
 ///
 /// Callers own the *reason*: a real resume (power listener) is INFO, a
-/// degraded/stuck sensor (health supervisor, adaptive-brightness watchdog) is
-/// DEBUG noise. This used to log "(power resume event)" for every caller,
-/// which put six fake resumes in a 7 h window with no suspend at all.
+/// degraded/stuck sensor (health supervisor) is DEBUG noise. This used to
+/// log "(power resume event)" for every caller, which put six fake resumes
+/// in a 7 h window with no suspend at all.
 ///
-/// Diagnosed-stable states (FrozenReport / NoSensor) suppress the request
-/// entirely: re-creating those stacks cannot make them deliver data
-/// (production proof: the TCS3408 froze for 4+ days while reset requests kept
-/// firing every 5 cycles). Gating here protects every caller, including the
-/// resume path: a healthy sensor still resets normally on resume, a frozen
-/// one just wastes the attempt.
+/// Only `NoSensor` suppresses the request: there is no device to re-create.
+/// `FrozenReport` deliberately ACCEPTS resets now: the 2026-11-23 proof
+/// showed that a wedged cached stack heals when it is discarded and
+/// re-created (killing the process revived the sensor; the hardware was
+/// never broken). The floor in `SensorOwnerCore::decide` keeps chatty
+/// callers from turning forced rebuilds into COM hammering.
 pub fn request_sensor_reset(reason: &str) {
     let state = ambient_sensor_state();
-    if state.is_diagnosed() {
-        log::debug!(
-            "[display] sensor reset suppressed ({reason}): ambient sensor state is {state:?}"
-        );
+    if state == AmbientSensorState::NoSensor {
+        log::debug!("[display] sensor reset suppressed ({reason}): no sensor device to re-create");
         return;
     }
     SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
     log::debug!("[display] Sensor reset requested ({reason})");
 }
 
-/// Cached LightSensor instance — re-created only when a reset is requested.
-/// This avoids calling `LightSensor::GetDefault()` on every 2-second poll,
-/// which can be slow and may return `None` transiently after sleep/wake.
-#[cfg(windows)]
-static CACHED_LIGHT_SENSOR: std::sync::OnceLock<
-    std::sync::Mutex<Option<windows::Devices::Sensors::LightSensor>>,
-> = std::sync::OnceLock::new();
+/// FILETIME epoch (1601-01-01 UTC) expressed in 100 ns ticks up to the UNIX
+/// epoch. Sensor report timestamps arrive as FILETIMEs (COM) or as a WinRT
+/// `DateTime`, which is the same 100 ns tick count, so one conversion fits
+/// both backends.
+const FILETIME_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
 
-/// Fallback ambient-light reader using the WinRT `Windows.Devices.Sensors.LightSensor` API.
-/// This works well in UWP/WinUI apps, but in an unpackaged desktop app it frequently
-/// returns `None` even when a HID ALS sensor is present in Device Manager.
+/// Convert a FILETIME (100 ns ticks since 1601-01-01 UTC) to wall-clock ms
+/// since the UNIX epoch. Garbage values before the UNIX epoch → None.
+#[cfg(any(windows, test))]
+fn filetime_ticks_to_epoch_ms(ticks: u64) -> Option<u64> {
+    ticks
+        .checked_sub(FILETIME_UNIX_EPOCH_TICKS)
+        .map(|delta| delta / 10_000)
+}
+
+/// The WinRT `Windows.Devices.Sensors.LightSensor` API works well in
+/// UWP/WinUI apps, but in an unpackaged desktop app it frequently returns
+/// `None` even when a HID ALS sensor is present in Device Manager. It is
+/// therefore only the FALLBACK backend, behind the classic COM Sensor API.
 /// Kill switch for the ambient-light readers (diagnostics, CI and kiosks with a
 /// broken sensor stack). `MICONTROL_DISABLE_AMBIENT_SENSOR` accepts:
 ///   "1" / "all"  → both readers off
@@ -2037,100 +2270,85 @@ fn ambient_sensor_disabled(path: &str) -> bool {
     }
 }
 
+// ── Classic COM sensor stack (ISensorManager) ───────────────────────────────
+//
+// The stack objects are thread-affine (COM apartment) and NOT Send/Sync, so
+// they cannot live in a global and cannot be shared across threads. They are
+// owned by ONE dedicated worker thread (the "sensor thread", further below):
+// every contact AND every recreation happens on that single thread, which is
+// what makes the auto-heal safe (drop the cached objects, CoCreateInstance
+// fresh ones on the apartment that created them). The 2026-11-23 proof: the
+// wedge lives in the cached objects, so dropping them on their owner thread
+// and re-creating is the cure; recreating them from any OTHER thread that
+// still holds references would be a use-after-free waiting to happen.
+
+/// One sensor's data from a single COM report: the lux value and the
+/// wall-clock ms the report itself claims (`SENSOR_DATA_TYPE_TIMESTAMP` /
+/// `ISensorDataReport::GetTimestamp`). `report_ms` is the auto-heal's
+/// freshness evidence: a stack whose reports stop advancing is wedged even
+/// when the lux value itself still looks plausible.
 #[cfg(windows)]
-static WINRT_DEVICES_SEEN: AtomicBool = AtomicBool::new(false);
+struct ComSensorReading {
+    lux: Option<f32>,
+    report_ms: Option<u64>,
+}
 
+/// Extract the report timestamp from a COM `ISensorDataReport`.
+///
+/// Primary source: the `SENSOR_DATA_TYPE_TIMESTAMP` property, which the
+/// sensor pipeline fills as a VT_FILETIME (UTC, 100 ns ticks). Fallback:
+/// `ISensorDataReport::GetTimestamp()`, which hands back a LOCAL
+/// `SYSTEMTIME`; `SystemTimeToFileTime` performs the local-to-UTC
+/// conversion. `None` only when BOTH fail (a driver that never timestamps).
+///
+/// # Safety
+///
+/// The report is a live COM pointer owned by the caller's stack; the call is
+/// synchronous and the PROPVARIANT union member is read only after checking
+/// `vt == VT_FILETIME`.
 #[cfg(windows)]
-fn get_ambient_lux_winrt() -> Option<f32> {
-    use windows::Devices::Sensors::LightSensor;
+unsafe fn com_report_timestamp(
+    report: &windows::Win32::Devices::Sensors::ISensorDataReport,
+) -> Option<u64> {
+    use windows::Win32::Devices::Sensors::SENSOR_DATA_TYPE_TIMESTAMP;
+    use windows::Win32::System::Variant::VT_FILETIME;
 
-    if ambient_sensor_disabled("winrt") {
-        return None;
-    }
-
-    // Check if a reset was requested (e.g., after sleep/wake)
-    let needs_reset = SENSOR_RESET_REQUESTED.swap(false, Ordering::SeqCst);
-
-    let cache = CACHED_LIGHT_SENSOR.get_or_init(|| std::sync::Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-
-    if needs_reset || guard.is_none() {
-        // Re-create the sensor instance
-        match LightSensor::GetDefault() {
-            Ok(sensor) => {
-                log::debug!(
-                    "[display] WinRT ambient light sensor {}",
-                    if needs_reset {
-                        "re-initialized (reset)"
-                    } else {
-                        "found"
-                    }
-                );
-                WINRT_DEVICES_SEEN.store(true, Ordering::Relaxed);
-                *guard = Some(sensor);
-            }
-            Err(_) => {
-                log::debug!("[display] WinRT ambient light sensor not available");
-                WINRT_DEVICES_SEEN.store(false, Ordering::Relaxed);
-                *guard = None;
-                return None;
-            }
+    if let Ok(pv) = report.GetSensorValue(&SENSOR_DATA_TYPE_TIMESTAMP) {
+        let anon = &pv.as_raw().Anonymous.Anonymous;
+        if anon.vt == VT_FILETIME.0 {
+            let ft = anon.Anonymous.filetime;
+            let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+            return filetime_ticks_to_epoch_ms(ticks);
         }
     }
-
-    let sensor = guard.as_ref()?;
-    let reading = sensor.GetCurrentReading().ok()?;
-    let lux = reading.IlluminanceInLux().ok()?;
-    log::debug!("[display] WinRT ambient lux: {lux}");
-    Some(lux)
+    let st = report.GetTimestamp().ok()?;
+    let mut ft = windows::Win32::Foundation::FILETIME::default();
+    windows::Win32::System::Time::SystemTimeToFileTime(&st, &mut ft).ok()?;
+    let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+    filetime_ticks_to_epoch_ms(ticks)
 }
-
-// Per-thread cache of the classic COM light sensor stack.
-//
-// `ISensorManager` (COM) is not `Send`/`Sync`, so we cannot put it in a
-// `static`. This mirrors `wmi_cache.rs`'s thread_local pattern: each worker
-// thread lazily creates the manager + sensor collection once, then reuses it
-// for every 2-second poll. The entry is left as `None` (a) before first use,
-// (b) when a poll fails — the next poll retries from scratch (re-enumerating
-// hot-plugged sensors) — and (c) forever on machines without the sensor.
-#[cfg(windows)]
-thread_local! {
-    static COM_SENSOR_MANAGER: std::cell::RefCell<Option<ComSensorStack>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
-/// Whether the LAST COM stack creation succeeded in enumerating at least one
-/// ambient-light sensor. The WinRT side sets the same flag when
-/// `GetDefault()` returns a sensor. This is the NoSensor-vs-FrozenReport
-/// discriminator of `classify_sensor_probe`.
-#[cfg(windows)]
-static COM_DEVICES_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// Lazily-created COM sensor manager + ambient-light collection.
+/// Worker-thread-confined (see the module comment above): the sensor thread
+/// drops and re-creates this object when the heal machine says the reports
+/// are wedged, and only that thread ever touches it.
 #[cfg(windows)]
 struct ComSensorStack {
-    /// Sensor collection (owns the enumeration). Manager is kept only for its
-    /// lifetime semantics; both are released together when the thread exits.
+    /// Sensor collection (owns the enumeration). The manager is kept only
+    /// for its lifetime semantics; both are released together on drop.
     collection: windows::Win32::Devices::Sensors::ISensorCollection,
 }
 
 #[cfg(windows)]
 impl ComSensorStack {
     /// (Re)create the sensor stack. Returns None on any failure path so the
-    /// caller falls back to WinRT / sensor-off.
-    ///
-    /// Whether the backend can see sensor DEVICES at all is recorded
-    /// process-wide (`COM_DEVICES_SEEN`: the stack itself is per-thread, the
-    /// diagnosis is not) so `classify_sensor_probe` can tell NoSensor
-    /// (nothing enumerated) from FrozenReport (devices present, no data).
+    /// worker falls back to WinRT / sensor-off.
     fn new() -> Option<Self> {
         use windows::Win32::Devices::Sensors::{
             ISensorManager, SensorManager as CLSID_SensorManager, SENSOR_TYPE_AMBIENT_LIGHT,
         };
         use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 
-        COM_DEVICES_SEEN.store(false, Ordering::Relaxed);
         // SAFETY: COM objects released on drop; pointers remain valid within the call.
         unsafe {
             let manager: ISensorManager = CoCreateInstance(&CLSID_SensorManager, None, CLSCTX_ALL)
@@ -2146,14 +2364,14 @@ impl ComSensorStack {
                 return None;
             }
             log::debug!("[display] COM SensorManager cached ({count} sensors)");
-            COM_DEVICES_SEEN.store(true, Ordering::Relaxed);
             Some(Self { collection })
         }
     }
 
-    /// Read every sensor's current lux value. Returns None if the whole stack
-    /// must be recreated (the caller invalidates the cache).
-    fn read_all(&self) -> Option<Vec<Option<f32>>> {
+    /// Read every sensor's current lux value AND report timestamp. Returns
+    /// None if the whole stack must be recreated (the worker invalidates
+    /// the cache).
+    fn read_all(&self) -> Option<Vec<ComSensorReading>> {
         use windows::Win32::Devices::Sensors::SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX;
         use windows::Win32::Foundation::{E_FAIL, S_OK};
 
@@ -2161,7 +2379,7 @@ impl ComSensorStack {
         // by their wrappers on drop.
         unsafe {
             let count = self.collection.GetCount().ok()?;
-            let mut readings: Vec<Option<f32>> = Vec::with_capacity(count as usize);
+            let mut readings: Vec<ComSensorReading> = Vec::with_capacity(count as usize);
             for i in 0..count {
                 let Ok(sensor) = self.collection.GetAt(i) else {
                     // A sensor appeared/disappeared → invalidate cache.
@@ -2170,20 +2388,35 @@ impl ComSensorStack {
                 let Ok(report) = sensor.GetData() else {
                     // Sensor momentarily unresponsive: report as None this poll,
                     // but don't tear down the whole stack for one glitch.
-                    readings.push(None);
+                    readings.push(ComSensorReading {
+                        lux: None,
+                        report_ms: None,
+                    });
                     continue;
                 };
+                // The report timestamp is the auto-heal's freshness evidence:
+                // captured even when the lux value itself is a placeholder.
+                let report_ms = com_report_timestamp(&report);
                 let pv = report.GetSensorValue(&SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX);
                 match pv {
                     Ok(v) => {
                         let lux = f64::try_from(&v).ok()? as f32;
-                        log::debug!("[display] COM sensor[{i}] ambient lux: {lux}");
-                        readings.push(if lux.is_finite() { Some(lux) } else { None });
+                        log::debug!(
+                            "[display] COM sensor[{i}] ambient lux: {lux} \
+                             (report ts {report_ms:?} ms)"
+                        );
+                        readings.push(ComSensorReading {
+                            lux: if lux.is_finite() { Some(lux) } else { None },
+                            report_ms,
+                        });
                     }
                     Err(e) => {
                         let hr = e.code();
                         if hr == E_FAIL || hr == S_OK {
-                            readings.push(None);
+                            readings.push(ComSensorReading {
+                                lux: None,
+                                report_ms,
+                            });
                         } else {
                             // Unusual HRESULT → invalidate the whole stack.
                             return None;
@@ -2194,56 +2427,6 @@ impl ComSensorStack {
             Some(readings)
         }
     }
-}
-
-/// Primary ambient-light reader using the classic COM Sensor API (`ISensorManager`).
-/// This is the API that Windows itself uses for the "Adaptive brightness" power-plan
-/// setting and it works for unpackaged desktop applications, unlike the WinRT API.
-#[cfg(windows)]
-fn get_ambient_lux_com() -> Option<f32> {
-    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-
-    if ambient_sensor_disabled("com") {
-        return None;
-    }
-
-    // S32-003 rationale (sensor selection) lives in `select_responsive_sensor`.
-    //
-    // S26-006: The manager+enumerator are cached per-thread (this runs on the
-    // tokio blocking pool, whose threads are long-lived). The previous
-    // implementation called `CoCreateInstance` + `GetSensorsByType` + `GetAt`
-    // on EVERY 2-second poll, churning COM allocations and MTA registrations
-    // for the whole app lifetime — an unnecessary leak/stress vector. Caching
-    // mirrors the `wmi_cache` thread_local pattern; the cache is invalidated
-    // when a poll fails so hot-plugged sensors are re-enumerated.
-
-    // SAFETY: `CoInitializeEx` is idempotent for the same apartment model and is safe
-    // to call from each thread. If the thread is already in a different apartment model
-    // the call returns RPC_E_CHANGED_MODE, which we ignore because the runtime may have
-    // already initialized COM for us.
-    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-
-    let readings = COM_SENSOR_MANAGER.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let stack = match borrow.as_ref() {
-            Some(s) => s,
-            None => {
-                let s = ComSensorStack::new()?;
-                *borrow = Some(s);
-                borrow.as_ref()?
-            }
-        };
-        let r = stack.read_all();
-        if r.is_none() {
-            // Invalidate on failure so the next poll re-enumerates.
-            *borrow = None;
-        }
-        r
-    });
-    let readings = readings?;
-    let lux = select_responsive_sensor(&readings);
-    log::debug!("[display] COM selected lux: {lux:?}");
-    lux
 }
 
 /// Per-sensor last-read cache used to detect which ALS sensor actually responds
@@ -2373,77 +2556,367 @@ fn lux_backend_override() -> Option<LuxBackend> {
     })
 }
 
+// ── Dedicated ambient-sensor thread ─────────────────────────────────────────
+//
+// The COM/WinRT stacks are thread-affine, so they live on ONE dedicated
+// thread instead of the shared fixed pool: every contact AND every heal
+// recreation happen on the thread that owns the objects. Readers (the
+// adaptive loop, `get_display_info`, the supervisor) submit a request over
+// a channel and await a bounded reply, so the async loop never blocks on
+// COM directly and a hung stack cannot stall the runtime.
+
+/// One reply from the sensor thread. `contact == false` means the heal
+/// machine suppressed the stack contact this read (backoff hold or NoSensor
+/// retry window): no diagnosis change, honest `None`.
 #[cfg(windows)]
-fn run_lux_backend(b: LuxBackend) -> Option<f32> {
-    match b {
-        LuxBackend::Winrt => get_ambient_lux_winrt(),
-        LuxBackend::Com => get_ambient_lux_com(),
-    }
+struct SensorReadout {
+    contact: bool,
+    lux: Option<f32>,
+    devices_seen: bool,
 }
 
-/// True when the classic COM sensor stack can be created on this thread
-/// (manager + at least one ambient-light sensor). Probed ONCE per process.
+/// Jobs the sensor thread understands. The thread is REQUEST-DRIVEN (it
+/// blocks on the channel): all stack state changes, including heal
+/// recreations, happen while handling a Read, so no timer thread is needed
+/// and the async loop never waits on a lock held by COM.
 #[cfg(windows)]
-fn com_sensor_stack_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        COM_SENSOR_MANAGER.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            if borrow.is_none() {
-                *borrow = ComSensorStack::new();
+enum SensorJob {
+    Read(std::sync::mpsc::Sender<SensorReadout>),
+}
+
+/// How long a read may wait for the sensor thread before the caller gives
+/// up this cycle. A stack that exceeds this is itself wedged: the channel
+/// is reset (sender dropped, fresh thread on the next read), which is the
+/// auto-heal applied to a hung stack.
+#[cfg(windows)]
+const SENSOR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(windows)]
+static SENSOR_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<SensorJob>>> =
+    std::sync::Mutex::new(None);
+
+/// The worker's whole world: the heal core plus the stack objects it owns.
+/// Only `sensor_worker` constructs and touches this.
+#[cfg(windows)]
+struct SensorOwner {
+    core: SensorOwnerCore,
+    backend: Option<LuxBackend>,
+    com: Option<ComSensorStack>,
+    winrt: Option<windows::Devices::Sensors::LightSensor>,
+}
+
+#[cfg(windows)]
+impl SensorOwner {
+    fn new() -> Self {
+        Self {
+            core: SensorOwnerCore::new(),
+            backend: None,
+            com: None,
+            winrt: None,
+        }
+    }
+
+    /// Drop the cached stack objects (the wedge lives in them) WITHOUT
+    /// revisiting the backend decision: one backend per process still
+    /// stands, only the OBJECT of that backend is re-created.
+    fn drop_stacks(&mut self) {
+        self.com = None;
+        self.winrt = None;
+    }
+
+    /// Commit to ONE backend for the whole process (the 2026-11-18 AV:
+    /// mixing the COM and WinRT stacks in one process is the trigger).
+    /// Decided on the first contact, never revisited afterwards.
+    fn commit_backend(&mut self) -> LuxBackend {
+        if let Some(b) = self.backend {
+            return b;
+        }
+        let b = match lux_backend_override() {
+            Some(b) => b,
+            None if ambient_sensor_disabled("com") => LuxBackend::Winrt,
+            None => {
+                // SAFETY: CoInitializeEx is idempotent for the same
+                // apartment model; the worker stays MTA for its whole life.
+                let _ = unsafe {
+                    windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_MULTITHREADED,
+                    )
+                };
+                match ComSensorStack::new() {
+                    Some(stack) => {
+                        self.com = Some(stack);
+                        LuxBackend::Com
+                    }
+                    None => LuxBackend::Winrt,
+                }
             }
-            borrow.is_some()
-        })
-    })
-}
+        };
+        self.backend = Some(b);
+        log::info!(
+            "[display] ambient sensor backend committed: {}",
+            match b {
+                LuxBackend::Com => "COM (ISensorManager)",
+                LuxBackend::Winrt => "WinRT (LightSensor)",
+            }
+        );
+        b
+    }
 
-/// One classified probe of the committed lux backend.
-#[cfg(windows)]
-fn probe_ambient_backend(backend: LuxBackend) -> AmbientProbe {
-    AmbientProbe {
-        lux: run_lux_backend(backend),
-        devices_seen: COM_DEVICES_SEEN.load(Ordering::Relaxed)
-            || WINRT_DEVICES_SEEN.load(Ordering::Relaxed),
+    /// One real contact with the committed stack: (lux, report timestamp,
+    /// devices seen). Failures keep the diagnosis honest instead of tearing
+    /// down the stack: recreation is the heal machine's job, not a reflex.
+    fn probe(&mut self) -> (Option<f32>, Option<u64>, bool) {
+        let backend = self.commit_backend();
+        match backend {
+            LuxBackend::Com if !ambient_sensor_disabled("com") => self.probe_com(),
+            LuxBackend::Winrt if !ambient_sensor_disabled("winrt") => self.probe_winrt(),
+            _ => (None, None, false),
+        }
+    }
+
+    fn probe_com(&mut self) -> (Option<f32>, Option<u64>, bool) {
+        if self.com.is_none() {
+            match ComSensorStack::new() {
+                Some(stack) => self.com = Some(stack),
+                None => return (None, None, false),
+            }
+        }
+        let Some(stack) = self.com.as_ref() else {
+            return (None, None, false);
+        };
+        let readings = match stack.read_all() {
+            Some(r) => r,
+            None => {
+                // The collection stopped answering: invalidate so the next
+                // tick re-enumerates (hot-plug) and the heal machine can
+                // escalate if the new stack stays frozen too.
+                self.com = None;
+                return (None, None, true);
+            }
+        };
+        // S32-003 rationale (sensor selection) lives in `select_responsive_sensor`.
+        let luxes: Vec<Option<f32>> = readings.iter().map(|r| r.lux).collect();
+        let lux = select_responsive_sensor(&luxes);
+        // Wedge evidence: the NEWEST report any sensor in the collection
+        // produced. If every report timestamp is stuck, the stack is wedged
+        // even though the collection still answers.
+        let report_ms = readings.iter().filter_map(|r| r.report_ms).max();
+        log::debug!("[display] COM selected lux: {lux:?} (report ts {report_ms:?} ms)");
+        (lux, report_ms, true)
+    }
+
+    fn probe_winrt(&mut self) -> (Option<f32>, Option<u64>, bool) {
+        use windows::Devices::Sensors::LightSensor;
+        if self.winrt.is_none() {
+            match LightSensor::GetDefault() {
+                Ok(sensor) => {
+                    log::debug!("[display] WinRT ambient light sensor found");
+                    self.winrt = Some(sensor);
+                }
+                Err(_) => {
+                    log::debug!("[display] WinRT ambient light sensor not available");
+                    return (None, None, false);
+                }
+            }
+        }
+        let Some(sensor) = self.winrt.as_ref() else {
+            return (None, None, false);
+        };
+        let Ok(reading) = sensor.GetCurrentReading() else {
+            // Present but not answering this poll: devices seen, no data.
+            return (None, None, true);
+        };
+        let lux = reading.IlluminanceInLux().ok();
+        // The WinRT reading carries its own timestamp (the same 100 ns UTC
+        // tick count as FILETIME): the heal machine uses it exactly like
+        // the COM report timestamp.
+        let report_ms = reading
+            .Timestamp()
+            .ok()
+            .and_then(|dt| filetime_ticks_to_epoch_ms(dt.UniversalTime as u64));
+        log::debug!("[display] WinRT ambient lux: {lux:?} (report ts {report_ms:?} ms)");
+        (lux, report_ms, true)
+    }
+
+    /// Handle one read request: run the heal machine, contact the stack
+    /// only when the machine says so, and report the evidence back.
+    fn handle_read(&mut self) -> SensorReadout {
+        let now = now_ms();
+        let reset_pending = SENSOR_RESET_REQUESTED.load(Ordering::SeqCst);
+        let decision = self.core.decide(reset_pending, now);
+        let mut rebuilt = false;
+        // Rebuild number of THIS tick (0 when no rebuild happens).
+        let mut rebuild_no = 0u64;
+        match decision {
+            ReadDecision::Suppress => {
+                return SensorReadout {
+                    contact: false,
+                    lux: None,
+                    devices_seen: self.core.devices_seen,
+                };
+            }
+            ReadDecision::Recreate { forced } => {
+                if self.core.wedged(now) && !self.core.stale_logged {
+                    self.core.stale_logged = true;
+                    let age = self
+                        .core
+                        .report_ms
+                        .map(|ts| now.saturating_sub(ts))
+                        .unwrap_or(0);
+                    log::info!(
+                        "[display] ambient sensor stale: newest report is {age} ms old \
+                         (threshold {} ms), recreating the cached stack",
+                        SENSOR_STALE_AFTER_MS
+                    );
+                }
+                if forced {
+                    SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+                }
+                // The wedge lives in the cached objects: drop them on their
+                // owner thread and let the probe below re-create fresh ones.
+                self.drop_stacks();
+                let delay = self.core.note_rebuild(forced, now);
+                // Capture the number NOW: a fresh probe right after this
+                // disarms the ladder and zeroes the counter again.
+                rebuild_no = self.core.heal.rebuilds;
+                rebuilt = true;
+                log::info!(
+                    "[display] ambient sensor recreating {} stack (rebuild #{rebuild_no}, {})",
+                    match self.backend {
+                        Some(LuxBackend::Com) => "COM",
+                        Some(LuxBackend::Winrt) => "WinRT",
+                        None => "committed",
+                    },
+                    if forced {
+                        "forced by reset request".to_string()
+                    } else {
+                        format!("next attempt in {delay} ms")
+                    }
+                );
+            }
+            ReadDecision::Probe => {}
+        }
+        let (lux, report_ms, devices_seen) = self.probe();
+        let fresh = lux.is_some_and(|v| v.is_finite() && v > MIN_PLAUSIBLE_LUX);
+        self.core.note_probe(devices_seen, report_ms, fresh, now);
+        if rebuilt {
+            // Close the transition trail: stale -> recreating -> outcome.
+            if self.core.wedged(now) {
+                log::info!(
+                    "[display] ambient sensor still frozen after rebuild #{rebuild_no}: \
+                     next attempt in {} ms",
+                    self.core.heal.retry_in_ms(now)
+                );
+            } else {
+                log::info!(
+                    "[display] ambient sensor available after rebuild #{rebuild_no} (lux={lux:?})"
+                );
+            }
+        }
+        SensorReadout {
+            contact: true,
+            lux,
+            devices_seen,
+        }
     }
 }
 
-/// The process's committed ambient-light backend. One decision, one scope:
-/// COM and WinRT both reach the same sensorservice singleton and mixing the
-/// two stacks in one process is the access-violation trigger, so every real
-/// probe goes through this single choice.
+/// Sensor thread body. Panics in job handling are caught: the stacks are
+/// dropped (the next read re-creates them) and the thread keeps serving,
+/// so a COM hiccup cannot silently kill the sensor for the whole session.
 #[cfg(windows)]
-static COMMITTED_BACKEND: std::sync::OnceLock<LuxBackend> = std::sync::OnceLock::new();
+fn sensor_worker(rx: std::sync::mpsc::Receiver<SensorJob>) {
+    let mut owner = SensorOwner::new();
+    while let Ok(job) = rx.recv() {
+        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
+            SensorJob::Read(reply) => {
+                let out = owner.handle_read();
+                let _ = reply.send(out);
+            }
+        }));
+        if handled.is_err() {
+            log::error!("[display] ambient sensor thread panicked: dropping stacks, continuing");
+            owner.drop_stacks();
+        }
+    }
+    log::debug!("[display] ambient sensor thread exiting (channel reset)");
+}
+
+/// Reset the worker channel so the next read starts a fresh thread (and a
+/// fresh stack). Dropping the sender lets a live worker finish its current
+/// job and exit; a hung worker dies with the stack it was holding.
+#[cfg(windows)]
+fn reset_sensor_channel() {
+    *SENSOR_TX
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
+}
+
+/// Send one read to the sensor thread, starting the thread if needed.
+/// Returns None only when the thread is unreachable (spawn failed or the
+/// stack hung past `SENSOR_READ_TIMEOUT`): the caller reports no reading
+/// this cycle instead of blocking anywhere on COM.
+#[cfg(windows)]
+fn read_ambient_via_worker() -> Option<SensorReadout> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    {
+        let mut guard = SENSOR_TX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if guard.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            match std::thread::Builder::new()
+                .name("ambient-sensor".to_string())
+                .spawn(move || sensor_worker(rx))
+            {
+                Ok(_) => {
+                    log::debug!("[display] ambient sensor thread started");
+                    *guard = Some(tx);
+                }
+                Err(e) => {
+                    log::warn!("[display] could not start ambient sensor thread: {e}");
+                    return None;
+                }
+            }
+        }
+        let tx = guard.as_ref()?;
+        if tx.send(SensorJob::Read(reply_tx)).is_err() {
+            // Worker gone: reset the channel so the next read starts fresh.
+            drop(guard);
+            reset_sensor_channel();
+            return None;
+        }
+    }
+    match reply_rx.recv_timeout(SENSOR_READ_TIMEOUT) {
+        Ok(out) => Some(out),
+        Err(e) => {
+            // Timeout or disconnected: the stack (or the thread) is
+            // unreachable. Resetting the channel IS the heal for a hung
+            // stack: the replacement thread re-creates everything.
+            log::warn!("[display] ambient sensor read failed ({e:?}), resetting worker and stack");
+            reset_sensor_channel();
+            None
+        }
+    }
+}
 
 #[cfg(windows)]
 fn get_ambient_lux() -> Option<f32> {
-    // The backend is decided once, on the first probe, and never revisited:
-    // an explicit MICONTROL_AMBIENT_SENSOR_BACKEND wins, otherwise the
-    // classic COM stack is adopted when it enumerates, with WinRT as the
-    // fallback for machines where it does not.
-    let backend = *COMMITTED_BACKEND.get_or_init(|| {
-        lux_backend_override().unwrap_or_else(|| {
-            if com_sensor_stack_available() {
-                LuxBackend::Com
-            } else {
-                LuxBackend::Winrt
-            }
-        })
-    });
-
-    // Diagnosed-stale gate: while the sensor is diagnosed FrozenReport or
-    // NoSensor, only one REAL probe per re-probe window reaches the sensor
-    // stack; every other call in the window answers `None` without touching
-    // COM/WinRT. This is what ends both cost centres of the old probe-per-
-    // call behaviour: the health supervisor's every-30 s reset requests and
-    // the loop's per-2 s stack round-trips against a sensor that does not
-    // deliver data.
-    let now = now_ms();
-    let last = SENSOR_LAST_PROBE_MS.swap(now, Ordering::Relaxed);
-    if probe_suppressed(ambient_sensor_state(), last, now) {
+    // All COM/WinRT contact happens on the dedicated sensor thread (the
+    // stacks are thread-affine); this call is a bounded round-trip to it.
+    // None = thread unreachable (spawn failed or stack hung past the
+    // timeout): report no reading this cycle, the diagnosis stays as is.
+    let readout = read_ambient_via_worker()?;
+    if !readout.contact {
+        // The heal machine held this read (backoff hold / NoSensor retry
+        // window): no stack contact, diagnosis unchanged, honest None.
         return None;
     }
-
-    let probe = probe_ambient_backend(backend);
+    let probe = AmbientProbe {
+        lux: readout.lux,
+        devices_seen: readout.devices_seen,
+    };
     settle_sensor_state(probe);
     let lux = probe
         .lux
@@ -2666,12 +3139,13 @@ pub async fn adaptive_brightness_loop() {
                 if consecutive_invalid_reads >= STUCK_SENSOR_RESET_AFTER {
                     let state = ambient_sensor_state();
                     if state.is_diagnosed() {
-                        // {FrozenReport, NoSensor}: resetting the stacks cannot
-                        // make a diagnosed-dead sensor deliver data (production
-                        // proof: the TCS3408 froze for 4+ days while the reset
-                        // requests kept firing every 5 cycles). Idle quietly.
+                        // {FrozenReport, NoSensor}: the auto-heal machine owns
+                        // recovery now (stale reports rebuild the cached stack
+                        // on the 1/5/15 min ladder). The loop must not add
+                        // per-cycle reset pressure on top of it.
                         log::debug!(
-                            "[adaptive_brightness] sensor diagnosed {state:?} — reset suppressed"
+                            "[adaptive_brightness] sensor diagnosed {state:?} \
+                             - auto-heal ladder owns recovery, no loop reset request"
                         );
                     } else {
                         log::warn!(
@@ -2691,11 +3165,12 @@ pub async fn adaptive_brightness_loop() {
                     let state = ambient_sensor_state();
                     if state.is_diagnosed() {
                         log::debug!(
-                            "[adaptive_brightness] sensor diagnosed {state:?} — reset suppressed"
+                            "[adaptive_brightness] sensor diagnosed {state:?} \
+                             - auto-heal ladder owns recovery, no loop reset request"
                         );
                     } else {
                         log::warn!(
-                            "[adaptive_brightness] no valid sensor reading for {} cycles — \
+                            "adaptive_brightness: no valid sensor reading for {} cycles — \
                              requesting sensor reset",
                             consecutive_invalid_reads
                         );
@@ -2706,11 +3181,13 @@ pub async fn adaptive_brightness_loop() {
                 if !no_sensor_warned {
                     // One line per session, honest about WHICH absence this is:
                     // a machine with no ALS at all is not the same failure as a
-                    // present-but-frozen sensor.
+                    // present-but-frozen sensor. FrozenReport is NOT terminal:
+                    // the sensor thread's auto-heal ladder keeps re-creating
+                    // the cached stack (1/5/15 min backoff) until reports flow.
                     match ambient_sensor_state() {
                         AmbientSensorState::FrozenReport => log::info!(
-                            "[adaptive_brightness] ambient sensor present but not reporting — \
-                             loop idle (no reset requests)"
+                            "[adaptive_brightness] ambient sensor present but not reporting - \
+                             loop idle, auto-heal re-creates the stack on its backoff ladder"
                         ),
                         _ => log::warn!(
                             "adaptive_brightness: no ambient light sensor found — loop idle. \
@@ -5217,55 +5694,216 @@ mod tests {
         }
     }
 
+    // ── Auto-heal: stale reports rebuild the cached stack ────────────────────
+
     #[test]
-    fn diagnosed_states_suppress_probe_and_resets() {
-        // Suppression window: a diagnosed sensor is re-probed at most once
-        // per window; Unknown/Available are never suppressed.
-        assert!(!probe_suppressed(
-            AmbientSensorState::Available,
-            1_000,
-            2_000
-        ));
-        assert!(!probe_suppressed(AmbientSensorState::Unknown, 1_000, 2_000));
-        // Never probed: the first diagnosis must be real.
-        assert!(!probe_suppressed(
-            AmbientSensorState::FrozenReport,
-            0,
-            1_000_000
-        ));
-        let last = 1_000_000u64;
-        let window_ms = SENSOR_DIAGNOSED_REPROBE_SECS * 1000;
-        assert!(probe_suppressed(
-            AmbientSensorState::FrozenReport,
-            last,
-            last + window_ms - 1
-        ));
-        assert!(!probe_suppressed(
-            AmbientSensorState::FrozenReport,
-            last,
-            last + window_ms
-        ));
-        assert!(!probe_suppressed(
-            AmbientSensorState::NoSensor,
-            last,
-            last + window_ms
-        ));
+    fn filetime_ticks_convert_to_wall_clock_ms() {
+        // 2026-11-23T16:23:50Z: the exact moment the owner proved the sensor
+        // revives after a process restart (log: Available, lux=30.0).
+        assert_eq!(
+            filetime_ticks_to_epoch_ms(134_399_246_300_000_000),
+            Some(1_795_451_030_000)
+        );
+        // The FILETIME epoch itself predates the UNIX epoch: not a usable stamp.
+        assert_eq!(filetime_ticks_to_epoch_ms(0), None);
+        assert_eq!(
+            filetime_ticks_to_epoch_ms(FILETIME_UNIX_EPOCH_TICKS),
+            Some(0)
+        );
     }
 
     #[test]
-    fn reset_requests_stop_for_diagnosed_sensors() {
+    fn stale_report_timestamp_triggers_recreation() {
+        let mut core = SensorOwnerCore::new();
+        // A healthy stack reporting fresh lux: no wedge evidence, normal probes.
+        core.note_probe(true, Some(1_000_000), true, 1_000_000);
+        assert!(!core.wedged(1_000_000));
+        assert_eq!(core.decide(false, 1_000_000), ReadDecision::Probe);
+        // The stack keeps answering but the REPORT TIMESTAMP stops moving:
+        // the frozen-stack signature (2026-11-22 production, FrozenReport).
+        // 29.999 s of the same stuck timestamp is still tolerated...
+        let almost = 1_000_000 + SENSOR_STALE_AFTER_MS - 1;
+        assert!(!core.wedged(almost));
+        assert_eq!(core.decide(false, almost), ReadDecision::Probe);
+        // ...30 s of it is a wedge, and the ladder starts ARMED: the first
+        // evidence discards and re-creates the cached stack immediately.
+        let stale = 1_000_000 + SENSOR_STALE_AFTER_MS;
+        assert!(core.wedged(stale));
+        assert_eq!(
+            core.decide(false, stale),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn rebuild_backoff_ladder_is_1_5_15_minutes_then_caps() {
+        let mut core = SensorOwnerCore::new();
+        let t0 = 10_000_000u64;
+        core.note_probe(true, Some(t0), true, t0);
+        let mut now = t0 + SENSOR_STALE_AFTER_MS;
+        // First wedge evidence: ladder armed, rebuild without waiting.
+        assert_eq!(
+            core.decide(false, now),
+            ReadDecision::Recreate { forced: false }
+        );
+        // Every rebuild is followed by a probe that STILL finds the stuck
+        // timestamp: the ladder walks 1 min, 5 min, 15 min, then caps at 15.
+        for (i, delay) in [60_000u64, 300_000, 900_000, 900_000].iter().enumerate() {
+            core.note_rebuild(false, now);
+            core.note_probe(true, Some(t0), false, now);
+            // Inside the step: hold, no stack contact (the cost guarantee).
+            assert_eq!(
+                core.decide(false, now + delay - 1),
+                ReadDecision::Suppress,
+                "after rebuild #{} the next attempt must wait {delay} ms",
+                i + 1
+            );
+            // At the step boundary: rebuild again.
+            now += delay;
+            assert_eq!(
+                core.decide(false, now),
+                ReadDecision::Recreate { forced: false },
+                "rebuild #{} must be due after {delay} ms",
+                i + 2
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_reading_restores_available_without_a_restart() {
+        let mut core = SensorOwnerCore::new();
+        let t0 = 10_000_000u64;
+        core.note_probe(true, Some(t0), true, t0);
+        let stale = t0 + SENSOR_STALE_AFTER_MS;
+        // Wedged: rebuild #1 fires; the re-created stack answers FRESH.
+        assert_eq!(
+            core.decide(false, stale),
+            ReadDecision::Recreate { forced: false }
+        );
+        core.note_rebuild(false, stale);
+        core.note_probe(true, Some(stale), true, stale);
+        // Fresh evidence: no wedge, ladder disarmed, normal probing resumes.
+        assert!(!core.wedged(stale));
+        assert_eq!(core.decide(false, stale), ReadDecision::Probe);
+        assert!(core.heal.armed(), "a fresh reading must disarm the ladder");
+        // And the diagnosis layer settles Available from the same evidence:
+        // the state returns on its own, no app restart involved.
+        assert_eq!(
+            classify_sensor_probe(Some(30.0), true),
+            AmbientSensorState::Available
+        );
+    }
+
+    #[test]
+    fn advancing_timestamp_in_a_dark_room_is_not_a_wedge() {
+        // Regression guard: lux below the plausibility floor (covered sensor,
+        // night) with an ADVANCING timestamp must never trigger rebuilds, or
+        // the heal machine would hammer COM in every dark room.
+        let mut core = SensorOwnerCore::new();
+        let t0 = 10_000_000u64;
+        core.note_probe(true, Some(t0), false, t0);
+        let almost = t0 + SENSOR_STALE_AFTER_MS - 1_000;
+        assert!(!core.wedged(almost), "timestamp still advancing");
+        assert_eq!(core.decide(false, almost), ReadDecision::Probe);
+        // The moment reports stop advancing for 30 s, it IS a wedge.
+        assert!(core.wedged(t0 + SENSOR_STALE_AFTER_MS));
+    }
+
+    #[test]
+    fn driver_without_timestamps_falls_back_to_frozen_evidence() {
+        // A driver that never fills SENSOR_DATA_TYPE_TIMESTAMP and fails
+        // GetTimestamp: the old lux-based evidence still drives the heal.
+        let mut core = SensorOwnerCore::new();
+        let t0 = 10_000_000u64;
+        core.note_probe(true, None, false, t0); // devices seen, no plausible lux
+        assert!(core.wedged(t0));
+        assert_eq!(
+            core.decide(false, t0),
+            ReadDecision::Recreate { forced: false }
+        );
+        // After the rebuild the same evidence re-arms the ladder at 1 min.
+        core.note_rebuild(false, t0);
+        core.note_probe(true, None, false, t0);
+        assert_eq!(core.decide(false, t0 + 1_000), ReadDecision::Suppress);
+        assert_eq!(
+            core.decide(false, t0 + SENSOR_REBUILD_BACKOFF_MS[0]),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn nosensor_retries_are_rate_limited() {
+        // Nothing enumerated: re-creating a stack that sees no device is
+        // pointless churn, so one real attempt per retry window.
+        let mut core = SensorOwnerCore::new();
+        let t0 = 10_000_000u64;
+        core.note_probe(false, None, false, t0);
+        assert!(!core.wedged(t0), "a missing sensor is not a wedge");
+        assert_eq!(core.decide(false, t0 + 1_000), ReadDecision::Suppress);
+        assert_eq!(
+            core.decide(false, t0 + SENSOR_NOSENSOR_RETRY_MS - 1),
+            ReadDecision::Suppress
+        );
+        assert_eq!(
+            core.decide(false, t0 + SENSOR_NOSENSOR_RETRY_MS),
+            ReadDecision::Probe,
+            "one real attempt per window must still notice a driver fix"
+        );
+    }
+
+    #[test]
+    fn forced_rebuilds_bypass_the_ladder_but_not_the_floor() {
+        let mut core = SensorOwnerCore::new();
+        let t0 = 10_000_000u64;
+        core.note_probe(true, Some(t0), true, t0);
+        // A reset request (power resume) rebuilds even a HEALTHY stack,
+        // immediately on a fresh core (last_rebuild_ms == 0 meets the floor).
+        assert_eq!(
+            core.decide(true, t0),
+            ReadDecision::Recreate { forced: true }
+        );
+        core.note_rebuild(true, t0);
+        core.note_probe(true, Some(t0), true, t0); // resume found a fresh stack
+                                                   // Inside the floor a second request is DEFERRED (the flag stays
+                                                   // pending): normal logic answers instead, no caller can hammer COM.
+        assert_eq!(
+            core.decide(true, t0 + SENSOR_FORCED_REBUILD_FLOOR_MS - 1),
+            ReadDecision::Probe
+        );
+        // Past the floor the pending request executes as a forced rebuild.
+        let t1 = t0 + SENSOR_FORCED_REBUILD_FLOOR_MS;
+        assert_eq!(
+            core.decide(true, t1),
+            ReadDecision::Recreate { forced: true }
+        );
+        core.note_rebuild(true, t1);
+        core.note_probe(true, Some(t1), true, t1);
+        // A forced rebuild restarts the ladder from armed: a FUTURE wedge
+        // rebuilds immediately again instead of waiting behind 1 min.
+        assert!(core.heal.armed());
+        let t2 = t1 + SENSOR_STALE_AFTER_MS;
+        assert_eq!(
+            core.decide(false, t2),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn reset_requests_reach_frozen_sensors_but_not_missing_ones() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let previous = SENSOR_STATE.load(Ordering::Relaxed);
         SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
-        // FrozenReport: every 5 cycles the loop used to re-request a reset
-        // that provably could not help. It must be refused.
+        // FrozenReport is NOT terminal: the 2026-11-23 proof showed the
+        // wedged CACHED STACK is the failure, and a reset request is exactly
+        // what discards and re-creates it (floor-gated on the sensor thread).
         SENSOR_STATE.store(AmbientSensorState::FrozenReport.code(), Ordering::Relaxed);
         request_sensor_reset("unit test frozen");
         assert!(
-            !SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
-            "a FrozenReport sensor must not receive reset requests"
+            SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
+            "a FrozenReport sensor must accept rebuild requests: recreation is the recovery"
         );
-        // NoSensor: nothing exists to reset.
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+        // NoSensor: nothing exists to re-create, the request is refused.
         SENSOR_STATE.store(AmbientSensorState::NoSensor.code(), Ordering::Relaxed);
         request_sensor_reset("unit test no sensor");
         assert!(!SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
@@ -5273,9 +5911,99 @@ mod tests {
         SENSOR_STATE.store(AmbientSensorState::Available.code(), Ordering::Relaxed);
         request_sensor_reset("unit test available");
         assert!(SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
-        // Restore the global for the other tests in this binary.
+        // Restore the globals for the other tests in this binary.
         SENSOR_STATE.store(previous, Ordering::Relaxed);
         SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+    }
+
+    // ── Live proof on real hardware (deliberately ignored) ──────────────────
+    //
+    // Run with: cargo test --lib -- --ignored --nocapture live_ambient_heal_proof
+    // It touches the REAL sensor stack on this machine and echoes the
+    // transition log lines (recreating -> available after rebuild), proving
+    // the heal end to end the way the owner proved the restart cure.
+
+    /// Logger that captures AND echoes every log line during the closure.
+    /// Returns (result, captured lines, logger_installed).
+    #[cfg(windows)]
+    fn capture_live_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>, bool) {
+        static LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, _metadata: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record) {
+                let line = format!("[{}] {}", record.level(), record.args());
+                println!("{line}");
+                if let Ok(mut lines) = LINES.lock() {
+                    lines.push(line);
+                }
+            }
+            fn flush(&self) {}
+        }
+        // A test binary has no logger by default. If some other test got
+        // there first, capture is skipped but the live assertions still run.
+        let installed = log::set_boxed_logger(Box::new(Capture)).is_ok();
+        if installed {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
+        let out = body();
+        let lines = LINES.lock().map(|l| l.clone()).unwrap_or_default();
+        (out, lines, installed)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "touches the live sensor stack; run deliberately with --ignored --nocapture"]
+    fn live_ambient_heal_proof() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (lux_b, state_b, lux_a, state_a) = {
+            let ((a, b, c, d), lines, installed) = capture_live_logs(|| {
+                let lux_b = get_ambient_lux();
+                let state_b = ambient_sensor_state();
+                // Force a rebuild through the PUBLIC request path (the same
+                // call the power listener makes on resume).
+                request_sensor_reset("live heal proof (forced rebuild)");
+                let lux_a = get_ambient_lux();
+                let state_a = ambient_sensor_state();
+                (lux_b, state_b, lux_a, state_a)
+            });
+            if !installed {
+                println!("WARN: another logger was already installed, line capture skipped");
+            } else {
+                assert!(
+                    lines
+                        .iter()
+                        .any(|l| l.contains("recreating") && l.contains("forced")),
+                    "the forced recreation must be logged: {lines:?}"
+                );
+                assert!(
+                    lines.iter().any(|l| l.contains("available after rebuild")),
+                    "the restore after recreation must be logged: {lines:?}"
+                );
+            }
+            (a, b, c, d)
+        };
+        // (1) The live hardware serves fresh lux (owner proof: 30.0 lux on
+        // 2026-11-23 after the restart; the heal must do it WITHOUT one).
+        assert_eq!(
+            state_b,
+            AmbientSensorState::Available,
+            "the live sensor must start Available (lux={lux_b:?})"
+        );
+        // (2) The forced rebuild ran ON the sensor thread, discarded the
+        // cached stack, re-created it, and readings came back immediately:
+        // no app restart involved.
+        assert_eq!(
+            state_a,
+            AmbientSensorState::Available,
+            "after a forced rebuild the live sensor must serve readings again"
+        );
+        assert!(
+            lux_a.is_some_and(|v| v > MIN_PLAUSIBLE_LUX),
+            "lux after rebuild: {lux_a:?}"
+        );
     }
 
     #[test]
