@@ -75,6 +75,18 @@ Ghidra headless startup has a 330 s default deadline
 machine is busy; a 500 KB PE that times out at 330 s is a load problem, not a
 tool problem.
 
+Some Rust PEs stall the decompiler passes indefinitely (the headless log stops
+after `ANALYZING all memory and code` and never advances). Disable the three
+expensive analyzers unless pseudocode quality is the point:
+
+```bash
+export REA_GHIDRA_DISABLED_ANALYZERS="Decompiler Parameter ID,Decompiler Switch Analysis,Stack"
+```
+
+With that set, `notepad.exe` and `ecram_service.exe` both complete. Keep a small
+known-good target (`C:\Windows\System32\notepad.exe`) as the provider smoke test;
+if it fails, the bench is broken, not the target.
+
 From an agent session, the same work goes through the `rea` MCP server
 (`open_binary`, `analyze_function`, `binary_overview`, `export_evidence_bundle`).
 Hermes must be restarted once after the MCP entry changes.
