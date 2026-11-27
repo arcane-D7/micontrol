@@ -55,8 +55,37 @@ pub struct PerformanceResult {
 /// writes — the two channels were writing different subsystems. We now write
 /// BOTH: HQ WMI (fan curve + DPTF table) AND the EC power mode (PL1/PL2).
 pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<PerformanceResult> {
-    // Always persist to registry
-    persist_to_registry(mode)?;
+    set_performance_mode_impl(mode, true)
+}
+
+/// Re-assert the saved preference without writing the registry.
+///
+/// Startup and lid transitions run in the user's session, where
+/// `HKLM\SOFTWARE\MI\PerformanceMode` is not writable. The preference is
+/// already persisted, so those paths must skip the registry step and only
+/// make the EC match it; otherwise `persist_to_registry` fails before the EC
+/// is touched and the fan keeps the firmware default.
+pub fn reapply_saved_mode() -> HardwareResult<()> {
+    let pref = get_performance_mode()?;
+    let res = set_performance_mode_impl(pref, false)?;
+    if !res.success {
+        return Err(crate::hw::errors::HardwareError::Other(format!(
+            "EC refused the saved profile ({})",
+            res.method
+        )));
+    }
+    Ok(())
+}
+
+fn set_performance_mode_impl(
+    mode: PerformanceMode,
+    persist: bool,
+) -> HardwareResult<PerformanceResult> {
+    // Persist to the registry only on a user action; the startup/lid reapply
+    // is already persisted and runs unelevated.
+    if persist {
+        persist_to_registry(mode)?;
+    }
 
     // Also sync the Windows 11 power overlay so the native power settings
     // slider reflects the change (requires this process to be elevated).

@@ -422,22 +422,14 @@ unsafe fn lid_from_lparam(lparam: LPARAM) -> Option<bool> {
 /// idempotent and verifies the latch, so a firmware reset cannot silently
 /// leave the machine on a louder table.
 fn reapply_saved_performance() {
-    match crate::hw::performance::get_performance_mode() {
-        Ok(pref) => match crate::hw::performance::set_performance_mode(pref) {
-            Ok(res) => log::info!(
-                target: "hw::power_listener",
-                "[perf] lid transition reapply: success={} method={}",
-                res.success,
-                res.method
-            ),
-            Err(e) => log::warn!(
-                target: "hw::power_listener",
-                "[perf] lid transition reapply failed: {e}"
-            ),
-        },
+    match crate::hw::performance::reapply_saved_mode() {
+        Ok(()) => log::info!(
+            target: "hw::power_listener",
+            "[perf] lid transition reapply: EC now matches the saved preference"
+        ),
         Err(e) => log::warn!(
             target: "hw::power_listener",
-            "[perf] lid transition: cannot read saved preference: {e}"
+            "[perf] lid transition reapply failed: {e}"
         ),
     }
 }

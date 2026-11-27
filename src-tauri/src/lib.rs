@@ -816,16 +816,9 @@ pub fn run() {
             // report. Idempotent: writes only what the user already chose
             // and verifies the latch.
             tauri::async_runtime::spawn_blocking(|| {
-                match crate::hw::performance::get_performance_mode() {
-                    Ok(pref) => match crate::hw::performance::set_performance_mode(pref) {
-                        Ok(res) => log::info!(
-                            "[perf] startup reapply: success={} method={}",
-                            res.success,
-                            res.method
-                        ),
-                        Err(e) => log::warn!("[perf] startup reapply failed: {e}"),
-                    },
-                    Err(e) => log::warn!("[perf] startup reapply: cannot read saved preference: {e}"),
+                match crate::hw::performance::reapply_saved_mode() {
+                    Ok(()) => log::info!("[perf] startup reapply: EC now matches the saved preference"),
+                    Err(e) => log::warn!("[perf] startup reapply failed: {e}"),
                 }
             });
 
