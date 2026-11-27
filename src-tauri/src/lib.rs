@@ -808,6 +808,27 @@ pub fn run() {
                 }
             });
 
+            // Performance preference: the EC resets QFAN to its firmware
+            // default at every boot while the user's choice lives in the
+            // registry. Without this reapply the machine runs the default
+            // fan table (aggressive clamshell curve) instead of the chosen
+            // one, which is the "the fans are loud again after a reboot"
+            // report. Idempotent: writes only what the user already chose
+            // and verifies the latch.
+            tauri::async_runtime::spawn_blocking(|| {
+                match crate::hw::performance::get_performance_mode() {
+                    Ok(pref) => match crate::hw::performance::set_performance_mode(pref) {
+                        Ok(res) => log::info!(
+                            "[perf] startup reapply: success={} method={}",
+                            res.success,
+                            res.method
+                        ),
+                        Err(e) => log::warn!("[perf] startup reapply failed: {e}"),
+                    },
+                    Err(e) => log::warn!("[perf] startup reapply: cannot read saved preference: {e}"),
+                }
+            });
+
             // Hardware discovery — load cached profile or scan on first run
             let data_dir = app
                 .path()

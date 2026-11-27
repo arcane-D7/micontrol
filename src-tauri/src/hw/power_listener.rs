@@ -368,6 +368,11 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         }
                     );
                     log_lid_snapshot(open);
+                    // The EC can move to a clamshell fan table across a lid
+                    // transition. Re-assert the user's saved performance
+                    // preference so the fan follows the chosen profile rather
+                    // than the firmware default.
+                    reapply_saved_performance();
                 }
             }
             return LRESULT(1);
@@ -408,6 +413,33 @@ unsafe fn lid_from_lparam(lparam: LPARAM) -> Option<bool> {
         return None;
     }
     lid_state_from_setting(&setting.PowerSetting, &setting.Data)
+}
+
+/// Re-assert the saved performance preference after a lid transition.
+///
+/// The EC owns the fan table and may switch to a clamshell profile on lid
+/// close; the user's choice lives in the registry. Writing it back is
+/// idempotent and verifies the latch, so a firmware reset cannot silently
+/// leave the machine on a louder table.
+fn reapply_saved_performance() {
+    match crate::hw::performance::get_performance_mode() {
+        Ok(pref) => match crate::hw::performance::set_performance_mode(pref) {
+            Ok(res) => log::info!(
+                target: "hw::power_listener",
+                "[perf] lid transition reapply: success={} method={}",
+                res.success,
+                res.method
+            ),
+            Err(e) => log::warn!(
+                target: "hw::power_listener",
+                "[perf] lid transition reapply failed: {e}"
+            ),
+        },
+        Err(e) => log::warn!(
+            target: "hw::power_listener",
+            "[perf] lid transition: cannot read saved preference: {e}"
+        ),
+    }
 }
 
 /// Log one thermal snapshot next to a lid transition.
