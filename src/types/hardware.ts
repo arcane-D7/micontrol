@@ -521,8 +521,45 @@ export interface AdapterPowerReading {
 
 // ── HQWmiCommonInterface (BIOS control via WMI) ────────────────────────────
 //
-// These types match the Rust structs in `src-tauri/src/hw/hq_wmi.rs`.
-// All methods take a String `req` parameter and return a String `ret`.
+// These types mirror the typed, allowlisted envelopes in
+// `src-tauri/src/hw/hq_wmi.rs`. The raw `req: string` surface was removed
+// (SEC-11): every BIOS command now takes a structured request whose fields are
+// enums / validated values, and the backend derives a fixed WMI token from
+// them. A caller can no longer pass an arbitrary string to the firmware.
+
+/** BIOS performance profiles accepted by `hq_set_performance_mode`. */
+export type HqPerformanceMode = 'performance' | 'balanced' | 'quiet';
+
+/** Boot devices accepted by `hq_change_boot_option`. */
+export type HqBootTarget = 'windows_boot_manager' | 'uefi_usb' | 'uefi_network';
+
+/** Explicit confirmation accepted by `hq_load_default`. */
+export type HqLoadDefaultConfirm = 'reset_to_defaults';
+
+/** ISO 3166-1 alpha-2 country code (uppercase, allowlisted on the backend). */
+export type HqCountryCode = string;
+
+export interface HqSetPerformanceModeReq {
+  mode: HqPerformanceMode;
+}
+export interface HqChangeBootOptionReq {
+  target: HqBootTarget;
+}
+export interface HqLoadDefaultReq {
+  confirm: HqLoadDefaultConfirm;
+}
+export interface HqEnablePxeBootReq {
+  enabled: boolean;
+}
+export interface HqS5RtcWakeEnableReq {
+  enabled: boolean;
+}
+export interface HqSetWifiCountryCodeReq {
+  countryCode: HqCountryCode;
+}
+export interface HqSetShippingCountryCodeReq {
+  countryCode: HqCountryCode;
+}
 
 /** Response from an HQWmiCommonInterface method call. */
 export interface HqWmiResponse {

@@ -947,68 +947,95 @@ pub async fn wmi_ec_set_label_mode(enabled: bool) -> Result<(), ErrorResponse> {
 }
 
 // ── HQWmiCommonInterface (BIOS control via WMI) ────────────────────────────
+//
+// SEC-11: these seven commands write to the BIOS. They no longer accept a raw
+// `req: String`. Each takes a typed, `deny_unknown_fields` envelope so an
+// unknown field or an out-of-allowlist value is rejected at the Tauri boundary
+// (before any elevation), then routes through the elevated bridge, where the
+// dispatcher re-validates the same envelope and derives a fixed wire token.
+// A compromised webview cannot reorder boot devices, reset the BIOS or flip
+// the radio domain: the arbitrary string never exists in the protocol.
+//
+// Shape follows `wmi_ec_read`: serialize the typed envelope, `run_elevated`
+// (whose bridge error converts to `ErrorResponse` via `?`), then deserialize
+// the `HqWmiResponse`. No bare-String result signature is introduced, keeping
+// the central error-catalog ratchet green.
 
 #[tauri::command]
 pub async fn hq_set_performance_mode(
-    req: String,
+    req: crate::hw::hq_wmi::HqSetPerformanceModeReq,
 ) -> Result<crate::hw::hq_wmi::HqWmiResponse, ErrorResponse> {
-    run_blocking(move || crate::hw::hq_wmi::set_performance_mode(&req))
-        .await
-        .map_err(ErrorResponse::from)
+    let args = serde_json::to_value(&req)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("serialize: {e}"))))?;
+    let raw = elev_bridge::run_elevated("hq_set_performance_mode", args).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 #[tauri::command]
 pub async fn hq_change_boot_option(
-    req: String,
+    req: crate::hw::hq_wmi::HqChangeBootOptionReq,
 ) -> Result<crate::hw::hq_wmi::HqWmiResponse, ErrorResponse> {
-    run_blocking(move || crate::hw::hq_wmi::change_boot_option(&req))
-        .await
-        .map_err(ErrorResponse::from)
+    let args = serde_json::to_value(&req)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("serialize: {e}"))))?;
+    let raw = elev_bridge::run_elevated("hq_change_boot_option", args).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 #[tauri::command]
 pub async fn hq_load_default(
-    req: String,
+    req: crate::hw::hq_wmi::HqLoadDefaultReq,
 ) -> Result<crate::hw::hq_wmi::HqWmiResponse, ErrorResponse> {
-    run_blocking(move || crate::hw::hq_wmi::load_default(&req))
-        .await
-        .map_err(ErrorResponse::from)
+    let args = serde_json::to_value(&req)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("serialize: {e}"))))?;
+    let raw = elev_bridge::run_elevated("hq_load_default", args).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 #[tauri::command]
 pub async fn hq_s5_rtc_wake_enable(
-    req: String,
+    req: crate::hw::hq_wmi::HqS5RtcWakeEnableReq,
 ) -> Result<crate::hw::hq_wmi::HqWmiResponse, ErrorResponse> {
-    run_blocking(move || crate::hw::hq_wmi::s5_rtc_wake_enable(&req))
-        .await
-        .map_err(ErrorResponse::from)
+    let args = serde_json::to_value(&req)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("serialize: {e}"))))?;
+    let raw = elev_bridge::run_elevated("hq_s5_rtc_wake_enable", args).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 #[tauri::command]
 pub async fn hq_enable_pxe_boot(
-    req: String,
+    req: crate::hw::hq_wmi::HqEnablePxeBootReq,
 ) -> Result<crate::hw::hq_wmi::HqWmiResponse, ErrorResponse> {
-    run_blocking(move || crate::hw::hq_wmi::enable_pxe_boot(&req))
-        .await
-        .map_err(ErrorResponse::from)
+    let args = serde_json::to_value(&req)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("serialize: {e}"))))?;
+    let raw = elev_bridge::run_elevated("hq_enable_pxe_boot", args).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 #[tauri::command]
 pub async fn hq_set_wifi_country_code(
-    req: String,
+    req: crate::hw::hq_wmi::HqSetWifiCountryCodeReq,
 ) -> Result<crate::hw::hq_wmi::HqWmiResponse, ErrorResponse> {
-    run_blocking(move || crate::hw::hq_wmi::set_wifi_country_code(&req))
-        .await
-        .map_err(ErrorResponse::from)
+    let args = serde_json::to_value(&req)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("serialize: {e}"))))?;
+    let raw = elev_bridge::run_elevated("hq_set_wifi_country_code", args).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 #[tauri::command]
 pub async fn hq_set_shipping_country_code(
-    req: String,
+    req: crate::hw::hq_wmi::HqSetShippingCountryCodeReq,
 ) -> Result<crate::hw::hq_wmi::HqWmiResponse, ErrorResponse> {
-    run_blocking(move || crate::hw::hq_wmi::set_shipping_country_code(&req))
-        .await
-        .map_err(ErrorResponse::from)
+    let args = serde_json::to_value(&req)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("serialize: {e}"))))?;
+    let raw = elev_bridge::run_elevated("hq_set_shipping_country_code", args).await?;
+    serde_json::from_value(raw)
+        .map_err(|e| ErrorResponse::from(HardwareError::Other(format!("deserialize: {e}"))))
 }
 
 // ── Thermal Zone (ACPI temperature) ────────────────────────────────────────

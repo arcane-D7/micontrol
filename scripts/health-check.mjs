@@ -106,6 +106,16 @@ const STEPS = [
     cmd: 'node',
     args: ['scripts/check-schtasks-calls.mjs'],
   },
+  {
+    // SEC-11: no command handler may write BIOS/EC/services/drivers/HKLM
+    // in-process without elevation or an allowlist. Ratchet baseline holds
+    // ZERO ungated sites - the `hq_*` BIOS family was the only unvalidated
+    // in-process privileged writer and is now closed. Any new one fails here.
+    id: 'command-gates',
+    name: 'Command privilege gate (no ungated BIOS/EC/HKLM writer)',
+    cmd: 'node',
+    args: ['scripts/check-command-gates.mjs'],
+  },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];
 

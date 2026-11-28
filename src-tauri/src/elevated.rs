@@ -1663,6 +1663,80 @@ fn dispatch(cmd: ElevCmd) -> Value {
             }
         }
 
+        // ── HQWmiCommonInterface BIOS writes (SEC-11) ──────────────────────
+        //
+        // The elevated side never trusts the caller's payload: each branch
+        // re-parses `cmd.args` into the typed, `deny_unknown_fields` envelope
+        // (rejecting unknown fields and out-of-allowlist values) and derives a
+        // fixed wire token from the semantic variant. Only that constant ever
+        // reaches the WMI BIOS method, so an arbitrary `req` string is
+        // unrepresentable even if the unprivileged side were bypassed.
+        "hq_set_performance_mode" => {
+            match crate::hw::hq_wmi::HqSetPerformanceModeReq::from_args(&cmd.args) {
+                Ok(req) => match crate::hw::hq_wmi::set_performance_mode(req.token()) {
+                    Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
+                    Err(e) => make_err(e.to_string()),
+                },
+                Err(e) => make_err(format!("hq_set_performance_mode rejected: {e}")),
+            }
+        }
+
+        "hq_change_boot_option" => {
+            match crate::hw::hq_wmi::HqChangeBootOptionReq::from_args(&cmd.args) {
+                Ok(req) => match crate::hw::hq_wmi::change_boot_option(req.token()) {
+                    Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
+                    Err(e) => make_err(e.to_string()),
+                },
+                Err(e) => make_err(format!("hq_change_boot_option rejected: {e}")),
+            }
+        }
+
+        "hq_load_default" => match crate::hw::hq_wmi::HqLoadDefaultReq::from_args(&cmd.args) {
+            Ok(req) => match crate::hw::hq_wmi::load_default(req.token()) {
+                Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
+                Err(e) => make_err(e.to_string()),
+            },
+            Err(e) => make_err(format!("hq_load_default rejected: {e}")),
+        },
+
+        "hq_s5_rtc_wake_enable" => {
+            match crate::hw::hq_wmi::HqS5RtcWakeEnableReq::from_args(&cmd.args) {
+                Ok(req) => match crate::hw::hq_wmi::s5_rtc_wake_enable(req.token()) {
+                    Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
+                    Err(e) => make_err(e.to_string()),
+                },
+                Err(e) => make_err(format!("hq_s5_rtc_wake_enable rejected: {e}")),
+            }
+        }
+
+        "hq_enable_pxe_boot" => match crate::hw::hq_wmi::HqEnablePxeBootReq::from_args(&cmd.args) {
+            Ok(req) => match crate::hw::hq_wmi::enable_pxe_boot(req.token()) {
+                Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
+                Err(e) => make_err(e.to_string()),
+            },
+            Err(e) => make_err(format!("hq_enable_pxe_boot rejected: {e}")),
+        },
+
+        "hq_set_wifi_country_code" => {
+            match crate::hw::hq_wmi::HqSetWifiCountryCodeReq::from_args(&cmd.args) {
+                Ok(req) => match crate::hw::hq_wmi::set_wifi_country_code(req.token()) {
+                    Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
+                    Err(e) => make_err(e.to_string()),
+                },
+                Err(e) => make_err(format!("hq_set_wifi_country_code rejected: {e}")),
+            }
+        }
+
+        "hq_set_shipping_country_code" => {
+            match crate::hw::hq_wmi::HqSetShippingCountryCodeReq::from_args(&cmd.args) {
+                Ok(req) => match crate::hw::hq_wmi::set_shipping_country_code(req.token()) {
+                    Ok(resp) => make_ok(serde_json::to_value(resp).unwrap_or(Value::Null)),
+                    Err(e) => make_err(e.to_string()),
+                },
+                Err(e) => make_err(format!("hq_set_shipping_country_code rejected: {e}")),
+            }
+        }
+
         "ensure_ecram_service" => match crate::hw::ecram_service_mgmt::ensure_service_running() {
             Ok(status) => make_ok(serde_json::to_value(status).unwrap_or(Value::Null)),
             Err(e) => make_err(e.to_string()),
@@ -2844,6 +2918,86 @@ mod tests {
             result["error"].as_str().is_some(),
             "failed dispatch must carry an error string"
         );
+    }
+
+    // ── SEC-11: the elevated BIOS dispatcher re-validates, never trusts ────
+    //
+    // These feed the dispatcher INVALID payloads only. On a Windows test host
+    // a *valid* BIOS payload would really write firmware (ChangeBootOption /
+    // LoadDefault), which no test may do; an invalid one is rejected by
+    // `from_args` before any WMI call, proving the allowlist boundary holds on
+    // the elevated side too. The rejection string ("rejected") is distinct from
+    // the WMI/NotSupported path, so we can assert the payload never reached the
+    // firmware.
+
+    #[test]
+    fn hq_dispatcher_rejects_free_form_req_before_wmi() {
+        for cmd in [
+            "hq_set_performance_mode",
+            "hq_change_boot_option",
+            "hq_load_default",
+            "hq_s5_rtc_wake_enable",
+            "hq_enable_pxe_boot",
+            "hq_set_wifi_country_code",
+            "hq_set_shipping_country_code",
+        ] {
+            // The legacy raw-`req` shape is not a valid envelope: it must be
+            // refused (deny_unknown_fields + missing required field).
+            let result = super::dispatch_cmd(cmd, serde_json::json!({ "req": "arbitrary" }));
+            assert_eq!(result["ok"].as_bool(), Some(false), "{cmd} must fail");
+            let err = result["error"].as_str().unwrap_or("");
+            assert!(
+                err.contains("rejected"),
+                "{cmd}: expected allowlist rejection before WMI, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn hq_dispatcher_rejects_out_of_allowlist_values_before_wmi() {
+        // Valid envelope shape, but the value is outside the allowlist. Each
+        // must be refused at the type boundary, never sent to the firmware.
+        let cases: &[(&str, serde_json::Value)] = &[
+            (
+                "hq_set_performance_mode",
+                serde_json::json!({ "mode": "turbo" }),
+            ),
+            (
+                "hq_change_boot_option",
+                serde_json::json!({ "target": "my_usb_stick" }),
+            ),
+            ("hq_load_default", serde_json::json!({ "confirm": "yes" })),
+            ("hq_enable_pxe_boot", serde_json::json!({ "enabled": "1" })),
+            (
+                "hq_set_wifi_country_code",
+                serde_json::json!({ "countryCode": "ZZ" }),
+            ),
+            (
+                "hq_set_shipping_country_code",
+                serde_json::json!({ "countryCode": "pt" }),
+            ),
+        ];
+        for (cmd, args) in cases {
+            let result = super::dispatch_cmd(cmd, args.clone());
+            assert_eq!(result["ok"].as_bool(), Some(false), "{cmd} must fail");
+            let err = result["error"].as_str().unwrap_or("");
+            assert!(
+                err.contains("rejected"),
+                "{cmd}: expected allowlist rejection before WMI, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn hq_dispatcher_rejects_smuggled_extra_field_before_wmi() {
+        // A well-formed field plus a smuggled arbitrary `req` is rejected
+        // wholesale by deny_unknown_fields - the injection vector is gone.
+        let result = super::dispatch_cmd(
+            "hq_set_performance_mode",
+            serde_json::json!({ "mode": "balanced", "req": "rm -rf /" }),
+        );
+        assert_eq!(result["ok"].as_bool(), Some(false));
+        assert!(result["error"].as_str().unwrap_or("").contains("rejected"));
     }
 
     /// S66-003 regression: `ensure_face_service_reinstall` must be wired into

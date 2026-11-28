@@ -42,6 +42,17 @@ export type {
   WiFiStatusInfo,
   WiFiItemInfo,
   HqWmiResponse,
+  HqPerformanceMode,
+  HqBootTarget,
+  HqLoadDefaultConfirm,
+  HqCountryCode,
+  HqSetPerformanceModeReq,
+  HqChangeBootOptionReq,
+  HqLoadDefaultReq,
+  HqEnablePxeBootReq,
+  HqS5RtcWakeEnableReq,
+  HqSetWifiCountryCodeReq,
+  HqSetShippingCountryCodeReq,
   ThermalZoneInfo,
 } from '../types/hardware';
 
@@ -69,6 +80,13 @@ import type {
   EcSensorData,
   AdapterPowerReading,
   HqWmiResponse,
+  HqSetPerformanceModeReq,
+  HqChangeBootOptionReq,
+  HqLoadDefaultReq,
+  HqEnablePxeBootReq,
+  HqS5RtcWakeEnableReq,
+  HqSetWifiCountryCodeReq,
+  HqSetShippingCountryCodeReq,
   ThermalZoneInfo,
   ProcessTaskInfo,
   NetworkInterfaceSample,
@@ -1137,31 +1155,31 @@ export function useHardware() {
 
   // ── HQWmiCommonInterface (BIOS control via WMI) ──────────────────────────
 
-  const hqSetPerformanceMode = useCallback(async (req: string) => {
+  const hqSetPerformanceMode = useCallback(async (req: HqSetPerformanceModeReq) => {
     return await invoke<HqWmiResponse>('hq_set_performance_mode', { req });
   }, []);
 
-  const hqChangeBootOption = useCallback(async (req: string) => {
+  const hqChangeBootOption = useCallback(async (req: HqChangeBootOptionReq) => {
     return await invoke<HqWmiResponse>('hq_change_boot_option', { req });
   }, []);
 
-  const hqLoadDefault = useCallback(async (req: string) => {
+  const hqLoadDefault = useCallback(async (req: HqLoadDefaultReq) => {
     return await invoke<HqWmiResponse>('hq_load_default', { req });
   }, []);
 
-  const hqS5RtcWakeEnable = useCallback(async (req: string) => {
+  const hqS5RtcWakeEnable = useCallback(async (req: HqS5RtcWakeEnableReq) => {
     return await invoke<HqWmiResponse>('hq_s5_rtc_wake_enable', { req });
   }, []);
 
-  const hqEnablePxeBoot = useCallback(async (req: string) => {
+  const hqEnablePxeBoot = useCallback(async (req: HqEnablePxeBootReq) => {
     return await invoke<HqWmiResponse>('hq_enable_pxe_boot', { req });
   }, []);
 
-  const hqSetWifiCountryCode = useCallback(async (req: string) => {
+  const hqSetWifiCountryCode = useCallback(async (req: HqSetWifiCountryCodeReq) => {
     return await invoke<HqWmiResponse>('hq_set_wifi_country_code', { req });
   }, []);
 
-  const hqSetShippingCountryCode = useCallback(async (req: string) => {
+  const hqSetShippingCountryCode = useCallback(async (req: HqSetShippingCountryCodeReq) => {
     return await invoke<HqWmiResponse>('hq_set_shipping_country_code', { req });
   }, []);
 

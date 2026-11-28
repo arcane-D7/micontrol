@@ -647,7 +647,18 @@ fn timeout_for_cmd(cmd: &str) -> Duration {
         | "set_eye_protection"
         | "set_os_turbo"
         | "refresh_os_turbo"
-        | "set_function_key" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
+        | "set_function_key"
+        // SEC-11: BIOS writes via HQWmiCommonInterface. Single ExecMethod calls
+        // are normally fast, but `LoadDefault` (reset to firmware defaults) can
+        // stall the provider; give the whole family the medium budget so a slow
+        // BIOS write is never killed mid-operation by the 15 s default.
+        | "hq_set_performance_mode"
+        | "hq_change_boot_option"
+        | "hq_load_default"
+        | "hq_s5_rtc_wake_enable"
+        | "hq_enable_pxe_boot"
+        | "hq_set_wifi_country_code"
+        | "hq_set_shipping_country_code" => Duration::from_secs(ELEV_TIMEOUT_MEDIUM_SECS),
 
         // Audit F2.1: the elevated half of a cleanup is now `clean_system_junk`
         // (Windows Update cache + Windows logs). It walks two trees, so it gets

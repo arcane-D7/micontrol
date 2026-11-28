@@ -884,14 +884,40 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return undefined as T;
 
     // ── HQWmi commands ──────────────────────────────────────────────────────
+    //
+    // SEC-11: these BIOS commands now take a typed, allowlisted envelope (not a
+    // raw `req` string). The mock mirrors the backend's fixed-token derivation
+    // so tests see the same WMI `req` the real dispatcher would send.
     case 'hq_set_performance_mode':
     case 'hq_change_boot_option':
     case 'hq_load_default':
     case 'hq_s5_rtc_wake_enable':
     case 'hq_enable_pxe_boot':
     case 'hq_set_wifi_country_code':
-    case 'hq_set_shipping_country_code':
-      return { method: command, req: String(args?.req ?? ''), ret: 'OK', success: true } as T;
+    case 'hq_set_shipping_country_code': {
+      const r = (args?.req ?? {}) as Record<string, unknown>;
+      const token =
+        typeof r.mode === 'string'
+          ? ({ performance: '1', balanced: '2', quiet: '3' }[r.mode] ?? '')
+          : typeof r.target === 'string'
+            ? ({
+                windows_boot_manager: 'Windows Boot Manager',
+                uefi_usb: 'UEFI USB',
+                uefi_network: 'UEFI Network',
+              }[r.target] ?? '')
+            : typeof r.confirm === 'string'
+              ? r.confirm === 'reset_to_defaults'
+                ? '1'
+                : ''
+              : typeof r.enabled === 'boolean'
+                ? r.enabled
+                  ? '1'
+                  : '0'
+                : typeof r.countryCode === 'string'
+                  ? r.countryCode
+                  : '';
+      return { method: command, req: token, ret: 'OK', success: true } as T;
+    }
 
     // ── IoT hex / region ─────────────────────────────────────────────────────
     case 'get_iot_region_hex': {
