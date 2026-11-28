@@ -29,6 +29,63 @@ thread_local! {
 
 static WMI_INVALIDATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// What to do with cached COM pointers when a thread tears down.
+///
+/// Split out as a pure decision so the ordering rule is unit-testable
+/// without a live WMI service or a second logon.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Teardown {
+    /// COM is still initialised on this thread: the provider vtables are
+    /// mapped, so `Release()` is safe and the connections must be released.
+    Release,
+    /// The apartment is already gone. The interface vtables live in the WMI
+    /// provider DLLs (`fastprox.dll` / `wbemsvc.dll`), which COM unloads when
+    /// the apartment dies. Calling `Release()` then reads a vtable slot inside
+    /// unmapped memory. Leak the pointers instead: a leaked pointer is inert,
+    /// a released one is an access violation.
+    Leak,
+}
+
+/// Pure half of [`com_alive`]: the teardown decision for a given apartment
+/// state. Kept separate so tests can pin the rule by mutation.
+#[cfg(windows)]
+fn teardown_action(com_alive: bool) -> Teardown {
+    if com_alive {
+        Teardown::Release
+    } else {
+        Teardown::Leak
+    }
+}
+
+/// Is COM still initialised on the calling thread?
+///
+/// `CoGetApartmentType` answers `CO_E_NOTINITIALIZED` once the apartment has
+/// been torn down. This matters because at thread exit Windows runs the DLL
+/// thread-detach callbacks (where COM tears the apartment down and unloads the
+/// provider libraries it no longer references) BEFORE the Rust `thread_local!`
+/// destructors. A cached `IWbemServices` released from a TLS destructor
+/// therefore calls into an unmapped vtable.
+///
+/// Live evidence (`C:\ProgramData\MI\IoTService\IoTService.exe.45864.dmp`,
+/// 2026-11-27): exception `0xc0000005` reading `0x7ffd4452f2f0`, fault
+/// instruction `call qword ptr [rax+0x10]` (vtable slot 2 = `Release`) at a
+/// constant offset in `IoTService.exe`; `rax` = `0x7ffd4452f2e0` is inside NO
+/// loaded module, and 279 further pointers in the dump fall in the dead band
+/// `0x7ffd44480000..0x7ffd44575000` (~980 KB, the size of the WMI providers).
+/// `fastprox`/`wbemsvc`/`IWbemServices` strings are present in the heap, so the
+/// providers were loaded and then unloaded. 43 such crashes in 11 hours took
+/// the whole `IoTSvc` service down with them (SCM 7034, `WIN32_EXIT_CODE 1067`).
+#[cfg(windows)]
+fn com_alive() -> bool {
+    use windows::Win32::System::Com::{CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER};
+
+    let mut apt = APTTYPE::default();
+    let mut qualifier = APTTYPEQUALIFIER::default();
+    // SAFETY: both out-parameters are valid, initialised, writable locals.
+    unsafe { CoGetApartmentType(&mut apt, &mut qualifier).is_ok() }
+}
+
 /// Per-thread COM initialisation for WMI.
 ///
 /// P3: `COMLibrary::new()` (the `wmi` crate) calls
@@ -173,10 +230,42 @@ mod com_init {
 #[cfg(windows)]
 use com_init::ensure_com;
 
+/// The three cached connections of one thread.
+///
+/// Every slot is an `Option` so the whole cache can be released by *taking*
+/// the values, which is what makes the teardown order controllable: see the
+/// `Drop` implementation below.
 struct WmiThreadCache {
-    cimv2: WMIConnection,
-    wmi: WMIConnection,
+    cimv2: Option<WMIConnection>,
+    wmi: Option<WMIConnection>,
     defender: Option<WMIConnection>,
+}
+
+#[cfg(windows)]
+impl Drop for WmiThreadCache {
+    /// Release the cached COM pointers, but never after the apartment died.
+    ///
+    /// Rust runs `thread_local!` destructors when the thread exits, which is
+    /// *after* COM has torn the apartment down and unloaded the WMI provider
+    /// libraries. Releasing then reads a vtable slot in unmapped memory and
+    /// takes the whole process with it (43 crashes/11 h in `IoTSvc`, see
+    /// [`com_alive`]). So the apartment state decides the teardown: release
+    /// while COM lives, leak otherwise.
+    fn drop(&mut self) {
+        let connections = [self.cimv2.take(), self.wmi.take(), self.defender.take()];
+        match teardown_action(com_alive()) {
+            Teardown::Release => drop(connections),
+            Teardown::Leak => {
+                log::warn!(
+                    "WMI cache: COM apartment already gone on this thread \
+                     (thread teardown); leaking the cached connections instead \
+                     of releasing them, because releasing would call into the \
+                     unloaded WMI provider DLLs"
+                );
+                std::mem::forget(connections);
+            }
+        }
+    }
 }
 
 impl WmiThreadCache {
@@ -201,11 +290,29 @@ impl WmiThreadCache {
         // Defender namespace may not exist on systems without Defender — do not fail.
         let defender = WMIConnection::with_namespace_path(NS_DEFENDER, com).ok();
         Ok(Self {
-            cimv2,
-            wmi,
+            cimv2: Some(cimv2),
+            wmi: Some(wmi),
             defender,
         })
     }
+}
+
+/// Drop this thread's cached WMI connections right now, while COM is still
+/// alive on it.
+///
+/// Short-lived worker threads (the IoT pipe serves one request per thread) must
+/// not leave the release to the TLS destructor: by then the apartment is gone
+/// and the WMI provider DLLs are unmapped. Calling this at the end of the
+/// worker body makes the teardown ordered and safe. Idempotent, and cheap when
+/// the thread never touched WMI.
+pub fn release_current_thread() {
+    WMI_CACHE.with(|cell| {
+        let taken = cell.borrow_mut().take();
+        if let Some(cache) = taken {
+            // Runs the Drop impl above, which sees COM still initialised.
+            drop(cache);
+        }
+    });
 }
 
 /// Execute a closure with the cached `ROOT\CIMV2` connection, with one retry.
@@ -231,8 +338,8 @@ where
                     }
                 }
             }
-            match cache_ref.as_ref() {
-                Some(c) => f(&c.cimv2),
+            match cache_ref.as_ref().and_then(|c| c.cimv2.as_ref()) {
+                Some(conn) => f(conn),
                 None => {
                     log::error!("WMI cache: cimv2 cache unavailable after init");
                     Err(anyhow::anyhow!(HardwareError::WmiConnection(
@@ -287,8 +394,8 @@ where
                     }
                 }
             }
-            match cache_ref.as_ref() {
-                Some(c) => f(&c.wmi),
+            match cache_ref.as_ref().and_then(|c| c.wmi.as_ref()) {
+                Some(conn) => f(conn),
                 None => {
                     log::error!("WMI cache: wmi cache unavailable after init");
                     Err(anyhow::anyhow!(HardwareError::WmiConnection(
@@ -605,6 +712,139 @@ mod tests {
     }
 
     // ── S19-07: Cache lifecycle and thread-local tests ───────────────────────
+
+    // ── IoTSvc crash regression: COM teardown ordering at thread exit ──────
+    //
+    // `IoTSvc` died 43 times in 11 hours with `0xc0000005` inside a
+    // `thread_local!` destructor: at thread exit COM tears the apartment down
+    // and unloads the WMI providers BEFORE Rust runs the TLS destructors, so
+    // releasing a cached `IWbemServices` calls a vtable slot in unmapped
+    // memory. These tests pin the rule that keeps that from coming back.
+
+    /// The teardown rule is decided by the apartment state and by nothing else.
+    #[cfg(windows)]
+    #[test]
+    fn teardown_releases_only_while_com_is_alive() {
+        assert_eq!(teardown_action(true), Teardown::Release);
+        assert_eq!(teardown_action(false), Teardown::Leak);
+        assert_ne!(
+            teardown_action(false),
+            teardown_action(true),
+            "the two apartment states must not produce the same teardown"
+        );
+    }
+
+    /// A thread that initialised COM must report a live apartment, so its cached
+    /// connections are released normally instead of leaked.
+    ///
+    /// The state BEFORE `ensure_com` is deliberately not asserted: in a process
+    /// that already used COM (the full suite does), a brand-new thread can be
+    /// handed an implicit MTA (`CoGetApartmentType` -> `APTTYPE_MNA`), and
+    /// `com_alive` reporting "live" is the conservative direction: it only ever
+    /// enables a `Release` that COM itself supports. The dangerous direction
+    /// ("live" while the apartment is really gone) is what the guard removes, and
+    /// the rule itself is pinned by `teardown_releases_only_while_com_is_alive`.
+    #[cfg(windows)]
+    #[test]
+    fn com_alive_reports_live_after_ensure_com() {
+        std::thread::spawn(|| {
+            let _implicit_apartment_before_init = com_alive();
+            ensure_com().expect("COM init on the test thread");
+            assert!(
+                com_alive(),
+                "after ensure_com the apartment is live, so cached connections \
+                 may be released normally"
+            );
+        })
+        .join()
+        .expect("COM-alive test thread panicked");
+    }
+
+    /// `release_current_thread` empties the cache and is idempotent, so a worker
+    /// thread that never touched WMI pays nothing for calling it.
+    #[cfg(windows)]
+    #[test]
+    fn release_current_thread_empties_the_cache_idempotently() {
+        std::thread::spawn(|| {
+            release_current_thread();
+            WMI_CACHE.with(|cell| assert!(cell.borrow().is_none()));
+            release_current_thread();
+            release_current_thread();
+            WMI_CACHE.with(|cell| assert!(cell.borrow().is_none()));
+        })
+        .join()
+        .expect("release_current_thread test thread panicked");
+    }
+
+    /// The scenario, run in a FRESH process by the test below: one worker thread
+    /// queries WMI and then exits, optionally releasing its cache first.
+    ///
+    /// Isolation is load-bearing. Inside a shared test process the WMI provider
+    /// DLLs stay mapped because other threads hold their own connections, so the
+    /// unload that killed `IoTSvc` cannot happen and the loop would never go red.
+    /// In a process whose only WMI user is this one thread, the provider refcount
+    /// drops to zero at thread exit, exactly as in the pipe service.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "helper scenario: only runs as the child of the fresh-process test"]
+    fn wmi_worker_tls_teardown_scenario() {
+        let release_explicitly = std::env::var("MICONTROL_WMI_TEST_RELEASE").as_deref() == Ok("1");
+        std::thread::spawn(move || {
+            let rows: Vec<std::collections::HashMap<String, wmi::Variant>> =
+                with_cimv2(|conn| Ok(conn.raw_query("SELECT Caption FROM Win32_OperatingSystem")?))
+                    .expect("WMI query on a short-lived worker thread must succeed");
+            assert!(!rows.is_empty(), "Win32_OperatingSystem returned no rows");
+            if release_explicitly {
+                // What the pipe service now does at the end of every request
+                // thread: release while COM is still alive.
+                release_current_thread();
+            }
+            // Otherwise the thread simply returns: COM tears the apartment down
+            // and unloads the providers, then Rust runs the `thread_local!`
+            // destructor, which must leak instead of releasing into an unmapped
+            // vtable.
+        })
+        .join()
+        .expect("the worker thread must not panic");
+        println!("scenario survived (explicit_release={release_explicitly})");
+    }
+
+    /// Red-capable regression loop for the `IoTSvc` crash: the exact sequence
+    /// (one WMI-using worker thread per pipe request) in a fresh process, for
+    /// both teardown layers.
+    ///
+    /// With the `com_alive` guard removed the child dies with `0xc0000005` and
+    /// this test fails; with the fix both children must exit clean. Run it with
+    /// `cargo test --lib -- --ignored worker_threads_that_used_wmi_survive_teardown_in_a_fresh_process`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "spawns helper processes and needs a live WMI service"]
+    fn worker_threads_that_used_wmi_survive_teardown_in_a_fresh_process() {
+        use crate::util::process_spawn;
+        use std::process::Command;
+        use std::time::Duration;
+
+        let exe = std::env::current_exe().expect("the test binary must be runnable");
+        for release in ["0", "1"] {
+            let mut cmd = Command::new(&exe);
+            cmd.args([
+                "--exact",
+                "hw::wmi_cache::tests::wmi_worker_tls_teardown_scenario",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ]);
+            cmd.env("MICONTROL_WMI_TEST_RELEASE", release);
+            let out = process_spawn::run_capture(&mut cmd, Duration::from_secs(120))
+                .expect("the helper process must start and finish within its budget");
+            assert!(
+                out.success(),
+                "child process died (release={release}, exit={:?}): {}",
+                out.status.code(),
+                out.stdout_str()
+            );
+        }
+    }
 
     #[test]
     fn test_invalidate_clears_thread_local_cache() {

@@ -1652,6 +1652,17 @@ mod pipe_server {
                 let _slot = slot;
                 let handle = HANDLE(raw_handle as *mut core::ffi::c_void);
                 handle_client(handle);
+                // Release the WMI/COM connections this request opened BEFORE the
+                // thread exits. At thread exit COM tears the apartment down (and
+                // unloads the WMI providers) first, and Rust runs the
+                // `thread_local!` destructors after that; releasing a cached
+                // `IWbemServices` there calls a vtable slot in unmapped memory
+                // and takes this whole service down with it. Live evidence:
+                // 43 `0xc0000005` crashes in 11 h of `IoTSvc` (SCM 7034,
+                // `WIN32_EXIT_CODE 1067`), all of them inside that destructor,
+                // reached from `{"op":"charge_limit_read"}` which reads the EC
+                // charge limit over WMI.
+                micontrol_lib::hw::wmi_cache::release_current_thread();
                 unsafe {
                     DisconnectNamedPipe(handle).ok();
                     CloseHandle(handle).ok();
@@ -2527,6 +2538,16 @@ mod service {
 
                 set_service_state(h, SERVICE_RUNNING);
 
+                // A crash must be restarted by the SCM in seconds, not waited out
+                // until a healer episode comes round. The live machine had NO
+                // failure actions at all (`sc qfailure IoTSvc` -> `RESET_PERIOD 0`
+                // with no `ACTIONS`), so every unexpected exit left `IoTSvc`
+                // stopped until the bridge's repair cooldown expired. Configuring
+                // it here (rather than only in the repair path) means a HEALTHY
+                // service gets the ladder too, which the repair path can never do
+                // because it only runs when something is already wrong.
+                ensure_self_recovery_actions();
+
                 while !SHUTDOWN.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
@@ -2534,6 +2555,12 @@ mod service {
                 shutdown.store(true, Ordering::SeqCst);
                 let _ = pipe_thread.join();
                 set_service_state(h, SERVICE_STOPPED);
+                // Loud, controlled shutdown line: an intentional `sc stop` must be
+                // distinguishable in our own log from an abrupt exit (which is what
+                // the SCM reports as 1067 with no line here at all).
+                super::service_log(
+                    "service stopped: reported SERVICE_STOPPED to the SCM (controlled stop)",
+                );
             }
             Err(e) => {
                 eprintln!("[ecram_service] RegisterServiceCtrlHandlerW failed: {e}");
@@ -2541,8 +2568,47 @@ mod service {
         }
     }
 
+    /// Install and verify the SCM restart ladder for this very service.
+    ///
+    /// Best-effort by design: a service account that cannot reconfigure its own
+    /// entry must not fail the start, but the readback makes the gap visible in
+    /// `ecram_service.log` instead of leaving "no recovery" as an invisible
+    /// property of the machine.
+    fn ensure_self_recovery_actions() {
+        use micontrol_lib::util::win_service::{self, FailureAction};
+
+        /// `sc failure reset= 86400`: forget the failure count after a day, so a
+        /// long outage is not remembered as one endless failure streak.
+        const RESET_PERIOD_SECS: u32 = 86_400;
+
+        let ladder = [
+            FailureAction::restart(5_000),
+            FailureAction::restart(10_000),
+            FailureAction::restart(30_000),
+        ];
+        if let Err(e) = win_service::set_failure_actions(SERVICE_NAME, &ladder, RESET_PERIOD_SECS) {
+            super::service_log(&format!(
+                "recovery actions NOT configured for {SERVICE_NAME} ({e}); \
+                 an unexpected exit will not be restarted by the SCM"
+            ));
+            return;
+        }
+        match win_service::failure_actions(SERVICE_NAME) {
+            Ok(readback) if readback.actions == ladder => super::service_log(
+                "recovery actions verified: restart/5000, restart/10000, restart/30000 (reset 86400s)",
+            ),
+            Ok(readback) => super::service_log(&format!(
+                "recovery actions read back as {readback:?}, not the restart ladder"
+            )),
+            Err(e) => super::service_log(&format!(
+                "recovery actions written but unreadable ({e})"
+            )),
+        }
+    }
+
     extern "system" fn service_control_handler(control: u32) {
         if control == SERVICE_CONTROL_STOP {
+            super::service_log("received SERVICE_CONTROL_STOP from the SCM");
             SHUTDOWN.store(true, Ordering::SeqCst);
         }
     }

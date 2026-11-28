@@ -238,8 +238,24 @@ async fn check_iot() {
         .await
         {
             Ok(_) => {
+                // An `ok` answer is not proof: the healer returns `ok` for a
+                // throttled no-op and for a healthy verification alike. Re-probe
+                // the data path and only declare health on a positive readback,
+                // the same rule `check_bridge` follows.
+                let after =
+                    crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
+                        Ok(crate::hw::iotservice::is_pipe_available())
+                    })
+                    .await
+                    .unwrap_or(false);
                 if let Ok(mut snapshot) = state().lock() {
-                    mark_healthy(&mut snapshot.iot, now_ms());
+                    if after {
+                        mark_healthy(&mut snapshot.iot, now_ms());
+                    } else {
+                        snapshot.iot.state = HealthState::Degraded;
+                        snapshot.iot.last_error =
+                            Some("IoT service pipe still unavailable after ensure".into());
+                    }
                 }
             }
             Err(error) => {

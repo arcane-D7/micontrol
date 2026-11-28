@@ -1,7 +1,7 @@
 {
   "comment": "Ratchet over Result<_, String> occurrences in src-tauri/src (grep-equivalent, line-based regex /Result<[^>]+, String>/). Counts may only go down: fixed files are removed with `node scripts/check-error-catalog.mjs --update`. New occurrences fail the gate; new files with occurrences fail the gate.",
   "pattern": "Result<[^>]+, String>",
-  "total": 249,
+  "total": 245,
   "files": {
     "src-tauri/src/bin/ecram_service.rs": 30,
     "src-tauri/src/bin/micontrol_bridge.rs": 8,
@@ -22,7 +22,7 @@
     "src-tauri/src/hw/color_calibration.rs": 5,
     "src-tauri/src/hw/display.rs": 2,
     "src-tauri/src/hw/ecram.rs": 3,
-    "src-tauri/src/hw/ecram_service_mgmt.rs": 5,
+    "src-tauri/src/hw/ecram_service_mgmt.rs": 1,
     "src-tauri/src/hw/event_log.rs": 8,
     "src-tauri/src/hw/hotkeys/mod.rs": 3,
     "src-tauri/src/hw/icc_catalog.rs": 10,
