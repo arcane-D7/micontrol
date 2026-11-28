@@ -64,6 +64,58 @@ const STEPS = [
     cmd: 'node',
     args: ['scripts/check-handle-leaks.mjs'],
   },
+  {
+    // B7 / RNF-14: no console window may flash. Ratchet: the baseline lists
+    // today's offenders; any NEW spawn without CREATE_NO_WINDOW fails here.
+    id: 'windowless-spawn',
+    name: 'Windowless spawn gate (no console flash)',
+    cmd: 'node',
+    args: ['scripts/check-windowless-spawns.mjs'],
+  },
+  {
+    id: 'spawn-timeout',
+    name: 'Spawn timeout gate (no unbounded child)',
+    cmd: 'node',
+    args: ['scripts/check-spawn-timeout.mjs'],
+  },
+  {
+    id: 'error-catalog',
+    name: 'Central error catalog gate',
+    cmd: 'node',
+    args: ['scripts/check-error-catalog.mjs'],
+  },
+  {
+    id: 'state-writes',
+    name: 'State writes gate (state_store only)',
+    cmd: 'node',
+    args: ['scripts/check-state-writes.mjs'],
+  },
+  {
+    // C1a / U3 (architecture governor D3): every Windows service operation
+    // goes through the native SCM API in src-tauri/src/util/win_service.rs.
+    // Ratchet: the baseline holds ZERO entries — service ops were migrated
+    // off sc.exe wholesale, any new spawn fails here immediately.
+    id: 'service-calls',
+    name: 'Service calls gate (no sc.exe spawns)',
+    cmd: 'node',
+    args: ['scripts/check-service-calls.mjs'],
+  },
+  {
+    id: 'schtasks-calls',
+    name: 'Single schtasks port gate',
+    cmd: 'node',
+    args: ['scripts/check-schtasks-calls.mjs'],
+  },
+  {
+    // SEC-11: no command handler may write BIOS/EC/services/drivers/HKLM
+    // in-process without elevation or an allowlist. Ratchet baseline holds
+    // ZERO ungated sites - the `hq_*` BIOS family was the only unvalidated
+    // in-process privileged writer and is now closed. Any new one fails here.
+    id: 'command-gates',
+    name: 'Command privilege gate (no ungated BIOS/EC/HKLM writer)',
+    cmd: 'node',
+    args: ['scripts/check-command-gates.mjs'],
+  },
   { id: 'toolchain', name: 'Toolchain consistency check', fn: checkToolchain },
 ];
 

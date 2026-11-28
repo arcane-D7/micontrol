@@ -1,12 +1,33 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-PT">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>MiControl</title>
-    <link rel="preload" as="font" type="font/woff2" href="/fonts/Outfit-Variable.woff2" crossorigin />
-    <link rel="preload" as="font" type="font/woff2" href="/fonts/JetBrainsMono-Variable.woff2" crossorigin />
+    <!--
+      As duas preloads de fonte saíram: /fonts/Outfit-Variable.woff2 e
+      /fonts/JetBrainsMono-Variable.woff2 nunca existiram (404 em cada
+      arranque). Não há @font-face, portanto o tema prometia uma face que
+      não tem. Decisão do dono: system-ui + ui-monospace.
+    -->
+    <script>
+      /* Resolve o tema ANTES da primeira pintura. App.tsx continua a ser o
+         dono do modo (localStorage 'micontrol_theme'); isto só evita o flash
+         claro quando o sistema está em escuro e o modo é 'auto'. */
+      (function () {
+        try {
+          var pref = localStorage.getItem('micontrol_theme') || 'auto';
+          var dark =
+            pref === 'dark' ||
+            (pref === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

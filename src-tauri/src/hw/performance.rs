@@ -55,8 +55,37 @@ pub struct PerformanceResult {
 /// writes — the two channels were writing different subsystems. We now write
 /// BOTH: HQ WMI (fan curve + DPTF table) AND the EC power mode (PL1/PL2).
 pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<PerformanceResult> {
-    // Always persist to registry
-    persist_to_registry(mode)?;
+    set_performance_mode_impl(mode, true)
+}
+
+/// Re-assert the saved preference without writing the registry.
+///
+/// Startup and lid transitions run in the user's session, where
+/// `HKLM\SOFTWARE\MI\PerformanceMode` is not writable. The preference is
+/// already persisted, so those paths must skip the registry step and only
+/// make the EC match it; otherwise `persist_to_registry` fails before the EC
+/// is touched and the fan keeps the firmware default.
+pub fn reapply_saved_mode() -> HardwareResult<()> {
+    let pref = get_performance_mode()?;
+    let res = set_performance_mode_impl(pref, false)?;
+    if !res.success {
+        return Err(crate::hw::errors::HardwareError::Other(format!(
+            "EC refused the saved profile ({})",
+            res.method
+        )));
+    }
+    Ok(())
+}
+
+fn set_performance_mode_impl(
+    mode: PerformanceMode,
+    persist: bool,
+) -> HardwareResult<PerformanceResult> {
+    // Persist to the registry only on a user action; the startup/lid reapply
+    // is already persisted and runs unelevated.
+    if persist {
+        persist_to_registry(mode)?;
+    }
 
     // Also sync the Windows 11 power overlay so the native power settings
     // slider reflects the change (requires this process to be elevated).
@@ -79,11 +108,46 @@ pub fn set_performance_mode(mode: PerformanceMode) -> HardwareResult<Performance
     #[cfg(windows)]
     match send_via_hq_wmi(mode) {
         Ok(()) => {
+            // The EC mode changed — drop the cached readback so the next UI poll
+            // shows the real value instead of up to 3 s of stale mode.
+            crate::hw::fan::invalidate_ec_mode_cache();
+
+            // VERIFY the value actually latched in `QFAN`. The HQ WMI method
+            // returns success even when the EC refuses the value: measured live
+            // on the TM2424 firmware, Turbo (2) latches and LongBattery (11)
+            // leaves QFAN untouched — reporting success there was a lie.
+            let want = mode.to_hw_value() as u16;
+            let raw = crate::hw::wmi_ec::read_active_mode().ok().map(|(r, _)| r);
+            if raw == Some(want) {
+                return Ok(PerformanceResult {
+                    success: true,
+                    method: "hq_wmi+ec_wmaa+registry+overlay".to_string(),
+                    mode,
+                });
+            }
+            // LongBattery (11) is refused by this firmware's QFAN register; the
+            // Smart profile (10) is the adaptive battery curve it does accept.
+            if mode == PerformanceMode::LongBattery && send_via_hq_wmi_raw(10).is_ok() {
+                if let Ok((r2, _)) = crate::hw::wmi_ec::read_active_mode() {
+                    if r2 == 10 {
+                        crate::hw::fan::invalidate_ec_mode_cache();
+                        log::info!(
+                            "[perf] LongBattery: QFAN refuses 11; Smart profile (10) latched instead"
+                        );
+                        return Ok(PerformanceResult {
+                            success: true,
+                            method: "hq_wmi+smart_fallback+ec_wmaa+registry+overlay".to_string(),
+                            mode,
+                        });
+                    }
+                }
+            }
+            log::warn!("[perf] EC refused the fan profile: requested {want}, QFAN reads {raw:?}");
             return Ok(PerformanceResult {
-                success: true,
-                method: "hq_wmi+ec_wmaa+registry+overlay".to_string(),
+                success: false,
+                method: format!("hq_wmi(refused {want}->{raw:?})+ec_wmaa+registry+overlay"),
                 mode,
-            })
+            });
         }
         Err(e) => log::warn!("HQ WMI SetPerformanceMode failed, trying VHF: {e}"),
     }
@@ -487,6 +551,35 @@ fn find_hq_wmi_instance_name(wmi: &wmi::WMIConnection) -> Result<String> {
 /// (uses ACPI\PNP0C14\0 device, WmiMethodId=9).
 #[cfg(windows)]
 fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
+    send_via_hq_wmi_raw(mode.to_hw_value())
+}
+
+/// Write the EC mode register (`QFAN`) through
+/// `HQWmiCommonInterface.SetPerformanceMode(req)`.
+///
+/// This is the channel the original Xiaomi app uses, and the only one on this
+/// firmware that moves `QFAN` for values the WMAA read path cannot even report
+/// (`0` Silence, `1` Balance, `11` LongBattery, …). The AML is
+/// `ECWT(ToInteger(req), QFAN); Sleep(5ms); NTDP(ECRD(QFAN))`, so a readback of
+/// `WMAA 0x0800 / 0` proves whether it landed (see
+/// [`crate::hw::wmi_ec::qfan_write_verified`]).
+///
+/// Deliberately does **not** touch the registry or the Windows overlay — callers
+/// that only need the hardware write (the fan tab verify/retry path) must not
+/// silently rewrite the performance-mode preference.
+#[cfg(windows)]
+pub fn set_ec_qfan(hw_value: u32) -> Result<()> {
+    send_via_hq_wmi_raw(hw_value)
+}
+
+/// Non-Windows stub: the HQ WMI channel is ACPI/Windows-only.
+#[cfg(not(windows))]
+pub fn set_ec_qfan(_hw_value: u32) -> Result<()> {
+    anyhow::bail!("HQ WMI performance mode is Windows-only")
+}
+
+#[cfg(windows)]
+fn send_via_hq_wmi_raw(hw_value: u32) -> Result<()> {
     use windows::core::{BSTR, VARIANT};
     use windows::Win32::System::Wmi::{WBEM_FLAG_RETURN_WBEM_COMPLETE, WBEM_GENERIC_FLAG_TYPE};
     use wmi::{COMLibrary, WMIConnection};
@@ -501,7 +594,7 @@ fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
     let instance_name = find_hq_wmi_instance_name(&wmi)
         .context("HQ WMI: cannot find active HQWmiCommonInterface instance")?;
 
-    let mode_str = mode.to_hw_value().to_string();
+    let mode_str = hw_value.to_string();
 
     // WMI object-path format requires backslashes in key values to be escaped as \\.
     // e.g. InstanceName="ACPI\PNP0C14\0_0"  →  "ACPI\\PNP0C14\\0_0" in the path string.
@@ -563,7 +656,7 @@ fn send_via_hq_wmi(mode: PerformanceMode) -> Result<()> {
             let ret_str = BSTR::try_from(&ret_v)
                 .map(|b| b.to_string())
                 .unwrap_or_default();
-            log::debug!("HQ WMI SetPerformanceMode({mode:?}) → {ret_str}");
+            log::debug!("HQ WMI SetPerformanceMode({hw_value}) → {ret_str}");
         }
     }
 

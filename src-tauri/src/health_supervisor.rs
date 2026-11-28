@@ -139,26 +139,25 @@ async fn bounded_recovery<T>(
 }
 
 async fn check_bridge() {
-    let available = crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
-        Ok(crate::elev_bridge::is_bridge_service_available())
-    })
-    .await
-    .unwrap_or(false);
+    let health = probe_bridge_health().await;
     let at = now_ms();
     // S51: keep the elev_bridge circuit breaker in sync — when the bridge
-    // service comes back (or goes away) the breaker must know.
-    if available {
+    // service comes back (or goes away) the breaker must know. Note that a
+    // RUNNING service with a wedged pipe still counts as "infrastructure
+    // present": the scheduled-task path may work, and P1 must not treat the
+    // busy pipe as proof that the service is missing.
+    if health.service_running() {
         crate::elev_bridge::note_elevated_recovery();
     }
     let should_recover = state()
         .lock()
         .map(|mut snapshot| {
             begin_check(&mut snapshot.bridge, at);
-            if available {
+            if health.is_healthy() {
                 mark_healthy(&mut snapshot.bridge, at);
                 false
             } else {
-                mark_failure(&mut snapshot.bridge, at, "bridge pipe unavailable".into())
+                mark_failure(&mut snapshot.bridge, at, health.describe().to_string())
             }
         })
         .unwrap_or(false);
@@ -169,8 +168,18 @@ async fn check_bridge() {
         }
         match bounded_recovery(crate::elev_bridge::ensure_bridge_service(), "bridge").await {
             Ok(_) => {
+                // Re-probe before declaring recovery: `ensure_bridge_service`
+                // answering "already_running" (P1, SCM-based) says nothing about
+                // the data path — C-01 leaves a RUNNING service with a dead pipe,
+                // and marking it healthy here would hide that forever.
+                let after = probe_bridge_health().await;
                 if let Ok(mut snapshot) = state().lock() {
-                    mark_healthy(&mut snapshot.bridge, now_ms());
+                    if after.is_healthy() {
+                        mark_healthy(&mut snapshot.bridge, now_ms());
+                    } else {
+                        snapshot.bridge.state = HealthState::Degraded;
+                        snapshot.bridge.last_error = Some(after.describe().to_string());
+                    }
                 }
             }
             Err(error) => {
@@ -181,6 +190,18 @@ async fn check_bridge() {
             }
         }
     }
+}
+
+/// Probe the bridge (SCM + pipe) off the async runtime.
+///
+/// `bridge_health()` performs two blocking Win32 calls (SCM query + a
+/// `CreateFileW` on the pipe), so it must not run on a runtime worker.
+async fn probe_bridge_health() -> crate::elev_bridge::BridgeHealth {
+    crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
+        Ok(crate::elev_bridge::bridge_health())
+    })
+    .await
+    .unwrap_or(crate::elev_bridge::BridgeHealth::ServiceUnknown)
 }
 
 async fn check_iot() {
@@ -217,8 +238,24 @@ async fn check_iot() {
         .await
         {
             Ok(_) => {
+                // An `ok` answer is not proof: the healer returns `ok` for a
+                // throttled no-op and for a healthy verification alike. Re-probe
+                // the data path and only declare health on a positive readback,
+                // the same rule `check_bridge` follows.
+                let after =
+                    crate::util::blocking::run_blocking_timeout(HEALTH_CHECK_TIMEOUT, || {
+                        Ok(crate::hw::iotservice::is_pipe_available())
+                    })
+                    .await
+                    .unwrap_or(false);
                 if let Ok(mut snapshot) = state().lock() {
-                    mark_healthy(&mut snapshot.iot, now_ms());
+                    if after {
+                        mark_healthy(&mut snapshot.iot, now_ms());
+                    } else {
+                        snapshot.iot.state = HealthState::Degraded;
+                        snapshot.iot.last_error =
+                            Some("IoT service pipe still unavailable after ensure".into());
+                    }
                 }
             }
             Err(error) => {
@@ -289,27 +326,45 @@ async fn check_ambient_sensor() {
     .await
     .ok();
     let at = now_ms();
-    let healthy = result
-        .as_ref()
-        .and_then(|display| display.ambient_lux)
-        .is_some_and(|lux| lux.is_finite() && lux > 0.5);
-
+    // The diagnosis (Available / NoSensor / FrozenReport) decides what a
+    // failed reading MEANS. A diagnosed-stable sensor must not accumulate
+    // consecutive_failures forever or trigger reset bursts: the hardware is
+    // known (production proof: the TCS3408 froze for 4+ days while the
+    // supervisor requested a reset every cycle).
+    let sensor_state = crate::hw::display::ambient_sensor_state();
+    let diagnosed = sensor_state.is_diagnosed();
+    let healthy = result.as_ref().is_some_and(|d| {
+        d.ambient_lux
+            .is_some_and(|lux| lux.is_finite() && lux > 0.5)
+    });
+    let mut should_request_reset = false;
     if let Ok(mut snapshot) = state().lock() {
         begin_check(&mut snapshot.ambient_sensor, at);
         if healthy {
             mark_healthy(&mut snapshot.ambient_sensor, at);
+        } else if diagnosed {
+            snapshot.ambient_sensor.state = HealthState::Degraded;
+            snapshot.ambient_sensor.last_error = Some(match sensor_state {
+                crate::hw::display::AmbientSensorState::FrozenReport => {
+                    "ambient sensor present but not reporting (frozen reports)".to_string()
+                }
+                _ => "this device has no ambient light sensor".to_string(),
+            });
         } else {
+            // Undiagnosed (Unknown / transient Available): keep the old
+            // behaviour — count failures and reset after the burst.
             snapshot.ambient_sensor.state = HealthState::Degraded;
             snapshot.ambient_sensor.consecutive_failures = snapshot
                 .ambient_sensor
                 .consecutive_failures
                 .saturating_add(1);
-            snapshot.ambient_sensor.last_error = Some("ambient sensor reading unavailable".into());
+            snapshot.ambient_sensor.last_error =
+                Some("ambient sensor reading unavailable".to_string());
+            should_request_reset = true;
         }
     }
-
-    if !healthy {
-        crate::hw::display::request_sensor_reset();
+    if should_request_reset {
+        crate::hw::display::request_sensor_reset("ambient sensor degraded");
     }
 }
 

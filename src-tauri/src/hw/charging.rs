@@ -1,500 +1,1766 @@
-//! Charging threshold control via IoTService IPC and registry fallback.
+//! Charging limit ("Battery Care") — firmware-authoritative path.
 //!
-//! Reads and sets the battery charging limit through the Xiaomi IoT
-//! service named pipe, with a Windows Registry fallback path.
+//! # What actually controls the limit on this platform
+//!
+//! The limit lives in two EC registers: `ERAM 0xA4` (`LONL`, bit0 = care on)
+//! and `ERAM 0xA7` (`HBDA`, the limit in percent). Both sit inside the
+//! `SystemMemory 0xFE0B0300` region that `IoTDriver.sys` **refuses** to expose
+//! through its ECRAM IOCTLs (`STATUS_ACCESS_DENIED` / `0x80070005`, verified
+//! live even for the SYSTEM `IoTService.exe`). Every ERAM write path this file
+//! used to attempt failed and silently fell back to the registry, so the UI
+//! showed a limit the hardware never received.
+//!
+//! The firmware exposes the same two registers through the ACPI `WMAA` method
+//! (`MICommonInterface.MiInterface`, `\_SB.PC00.WMID`, `_HID` `PNP0C14`,
+//! `_UID` `"MIFS"`). Decoded from `ssdt24.dsl`, Method `WMAA`, `FUN1=0xFB00`,
+//! `FUN2=0x1000`, `FUN3=0x02`:
+//!
+//! | FUN4 | effect                                        |
+//! |------|-----------------------------------------------|
+//! | 0    | `LONL &= ~1`, `HBDA = 0x64` → care OFF (100%) |
+//! | 1    | `LONL |= 1`,  `HBDA = 0x50` → 80%             |
+//! | 4    | `LONL |= 1`,  `HBDA = 0x5A` → 90%             |
+//! | 5    | `LONL |= 1`,  `HBDA = 0x46` → 70%             |
+//! | 6    | `LONL |= 1`,  `HBDA = 0x3C` → 60%             |
+//! | 7    | `LONL |= 1`,  `HBDA = 0x32` → 50%             |
+//! | 8    | `LONL |= 1`,  `HBDA = 0x28` → 40%             |
+//!
+//! The read branch (`FUN1=0xFA00`, same FUN2/FUN3) returns the same code in
+//! `FRD1`: 0 = care off, otherwise the active level. The code set is the OEM
+//! enum the original PC Manager UI sends (`gp.One=1 … gp.Eight=8`), i.e. the
+//! payload is a **level code, not a percentage**.
+//!
+//! This module therefore writes and verifies through WMAA and never claims
+//! success without a read-back. The registry (`HKLM\SOFTWARE\MI\IoTDriver`
+//! `ChargingThreshold`) is only the user's *requested* value and for
+//! re-assertion; it is never reported as applied hardware state.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-/// Named pipe path to the IoTService IPC broker.
-const IOT_PIPE: &str = r"\\.\pipe\LOCAL\IoTService_IPC_Broker";
-
-/// Registry fallback for charging threshold.
+/// Registry key shared with the original Xiaomi IoT software.
 #[cfg(windows)]
 const CHARGE_REG_KEY: &str = r"SOFTWARE\MI\IoTDriver";
 #[cfg(windows)]
 const CHARGE_REG_VALUE: &str = "ChargingThreshold";
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// WMAA sub-command group used by the charging-protection method.
+pub const FUN2_CHARGE: u16 = 0x1000;
+/// WMAA action id inside `FUN2_CHARGE` (read and write share it).
+pub const FUN3_CHARGE: u16 = 0x02;
+/// `SGER` value the ACPI method returns on success.
+pub const SGER_SUCCESS: u16 = 0x8000;
+
+/// Percentages the firmware can express. 100 means "no limit" (care off).
+pub const VALID_THRESHOLDS: [u8; 7] = [40, 50, 60, 70, 80, 90, 100];
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct ChargingResult {
+    /// True only when the firmware accepted **and** read back the new value.
     pub success: bool,
+    /// `wmi_wmaa` when the value is on the hardware, `unverified` otherwise.
     pub method: String,
+    /// The value the caller asked for.
     pub threshold: u8,
+    /// The value the firmware reported after the write (`None` = unreadable).
+    pub hardware_threshold: Option<u8>,
+    /// Human-readable reason when `success` is false.
+    pub detail: Option<String>,
 }
 
-/// Valid charging threshold levels (percent). 100 = no limit (charge to full).
-const VALID_THRESHOLDS: [u8; 6] = [40, 50, 60, 70, 80, 100];
+/// The truth about the charging limit: what the user asked for, what the
+/// firmware actually holds, and whether they agree.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ChargeLimitState {
+    /// Last requested value (registry). 100 = no limit.
+    pub requested_threshold: u8,
+    /// Value read back from the firmware; `None` when the read failed.
+    pub hardware_threshold: Option<u8>,
+    /// Raw firmware level code (0,1,4,5,6,7,8); `None` when unreadable.
+    pub hardware_code: Option<u8>,
+    /// True only when the firmware read succeeded and equals the request.
+    pub applied: bool,
+    /// `firmware` (live read) | `cache` (last confirmed value, see
+    /// `last_verified_ms`) | `registry` (nothing read) — how much is real.
+    pub source: String,
+    /// Why the hardware value is unknown or stale, when it is.
+    pub detail: Option<String>,
+    /// When the firmware value was last confirmed by a real read (ms since
+    /// epoch). `None` = never confirmed. Lets the UI say how old the
+    /// confirmation is instead of presenting a cached value as fresh.
+    #[serde(default)]
+    pub last_verified_ms: Option<u64>,
+}
 
-pub fn set_charging_threshold(threshold: u8) -> HardwareResult<ChargingResult> {
-    if !VALID_THRESHOLDS.contains(&threshold) {
-        return Err(HardwareError::InvalidConfig(format!(
-            "Invalid threshold {threshold}. Must be one of: 40,50,60,70,80,100"
-        )));
+/// Map a user-facing percentage to the firmware level code.
+///
+/// Returns `None` for values the firmware cannot express.
+pub fn percent_to_code(percent: u8) -> Option<u8> {
+    match percent {
+        40 => Some(8),
+        50 => Some(7),
+        60 => Some(6),
+        70 => Some(5),
+        80 => Some(1),
+        90 => Some(4),
+        100 => Some(0),
+        _ => None,
     }
+}
 
-    // Try the ecram_service pipe first (our IoTService.exe replacement).
-    // It writes the threshold directly to the EC ERAM registers (0xA4/0xA7).
-    if crate::hw::ecram::is_pipe_broker_available() {
-        let request = format!(r#"{{"op":"iot_set_charging_threshold","threshold":{threshold}}}"#);
-        match crate::hw::ecram::send_pipe_request(&request) {
-            Ok(response) => {
-                let parsed: serde_json::Value = match serde_json::from_str(&response) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::warn!("Charging pipe response not JSON: {e}");
-                        serde_json::Value::Null
-                    }
-                };
-                if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    persist_threshold_registry(threshold).ok();
-                    return Ok(ChargingResult {
-                        success: true,
-                        method: "ecram_pipe".to_string(),
-                        threshold,
-                    });
-                }
-                let err = parsed
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown ecram charging error");
-                log::warn!("ecram charging threshold failed: {err}, falling back to registry");
-            }
-            Err(e) => log::warn!("ecram charging pipe unavailable: {e}, falling back to registry"),
-        }
-        persist_threshold_registry(threshold)
-            .context("Registry fallback for charging threshold")?;
-        return Ok(ChargingResult {
-            success: true,
-            method: "registry".to_string(),
-            threshold,
-        });
+/// Map a firmware level code back to a percentage.
+pub fn code_to_percent(code: u8) -> Option<u8> {
+    match code {
+        8 => Some(40),
+        7 => Some(50),
+        6 => Some(60),
+        5 => Some(70),
+        1 => Some(80),
+        4 => Some(90),
+        0 => Some(100),
+        _ => None,
     }
+}
 
-    // Try named pipe first
-    match send_via_pipe(threshold) {
-        Ok(()) => {
-            persist_threshold_registry(threshold).ok();
-            return Ok(ChargingResult {
-                success: true,
-                method: "iot_pipe".to_string(),
-                threshold,
-            });
-        }
-        Err(e) => log::warn!("IoT pipe send failed: {e}, falling back to registry"),
-    }
+/// Parse the `FRD1` value of a `FUN2=0x1000 / FUN3=0x02` read into a code.
+///
+/// `FRD1` is a DWORD; anything outside the OEM code set is a firmware
+/// surprise and is rejected instead of being coerced into a percentage.
+pub fn parse_level_code(frd1: u32) -> Option<u8> {
+    let code = u8::try_from(frd1).ok()?;
+    code_to_percent(code).map(|_| code)
+}
 
-    // Registry fallback
-    persist_threshold_registry(threshold).context("Registry fallback for charging threshold")?;
-    Ok(ChargingResult {
-        success: true,
-        method: "registry".to_string(),
-        threshold,
+fn validate(threshold: u8) -> HardwareResult<u8> {
+    percent_to_code(threshold).ok_or_else(|| {
+        HardwareError::InvalidConfig(format!(
+            "Invalid threshold {threshold}. Must be one of: 40,50,60,70,80,90,100"
+        ))
     })
 }
 
-pub fn get_charging_threshold() -> HardwareResult<u8> {
+/// Read the limit straight from the firmware.
+///
+/// Returns `Err` when the WMAA read fails (no admin, provider stall, WMI
+/// blocked). Callers must not translate that error into a value.
+pub fn read_hardware_threshold() -> HardwareResult<u8> {
     #[cfg(windows)]
     {
-        // When the ecram_service pipe is active, read the live EC register
-        // (0xA7) so the UI reflects the actual hardware value.
-        if crate::hw::ecram::is_pipe_broker_available() {
-            if let Ok(response) =
-                crate::hw::ecram::send_pipe_request(r#"{"op":"iot_get_charging_threshold"}"#)
+        // Patient budget on purpose: this register is polled once per 5 min and
+        // a blank read-back is what makes the hold supervisor flap to `unknown`.
+        let resp = crate::hw::wmi_ec::wmi_read_patient(FUN2_CHARGE, FUN3_CHARGE)?;
+        if resp.sger != SGER_SUCCESS {
+            return Err(HardwareError::Wmi(format!(
+                "WMAA 0x1000/0x02 read rejected: SGER=0x{:04X}",
+                resp.sger
+            )));
+        }
+        let code = parse_level_code(resp.frd1).ok_or_else(|| {
+            HardwareError::Wmi(format!(
+                "WMAA 0x1000/0x02 returned unknown level code {:#X}",
+                resp.frd1
+            ))
+        })?;
+        Ok(code_to_percent(code).expect("parse_level_code validated the code"))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(HardwareError::NotSupported(
+            "WMI only available on Windows".into(),
+        ))
+    }
+}
+
+/// Set the charging limit in the firmware and verify it by reading back.
+///
+/// There is deliberately **no silent fallback**: a failed write is an error,
+/// because reporting success while the EC still charges to 100% is exactly
+/// the bug this function exists to fix.
+pub fn set_charging_threshold(threshold: u8) -> HardwareResult<ChargingResult> {
+    let code = validate(threshold)?;
+
+    #[cfg(windows)]
+    {
+        let resp = crate::hw::wmi_ec::wmi_write(FUN2_CHARGE, FUN3_CHARGE, code as u32)?;
+        if resp.sger != SGER_SUCCESS {
+            return Err(HardwareError::Wmi(format!(
+                "WMAA 0x1000/0x02 write rejected: SGER=0x{:04X}",
+                resp.sger
+            )));
+        }
+
+        // The ACPI method sets SGER before touching the EC and never reports
+        // a failure of the ECWT itself, so SGER alone is not proof. Read back.
+        match read_hardware_threshold() {
+            Ok(actual) if actual == threshold => {
+                persist_threshold(threshold);
+                log::info!(
+                    target: "hw::charging",
+                    "charging limit {threshold}% applied on firmware (WMAA 0x1000/0x02, code {code})"
+                );
+                Ok(ChargingResult {
+                    success: true,
+                    method: "wmi_wmaa".to_string(),
+                    threshold,
+                    hardware_threshold: Some(actual),
+                    detail: None,
+                })
+            }
+            Ok(actual) => {
+                log::warn!(
+                    target: "hw::charging",
+                    "charging limit write acknowledged but firmware reads {actual}% (wanted {threshold}%)"
+                );
+                Err(HardwareError::Wmi(format!(
+                    "firmware accepted the write but still reports {actual}% (wanted {threshold}%)"
+                )))
+            }
+            Err(e) => {
+                log::warn!(
+                    target: "hw::charging",
+                    "charging limit written but read-back failed: {e}"
+                );
+                Err(HardwareError::Wmi(format!(
+                    "limit written to firmware but the read-back failed: {e}"
+                )))
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = code;
+        Err(HardwareError::NotSupported(
+            "WMI only available on Windows".into(),
+        ))
+    }
+}
+
+/// Combined view: requested value (registry) + firmware value.
+///
+/// Never fails: an unreadable firmware is reported as
+/// `hardware_threshold: None, applied: false, detail: Some(..)` so the UI can
+/// say "not confirmed on the hardware" instead of inventing a value.
+///
+/// Runs inside the elevated dispatcher (`get_charge_limit_state` command), so
+/// this is the direct WMAA read. The app-side fast path (ecram_service pipe
+/// first, cache second) is [`read_charge_limit_state_app`].
+pub fn get_charge_limit_state() -> ChargeLimitState {
+    let requested = get_requested_threshold();
+    match read_hardware_threshold() {
+        Ok(hardware) => ChargeLimitState {
+            requested_threshold: requested,
+            hardware_threshold: Some(hardware),
+            hardware_code: percent_to_code(hardware),
+            applied: hardware == requested,
+            source: "firmware".to_string(),
+            detail: None,
+            last_verified_ms: Some(crate::util::auth::now_ms()),
+        },
+        Err(e) => ChargeLimitState {
+            requested_threshold: requested,
+            hardware_threshold: None,
+            hardware_code: None,
+            applied: false,
+            source: "registry".to_string(),
+            detail: Some(e.to_string()),
+            last_verified_ms: None,
+        },
+    }
+}
+
+/// The user's requested limit (registry), 100 when unset.
+///
+/// This is **not** hardware state — call it what it is.
+pub fn get_requested_threshold() -> u8 {
+    #[cfg(windows)]
+    {
+        load_threshold_state().unwrap_or(100)
+    }
+    #[cfg(not(windows))]
+    {
+        100
+    }
+}
+
+/// Backwards-compatible accessor: the requested limit.
+///
+/// Prefer [`get_charge_limit_state`] when the UI needs to tell the truth about
+/// whether the hardware accepted it.
+pub fn get_charging_threshold() -> HardwareResult<u8> {
+    Ok(get_requested_threshold())
+}
+
+// ── App-side readback: the ecram_service pipe first ─────────────────────────
+//
+// The WMAA read needs admin (`MICommonInterface` instance queries answer
+// 0x80041003 to non-elevated callers), so the readback used to travel the
+// whole elevated ladder: bridge pipe -> scheduled task. Production evidence
+// (tauri-app.log, 2026-11-21 05:47-06:49): seven `wmi_ec_read failed after
+// 1258-2676 ms` with "scheduled task 'MiControlElevated' is unavailable" while
+// the SAME minute's bridge dispatches answered the identical read in 8-620 ms.
+// The pipe client fails fast when all bridge pipe instances are busy (the
+// slow-poll bursts open several connections at once), the retry burns out, the
+// task is missing, and the whole read is lost. The UI then rendered "Could not
+// be read back from the firmware" although the driver and the WMI provider
+// were healthy throughout.
+//
+// `ecram_service` is a second, independent SYSTEM transport that is already
+// alive (IoTSvc): it answers the same WMAA read over `\\.\pipe\ecram_service`
+// (op `charge_limit_read`) in single-digit milliseconds. The app reads the
+// limit through that pipe first and only falls back to the elevated ladder
+// when the service pipe cannot answer (service down, or an old deploy without
+// the op). Every successful read still lands in the firmware cache, so the
+// hold supervisor and the UI keep working across a transient outage.
+
+/// Attempts for the service-pipe readback. Two tries cover a busy accept
+/// window; each miss is cheap (the pipe answers in ~1-10 ms or fails fast),
+/// and the elevated fallback keeps the total well inside the command budget.
+#[cfg(windows)]
+pub const SERVICE_PIPE_READ_ATTEMPTS: u32 = 2;
+/// Pause between the two service-pipe attempts.
+#[cfg(windows)]
+pub const SERVICE_PIPE_READ_RETRY_DELAY_MS: u64 = 150;
+
+/// Parse the `ecram_service` `charge_limit_read` response (pure, unit-tested).
+///
+/// Response shape: `{"ok":true,"cmd":"charge_limit_read","percent":80,"code":1}`.
+/// `ok:false` carries the service-side reason verbatim (which is how an old
+/// deployed service without the op reports itself: "unknown op").
+#[cfg(windows)]
+pub fn parse_service_pipe_limit_response(response: &str) -> HardwareResult<u8> {
+    let value: serde_json::Value = serde_json::from_str(response.trim()).map_err(|e| {
+        HardwareError::Ecram(format!(
+            "charge_limit_read: invalid JSON from ecram_service: {e}"
+        ))
+    })?;
+    if value.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        let reason = value
+            .get("error")
+            .and_then(|s| s.as_str())
+            .unwrap_or("ecram_service refused without a reason");
+        return Err(HardwareError::Ecram(format!(
+            "charge_limit_read refused: {reason}"
+        )));
+    }
+    let percent = value
+        .get("percent")
+        .and_then(|p| p.as_u64())
+        .ok_or_else(|| {
+            HardwareError::Ecram("charge_limit_read answered without a percent".to_string())
+        })?;
+    let percent = u8::try_from(percent).map_err(|_| {
+        HardwareError::Ecram(format!(
+            "charge_limit_read returned invalid percent {percent}"
+        ))
+    })?;
+    // The percentage must round-trip through the firmware's expressible set;
+    // anything else is a firmware surprise, not a limit.
+    if percent_to_code(percent).is_none() {
+        return Err(HardwareError::Ecram(format!(
+            "charge_limit_read returned invalid percent {percent}"
+        )));
+    }
+    Ok(percent)
+}
+
+/// Read the charge limit from the firmware through the `ecram_service` pipe.
+///
+/// Blocking named-pipe IO: callers must not run this on the async runtime
+/// (wrap in the fixed pool, like every other sync read). A successful read
+/// refreshes the app-process firmware cache. Retries cover only transport
+/// failures; a final `ok:false` from the service (bad answer, unknown op on an
+/// old deploy) is returned as-is so the caller can fall back or report.
+#[cfg(windows)]
+pub fn read_hardware_threshold_via_service_pipe() -> HardwareResult<u8> {
+    const REQUEST: &str = r#"{"op":"charge_limit_read"}"#;
+    let mut last_err = "ecram_service pipe did not answer".to_string();
+    for attempt in 0..SERVICE_PIPE_READ_ATTEMPTS {
+        match crate::hw::ecram::send_pipe_request(REQUEST) {
+            Ok(response) => {
+                // A definitive service answer (success or error) is final:
+                // retrying cannot change it.
+                let percent = parse_service_pipe_limit_response(&response)?;
+                note_firmware_value(percent);
+                return Ok(percent);
+            }
+            Err(e) => {
+                last_err = format!("ecram_service pipe: {e}");
+                if attempt + 1 < SERVICE_PIPE_READ_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        SERVICE_PIPE_READ_RETRY_DELAY_MS,
+                    ));
+                }
+            }
+        }
+    }
+    Err(HardwareError::Ecram(last_err))
+}
+
+/// Build the app-facing [`ChargeLimitState`] from one read attempt plus the
+/// last confirmed value (pure, clock-injected, unit-tested).
+///
+/// * a successful read is `firmware` truth, stamped now;
+/// * a failed read falls back to a still-fresh cache value, reported as
+///   `cache` with its ORIGINAL confirmation time (never re-stamped);
+/// * nothing readable at all is the honest `registry` state.
+fn charge_limit_state_from(
+    requested: u8,
+    read: HardwareResult<u8>,
+    now_ms: u64,
+    cached: Option<(u8, u64)>,
+) -> ChargeLimitState {
+    match read {
+        Ok(hardware) => ChargeLimitState {
+            requested_threshold: requested,
+            hardware_threshold: Some(hardware),
+            hardware_code: percent_to_code(hardware),
+            applied: hardware == requested,
+            source: "firmware".to_string(),
+            detail: None,
+            last_verified_ms: Some(now_ms),
+        },
+        Err(e) => {
+            if let Some((value, at)) = cached {
+                ChargeLimitState {
+                    requested_threshold: requested,
+                    hardware_threshold: Some(value),
+                    hardware_code: percent_to_code(value),
+                    applied: value == requested,
+                    source: "cache".to_string(),
+                    detail: Some(e.to_string()),
+                    last_verified_ms: Some(at),
+                }
+            } else {
+                ChargeLimitState {
+                    requested_threshold: requested,
+                    hardware_threshold: None,
+                    hardware_code: None,
+                    applied: false,
+                    source: "registry".to_string(),
+                    detail: Some(e.to_string()),
+                    last_verified_ms: None,
+                }
+            }
+        }
+    }
+}
+
+/// The app-side charge-limit read: ecram_service pipe first, cached value
+/// second, nothing invented.
+///
+/// `source: "registry"` means neither the pipe nor the cache could answer and
+/// the caller should consider the elevated fallback. Blocking (pipe IO): run
+/// through the fixed pool.
+#[cfg(windows)]
+pub fn read_charge_limit_state_app() -> ChargeLimitState {
+    let requested = get_requested_threshold();
+    let now = crate::util::auth::now_ms();
+    let cached = last_firmware(now);
+    let read = read_hardware_threshold_via_service_pipe();
+    charge_limit_state_from(requested, read, now, cached)
+}
+
+#[cfg(not(windows))]
+pub fn read_charge_limit_state_app() -> ChargeLimitState {
+    get_charge_limit_state()
+}
+
+// ── Reconciliation (P1-2, recheck 2026-11-11) ───────────────────────────────
+//
+// The EC forgets the limit across an S3 cycle and across `ecram_service`
+// restarts. The 2026-11-11 recheck found the hardware at 100 % (code 0) while
+// the registry still said 80 %: the limit applied at 20:17 was gone after the
+// 02:23 → 10:55 resume, and nothing ever re-asserted it. The read-back was
+// honest (`applied=false`) but the machine charged to 100 % for 8 h.
+//
+// The reconciler re-asserts the *requested* value, but only through a gate:
+// one write per cooldown window, exponential backoff on failure. A firmware
+// that refuses the write can therefore never turn into a write loop.
+
+/// Minimum spacing between two reconciliation writes.
+pub const RECONCILE_MIN_INTERVAL_MS: u64 = 5 * 60 * 1000;
+/// Ceiling for the failure backoff.
+pub const RECONCILE_MAX_BACKOFF_MS: u64 = 60 * 60 * 1000;
+/// Floor between two *forced* re-asserts (resume / AC plug).
+pub const FORCE_MIN_INTERVAL_MS: u64 = 30 * 1000;
+/// How long a firmware read-back stays usable for the hold state.
+pub const FIRMWARE_CACHE_TTL_MS: u64 = 15 * 60 * 1000;
+/// Hold supervisor tick. State machine only — it never writes on a timer.
+pub const HOLD_TICK_MS: u64 = 45 * 1000;
+/// Width of the band below the limit that still counts as "held".
+pub const HOLD_RESUME_MARGIN: u8 = 2;
+
+/// What the reconciler should do with the current (requested, hardware) pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileAction {
+    /// The firmware already holds the requested value.
+    InSync,
+    /// Care is off (requested 100 %). Turning care *off* is a user action, not
+    /// a drift to auto-correct: writing 100 % would silently disable battery
+    /// care, so the reconciler leaves it alone.
+    CareOff,
+    /// The firmware value could not be read — never write blind.
+    Unreadable,
+    /// Write the requested value now.
+    Apply,
+    /// A write is due but the gate is closed; retry after `retry_in_ms`.
+    Deferred { retry_in_ms: u64 },
+}
+
+impl ReconcileAction {
+    /// Short label for the log line.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::InSync => "in sync",
+            Self::CareOff => "care off",
+            Self::Unreadable => "hardware unreadable",
+            Self::Apply => "apply",
+            Self::Deferred { .. } => "deferred",
+        }
+    }
+}
+
+/// Write gate for the reconciler. Pure and clock-injected so every transition
+/// is unit-testable without touching the firmware.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReconcileGate {
+    last_attempt_ms: Option<u64>,
+    consecutive_failures: u32,
+}
+
+impl ReconcileGate {
+    pub const fn new() -> Self {
+        Self {
+            last_attempt_ms: None,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// How long the gate stays closed after the last attempt.
+    ///
+    /// 5 min after a success; 10, 20, 40, 60 min after consecutive failures.
+    pub fn cooldown_ms(&self) -> u64 {
+        if self.consecutive_failures == 0 {
+            return RECONCILE_MIN_INTERVAL_MS;
+        }
+        let factor = 1u64 << self.consecutive_failures.min(4);
+        RECONCILE_MIN_INTERVAL_MS
+            .saturating_mul(factor)
+            .min(RECONCILE_MAX_BACKOFF_MS)
+    }
+
+    /// Decide what to do at `now_ms`.
+    pub fn decide(&self, now_ms: u64, requested: u8, hardware: Option<u8>) -> ReconcileAction {
+        if requested >= 100 {
+            return ReconcileAction::CareOff;
+        }
+        let Some(hardware) = hardware else {
+            return ReconcileAction::Unreadable;
+        };
+        if hardware == requested {
+            return ReconcileAction::InSync;
+        }
+        match self.last_attempt_ms {
+            None => ReconcileAction::Apply,
+            Some(last) => {
+                let elapsed = now_ms.saturating_sub(last);
+                let cooldown = self.cooldown_ms();
+                if elapsed >= cooldown {
+                    ReconcileAction::Apply
+                } else {
+                    ReconcileAction::Deferred {
+                        retry_in_ms: cooldown - elapsed,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Same decision, but a *power event* (resume, AC plug) may shorten the
+    /// wait to [`FORCE_MIN_INTERVAL_MS`].
+    ///
+    /// The 5 min window exists to stop a UI poll from becoming a write loop.
+    /// A resume or an AC plug is not a poll: the EC has just dropped the
+    /// setting and every minute spent waiting is charge the user did not ask
+    /// for. The failure backoff is still honoured — a firmware that refuses
+    /// the write must never be hammered, whatever triggered the attempt.
+    pub fn decide_forced(
+        &self,
+        now_ms: u64,
+        requested: u8,
+        hardware: Option<u8>,
+    ) -> ReconcileAction {
+        let base = self.decide(now_ms, requested, hardware);
+        if !matches!(base, ReconcileAction::Deferred { .. }) {
+            return base;
+        }
+        if self.consecutive_failures > 0 {
+            return base;
+        }
+        match self.last_attempt_ms {
+            Some(last) if now_ms.saturating_sub(last) >= FORCE_MIN_INTERVAL_MS => {
+                ReconcileAction::Apply
+            }
+            _ => base,
+        }
+    }
+
+    /// Record that a write is being attempted now.
+    pub fn note_attempt(&mut self, now_ms: u64) {
+        self.last_attempt_ms = Some(now_ms);
+    }
+
+    /// The firmware accepted the write — clear the backoff.
+    pub fn note_success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    /// The write failed — widen the next window.
+    pub fn note_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+    }
+
+    /// Consecutive failures so far (diagnostics).
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
+static RECONCILE_GATE: std::sync::Mutex<ReconcileGate> =
+    std::sync::Mutex::new(ReconcileGate::new());
+
+fn reconcile_gate() -> std::sync::MutexGuard<'static, ReconcileGate> {
+    match RECONCILE_GATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+// ── Active hold (F5, 2026-11-11) ────────────────────────────────────────────
+//
+// What this firmware can and cannot do — measured, see
+// `audit-20261107/CHARGE-HOLD-DEBUG.md`:
+//
+//  * The limit is a **ceiling**, not a setpoint. The EC stops charging at
+//    `HBDA` and lets the pack sit there. There is no discharge command
+//    anywhere: the WMAA write branch of `FUN2=0x1000` has exactly one case
+//    (`FUN3=0x02` → `LONL`/`HBDA`), `IoTDriver.sys` exposes exactly two
+//    IOCTLs over three physical regions (none of them ERAM), and the original
+//    `IoTService.exe` has no charging command at all. A pack above the limit
+//    therefore stays there — the app must say so, not promise a discharge.
+//  * The EC drops `LONL`/`HBDA` on its own across power-source changes and S3
+//    cycles: on 2026-11-11 the read-back returned code 0 while the last write
+//    was 80 and no software wrote 0. That is why the original PC Manager
+//    re-applies on every AC/DC transition
+//    (`PerformanceModesModule::OnAcDcPowerSource` → `resume_charging_protect`).
+//
+// So "hold at 80 %" means: keep the firmware value at 80 and verify it. The
+// supervisor below is the loop that does exactly that, and reports the phase
+// the machine is really in.
+
+/// Which part of the hold cycle the machine is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldPhase {
+    /// No limit requested (100 %): the pack charges to full.
+    Off,
+    /// The firmware holds the requested value and the pack sits in the band.
+    Holding,
+    /// Above the limit. This firmware cannot discharge — it will hold on the
+    /// next charge cycle instead.
+    AboveLimit,
+    /// Plugged, below the band, charging toward the limit.
+    Charging,
+    /// Plugged, below the band, not charging right now (thermal pause, etc.).
+    Idle,
+    /// On battery, below the limit — the ceiling applies at the next plug-in.
+    OnBattery,
+    /// The firmware reports a different value than the request.
+    Drifted,
+    /// The firmware value could not be read (or is stale).
+    Unknown,
+}
+
+impl HoldPhase {
+    /// Short label for logs and diagnostics.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Holding => "holding",
+            Self::AboveLimit => "above limit",
+            Self::Charging => "charging",
+            Self::Idle => "idle",
+            Self::OnBattery => "on battery",
+            Self::Drifted => "drifted",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One snapshot of the hold state, as the UI needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChargeHoldState {
+    pub phase: HoldPhase,
+    /// Battery level in percent; `None` when no snapshot is available.
+    pub level: Option<u8>,
+    /// Requested limit (registry). 100 = no limit.
+    pub limit: u8,
+    /// Lowest level that still counts as held (`limit - HOLD_RESUME_MARGIN`).
+    pub band_low: u8,
+    /// The limit itself.
+    pub band_high: u8,
+    /// Value the firmware reported at the last read-back.
+    pub firmware_threshold: Option<u8>,
+    /// True only when the firmware reported the requested value.
+    pub applied: bool,
+    pub charging: Option<bool>,
+    pub plugged: Option<bool>,
+    /// Always false on this firmware: there is no discharge channel. Exposed
+    /// so the UI can state the limit without promising a discharge.
+    pub can_discharge: bool,
+    /// Why the phase is what it is, when that needs saying.
+    pub detail: Option<String>,
+    /// When the firmware value was last verified (ms since epoch).
+    pub verified_ms: Option<u64>,
+}
+
+/// Decide the phase from four raw facts. Pure — every branch is unit-tested.
+///
+/// `firmware` is the last read-back of `WMAA 0x1000/0x02`; `None` means the
+/// value is unknown (never read, or older than the cache TTL) and the app must
+/// not claim the limit is applied.
+pub fn decide_hold(
+    level: Option<u8>,
+    limit: u8,
+    firmware: Option<u8>,
+    charging: Option<bool>,
+    plugged: Option<bool>,
+) -> HoldPhase {
+    if limit >= 100 {
+        return HoldPhase::Off;
+    }
+    let Some(level) = level else {
+        return HoldPhase::Unknown;
+    };
+    let Some(hardware) = firmware else {
+        return HoldPhase::Unknown;
+    };
+    if hardware != limit {
+        return HoldPhase::Drifted;
+    }
+    if level > limit {
+        return HoldPhase::AboveLimit;
+    }
+    if level.saturating_add(HOLD_RESUME_MARGIN) >= limit {
+        return HoldPhase::Holding;
+    }
+    match (plugged, charging) {
+        (Some(false), _) => HoldPhase::OnBattery,
+        (Some(true), Some(false)) => HoldPhase::Idle,
+        _ => HoldPhase::Charging,
+    }
+}
+
+/// Build the full state (phase + the numbers the UI renders).
+pub fn compute_hold_state(
+    level: Option<u8>,
+    limit: u8,
+    firmware: Option<u8>,
+    charging: Option<bool>,
+    plugged: Option<bool>,
+    verified_ms: Option<u64>,
+) -> ChargeHoldState {
+    let phase = decide_hold(level, limit, firmware, charging, plugged);
+    let detail = match phase {
+        HoldPhase::Unknown if level.is_none() => Some("battery level unavailable".to_string()),
+        HoldPhase::Unknown => Some("charge limit not verified yet".to_string()),
+        HoldPhase::Drifted => Some(format!(
+            "firmware reports {}%, requested {limit}%",
+            firmware
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "an unknown value".into())
+        )),
+        HoldPhase::AboveLimit => Some(
+            "above the limit: this firmware has no discharge channel, so the pack stays here \
+             until it is used"
+                .to_string(),
+        ),
+        _ => None,
+    };
+    ChargeHoldState {
+        phase,
+        level,
+        limit,
+        band_low: limit.saturating_sub(HOLD_RESUME_MARGIN),
+        band_high: limit,
+        firmware_threshold: firmware,
+        applied: firmware == Some(limit),
+        charging,
+        plugged,
+        can_discharge: false,
+        detail,
+        verified_ms,
+    }
+}
+
+#[cfg(windows)]
+static LAST_FIRMWARE: std::sync::Mutex<Option<(u8, u64)>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+fn firmware_cache() -> std::sync::MutexGuard<'static, Option<(u8, u64)>> {
+    crate::util::panic::lock_or_recover(&LAST_FIRMWARE)
+}
+
+/// Record the firmware truth returned by a read-back.
+///
+/// The WMAA read runs in the *elevated* process, so the app process cannot
+/// observe it directly; every path that receives a [`ChargeLimitState`] from
+/// the bridge must call this, otherwise the hold state falls back to `Unknown`.
+///
+/// A state that carries `last_verified_ms` is recorded with THAT time, never
+/// re-stamped: re-stamping a cached value on every poll would inflate its
+/// freshness forever and hide a dead read path behind "confirmed 1 min ago".
+pub fn note_firmware_state(state: &ChargeLimitState) {
+    #[cfg(windows)]
+    {
+        if let Some(value) = state.hardware_threshold {
+            let at = state
+                .last_verified_ms
+                .unwrap_or_else(crate::util::auth::now_ms);
+            *firmware_cache() = Some((value, at));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = state;
+}
+
+#[cfg(windows)]
+fn note_firmware_value(value: u8) {
+    *firmware_cache() = Some((value, crate::util::auth::now_ms()));
+}
+
+/// Last verified firmware value and when it was seen, if still fresh.
+#[cfg(windows)]
+pub fn last_firmware(now_ms: u64) -> Option<(u8, u64)> {
+    match *firmware_cache() {
+        Some((value, at)) if now_ms.saturating_sub(at) <= FIRMWARE_CACHE_TTL_MS => {
+            Some((value, at))
+        }
+        _ => None,
+    }
+}
+
+/// Current hold state, computed from the cached battery snapshot.
+///
+/// Cheap by design: no WMI query and no elevated round-trip, so the UI can
+/// poll it as often as it likes. The firmware half comes from the last
+/// read-back; when it is older than [`FIRMWARE_CACHE_TTL_MS`] the phase is
+/// `Unknown` and the supervisor re-verifies.
+#[cfg(windows)]
+pub fn current_hold_state() -> ChargeHoldState {
+    let now = crate::util::auth::now_ms();
+    let snapshot = crate::hw::battery::cached_battery_info();
+    let (level, charging, plugged) = match &snapshot {
+        Some(b) => (
+            Some(b.level.clamp(0, 100)),
+            Some(b.is_charging),
+            Some(b.is_plugged),
+        ),
+        None => (None, None, None),
+    };
+    let (firmware, verified_ms) = match last_firmware(now) {
+        Some((value, at)) => (Some(value), Some(at)),
+        None => (None, None),
+    };
+    compute_hold_state(
+        level,
+        get_requested_threshold(),
+        firmware,
+        charging,
+        plugged,
+        verified_ms,
+    )
+}
+
+#[cfg(not(windows))]
+pub fn current_hold_state() -> ChargeHoldState {
+    compute_hold_state(None, get_requested_threshold(), None, None, None, None)
+}
+
+/// Re-assert the requested charging limit when the firmware has drifted.
+///
+/// Called at app start, on resume from sleep, and whenever a read-back reports
+/// `applied=false` with care on. Every path goes through [`ReconcileGate`], so
+/// the worst case is one write per 5 min (widening to 60 min while the
+/// firmware keeps refusing).
+///
+/// Runs in the **app** process and dispatches through the elevated bridge: the
+/// MICommonInterface instance query is denied to non-admin callers, which is
+/// why the read and the write are elevated commands in the first place.
+#[cfg(windows)]
+pub async fn reconcile_charge_limit(trigger: &str) -> ReconcileAction {
+    reconcile_charge_limit_with(trigger, false).await
+}
+
+/// Reconcile, optionally treating the trigger as a power event.
+///
+/// `force = true` is for resume and AC-plug: the EC has just dropped the
+/// setting, so waiting out the 5 min poll window means charging above the
+/// limit. The failure backoff still applies (see [`ReconcileGate::decide_forced`]).
+#[cfg(windows)]
+pub async fn reconcile_charge_limit_with(trigger: &str, force: bool) -> ReconcileAction {
+    use crate::elev_bridge;
+
+    // Read the truth. The ecram_service pipe answers in single-digit ms with
+    // no elevation; the elevated ladder stays as the fallback for a service
+    // that is down or predates the `charge_limit_read` op. The pipe read is
+    // blocking IO, so it goes through the fixed pool (S69).
+    let state: ChargeLimitState = match crate::util::fixed_pool::run_blocking_timeout(
+        std::time::Duration::from_secs(8),
+        read_charge_limit_state_app,
+    )
+    .await
+    {
+        Ok(state) if state.source != "registry" => state,
+        _ => {
+            match elev_bridge::run_elevated_no_prompt(
+                "get_charge_limit_state",
+                serde_json::json!({}),
+            )
+            .await
             {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&response) {
-                    if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        if let Some(t) = parsed.get("threshold").and_then(|v| v.as_u64()) {
-                            return Ok(t.clamp(40, 100) as u8);
+                Ok(raw) => match serde_json::from_value(raw) {
+                    Ok(state) => state,
+                    Err(e) => {
+                        log::debug!(
+                            target: "hw::charging",
+                            "[charge_limit] reconcile ({trigger}): unreadable state ({e})"
+                        );
+                        return ReconcileAction::Unreadable;
+                    }
+                },
+                Err(e) => {
+                    log::debug!(
+                        target: "hw::charging",
+                        "[charge_limit] reconcile ({trigger}): state read failed ({e})"
+                    );
+                    return ReconcileAction::Unreadable;
+                }
+            }
+        }
+    };
+
+    // Every read refreshes the cache the hold state renders from.
+    note_firmware_state(&state);
+
+    let now = crate::util::auth::now_ms();
+    let action = {
+        let gate = reconcile_gate();
+        if force {
+            gate.decide_forced(now, state.requested_threshold, state.hardware_threshold)
+        } else {
+            gate.decide(now, state.requested_threshold, state.hardware_threshold)
+        }
+    };
+
+    match action {
+        ReconcileAction::Apply => {
+            {
+                let mut gate = reconcile_gate();
+                gate.note_attempt(now);
+            }
+            let requested = state.requested_threshold;
+            let result = elev_bridge::run_elevated_no_prompt(
+                "set_charging_threshold",
+                serde_json::json!({ "threshold": requested }),
+            )
+            .await;
+
+            match result {
+                Ok(raw) => {
+                    let applied = serde_json::from_value::<ChargingResult>(raw)
+                        .ok()
+                        .filter(|r| r.success);
+                    match applied {
+                        Some(r) => {
+                            reconcile_gate().note_success();
+                            if let Some(hw) = r.hardware_threshold {
+                                note_firmware_value(hw);
+                            }
+                            log::info!(
+                                target: "hw::charging",
+                                "[charge_limit] re-applied {requested}% on {trigger} \
+                                 (was {:?}%, read-back {:?}%)",
+                                state.hardware_threshold,
+                                r.hardware_threshold
+                            );
+                        }
+                        None => {
+                            let mut gate = reconcile_gate();
+                            gate.note_failure();
+                            let next = gate.cooldown_ms() / 1000;
+                            log::warn!(
+                                target: "hw::charging",
+                                "[charge_limit] re-apply {requested}% on {trigger} was not \
+                                 confirmed by the firmware (was {:?}%) — next attempt in {next} s",
+                                state.hardware_threshold
+                            );
                         }
                     }
                 }
-            }
-            log::debug!("ecram charging threshold read failed — falling back to registry");
-        }
-        read_threshold_registry().unwrap_or(Ok(80))
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(80)
-    }
-}
-
-// ── Private helpers ──────────────────────────────────────────────────────────
-
-/// IPC message layout discovered from IoTService.exe binary analysis (v25.0.0.9).
-///
-/// The IoTService validates the first 4 bytes against the magic "MCPI"
-/// (0x4950434D in little-endian) and rejects messages without it.
-///
-/// Header layout (16 bytes, from Ghidra decompilation of FUN_140043ac0):
-///   - magic: u32 (offset 0)  — MCPI magic (0x4950434D)
-///   - src_id: u16 (offset 4)
-///   - dst_id: u16 (offset 6)
-///   - type_lo: u16 (offset 8)  — low 16 bits of msg_type
-///   - routing: i16 (offset 10) — 0=normal unicast
-///   - field: u16 (offset 12)  — sub-type, 0 for normal
-///   - payload_len: u16 (offset 14) — total message size (header + payload)
-///
-/// src_id=1 (MiControl), dst_id=2 (IoTDriver), type_lo=0x1003 (set charging limit)
-///
-/// # Safety
-///
-/// This struct maps to the binary wire format used for IoTService IPC.
-/// The fields are naturally aligned with no padding.
-#[repr(C)]
-struct IotIpcMsg {
-    magic: u32,
-    src_id: u16,
-    dst_id: u16,
-    type_lo: u16,
-    routing: i16,
-    field: u16,
-    payload_len: u16,
-}
-
-/// MCPI magic value: bytes `4D 43 50 49` = "MCPI" in ASCII.
-const MCPI_MAGIC: u32 = 0x4950434D;
-
-/// Compile-time assertion: IotIpcMsg must be exactly 16 bytes.
-const _: () = assert!(std::mem::size_of::<IotIpcMsg>() == 16);
-
-/// Send a charging threshold command to the IoTService IPC pipe.
-///
-/// This is intentionally fire-and-forget: the IoTService pipe protocol
-/// does not return a response for charging threshold commands (msg_type
-/// `0x1003`). The command is validated before sending, and the registry
-/// is updated separately. If the pipe send fails, the registry value
-/// still reflects the user's intent and will be applied on the next
-/// IoTService restart.
-fn send_via_pipe(threshold: u8) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        use std::io::Write;
-        use std::os::windows::ffi::OsStrExt;
-        use std::os::windows::io::FromRawHandle;
-        use windows::Win32::Foundation::{
-            GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-        };
-        use windows::Win32::Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        };
-        use windows::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_READMODE_MESSAGE};
-
-        // Use the IoT pipe path discovered at startup; fall back to the default constant.
-        let pipe_path = crate::hw::discovery::global_profile()
-            .and_then(|p| p.iot_pipe_path)
-            .unwrap_or_else(|| IOT_PIPE.to_string());
-
-        // Open the pipe using CreateFileW so we can set MESSAGE mode.
-        let path_w: Vec<u16> = std::ffi::OsStr::new(&pipe_path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        // SAFETY: CreateFileW with a valid null-terminated wide string path.
-        let raw_handle = unsafe {
-            CreateFileW(
-                windows::core::PCWSTR(path_w.as_ptr()),
-                (GENERIC_READ | GENERIC_WRITE).0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                HANDLE::default(),
-            )
-        };
-
-        let raw_handle = raw_handle.context("Open IoT IPC pipe")?;
-
-        if raw_handle == INVALID_HANDLE_VALUE {
-            return Err(anyhow::anyhow!(
-                "Open IoT IPC pipe returned INVALID_HANDLE_VALUE: {}",
-                pipe_path
-            )
-            .into());
-        }
-
-        // Set pipe to MESSAGE read mode (required by IoTService pipe server)
-        let mode = PIPE_READMODE_MESSAGE;
-        // SAFETY: raw_handle is a valid pipe handle from CreateFileW.
-        let _ = unsafe { SetNamedPipeHandleState(raw_handle, Some(&mode as *const _), None, None) };
-
-        // Wrap the raw handle in a std::fs::File for Write trait
-        // SAFETY: raw_handle is a valid file handle owned by us; std::fs::File will close it on drop.
-        let mut pipe = unsafe {
-            std::fs::File::from_raw_handle(raw_handle.0 as std::os::windows::io::RawHandle)
-        };
-
-        // Build the 16-byte MCPI header with 1-byte payload (threshold)
-        // payload_len = header(16) + payload(1) = 17
-        let msg = IotIpcMsg {
-            magic: MCPI_MAGIC,
-            src_id: 1,
-            dst_id: 2,
-            type_lo: 0x1003,
-            routing: 0,
-            field: 0,
-            payload_len: 17,
-        };
-
-        let bytes: &[u8] = unsafe {
-            // SAFETY: IotIpcMsg is #[repr(C)] with no padding and known size (16 bytes);
-            // casting its address to a byte slice yields a valid, sized buffer for write_all.
-            std::slice::from_raw_parts(
-                &msg as *const IotIpcMsg as *const u8,
-                std::mem::size_of::<IotIpcMsg>(),
-            )
-        };
-        pipe.write_all(bytes)
-            .context("Write MCPI header to IoT pipe")?;
-        // Write the 1-byte payload (threshold value)
-        pipe.write_all(&[threshold])
-            .context("Write threshold payload to IoT pipe")?;
-
-        // Do NOT block on a read here — IoTService does not send an
-        // acknowledgment for 0x1003 (set-charging-limit) messages.
-        // This is a fire-and-forget command per the IoT protocol:
-        // the service accepts the threshold and applies it internally
-        // without returning a response payload. A blocking pipe.read()
-        // would hang the elevated helper indefinitely.
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = threshold;
-    }
-    Ok(())
-}
-
-fn persist_threshold_registry(threshold: u8) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-        // S25-006: Use RegKeyGuard instead of raw RegOpenKeyExW/RegCloseKey.
-        // create_write opens with KEY_ALL_ACCESS which includes KEY_WRITE.
-        match RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY) {
-            Ok(key) => {
-                key.write_u32(CHARGE_REG_VALUE, threshold as u32)
-                    .map_err(|e| {
-                        HardwareError::Registry(format!(
-                            "Write charging threshold to registry: {e}"
-                        ))
-                    })?;
-            }
-            Err(e) => {
-                // Key doesn't exist or can't be opened — IoT driver may be absent
-                log::debug!("Cannot open charging registry key for write: {e}");
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn read_threshold_registry() -> Option<HardwareResult<u8>> {
-    use crate::util::registry::RegKeyGuard;
-    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-    // S25-006: Use RegKeyGuard instead of raw RegOpenKeyExW/RegCloseKey.
-    let key = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY).ok()??;
-    match key.read_u32(CHARGE_REG_VALUE) {
-        Ok(Some(data)) => Some(Ok(data.clamp(40, 100) as u8)),
-        Ok(None) => None,
-        Err(e) => Some(Err(HardwareError::Registry(format!(
-            "Read charging threshold: {e}"
-        )))),
-    }
-}
-
-// ── Battery Care Toggle (EC register 0xA4) ───────────────────────────────────
-//
-// EC register 0xA4 is the master enable/disable for the charging-threshold
-// logic. When 0xA4 = 0x00, the EC ignores the threshold register (0xA7) and
-// charges to 100%. When 0xA4 = 0x01, the threshold at 0xA7 is respected.
-//
-// XPM calls this "Battery Care" / "Charging Protect" and exposes it via
-// SvrCModule methods: get_charging_protect, resume_charging_protect.
-//
-// On the TM2424, register 0xA4 is in the ACPI ERAM region (0xFE0B0300 + 0xA4)
-// and is accessible via the IoTDriver IOCTL write path (write_ecram).
-// It has been added to the safe-write allowlist (ecram-safe-writes.json).
-
-/// ERAM offset of the Battery Care enable register.
-const BATTERY_CARE_ERAM_OFFSET: usize = 0xA4;
-
-/// Registry value for persisting Battery Care state across reboots.
-#[cfg(windows)]
-const BATTERY_CARE_REG_VALUE: &str = "BatteryCareEnabled";
-
-/// Read the Battery Care toggle state from EC register 0xA4.
-///
-/// Returns `true` if battery care (charging protection) is enabled,
-/// `false` if disabled. Falls back to registry if EC read fails.
-pub fn get_battery_care() -> HardwareResult<bool> {
-    // Try EC read first (via ERAM pipe)
-    let eram_base = crate::hw::ecram::get_eram_base();
-    match crate::hw::ecram::read_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, 1) {
-        Ok(data) if !data.is_empty() => {
-            let enabled = data[0] != 0;
-            log::debug!(target: "hw::charging", "Battery Care (EC 0xA4) = {:#04X} → enabled={}", data[0], enabled);
-            Ok(enabled)
-        }
-        Ok(_) => {
-            log::warn!(target: "hw::charging", "EC read of 0xA4 returned empty data, falling back to registry");
-            get_battery_care_registry().unwrap_or(Ok(false))
-        }
-        Err(e) => {
-            log::warn!(target: "hw::charging", "EC read of 0xA4 failed: {e}, falling back to registry");
-            get_battery_care_registry().unwrap_or(Ok(false))
-        }
-    }
-}
-
-/// Set the Battery Care toggle state by writing to EC register 0xA4.
-///
-/// When enabled (true), the EC respects the charging threshold (0xA7).
-/// When disabled (false), the EC charges to 100% regardless of threshold.
-///
-/// This also persists the state to registry for re-assertion after S3/S4 resume.
-pub fn set_battery_care(enabled: bool) -> HardwareResult<()> {
-    let value: u8 = if enabled { 0x01 } else { 0x00 };
-    let eram_base = crate::hw::ecram::get_eram_base();
-
-    // S39-001: Try the ecram_service pipe broker FIRST (same as
-    // `set_charging_threshold`). When the custom IoTService.exe broker is
-    // running, it performs the EC write in-process (its binary lives in the
-    // DriverStore, satisfying the IoTDriver process-name check) — no IOCTL
-    // from this process is required. This makes the toggle work immediately
-    // without needing an elevated scheduled-task helper.
-    if crate::hw::ecram::is_pipe_broker_available() {
-        let request = serde_json::json!({
-            "op": "write",
-            "addr": format!("0x{:08X}", eram_base + BATTERY_CARE_ERAM_OFFSET as u64),
-            "data": format!("{value:02X}")
-        })
-        .to_string();
-        match crate::hw::ecram::send_pipe_request(&request) {
-            Ok(response) => {
-                let parsed: serde_json::Value = match serde_json::from_str(&response) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::warn!("Battery Care pipe response not JSON: {e}");
-                        serde_json::Value::Null
-                    }
-                };
-                if parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    log::info!(
-                        target: "hw::charging",
-                        "Battery Care set to {} via ecram pipe (EC 0xA4 = {:#04X})",
-                        if enabled { "enabled" } else { "disabled" },
-                        value
-                    );
-                    persist_battery_care_registry(enabled).ok();
-                    return Ok(());
-                }
-                let err = parsed
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown ecram battery care error");
-                log::warn!("ecram battery care pipe write failed: {err}, falling back to IOCTL");
-            }
-            Err(e) => {
-                log::warn!("ecram battery care pipe write unavailable: {e}, falling back to IOCTL")
-            }
-        }
-    }
-
-    // S38-001: Best-effort EC write. The IoTDriver security check requires the
-    // calling process to live under the DriverStore directory of IoTDriver.sys —
-    // the scheduled-task helper (`C:\Program Files\miControl\micontrol.exe
-    // --elevated`) does NOT satisfy that, so the IOCTL fails with
-    // STATUS_ACCESS_DENIED even when elevated. This is expected on this
-    // platform. We therefore persist the requested state to the registry
-    // (which drives re-assertion + what the UI reports) and only surface an
-    // error when the registry write itself fails. When running from the
-    // DriverStore (e.g. the old IoTService.exe), the EC write succeeds.
-    match crate::hw::ecram::write_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, &[value]) {
-        Ok(()) => {
-            // Read back to confirm
-            match crate::hw::ecram::read_ecram(eram_base + BATTERY_CARE_ERAM_OFFSET as u64, 1) {
-                Ok(data) if !data.is_empty() => {
-                    if data[0] != value {
-                        log::warn!(
-                            target: "hw::charging",
-                            "Battery Care write verification failed: wrote {:#04X}, read back {:#04X}",
-                            value, data[0]
-                        );
-                    } else {
-                        log::info!(
-                            target: "hw::charging",
-                            "Battery Care set to {} (EC 0xA4 = {:#04X})",
-                            if enabled { "enabled" } else { "disabled" },
-                            value
-                        );
-                    }
-                }
                 Err(e) => {
-                    log::warn!(target: "hw::charging", "Battery Care read-back failed: {e}");
+                    let mut gate = reconcile_gate();
+                    gate.note_failure();
+                    let next = gate.cooldown_ms() / 1000;
+                    log::warn!(
+                        target: "hw::charging",
+                        "[charge_limit] re-apply {requested}% on {trigger} failed: {e} — \
+                         next attempt in {next} s"
+                    );
                 }
-                _ => {}
             }
         }
-        Err(e) => {
-            // Expected when running as the scheduled-task helper (not in
-            // DriverStore). Persist the state anyway so the UI stays
-            // consistent and re-assertion can happen from a privileged path.
-            log::warn!(
+        ReconcileAction::Deferred { retry_in_ms } => log::debug!(
+            target: "hw::charging",
+            "[charge_limit] reconcile ({trigger}): drift {:?}% → {}% deferred, retry in {} s",
+            state.hardware_threshold,
+            state.requested_threshold,
+            retry_in_ms / 1000
+        ),
+        ReconcileAction::InSync | ReconcileAction::CareOff | ReconcileAction::Unreadable => {
+            log::debug!(
                 target: "hw::charging",
-                "Battery Care EC write unavailable ({e}) — persisting registry state"
+                "[charge_limit] reconcile ({trigger}): {} (requested {}%, hardware {:?}%)",
+                action.describe(),
+                state.requested_threshold,
+                state.hardware_threshold
             );
         }
     }
 
-    // Persist to registry for re-assertion after sleep/resume
-    persist_battery_care_registry(enabled)?;
-
-    Ok(())
+    action
 }
 
-/// Persist Battery Care state to registry.
-fn persist_battery_care_registry(enabled: bool) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        use crate::util::registry::RegKeyGuard;
-        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-        match RegKeyGuard::create_write(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY) {
-            Ok(key) => {
-                key.write_u32(BATTERY_CARE_REG_VALUE, if enabled { 1 } else { 0 })
-                    .map_err(|e| {
-                        HardwareError::Registry(format!("Write Battery Care to registry: {e}"))
-                    })?;
+/// Periodic hold supervisor (45 s tick, 5 min verify).
+///
+/// The UI only reads the limit when the Battery tab opens, so a drift that
+/// happens while the app sits in the tray would otherwise persist until the
+/// user looked. Two different cadences, on purpose:
+///
+///  * **45 s** — recompute the phase from the cached battery snapshot. No WMI
+///    query and no elevated call, so it costs nothing; it is what makes the
+///    log show the real state ("holding at 80", "above limit", "charging") and
+///    what the UI polls.
+///  * **5 min** — verify the firmware value through the elevated bridge and
+///    re-assert on drift. An elevated round-trip every 45 s would spawn a
+///    scheduled task 80 times an hour; the reconcile gate already caps writes
+///    to one per window, and the events that actually drop the setting
+///    (resume, AC plug) take the forced path instead of waiting for this tick.
+#[cfg(windows)]
+pub fn start_charge_hold_supervisor() {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn(async {
+        // Let the bridge service and the elevated path settle after boot.
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let mut last_verify_ms: u64 = 0;
+        let mut last_phase: Option<HoldPhase> = None;
+        loop {
+            let now = crate::util::auth::now_ms();
+            let state = current_hold_state();
+
+            if last_phase != Some(state.phase) {
+                log::info!(
+                    target: "hw::charging",
+                    "[charge_hold] phase={} ({}%) limit={}% band=[{}..{}] firmware={:?}% charging={:?} plugged={:?}",
+                    state.phase.describe(),
+                    state
+                        .level
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    state.limit,
+                    state.band_low,
+                    state.band_high,
+                    state.firmware_threshold,
+                    state.charging,
+                    state.plugged
+                );
+                last_phase = Some(state.phase);
             }
-            Err(e) => {
-                log::debug!("Cannot open charging registry key for Battery Care write: {e}");
-                return Ok(());
+
+            let verify_due = now.saturating_sub(last_verify_ms) >= RECONCILE_MIN_INTERVAL_MS;
+            // A drifted/unknown firmware read is worth re-checking sooner than
+            // the 5 min window — but never more than once a minute.
+            let drift_due = matches!(state.phase, HoldPhase::Drifted | HoldPhase::Unknown)
+                && now.saturating_sub(last_verify_ms) >= 60_000;
+            if verify_due || drift_due {
+                last_verify_ms = now;
+                reconcile_charge_limit("hold").await;
+                // The reconcile just refreshed the firmware cache; recompute so
+                // the next tick's transition compares like with like.
+                let refreshed = current_hold_state();
+                if last_phase != Some(refreshed.phase) {
+                    log::info!(
+                        target: "hw::charging",
+                        "[charge_hold] phase={} after verify (firmware={:?}%)",
+                        refreshed.phase.describe(),
+                        refreshed.firmware_threshold
+                    );
+                    last_phase = Some(refreshed.phase);
+                }
             }
+
+            tokio::time::sleep(std::time::Duration::from_millis(HOLD_TICK_MS)).await;
+        }
+    });
+}
+
+// ── Battery Care toggle ─────────────────────────────────────────────────────
+//
+// "Care" and "limit" are the same firmware field: code 0 means care off
+// (charges to 100%), any other code means care on at that level. The toggle is
+// therefore expressed through the same WMAA write.
+
+/// Is charging protection currently active on the firmware?
+pub fn get_battery_care() -> HardwareResult<bool> {
+    match read_hardware_threshold() {
+        Ok(percent) => Ok(percent != 100),
+        Err(e) => {
+            log::warn!(
+                target: "hw::charging",
+                "battery care state unreadable from firmware: {e}"
+            );
+            Err(e)
         }
     }
-    Ok(())
 }
 
-/// Read Battery Care state from registry fallback.
+/// Turn charging protection on (at `limit`) or off (charges to 100%).
+pub fn set_battery_care(enabled: bool, limit: u8) -> HardwareResult<ChargingResult> {
+    let target = if enabled {
+        if limit >= 100 || percent_to_code(limit).is_none() {
+            80
+        } else {
+            limit
+        }
+    } else {
+        100
+    };
+    set_charging_threshold(target)
+}
+
+// ── Requested-value persistence (state store) ───────────────────────────────
+//
+// The requested threshold used to be cached in an HKLM registry value, which
+// a non-elevated app process could not even write (the save silently failed
+// with a debug line). The value now lives in the user's state store
+// (`%LOCALAPPDATA%\MiControl\state\charging.json`). The stale HKLM value is
+// imported read-only on the first store miss and then left in place: only a
+// SYSTEM context could delete it, and nothing reads it anymore.
+
+/// Persist the requested threshold through the state store. Best-effort by
+/// design: this is a preference cache, not enforcement state; a failed save
+/// only loses the fallback value.
+fn persist_threshold(threshold: u8) {
+    let store = crate::util::state_store::charging_store();
+    let state = crate::util::state_store::ChargingThresholdState { threshold };
+    match store {
+        Ok(store) => {
+            if let Err(e) = store.save(&state) {
+                log::debug!(
+                    target: "hw::charging",
+                    "charging threshold store save failed: {e}"
+                );
+            }
+        }
+        Err(e) => log::debug!(target: "hw::charging", "charging store unavailable: {e}"),
+    }
+}
+
+/// The user's requested limit fallback: the state store, with a one-time
+/// read-only import of the legacy HKLM cache on the first miss. Corrupt or
+/// unavailable state degrades to the legacy value (or unset), never an error.
+fn load_threshold_state() -> Option<u8> {
+    let store = crate::util::state_store::charging_store();
+    load_threshold_from(&store, legacy_threshold_value())
+}
+
+/// Shared load path (explicit store + injected legacy value for tests).
+fn load_threshold_from(
+    store: &Result<
+        crate::util::state_store::Store<crate::util::state_store::ChargingThresholdState>,
+        crate::util::state_store::StoreError,
+    >,
+    legacy: Option<u8>,
+) -> Option<u8> {
+    let Ok(store) = store else {
+        return legacy;
+    };
+    match store.load() {
+        Ok(Some(state)) => Some(state.threshold.clamp(40, 100)),
+        Ok(None) => {
+            // First run after the migration: import the legacy HKLM cache
+            // once. The stale value itself cannot be deleted without
+            // elevation and nothing reads it anymore.
+            if let Some(value) = legacy {
+                let state = crate::util::state_store::ChargingThresholdState { threshold: value };
+                let _ = store.save(&state);
+            }
+            legacy
+        }
+        Err(e) => {
+            log::warn!(
+                target: "hw::charging",
+                "charging store unreadable ({e}); falling back to the legacy registry value"
+            );
+            legacy
+        }
+    }
+}
+
+/// Legacy HKLM cache written by pre-store builds. Read-only import source;
+/// non-elevated processes usually cannot create it either, so a `None` here
+/// is the normal case.
 #[cfg(windows)]
-fn get_battery_care_registry() -> Option<HardwareResult<bool>> {
+fn legacy_threshold_value() -> Option<u8> {
     use crate::util::registry::RegKeyGuard;
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
     let key = RegKeyGuard::open_read(HKEY_LOCAL_MACHINE, CHARGE_REG_KEY).ok()??;
-    match key.read_u32(BATTERY_CARE_REG_VALUE) {
-        Ok(Some(data)) => Some(Ok(data != 0)),
-        Ok(None) => Some(Ok(false)),
-        Err(e) => Some(Err(HardwareError::Registry(format!(
-            "Read Battery Care: {e}"
-        )))),
+    match key.read_u32(CHARGE_REG_VALUE) {
+        Ok(Some(data)) => Some(data.clamp(40, 100) as u8),
+        Ok(None) | Err(_) => None,
     }
 }
 
 #[cfg(not(windows))]
-fn get_battery_care_registry() -> Option<HardwareResult<bool>> {
-    Some(Ok(false))
+fn legacy_threshold_value() -> Option<u8> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_to_code_matches_oem_enum_and_ssdt() {
+        // OEM PC Manager enum gp: One=1 (80%), Four=4 (90%), Five=5 (70%),
+        // Six=6 (60%), Seven=7 (50%), Eight=8 (40%); 0 = care off.
+        assert_eq!(percent_to_code(80), Some(1));
+        assert_eq!(percent_to_code(90), Some(4));
+        assert_eq!(percent_to_code(70), Some(5));
+        assert_eq!(percent_to_code(60), Some(6));
+        assert_eq!(percent_to_code(50), Some(7));
+        assert_eq!(percent_to_code(40), Some(8));
+        assert_eq!(percent_to_code(100), Some(0));
+    }
+
+    #[test]
+    fn percent_to_code_rejects_values_the_firmware_cannot_express() {
+        for bad in [0u8, 1, 79, 81, 95, 99, 101, 255] {
+            assert_eq!(percent_to_code(bad), None, "{bad} must not be writable");
+        }
+    }
+
+    #[test]
+    fn code_roundtrip_is_identity() {
+        for p in VALID_THRESHOLDS {
+            let c = percent_to_code(p).expect("valid");
+            assert_eq!(code_to_percent(c), Some(p), "roundtrip for {p}%");
+        }
+    }
+
+    #[test]
+    fn parse_level_code_accepts_only_the_oem_code_set() {
+        for code in [0u32, 1, 4, 5, 6, 7, 8] {
+            assert_eq!(parse_level_code(code), Some(code as u8));
+        }
+        for bad in [2u32, 3, 9, 80, 0x50, 0xFFFF_FFFF] {
+            assert_eq!(
+                parse_level_code(bad),
+                None,
+                "{bad:#X} is not a firmware level code"
+            );
+        }
+    }
+
+    #[test]
+    fn threshold_is_a_code_not_a_percentage() {
+        // The historical bug: the MCPI 0x1003 payload carried the percentage
+        // (80) where the firmware expects the level code (1). Pin the
+        // distinction so it cannot regress silently.
+        assert_ne!(percent_to_code(80).unwrap(), 80);
+        assert_eq!(parse_level_code(80), None);
+    }
+
+    #[test]
+    fn charging_result_serializes_the_honesty_fields() {
+        let r = ChargingResult {
+            success: false,
+            method: "unverified".into(),
+            threshold: 80,
+            hardware_threshold: None,
+            detail: Some("access denied".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["success"], serde_json::json!(false));
+        assert_eq!(v["threshold"], serde_json::json!(80));
+        assert_eq!(v["hardware_threshold"], serde_json::Value::Null);
+        assert_eq!(v["detail"], serde_json::json!("access denied"));
+    }
+
+    #[test]
+    fn state_never_claims_applied_without_hardware() {
+        let s = ChargeLimitState {
+            requested_threshold: 80,
+            hardware_threshold: None,
+            hardware_code: None,
+            applied: false,
+            source: "registry".into(),
+            detail: Some("ECRAM blocked".into()),
+            last_verified_ms: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["applied"], serde_json::json!(false));
+        assert_eq!(v["source"], serde_json::json!("registry"));
+        assert_eq!(v["last_verified_ms"], serde_json::Value::Null);
+    }
+
+    // ── P1-2: the reconciler ────────────────────────────────────────────────
+
+    /// The production drift: requested 80, firmware 100 → write.
+    #[test]
+    fn drift_with_care_on_is_applied() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 80, Some(100)), ReconcileAction::Apply);
+    }
+
+    /// Nothing to do when the firmware already holds the request.
+    #[test]
+    fn matching_hardware_is_in_sync() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 80, Some(80)), ReconcileAction::InSync);
+    }
+
+    /// Care off (100 %) is a user decision, not a drift to auto-correct.
+    #[test]
+    fn care_off_is_never_rewritten() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 100, Some(80)), ReconcileAction::CareOff);
+        assert_eq!(gate.decide(1_000, 100, Some(100)), ReconcileAction::CareOff);
+    }
+
+    /// An unreadable firmware must never be written blind.
+    #[test]
+    fn unreadable_hardware_is_not_written() {
+        let gate = ReconcileGate::new();
+        assert_eq!(gate.decide(1_000, 80, None), ReconcileAction::Unreadable);
+    }
+
+    /// One write per 5 min: a second call inside the window is deferred, and
+    /// the deferral reports the remaining time.
+    #[test]
+    fn writes_are_rate_limited_to_one_per_five_minutes() {
+        let mut gate = ReconcileGate::new();
+        assert_eq!(gate.decide(0, 80, Some(100)), ReconcileAction::Apply);
+        gate.note_attempt(0);
+        gate.note_success();
+
+        assert_eq!(
+            gate.decide(60_000, 80, Some(100)),
+            ReconcileAction::Deferred {
+                retry_in_ms: RECONCILE_MIN_INTERVAL_MS - 60_000
+            }
+        );
+        // Exactly at the boundary the gate reopens.
+        assert_eq!(
+            gate.decide(RECONCILE_MIN_INTERVAL_MS, 80, Some(100)),
+            ReconcileAction::Apply
+        );
+    }
+
+    /// A firmware that keeps refusing must widen the window, never loop.
+    #[test]
+    fn failures_back_off_exponentially_up_to_the_cap() {
+        let mut gate = ReconcileGate::new();
+        assert_eq!(gate.cooldown_ms(), RECONCILE_MIN_INTERVAL_MS);
+
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            gate.note_failure();
+            seen.push(gate.cooldown_ms());
+        }
+        assert_eq!(
+            seen,
+            vec![
+                10 * 60_000,
+                20 * 60_000,
+                40 * 60_000,
+                RECONCILE_MAX_BACKOFF_MS,
+                RECONCILE_MAX_BACKOFF_MS,
+                RECONCILE_MAX_BACKOFF_MS,
+            ]
+        );
+        assert_eq!(gate.consecutive_failures(), 6);
+
+        // A success clears the backoff entirely.
+        gate.note_success();
+        assert_eq!(gate.cooldown_ms(), RECONCILE_MIN_INTERVAL_MS);
+        assert_eq!(gate.consecutive_failures(), 0);
+    }
+
+    /// The gate must not write twice inside a backoff window even when the
+    /// drift is still present — this is the "never a write loop" property.
+    #[test]
+    fn backoff_window_blocks_repeated_writes() {
+        let mut gate = ReconcileGate::new();
+        gate.note_attempt(0);
+        gate.note_failure(); // cooldown 10 min
+        assert!(matches!(
+            gate.decide(5 * 60_000, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        assert_eq!(
+            gate.decide(10 * 60_000, 80, Some(100)),
+            ReconcileAction::Apply
+        );
+    }
+
+    // ── F5: the hold phase ──────────────────────────────────────────────────
+
+    #[test]
+    fn hold_phase_covers_every_real_state() {
+        let (on, off) = (Some(true), Some(false));
+        // care off
+        assert_eq!(
+            decide_hold(Some(100), 100, Some(100), off, on),
+            HoldPhase::Off
+        );
+        // above the limit — no discharge on this firmware
+        assert_eq!(
+            decide_hold(Some(100), 80, Some(80), off, on),
+            HoldPhase::AboveLimit
+        );
+        // at the limit
+        assert_eq!(
+            decide_hold(Some(80), 80, Some(80), off, on),
+            HoldPhase::Holding
+        );
+        // inside the band (limit - HOLD_RESUME_MARGIN)
+        assert_eq!(
+            decide_hold(Some(78), 80, Some(80), on, on),
+            HoldPhase::Holding
+        );
+        // just below the band
+        assert_eq!(
+            decide_hold(Some(77), 80, Some(80), on, on),
+            HoldPhase::Charging
+        );
+        // plugged but not charging right now
+        assert_eq!(
+            decide_hold(Some(77), 80, Some(80), off, on),
+            HoldPhase::Idle
+        );
+        // on battery below the limit
+        assert_eq!(
+            decide_hold(Some(60), 80, Some(80), off, off),
+            HoldPhase::OnBattery
+        );
+        // firmware disagrees
+        assert_eq!(
+            decide_hold(Some(60), 80, Some(100), on, on),
+            HoldPhase::Drifted
+        );
+        // firmware unreadable / stale
+        assert_eq!(decide_hold(Some(60), 80, None, on, on), HoldPhase::Unknown);
+        // level unreadable
+        assert_eq!(decide_hold(None, 80, Some(80), on, on), HoldPhase::Unknown);
+    }
+
+    /// The owner's report, exactly: limit verified at 80 % and the pack at
+    /// 100 %. The app must say "above the limit", never "holding at 80".
+    #[test]
+    fn pack_above_the_limit_is_not_reported_as_holding() {
+        let state = compute_hold_state(Some(100), 80, Some(80), Some(false), Some(true), Some(1));
+        assert_eq!(state.phase, HoldPhase::AboveLimit);
+        assert!(state.applied, "the limit IS on the firmware");
+        assert!(
+            !state.can_discharge,
+            "this firmware has no discharge channel"
+        );
+        assert_eq!((state.band_low, state.band_high), (78, 80));
+        assert!(state.detail.unwrap().contains("no discharge"));
+    }
+
+    #[test]
+    fn hold_state_exposes_the_requested_band() {
+        let state = compute_hold_state(Some(79), 80, Some(80), Some(false), Some(true), None);
+        assert_eq!(state.phase, HoldPhase::Holding);
+        assert_eq!(state.band_low, 78);
+        assert_eq!(state.band_high, 80);
+        assert!(state.applied);
+    }
+
+    #[test]
+    fn hold_state_never_claims_applied_without_a_firmware_value() {
+        let state = compute_hold_state(Some(80), 80, None, Some(false), Some(true), None);
+        assert!(!state.applied);
+        assert_eq!(state.phase, HoldPhase::Unknown);
+    }
+
+    // ── F5: forced re-assert on power events ───────────────────────────────
+
+    /// A resume/AC plug must not wait out the 5 min poll window.
+    #[test]
+    fn forced_reassert_shortens_the_window_to_the_floor() {
+        let mut gate = ReconcileGate::new();
+        gate.note_attempt(0);
+        gate.note_success();
+
+        // 10 s later the normal gate defers for the rest of the window…
+        assert!(matches!(
+            gate.decide(10_000, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        // …and the forced path still refuses before the 30 s floor.
+        assert!(matches!(
+            gate.decide_forced(10_000, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        // At the floor it applies.
+        assert_eq!(
+            gate.decide_forced(FORCE_MIN_INTERVAL_MS, 80, Some(100)),
+            ReconcileAction::Apply
+        );
+    }
+
+    /// Forcing must never defeat the failure backoff: a firmware that refuses
+    /// the write cannot be retried on every AC/DC flicker.
+    #[test]
+    fn forced_reassert_respects_the_failure_backoff() {
+        let mut gate = ReconcileGate::new();
+        gate.note_attempt(0);
+        gate.note_failure(); // cooldown 10 min
+        assert!(matches!(
+            gate.decide_forced(FORCE_MIN_INTERVAL_MS, 80, Some(100)),
+            ReconcileAction::Deferred { .. }
+        ));
+        // In sync is in sync, forced or not.
+        assert_eq!(gate.decide_forced(0, 80, Some(80)), ReconcileAction::InSync);
+        // Care off is still a user decision.
+        assert_eq!(
+            gate.decide_forced(0, 100, Some(80)),
+            ReconcileAction::CareOff
+        );
+    }
+
+    /// Unique per-test scratch state root.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "micontrol-charging-{}-{}-{}",
+            tag,
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch root");
+        dir
+    }
+
+    #[test]
+    fn threshold_state_roundtrips_through_the_store() {
+        let root = scratch_root("roundtrip");
+        let store = crate::util::state_store::charging_store_in(&root);
+        store
+            .save(&crate::util::state_store::ChargingThresholdState { threshold: 80 })
+            .expect("save");
+        let holder = Ok(store);
+        assert_eq!(load_threshold_from(&holder, None), Some(80));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_registry_value_is_imported_once() {
+        let root = scratch_root("import");
+        let store = crate::util::state_store::charging_store_in(&root);
+        // First read with the store empty: the legacy value is returned AND
+        // saved into the store so the import never has to run again.
+        let holder = Ok(store);
+        assert_eq!(load_threshold_from(&holder, Some(60)), Some(60));
+        let reloaded = crate::util::state_store::charging_store_in(&root);
+        let state = reloaded.load().expect("load").expect("imported state");
+        assert_eq!(state.threshold, 60);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_store_degrades_to_legacy_value() {
+        let root = scratch_root("corrupt");
+        let spec = crate::util::state_store::charging_store_in(&root);
+        std::fs::create_dir_all(spec.path().parent().expect("parent")).expect("dir");
+        std::fs::write(spec.path(), "{corrupt").expect("corrupt fixture");
+        let store = crate::util::state_store::charging_store_in(&root);
+        let holder = Ok(store);
+        assert_eq!(load_threshold_from(&holder, Some(70)), Some(70));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unavailable_store_falls_back_to_legacy_value() {
+        let holder: Result<
+            crate::util::state_store::Store<crate::util::state_store::ChargingThresholdState>,
+            crate::util::state_store::StoreError,
+        > = Err(crate::util::state_store::StoreError::Corrupt {
+            path: std::path::PathBuf::from("charging"),
+            reason: "fixture".into(),
+        });
+        assert_eq!(load_threshold_from(&holder, Some(65)), Some(65));
+        assert_eq!(load_threshold_from(&holder, None), None);
+    }
+
+    // ── Service-pipe readback (f13) ─────────────────────────────────────────
+
+    #[test]
+    fn service_pipe_response_parses_to_a_percent() {
+        let ok = r#"{"ok":true,"cmd":"charge_limit_read","percent":80,"code":1}"#;
+        assert_eq!(parse_service_pipe_limit_response(ok).unwrap(), 80);
+        // 100 (care off) is a valid reading.
+        let off = r#"{"ok":true,"cmd":"charge_limit_read","percent":100,"code":0}"#;
+        assert_eq!(parse_service_pipe_limit_response(off).unwrap(), 100);
+    }
+
+    #[test]
+    fn service_pipe_response_rejects_impossible_percentages() {
+        // A percent the firmware cannot express is a protocol surprise from
+        // the service side and must be refused, not trusted. (The live
+        // validation is the caller's own parse; this pins the contract.)
+        for bad in [0u8, 1, 39, 79, 81, 95, 99, 101, 255] {
+            let body = format!(r#"{{"ok":true,"percent":{bad},"code":0}}"#);
+            assert!(
+                parse_service_pipe_limit_response(&body).is_err(),
+                "{bad}% must not parse as a readback"
+            );
+        }
+    }
+
+    #[test]
+    fn service_pipe_refusals_carry_the_service_reason() {
+        let refused = r#"{"ok":false,"error":"charge_limit_read refused: WMI broken"}"#;
+        let err = parse_service_pipe_limit_response(refused).unwrap_err();
+        assert!(err.to_string().contains("WMI broken"), "{err}");
+        // Non-JSON (an empty read, a half-written response) is an error too.
+        assert!(parse_service_pipe_limit_response("").is_err());
+        assert!(parse_service_pipe_limit_response("{\"ok\":true,").is_err());
+    }
+
+    #[test]
+    fn a_live_read_is_source_firmware_and_stamped_now() {
+        let now: u64 = 1_700_000_000_000;
+        let state = charge_limit_state_from(80, Ok(80), now, Some((80, now - 60_000)));
+        assert_eq!(state.source, "firmware");
+        assert!(state.applied);
+        assert_eq!(state.hardware_threshold, Some(80));
+        assert_eq!(state.last_verified_ms, Some(now));
+    }
+
+    #[test]
+    fn a_failed_read_falls_back_to_the_cache_with_its_original_age() {
+        // Cache confirmed 3 min before the failed read: the state says so and
+        // KEEPS the old stamp so age can be rendered honestly.
+        let now: u64 = 1_700_000_000_000;
+        let confirmed_at = now - 3 * 60_000;
+        let state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            now,
+            Some((80, confirmed_at)),
+        );
+        assert_eq!(state.source, "cache");
+        assert_eq!(state.hardware_threshold, Some(80));
+        assert_eq!(state.last_verified_ms, Some(confirmed_at));
+        assert!(state.detail.as_deref().unwrap().contains("pipe down"));
+    }
+
+    #[test]
+    fn a_failed_read_without_cache_is_registry_only() {
+        let state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            1_700_000_000_000,
+            None,
+        );
+        assert_eq!(state.source, "registry");
+        assert_eq!(state.hardware_threshold, None);
+        assert!(!state.applied);
+        assert_eq!(state.last_verified_ms, None);
+    }
+
+    /// The cached state must honestly disagree with the request: a live read
+    /// that FAILED with a cached 100% readback and a DRAFTED 80% request is
+    /// "not applied" (the cache still reports 100%), never "ok".
+    #[test]
+    fn a_cached_value_that_disagrees_is_not_applied() {
+        let state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            1_000,
+            Some((100, 5_000)),
+        );
+        assert_eq!(state.source, "cache");
+        assert!(!state.applied);
+        assert_eq!(state.hardware_threshold, Some(100));
+    }
+
+    /// A live read outranks the cache even when the two disagree: the read is
+    /// the freshest truth, the cache only covers FAILED reads.
+    #[test]
+    fn a_live_read_outranks_a_disagreeing_cache() {
+        let state = charge_limit_state_from(80, Ok(80), 1_000, Some((100, 5_000)));
+        assert_eq!(state.source, "firmware");
+        assert!(state.applied);
+        assert_eq!(state.hardware_threshold, Some(80));
+    }
+
+    #[test]
+    fn a_serialized_cache_state_keeps_the_verification_stamp() {
+        let mut state = charge_limit_state_from(
+            80,
+            Err(HardwareError::Ecram("pipe down".into())),
+            1_000,
+            Some((80, 999)),
+        );
+        state.last_verified_ms = Some(999);
+        let v = serde_json::to_value(&state).unwrap();
+        assert_eq!(v["last_verified_ms"], serde_json::json!(999));
+        assert_eq!(v["source"], serde_json::json!("cache"));
+    }
+
+    /// Integration (run with `cargo test -- --ignored`): apply the limit
+    /// through the real dispatcher and read it back through the real
+    /// ecram_service pipe. Only meaningful on the owner machine with IoTSvc
+    /// RUNNING; needs an interactive session for the WMI provider.
+    #[test]
+    #[ignore = "live hardware: applies a charge limit (writes the EC) and requires IoTSvc running"]
+    fn live_charge_limit_pipe_readback_roundtrip() {
+        let requested = get_requested_threshold();
+        let probe = read_charge_limit_state_app();
+        println!(
+            "live pipe readback: source={} hardware={:?} requested={requested} detail={:?}",
+            probe.source, probe.hardware_threshold, probe.detail
+        );
+        assert_eq!(
+            probe.source, "firmware",
+            "ecram_service pipe must answer on the owner machine (detail: {:?})",
+            probe.detail
+        );
+        assert_eq!(
+            probe.last_verified_ms.map(|_| ()),
+            Some(()),
+            "a live read is always stamped"
+        );
+        assert!(VALID_THRESHOLDS.contains(&probe.hardware_threshold.unwrap_or(0)));
+    }
 }

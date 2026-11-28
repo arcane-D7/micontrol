@@ -19,9 +19,19 @@
 //! frontend can render guidance instead of a crash.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
+use crate::util::process_spawn;
 use serde::Serialize;
+
+/// Version-probe budget (`sherpa-onnx --version` answers in milliseconds).
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Tar extraction of the model/binary archives; 30 s covers a cold disk.
+const EXTRACT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Transcription budget depends on the model; paraformer-small answers in
+/// seconds, 30 s leaves headroom without hanging the caller forever.
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default model: FunASR paraformer int8 (small, good zh/en/noise handling).
 /// Public URLs kept in one place so the download helper and the UI hint agree.
@@ -69,9 +79,9 @@ pub fn find_binary() -> Result<Option<PathBuf>, String> {
     } else {
         "sherpa-onnx"
     };
-    let out = Command::new(exe)
-        .arg("--version")
-        .output()
+    let mut cmd = Command::new(exe);
+    cmd.arg("--version");
+    let out = process_spawn::run_capture(&mut cmd, PROBE_TIMEOUT)
         .map_err(|e| format!("failed to probe sherpa-onnx: {e}"))?;
     if out.status.success() {
         return Ok(Some(PathBuf::from(exe)));
@@ -80,7 +90,9 @@ pub fn find_binary() -> Result<Option<PathBuf>, String> {
     // Fallback: our managed install dir.
     if let Ok(dir) = binary_dir() {
         let candidate = dir.join(exe);
-        let out2 = Command::new(&candidate).arg("--version").output();
+        let mut cmd2 = Command::new(&candidate);
+        cmd2.arg("--version");
+        let out2 = process_spawn::run_capture(&mut cmd2, PROBE_TIMEOUT);
         if let Ok(o) = out2 {
             if o.status.success() {
                 return Ok(Some(candidate));
@@ -165,17 +177,15 @@ pub fn download_model() -> Result<PathBuf, String> {
         std::fs::write(&tmp, &bytes).map_err(|e| format!("write temp tarball: {e}"))?;
 
         // Extract with `tar` (bundled with Windows 10+; also on macOS/Linux).
-        let out = Command::new("tar")
+        let mut tar_cmd = Command::new("tar");
+        tar_cmd
             .current_dir(&dir)
-            .args(["-xjf", tmp.to_str().unwrap_or("model.tar.bz2")])
-            .output()
+            .args(["-xjf", tmp.to_str().unwrap_or("model.tar.bz2")]);
+        let out = process_spawn::run_capture(&mut tar_cmd, EXTRACT_TIMEOUT)
             .map_err(|e| format!("extract failed: {e}"))?;
         let _ = std::fs::remove_file(&tmp);
         if !out.status.success() {
-            return Err(format!(
-                "tar extract failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
+            return Err(format!("tar extract failed: {}", out.stderr_str()));
         }
 
         // Move the two needed files up to the model dir root (trim the folder).
@@ -235,17 +245,15 @@ pub fn install_binary() -> Result<PathBuf, String> {
 
         let extract_dir = bin_dir.join("extract");
         std::fs::create_dir_all(&extract_dir).map_err(|e| format!("create extract dir: {e}"))?;
-        let out = Command::new("tar")
+        let mut tar_cmd = Command::new("tar");
+        tar_cmd
             .current_dir(&extract_dir)
-            .args(["-xjf", tmp.to_str().unwrap_or("sherpa-onnx.tar.bz2")])
-            .output()
+            .args(["-xjf", tmp.to_str().unwrap_or("sherpa-onnx.tar.bz2")]);
+        let out = process_spawn::run_capture(&mut tar_cmd, EXTRACT_TIMEOUT)
             .map_err(|e| format!("extract failed: {e}"))?;
         let _ = std::fs::remove_file(&tmp);
         if !out.status.success() {
-            return Err(format!(
-                "tar extract failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
+            return Err(format!("tar extract failed: {}", out.stderr_str()));
         }
 
         // Locate the exe inside the extracted tree (bin/ or root).
@@ -303,16 +311,15 @@ pub fn transcribe(wav_path: &str) -> Result<String, String> {
     let model = ensure_model_assets()?;
     let args = build_argv(ModelKind::Paraformer, &model, Path::new(wav_path), 2);
 
-    let out = Command::new(&bin)
-        .args(&args)
-        .stdin(Stdio::null())
-        .output()
+    let mut cmd = Command::new(&bin);
+    cmd.args(&args);
+    let out = process_spawn::run_capture(&mut cmd, TRANSCRIBE_TIMEOUT)
         .map_err(|e| format!("failed to run sherpa-onnx: {e}"))?;
 
     // sherpa-onnx prints the recognized text on stdout; keep the first
     // non-empty line (trimmed) so the UI shows clean results.
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = out.stdout_str();
+    let stderr = out.stderr_str();
     let text = stdout
         .lines()
         .map(str::trim)
@@ -426,5 +433,38 @@ mod tests {
         assert!(!s.binary_installed || s.binary_path.is_some());
         assert!(!s.model_ready || s.model_dir.is_some());
         assert!(!s.install_hint.is_empty());
+    }
+
+    /// Every spawn in this module goes through `run_capture` with a timeout
+    /// constant; a child that sleeps past the budget must return
+    /// `SpawnError::Timeout` and leave no process behind.
+    #[test]
+    fn child_wait_is_bounded_and_kills_tree() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 10 127.0.0.1"]);
+        let started = std::time::Instant::now();
+        let err = process_spawn::run_capture(&mut cmd, Duration::from_millis(500))
+            .expect_err("sleeping child must hit the timeout");
+        assert!(
+            matches!(err, process_spawn::SpawnError::Timeout { .. }),
+            "expected Timeout, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout path took too long: {:?}",
+            started.elapsed()
+        );
+
+        // No orphan ping.exe may survive the tree kill.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        let out = process_spawn::run_capture(&mut probe, Duration::from_secs(15))
+            .expect("tasklist probe failed");
+        assert!(
+            !out.stdout_str().contains("ping.exe"),
+            "ping.exe survived the tree kill: {}",
+            out.stdout_str()
+        );
     }
 }

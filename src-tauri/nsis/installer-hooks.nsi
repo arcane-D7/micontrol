@@ -24,19 +24,81 @@
   ; replaces itself) instead of the NSIS installer killing the bridge that
   ; launched it. The shell binary has a stable hash across releases, so an
   ; unconditional copy is safe and keeps the deployed shell fresh.
+  ;
+  ; VAGA F4 (audit 2026-11-08 §8.1): the bundled resource was deployed
+  ; verbatim, and a **0-byte** resource left
+  ; `setup\micontrol_setup.exe` unusable since 2026-11-07 — `install_update`
+  ; saw a file, skipped the runtime bootstrap, and every payload update died
+  ; spawning it. The shell is now size-validated before it replaces anything:
+  ; copy to `.new`, check the size, and only then rename over the live shell.
+  ; A bad bundle therefore never destroys a working shell.
+  ; v2 (2026-11-14): the .new+Rename dance silently failed on every deploy since
+  ; 2026-11-08 (the deployed shell stayed the 0-byte file from 2026-11-07 and no
+  ; log recorded why). This version logs every decision to
+  ; $INSTDIR\setup\install-hook.log, deletes the destination first (a Rename
+  ; over an existing file can fail when any handle is open) and retries the
+  ; copy three times. The ROOT copy is kept as a local self-heal source for the
+  ; app's bootstrap (no network needed).
+  CreateDirectory "$INSTDIR\setup"
+  FileOpen $9 "$INSTDIR\setup\install-hook.log" w
   ${If} ${FileExists} "$INSTDIR\micontrol_setup.exe"
-    CreateDirectory "$INSTDIR\setup"
-    CopyFiles /SILENT "$INSTDIR\micontrol_setup.exe" "$INSTDIR\setup\micontrol_setup.exe"
-    ${If} ${FileExists} "$INSTDIR\setup\micontrol_setup.exe"
-      DetailPrint "Setup shell deployed to setup\micontrol_setup.exe (decoupled updates enabled)."
-    ${Else}
-      DetailPrint "WARNING: failed to deploy setup shell — first payload update will download it at runtime."
+    FileWrite $9 "root copy: present$\r$\n"
+    StrCpy $0 0
+    ClearErrors
+    FileOpen $1 "$INSTDIR\micontrol_setup.exe" r
+    ${IfNot} ${Errors}
+      FileSeek $1 0 END $0
+      FileClose $1
     ${EndIf}
-    ; The root copy is only the transport vehicle for the resource system.
-    Delete "$INSTDIR\micontrol_setup.exe"
+    FileWrite $9 "root size: $0 bytes$\r$\n"
+    ${If} $0 >= 500000
+      StrCpy $8 0
+      deploy_retry:
+        IntOp $8 $8 + 1
+        Delete "$INSTDIR\setup\micontrol_setup.exe.new"
+        CopyFiles /SILENT "$INSTDIR\micontrol_setup.exe" "$INSTDIR\setup\micontrol_setup.exe.new"
+        StrCpy $1 0
+        ClearErrors
+        FileOpen $2 "$INSTDIR\setup\micontrol_setup.exe.new" r
+        ${IfNot} ${Errors}
+          FileSeek $2 0 END $1
+          FileClose $2
+        ${EndIf}
+        FileWrite $9 "attempt $8: new size: $1 bytes$\r$\n"
+        ${If} $1 >= 500000
+          ClearErrors
+          Delete "$INSTDIR\setup\micontrol_setup.exe"
+          Rename "$INSTDIR\setup\micontrol_setup.exe.new" "$INSTDIR\setup\micontrol_setup.exe"
+          StrCpy $2 0
+          ClearErrors
+          FileOpen $3 "$INSTDIR\setup\micontrol_setup.exe" r
+          ${IfNot} ${Errors}
+            FileSeek $3 0 END $2
+            FileClose $3
+          ${EndIf}
+          FileWrite $9 "final size: $2 bytes$\r$\n"
+        ${EndIf}
+        ${If} $2 < 500000
+          ${If} $8 < 3
+            Sleep 400
+            Goto deploy_retry
+          ${EndIf}
+        ${EndIf}
+      ${If} $2 >= 500000
+        FileWrite $9 "RESULT: deployed ($2 bytes)$\r$\n"
+        Delete "$INSTDIR\micontrol_setup.exe"
+        Delete "$INSTDIR\setup\micontrol_setup.exe.new"
+      ${Else}
+        FileWrite $9 "RESULT: FAILED after $8 attempts — root copy kept for the app bootstrap$\r$\n"
+      ${EndIf}
+    ${Else}
+      FileWrite $9 "RESULT: root copy too small ($0 bytes) — not deployed; runtime bootstrap owns it$\r$\n"
+      Delete "$INSTDIR\micontrol_setup.exe"
+    ${EndIf}
   ${Else}
-    DetailPrint "Note: setup shell not in bundle — first payload update will download it (runtime bootstrap)."
+    FileWrite $9 "root copy: MISSING — runtime bootstrap owns it$\r$\n"
   ${EndIf}
+  FileClose $9
 
   ; ── Windows startup (register auto-start; desktop shortcut is handled by
   ;    the installer.nsi template's finish page) ─────────────────────────────
@@ -96,6 +158,21 @@
   ; with error 87 → IoTSvc was DELETED and never recreated. This rewrites the
   ; whole block with deterministic exe discovery + status-aware handling.
   DetailPrint "Deploying ecram_service into the DriverStore..."
+  ; Guard (2026-11-18): a cold `target/` can leave a 0-byte placeholder in
+  ; bin/ when build.rs did not re-run after the real binary appeared — that
+  ; placeholder was then bundled. Never deploy one into the DriverStore: the
+  ; resulting service cannot start and looks like a driver fault. Refuse and
+  ; say so; the app degrades honestly.
+  FileOpen $9 "$INSTDIR\ecram_service.exe" r
+  ${If} $9 == ""
+    StrCpy $8 0
+  ${Else}
+    FileSeek $9 0 END $8
+    FileClose $9
+  ${EndIf}
+  ${If} $8 < 500000
+    DetailPrint "  ERROR: ecram_service.exe is only $8 bytes (missing or placeholder) — refusing to deploy. EC RAM unavailable; reinstall with a complete build."
+  ${Else}
   ; Locate the IoTDriver package dir deterministically.
   StrCpy $R0 ""
   FindFirst $R1 $R2 "$SYSDIR\DriverStore\FileRepository\iotdriver.inf_*"
@@ -131,6 +208,9 @@
     ; Candidate destination: the package dir's IoTService.exe.
     StrCpy $R4 "$R0\IoTService.exe"
     ; Backup existing binary (once) if present — gives a rollback point.
+    ; NOTE: on an ACL-clean machine this CopyFiles fails too ("Copy failed"):
+    ; the package dir is SYSTEM-writable only, so there is no backup to make.
+    ; That is non-fatal by design — the .bak is a convenience, not a guard.
     ${If} ${FileExists} "$R4"
       ${IfNot} ${FileExists} "$R4.bak"
         CopyFiles /SILENT "$R4" "$R4.bak"
@@ -138,11 +218,132 @@
     ${EndIf}
     ; Replace it with ours.
     CopyFiles /SILENT "$INSTDIR\ecram_service.exe" "$R4"
-    ; CopyFiles never returns an error code — verify the file landed AND that
-    ; it is the file we just copied (not the locked old binary CopyFiles kept).
-    ${IfNot} ${FileExists} "$R4"
-      DetailPrint "  ERROR: failed to copy ecram_service.exe to $R4 (destination file still absent)."
-      Abort "Could not replace IoTService.exe in the DriverStore. The IoTSvc service was NOT modified."
+    ; ── VERIFY the copy byte-for-byte (`fc /b`) ───────────────────────────
+    ; CopyFiles NEVER reports an error and, when the write is DENIED, it
+    ; silently leaves the destination untouched. On a CLEAN machine the
+    ; DriverStore package dir carries the DEFAULT ACL: only SYSTEM /
+    ; TrustedInstaller may write there — an elevated Administrator cannot —
+    ; so every CopyFiles on this path fails ("Copy failed" in the log) and
+    ; $R4 keeps the OEM Xiaomi IoTService.exe. The old `${FileExists}` test
+    ; therefore PASSED on exactly the machines where nothing had been
+    ; replaced, the installer printed "ecram_service deployed" (a lie) and
+    ; `install-service` then ran against the OEM binary, which cannot run
+    ; standalone → exit 0xC0000135 (STATUS_DLL_NOT_FOUND, "-1073741515")
+    ; and the whole installation Aborted.
+    ; This dev machine's DriverStore dir has an explicit `MAFSC\mafsc:(F)`
+    ; ACE, which is why the bug never reproduced here.
+    ; `fc /b` exit code: 0 = identical, 1 = different, 2 = file missing.
+    ; Its output goes to NUL: two 1-3 MB binaries that differ produce a
+    ; multi-hundred-line diff and the nsExec capture truncates at 1 KB
+    ; anyway — only the exit code matters. This `cmd /c "..." > NUL 2>&1`
+    ; form is the same pattern as the sc|findstr calls below and was
+    ; verified on this host: 0 identical, 1 different, 2 missing.
+    StrCpy $R7 0            ; 0 = destination NOT proven identical to ours
+    nsExec::ExecToStack '"$SYSDIR\cmd.exe" /c ""$SYSDIR\fc.exe" /b "$INSTDIR\ecram_service.exe" "$R4" > NUL 2>&1"'
+    Pop $R3                 ; fc exit code
+    Pop $R6                 ; drain (empty by construction)
+    ${If} $R3 = 0
+      StrCpy $R7 1
+    ${EndIf}
+    !if 0
+      ; TEST HOOK — compiled out (never shipped). Flip to `!if 1` for a
+      ; throwaway build to force the ACL fallback on ANY machine: the first
+      ; `fc /b` result is discarded, so the code must take the SYSTEM copy
+      ; path and still end with the IoTSvc service RUNNING. Verify the
+      ; DetailPrint line "retrying as SYSTEM" in the install log, then
+      ; revert (`!if 0`) before committing.
+      StrCpy $R7 0
+    !endif
+    ${If} $R7 = 0
+      ; ── ACL fallback: copy as SYSTEM via a one-shot scheduled task ──────
+      ; The copy is the ONLY step that needs SYSTEM; stop/kill/SCM all work
+      ; from an elevated admin. A .cmd in $SYSDIR (no spaces in the path)
+      ; keeps quoting trivial and returns the real errorlevel through
+      ; `exit /b %ERRORLEVEL%` — a scheduled task does not propagate the
+      ; batch errorlevel by itself, so the poll below uses `fc /b` as the
+      ; only source of truth.
+      DetailPrint "  Copy did not land (fc /b mismatch) - retrying as SYSTEM (DriverStore ACL)..."
+      ClearErrors
+      FileOpen $R9 "$SYSDIR\MCIoTSvcCopy.cmd" w
+      ${If} ${Errors}
+        DetailPrint "  WARNING: cannot write $SYSDIR\MCIoTSvcCopy.cmd (access denied)."
+      ${Else}
+        FileWrite $R9 "@echo off$\r$\n"
+        FileWrite $R9 "copy /y $\"$INSTDIR\ecram_service.exe$\" $\"$R4$\" > NUL 2>&1$\r$\n"
+        FileWrite $R9 "exit /b %ERRORLEVEL%$\r$\n"
+        FileClose $R9
+        ; Task XML: SYSTEM principal + disabled trigger driven by /run (the
+        ; same proven pattern as MiControlElevated above); NO xml prolog.
+        ; `LogonType` MUST be omitted for S-1-5-18 — on Win11 26200 a
+        ; `ServiceAccount` logon type is rejected with "The task XML
+        ; contains a value which is incorrectly formatted or out of range
+        ; (1,293):LogonType:ServiceAccount" (verified), while the same XML
+        ; without LogonType parses and creates fine.
+        ; ExecutionTimeLimit PT60S: the copy takes well under a second, but
+        ; a hung task must never linger on the machine.
+        FileOpen $R9 "$TEMP\MCIoTSvcFix.xml" w
+        FileWrite $R9 '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><TimeTrigger><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>false</Enabled></TimeTrigger></Triggers><Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT60S</ExecutionTimeLimit><Enabled>true</Enabled></Settings><Actions Context="Author"><Exec><Command>$SYSDIR\cmd.exe</Command><Arguments>/c "$SYSDIR\MCIoTSvcCopy.cmd"</Arguments></Exec></Actions></Task>'
+        FileClose $R9
+        nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /create /tn "MiControlIoTSvcFix" /xml "$TEMP\MCIoTSvcFix.xml" /f'
+        Pop $R3
+        Delete "$TEMP\MCIoTSvcFix.xml"
+        ${If} $R3 = 0
+          nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /run /tn "MiControlIoTSvcFix"'
+          Pop $R3
+          ; Poll the REAL result (`fc /b` every 1 s, 15 attempts ≈ 15 s).
+          StrCpy $R8 0
+          iot_acl_copy_wait:
+            nsExec::ExecToStack '"$SYSDIR\cmd.exe" /c ""$SYSDIR\fc.exe" /b "$INSTDIR\ecram_service.exe" "$R4" > NUL 2>&1"'
+            Pop $R3
+            Pop $R6
+            ${If} $R3 = 0
+              StrCpy $R7 1
+              Goto iot_acl_copy_done
+            ${EndIf}
+            Sleep 1000
+            IntOp $R8 $R8 + 1
+            ${If} $R8 < 15
+              Goto iot_acl_copy_wait
+            ${EndIf}
+          iot_acl_copy_done:
+          ${If} $R7 = 1
+            DetailPrint "  ecram_service copied as SYSTEM (fc /b verified)."
+          ${Else}
+            DetailPrint "  WARNING: SYSTEM copy did not land either (fc /b still differs)."
+          ${EndIf}
+        ${Else}
+          DetailPrint "  WARNING: could not register the one-shot SYSTEM copy task (code $R3)."
+        ${EndIf}
+        ; Cleanup: neither the task nor the .cmd may outlive this block.
+        nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "MiControlIoTSvcFix" /f'
+        Pop $R3
+        Delete "$SYSDIR\MCIoTSvcCopy.cmd"
+        ${If} ${FileExists} "$SYSDIR\MCIoTSvcCopy.cmd"
+          Sleep 500
+          Delete "$SYSDIR\MCIoTSvcCopy.cmd"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+    ; ── NEVER run install-service over the OEM binary ─────────────────────
+    ; EC RAM is a BONUS: without it the app still installs and runs (charge
+    ; limit + EC sensors degrade to "unavailable"). Aborting here left a
+    ; clean-machine user with NO app at all, which is strictly worse than a
+    ; degraded install. The elevated helper's ensure_service_running()
+    ; re-attempts this copy (bridge service = LocalSystem, which HAS write
+    ; access to the DriverStore) on the first app start, so a failure here
+    ; is a deferred repair, not a permanent loss.
+    ${If} $R7 = 0
+      DetailPrint "  ERROR: EC RAM indisponivel: nao foi possivel substituir o IoTService.exe no DriverStore (ACL); a app tenta auto-corrigir no arranque via servico elevado."
+      ; Leave the machine no worse than we found it: this block already
+      ; stopped the service and cleared its crash-restart actions. Re-arm
+      ; them (no-op when the entry is absent) so a surviving service can
+      ; still recover. Deliberately NO `sc start` here: the file we refused
+      ; to replace may be the OEM binary, and starting it would be the same
+      ; mistake as install-service over it. The app's watchdog starts the
+      ; service on first launch, after its SYSTEM copy has fixed the file.
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" failure IoTSvc reset= 86400 actions= restart/5000/restart/10000/restart/30000'
+      Pop $R3
+      Goto iot_deploy_done
     ${EndIf}
     DetailPrint "  ecram_service deployed -> $R4"
     ; Now recreate the service pointing to the deployed binary (idempotent:
@@ -166,8 +367,14 @@
       ${If} $R5 < 20      ; up to ~10 s
         Goto iot_delete_wait
       ${EndIf}
-      DetailPrint "  ERROR: IoTSvc was not removed from SCM (open handle / pending delete)."
-      Abort "Failed to recreate the IoTSvc service: the old entry was not removed from SCM."
+      DetailPrint "  ERROR: IoTSvc was not removed from SCM (open handle / pending delete) - service recreation skipped."
+      ; The binary is already OURS and verified, but this block disabled the
+      ; crash-restart actions above; re-arm them so the surviving entry can
+      ; still recover. The app's ensure_service_running() reconfigures the
+      ; service on the next start — no Abort: the app must install.
+      nsExec::ExecToLog '"$SYSDIR\sc.exe" failure IoTSvc reset= 86400 actions= restart/5000/restart/10000/restart/30000'
+      Pop $R3
+      Goto iot_deploy_done
     iot_deleted:
     DetailPrint "  IoTSvc removed from SCM (confirmed)."
     ; CRITICAL: the IoTSvc service is created by the Rust binary
@@ -200,15 +407,22 @@
         DetailPrint "  ERROR: IoTSvc did not reach RUNNING after install-service. Checking binPath..."
         nsExec::ExecToLog '"$SYSDIR\sc.exe" qc IoTSvc'
         Pop $R3
-        Abort "Failed to start the IoTSvc service: not in RUNNING state. EC RAM access disabled."
+        ; install-service itself succeeded (exit 0) and the binary IS ours,
+        ; so this is a service-start failure, not an EC-RAM veto. Warn and
+        ; keep installing — the app's elevated helper starts it on next launch.
+        DetailPrint "  WARNING: EC RAM indisponivel (IoTSvc nao chegou a RUNNING); a app tenta auto-corrigir no arranque."
+        Goto iot_deploy_done
       iot_running:
         DetailPrint "  IoTSvc recreated and RUNNING with ecram_service (verified)."
     ${Else}
       DetailPrint "  ERROR: ecram_service install-service returned $R3 — service NOT recreated."
-      Abort "Failed to create the IoTSvc service (code $R3). EC RAM access could not be configured."
+      DetailPrint "  WARNING: EC RAM indisponivel (servico IoTSvc nao criado); a app tenta auto-corrigir no arranque."
+      Goto iot_deploy_done
     ${EndIf}
   ${EndIf}
+  iot_deploy_done:
   FindClose $R1
+  ${EndIf}
 
   ; ── Scheduled task for elevated hardware operations (no UAC on use) ────────
   ; Registered via XML so we can set MultipleInstancesPolicy=StopExisting and
@@ -316,6 +530,16 @@
     DetailPrint "  Removing old MiControlFace service entry (if present)..."
     nsExec::ExecToLog '"$SYSDIR\sc.exe" delete MiControlFace'
     Pop $1
+    ; EXPECTED SIDE EFFECT (P2-face, recheck 2026-11-11): deleting a RUNNING
+    ; service kills the process without SERVICE_CONTROL_STOP, so the SCM logs
+    ; three things per install: Event 7031 for the old instance, then the
+    ; service's own restart action, then a second 7031 from the post-install
+    ; start/stop cycle. Both are benign as long as the service ends RUNNING
+    ; (verified: face_svc.log shows stopping -> starting on every install,
+    ; 13:12 / 15:33 / 16:36 / 20:15). Do not "fix" this by adding a stop
+    ; first: stop waits on the camera teardown, which is the ERROR_SERVICE_
+    ; MARKED_FOR_DELETE failure this delete-first order was introduced for.
+    ; See docs/LOGGING.md §3 "O que não é um crash".
     ; Install the LocalSystem auth service (auto-start) as a FRESH service.
     nsExec::ExecToLog '"$INSTDIR\micontrol_face_svc.exe" install'
     Pop $0
@@ -352,8 +576,78 @@
     WriteRegDWORD HKLM "SOFTWARE\Classes\CLSID\{E071A7CE-5D7F-4063-9A10-AE39AEC64EE8}" "DisableModeless" 1
   ${EndIf}
   ; Ensure the face data directory exists (SYSTEM-writable).
-  CreateDirectory "$PROGRAMDATA\MiControl\face"
+  ; NSIS has no $PROGRAMDATA constant (3.11 warns "unknown variable" and the
+  ; path silently degrades to "\MiControl\face" on the current drive), so read
+  ; it from the environment.
+  ReadEnvStr $0 "ProgramData"
+  ${If} $0 == ""
+    StrCpy $0 "$WINDIR\..\ProgramData"
+  ${EndIf}
+  CreateDirectory "$0\MiControl\face"
   DetailPrint "Face Unlock configured."
+
+  ; ── Windows Firewall: deterministic rules (no "Allow access" prompt) ──────
+  ; The app opens 0.0.0.0:9223 (MCP bridge WebSocket; now loopback-only, this
+  ; rule covers older builds) and 0.0.0.0:53317 TCP+UDP (LocalSend receiver).
+  ; With no matching rule Windows raises "Allow MiControl to communicate on
+  ; these networks: Private / Public" — once per program path and profile, so
+  ; every new build asked again (28 stale rules for target\debug\deps\...).
+  ;
+  ; Rules applied here:
+  ;   1. delete every rule scoped to this exe (removes the Defer=User rules
+  ;      created by the dialog — they are named after the binary description,
+  ;      so deleting by name is not possible) → idempotent re-apply;
+  ;   2. allow TCP 9223 + TCP/UDP 53317 on private,domain only, edge=no;
+  ;   3. block everything else for this exe on public. The block rule is what
+  ;      suppresses the dialog: Windows only asks when NO rule matches.
+  ; Best effort by design: a firewall failure must never fail the install
+  ; (the app works; it may only prompt again). The app re-applies the same set
+  ; through util::firewall on every payload update.
+  DetailPrint "Configuring Windows Firewall rules..."
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name=all program="$INSTDIR\micontrol.exe"'
+  Pop $0
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl MCP (TCP 9223)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=TCP localport=9223 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: MCP (TCP 9223) rule returned $0."
+  ${EndIf}
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl LocalSend (TCP 53317)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=TCP localport=53317 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: LocalSend (TCP 53317) rule returned $0."
+  ${EndIf}
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl LocalSend (UDP 53317)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=UDP localport=53317 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: LocalSend (UDP 53317) rule returned $0."
+  ${EndIf}
+
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl (block public)" dir=in action=block program="$INSTDIR\micontrol.exe" protocol=any profile=public enable=yes'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: public-profile block rule returned $0."
+  ${EndIf}
+
+  ; KDE Connect discovery (UDP 1716): the discovery socket binds the fixed
+  ; protocol port (ephemeral binds were the recurring dialog — a moving port
+  ; can never be covered by a deterministic rule).
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="MiControl KDE Connect (UDP 1716)" dir=in action=allow program="$INSTDIR\micontrol.exe" protocol=UDP localport=1716 profile=private,domain enable=yes edge=no'
+  Pop $0
+  ${If} $0 <> 0
+    DetailPrint "  WARNING: KDE Connect (UDP 1716) rule returned $0."
+  ${EndIf}
+
+  ; Sweep the dev-artifact rules (`micontrol_lib-<hash>` under target\debug):
+  ; every new test-binary hash used to add one more Allow rule (created by the
+  ; firewall dialog while running cargo tests). Best effort, silent.
+  ; -EncodedCommand (UTF-16LE base64): immune to the NSIS/PowerShell quoting
+  ; collision that silently broke the literal -Command form.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -EncodedCommand RwBlAHQALQBOAGUAdABGAGkAcgBlAHcAYQBsAGwAUgB1AGwAZQAgAC0ARABpAHMAcABsAGEAeQBOAGEAbQBlACAAJwBtAGkAYwBvAG4AdAByAG8AbABfAGwAaQBiAC0AKgAnACAALQBFAHIAcgBvAHIAQQBjAHQAaQBvAG4AIABTAGkAbABlAG4AdABsAHkAQwBvAG4AdABpAG4AdQBlACAAfAAgAFIAZQBtAG8AdgBlAC0ATgBlAHQARgBpAHIAZQB3AGEAbABsAFIAdQBsAGUA'
+  Pop $0
+  DetailPrint "Firewall rules configured."
 
   ; ── Post-install service verification ───────────────────────────────────────
   ; `micontrol_face_svc.exe install` exits 0 as soon as SCM accepts the create
@@ -391,6 +685,14 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ; ── Windows Firewall: remove every rule scoped to our exe ─────────────────
+  ; Deletes the allow/block rules added by POSTINSTALL *and* any rule the
+  ; firewall dialog created (all of them are keyed by the program path), so an
+  ; uninstall never leaves orphan rules behind. Best effort.
+  DetailPrint "Removing Windows Firewall rules..."
+  nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name=all program="$INSTDIR\micontrol.exe"'
+  Pop $0
+
   ; Remove desktop shortcut and startup entry (if they were created)
   Delete "$DESKTOP\MiControl.lnk"
   DeleteRegValue SHCTX "Software\Microsoft\Windows\CurrentVersion\Run" "MiControl"
@@ -401,6 +703,18 @@
   nsExec::ExecToLog '"$SYSDIR\schtasks.exe" /delete /tn "MiControlElevated" /f'
   Pop $0
   DetailPrint "MiControlElevated task removed: $0"
+
+  ; Remove the one-shot SYSTEM copy task + its .cmd (ACL fallback). Both are
+  ; normally deleted inside POSTINSTALL; this covers an install interrupted
+  ; mid-block. A SYSTEM task must not outlive the product, even an inert one
+  ; (its trigger is disabled and only /run could fire it).
+  nsExec::ExecToStack '"$SYSDIR\schtasks.exe" /delete /tn "MiControlIoTSvcFix" /f'
+  Pop $0
+  Pop $1              ; drain output (noise-free when the task is absent)
+  ${If} $0 = 0
+    DetailPrint "MiControlIoTSvcFix task removed."
+  ${EndIf}
+  Delete "$SYSDIR\MCIoTSvcCopy.cmd"
 
   ; Remove the autonomous bridge service (if present)
   nsExec::ExecToLog '"$INSTDIR\micontrol_bridge.exe" uninstall'

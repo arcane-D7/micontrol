@@ -1,5 +1,6 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
 import { t } from '../hooks/useI18n';
+import { Icon } from './ui/icons';
 
 interface ConsentDialogProps {
   onAllow: () => void;
@@ -141,7 +142,7 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
               flexShrink: 0,
             }}
           >
-            🛡️
+            <Icon name="shield" size={16} />
           </span>
           <h2
             id="consent-title"
@@ -183,7 +184,7 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
               style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}
             >
               <span aria-hidden="true" style={{ fontSize: 14, lineHeight: 1.5, flexShrink: 0 }}>
-                ✓
+                <Icon name="check" size={16} />
               </span>
               <span style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--color-text)' }}>
                 {t(key)}
@@ -218,7 +219,7 @@ export function ConsentDialog({ onAllow, onDeny, onOpenPrivacy }: ConsentDialogP
             marginBottom: 6,
           }}
         >
-          🔒 {t('consent.dialog.reassurance')}
+          <Icon name="lock" size={14} /> {t('consent.dialog.reassurance')}
         </p>
         <p style={{ fontSize: 12, marginBottom: 22, color: 'var(--color-text-muted)' }}>
           <a

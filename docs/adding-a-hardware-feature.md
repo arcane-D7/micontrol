@@ -2,7 +2,7 @@
 
 This guide walks through adding a new hardware module to the miPC HAL (Hardware Abstraction Layer).
 
-## 6-Step Checklist
+## 7-Step Checklist
 
 ### 1. Create the HAL Module
 
@@ -63,8 +63,16 @@ commands::hardware::get_your_feature,
 
 1. Add a hook in `src/hooks/useHardware.ts`
 2. Add a UI component in `src/components/` or `src/pages/`
-3. Add i18n keys to all locale files
+3. Add i18n keys to all locale files (`src/i18n/{en,pt,es,fr}.json`) — `pnpm run i18n:check` fails on a missing key
 4. Add tests
+
+### 7. Verify
+
+```bash
+pnpm run health-check
+```
+
+This is the same script CI runs: it compiles with `--features face`, denies clippy warnings, runs the Rust and frontend tests, type-checks, lints, checks i18n completeness and the kernel-handle leak gate.
 
 ## Testing
 

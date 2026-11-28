@@ -561,7 +561,17 @@ async fn apply_copilot_fix_inner() -> CopilotApplyOutcome {
     {
         Ok(result) => {
             if let Some(stdout) = result.get("stdout").and_then(|v| v.as_str()) {
-                log::info!("[hotkeys] Copilot policy set: {}", stdout.trim());
+                // The elevated script returns one result per line. Log them
+                // joined: a multi-line message leaves every following line
+                // without a timestamp/level prefix, which breaks log parsing
+                // (4 such lines per start in production).
+                let summary = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                log::info!("[hotkeys] Copilot policy set: {summary}");
             }
         }
         Err(e) => {
@@ -802,6 +812,76 @@ pub fn stop_hook() {
 
 // ── Hook thread ───────────────────────────────────────────────────────────────
 
+/// `ERROR_HOTKEY_ALREADY_REGISTERED` (0x80070581) as an HRESULT.
+///
+/// Raised when the exact (modifiers, VK) pair is already owned by another
+/// window or process — the P7 case: `Win+Shift+F23` failed on every startup.
+fn is_hotkey_already_registered(code: windows::core::HRESULT) -> bool {
+    use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
+    code == windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0)
+}
+
+/// Register a global hotkey, recovering from a stale registration.
+///
+/// P7: `RegisterHotKey(Win+Shift+F23)` returned 0x80070581 (already
+/// registered) once per startup. The registration can belong to:
+/// * a previous MiControl instance that has not exited yet (watchdog
+///   relaunch / user restart), or
+/// * another process that permanently owns the combination.
+///
+/// Strategy: unregister our own id, register, and on ALREADY_REGISTERED wait
+/// briefly and retry once — a dying previous instance releases the hotkey
+/// within a few hundred ms. If it is still taken we emit ONE clear WARN
+/// naming the key and continue (Raw Input / the low-level hook still see the
+/// key); never crash, never retry on every poll.
+#[cfg(windows)]
+fn register_hotkey_with_recovery(
+    hwnd: windows::Win32::Foundation::HWND,
+    id: i32,
+    mods: windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS,
+    vk: u32,
+    label: &str,
+) -> bool {
+    use std::time::Duration;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+
+    // Clear a stale registration left by a previous instance. Ignored: it
+    // fails when the hotkey belongs to another process (then the driver/Shell
+    // owns it and our register below reports ALREADY_REGISTERED).
+    let _ = unsafe { UnregisterHotKey(hwnd, id) };
+
+    for attempt in 0..2 {
+        match unsafe { RegisterHotKey(hwnd, id, mods, vk) } {
+            Ok(()) => {
+                log::info!("[hotkeys] RegisterHotKey {label} id={id} OK");
+                return true;
+            }
+            Err(e) if is_hotkey_already_registered(e.code()) => {
+                if attempt == 0 {
+                    // A previous MiControl instance may still be tearing down;
+                    // give it a moment and retry exactly once.
+                    std::thread::sleep(Duration::from_millis(200));
+                    let _ = unsafe { UnregisterHotKey(hwnd, id) };
+                    continue;
+                }
+                log::warn!(
+                    "[hotkeys] RegisterHotKey {label} id={id} unavailable: \
+                     ERROR_HOTKEY_ALREADY_REGISTERED (0x{:08X}) — another process \
+                     owns this hotkey; key detection still works via Raw Input / \
+                     WH_KEYBOARD_LL (not retrying)",
+                    e.code().0 as u32
+                );
+                return false;
+            }
+            Err(e) => {
+                log::warn!("[hotkeys] RegisterHotKey {label} id={id} failed: {e}");
+                return false;
+            }
+        }
+    }
+    false
+}
+
 fn hook_thread_main() {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HINSTANCE, HMODULE};
@@ -921,7 +1001,7 @@ fn hook_thread_main() {
     // revisions emit that raw sequence instead of synthesising VK 0xC3.
     {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+            HOT_KEY_MODIFIERS, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
         };
         // Standard VK registrations (AI key, Xiaomi key, Copilot key).
         for (id, vk) in [
@@ -929,31 +1009,15 @@ fn hook_thread_main() {
             (102i32, VK_XIAOMI_KEY),
             (103i32, VK_COPILOT),
         ] {
-            // SAFETY: RegisterHotKey takes a valid HWND (created via
-            // CreateWindowExW), a unique ID, and a VK code. The HWND is alive
-            // for the duration of the hook thread.
             let mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
-            // Best-effort: unregister first in case a previous instance left
-            // a stale registration (common after app restart without reboot).
-            let _ = unsafe { UnregisterHotKey(hwnd, id) };
-            match unsafe { RegisterHotKey(hwnd, id, mods, vk) } {
-                Ok(()) => log::info!("[hotkeys] RegisterHotKey VK={:#04X} id={id} OK", vk),
-                Err(e) => log::warn!(
-                    "[hotkeys] RegisterHotKey VK={:#04X} id={id} failed: {e}",
-                    vk
-                ),
-            }
+            let label = format!("VK={vk:#04X}");
+            // P7: unregister + single retry on ALREADY_REGISTERED, one clear log.
+            register_hotkey_with_recovery(hwnd, id, mods, vk, &label);
         }
         // Also register Win+Shift+F23 (alternate Copilot key path on some boards).
         // VK_F23 = 0x86.  MOD_WIN | MOD_SHIFT | MOD_NOREPEAT.
-        // Best-effort: unregister first to clear stale registrations from
-        // previous app instances (0x80070581 = ERROR_HOTKEY_ALREADY_REGISTERED).
-        let _ = unsafe { UnregisterHotKey(hwnd, 104i32) };
         let copilot_alt_mods = HOT_KEY_MODIFIERS(MOD_WIN.0 | MOD_SHIFT.0 | MOD_NOREPEAT.0);
-        match unsafe { RegisterHotKey(hwnd, 104i32, copilot_alt_mods, 0x86) } {
-            Ok(()) => log::info!("[hotkeys] RegisterHotKey Win+Shift+F23 id=104 OK"),
-            Err(e) => log::warn!("[hotkeys] RegisterHotKey Win+Shift+F23 id=104 failed: {e}"),
-        }
+        register_hotkey_with_recovery(hwnd, 104i32, copilot_alt_mods, 0x86, "Win+Shift+F23");
 
         // Also register the PLAIN F23 (VK 0x86) hotkey with no modifiers.
         // Xiaomi Book Pro 14 2024 and other OEM boards emit the raw F23 scan
@@ -961,14 +1025,10 @@ fn hook_thread_main() {
         // RegisterHotKey claims the plain VK at the Win32 level BEFORE the
         // Windows Shell can intercept it and open the "Copilot key" Settings
         // page.  Best-effort: if the Shell or another app already claimed it
-        // (ERROR_HOTKEY_ALREADY_REGISTERED) we log and continue — the
-        // WH_KEYBOARD_LL hook path still covers the plain F23.
-        let _ = unsafe { UnregisterHotKey(hwnd, 105i32) };
+        // the helper logs once and continues — the WH_KEYBOARD_LL hook path
+        // still covers the plain F23.
         let plain_f23_mods = HOT_KEY_MODIFIERS(MOD_NOREPEAT.0);
-        match unsafe { RegisterHotKey(hwnd, 105i32, plain_f23_mods, 0x86) } {
-            Ok(()) => log::info!("[hotkeys] RegisterHotKey plain F23 (0x86) id=105 OK"),
-            Err(e) => log::warn!("[hotkeys] RegisterHotKey plain F23 (0x86) id=105 failed: {e}"),
-        }
+        register_hotkey_with_recovery(hwnd, 105i32, plain_f23_mods, 0x86, "plain F23 (0x86)");
     }
 
     // ── Install WH_KEYBOARD_LL for key suppression (best-effort) ─────────────
@@ -1292,26 +1352,66 @@ fn handle_hotkey_message(id: i32) {
     }
 }
 
+/// What a HID consumer-control usage means for the microphone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerAudioKey {
+    /// Usage 0x00E2 — "Mute": mutes *playback*. Windows handles it; MiControl
+    /// must not show a microphone OSD or touch the capture endpoint.
+    OutputMute,
+    /// Usage 0x00CF (Microphone) / 0x0169 (AC Mute Microphone): the real
+    /// capture-mute keys (Fn+F4 on the Xiaomi keyboards reports one of these).
+    MicMute,
+    /// Not an audio key for this domain.
+    NotAudio,
+}
+
+/// Classify a HID consumer-control usage before acting on it.
+///
+/// Split out of [`dispatch_consumer_usage`] so the mapping is unit-testable:
+/// conflating [`ConsumerAudioKey::OutputMute`] with [`ConsumerAudioKey::MicMute`]
+/// is exactly the bug that made the mic OSD lie.
+fn classify_consumer_audio_key(usage: u16) -> ConsumerAudioKey {
+    match usage {
+        0x00E2 => ConsumerAudioKey::OutputMute,
+        0x00CF | 0x0169 => ConsumerAudioKey::MicMute,
+        _ => ConsumerAudioKey::NotAudio,
+    }
+}
+
 /// Dispatch action based on a HID Consumer Control usage code.
 ///
 /// Consumer usages come from the physical keyboard's Consumer Controls collection
 /// (UsagePage 0x0C) and from the VirtualControlHID VHF device (if running).
 /// Key → usage mappings for Xiaomi Book Pro 14 2024:
-///   Fn+F4  = mic mute       → 0x00CF (Microphone) or 0x00E2 (Mute)
+///   Fn+F4  = mic mute       → 0x00CF (Microphone) / 0x0169 (AC Mute Microphone)
 ///   Fn+F7  = Xiaomi AI key  → VK_LAUNCH_APP1 (keyboard path) or 0x01B3/0x01B6 (consumer)
 ///   Fn+F10 = keyboard light → 0x0271 (Backlight) or vendor-specific
 /// NOTE: Run app with detect mode (Settings → Hotkeys → "Detect Key") to find exact values.
 fn dispatch_consumer_usage(usage: u16) {
     log::info!("[hotkeys] Consumer usage {:#06X}", usage);
+    match classify_consumer_audio_key(usage) {
+        // 0x00E2 is the *output* mute usage: Windows mutes playback itself. It
+        // is NOT the microphone key — showing a mic OSD here (and toggling an
+        // internal bool) is what made the OSD claim a mute that never happened.
+        ConsumerAudioKey::OutputMute => {
+            log::info!("[hotkeys] Consumer: output mute key → left to Windows (no mic OSD)");
+            return;
+        }
+        // 0x00CF (Microphone) and 0x0169 (AC Mute Microphone) are real capture
+        // mute keys. Read the endpoint's actual state, flip it, and show an OSD
+        // that mirrors what the hardware reports afterwards.
+        ConsumerAudioKey::MicMute => {
+            log::info!("[hotkeys] Consumer: mic mute key → toggle capture endpoint + OSD");
+            // Spawns its own COM thread and returns immediately; the OSD shows
+            // the state the endpoint reports after the toggle.
+            crate::hw::mic::toggle_system_mic_mute_osd();
+            return;
+        }
+        ConsumerAudioKey::NotAudio => {}
+    }
+
     match usage {
         // ── Standard Consumer Controls ────────────────────────────────────────
-        // 0x00E2 = Mute (audio output mute)
-        // 0x00CF = Microphone (mic mute toggle, also seen on Xiaomi Fn+F4)
-        // 0x0169 = AC Mute Microphone (newer standard, same function)
-        0x00E2 | 0x00CF | 0x0169 => {
-            log::info!("[hotkeys] Consumer: mic/audio mute key → show OSD");
-            std::thread::spawn(crate::hw::osd::show_mic_mute_osd_toggle);
-        }
         // 0x0271 = Keyboard Backlight Brightness (HID usage)
         // 0x01BB = Keyboard Backlight toggle (Xiaomi specific, may vary)
         0x0271 | 0x01BB | 0x0073 => {
@@ -2411,8 +2511,13 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
         return; // Only act on key-down events.
     }
 
-    // Log every active WMI key event regardless of what happens next.
-    log::info!("[hotkeys] WMI key: class={class_name} detail={detail:02X?}");
+    // Raw event trace. DEBUG since the recheck of 2026-11-14: the IoT driver
+    // re-announces the same Fn key while it is held and the sampler logged
+    // 1 063 of these in 53 h (11 % of the app log) with no action attached.
+    // The dispatched action below stays at INFO, which is what a support
+    // report needs ("which action fired"), and RUST_LOG=debug brings the raw
+    // line back for Fn-key investigations.
+    log::debug!("[hotkeys] WMI key: class={class_name} detail={detail:02X?}");
 
     // Per-key debounce: IoTDriver may fire active=true repeatedly while a
     // key is held.  Use the distinguish_byte (key code) as the debounce key
@@ -2431,9 +2536,13 @@ fn handle_hid_wmi_event(class_name: &str, class_idx: u32, active: bool, detail: 
             // Fn+F4: mic mute.  detail[2]: 0x00 = muted, 0x01 = active.
             // (IoTDriver reports the NEW mic state after the key toggles it.)
             let muted = detail.get(2).copied().unwrap_or(1) == 0;
-            log::info!("[hotkeys] WMI Fn+F4 → mic mute OSD (muted={})", muted);
-            crate::hw::osd::show_mic_mute_osd(muted);
-            crate::hw::mic::set_system_mic_mute(muted);
+            log::info!(
+                "[hotkeys] WMI Fn+F4 → mic mute OSD (requested muted={})",
+                muted
+            );
+            // Apply first, then show what the endpoint reports back: the OSD
+            // must never claim a state the capture endpoint did not accept.
+            crate::hw::mic::set_system_mic_mute_osd(muted);
             return;
         }
         ("HID_EVENT20", 0x05) => {
@@ -3279,5 +3388,76 @@ mod wmi_debounce_tests {
             wmi_key_debounced(key_a),
             "key_a second fire should be debounced"
         );
+    }
+}
+
+#[cfg(test)]
+mod hotkey_registration_tests {
+    use super::*;
+
+    /// P7: only `ERROR_HOTKEY_ALREADY_REGISTERED` (1409 / 0x80070581) is
+    /// treated as "owned by someone else". Other failures must still be
+    /// reported as-is, otherwise we would silently swallow real errors.
+    #[test]
+    fn already_registered_hresult_is_recognised() {
+        use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
+        let already = windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0);
+        assert!(is_hotkey_already_registered(already));
+
+        let access_denied = windows::core::HRESULT::from_win32(5); // ERROR_ACCESS_DENIED
+        assert!(!is_hotkey_already_registered(access_denied));
+
+        let invalid_window = windows::core::HRESULT::from_win32(1400); // ERROR_INVALID_WINDOW_HANDLE
+        assert!(!is_hotkey_already_registered(invalid_window));
+    }
+
+    /// The constant must match the value observed in production logs
+    /// (`0x80070581`).
+    #[test]
+    fn already_registered_code_is_0x80070581() {
+        use windows::Win32::Foundation::ERROR_HOTKEY_ALREADY_REGISTERED;
+        let hr = windows::core::HRESULT::from_win32(ERROR_HOTKEY_ALREADY_REGISTERED.0);
+        assert_eq!(hr.0 as u32, 0x8007_0581);
+    }
+}
+
+#[cfg(test)]
+mod consumer_audio_tests {
+    use super::*;
+
+    /// 0x00E2 is the output-mute usage. Treating it as a microphone key is what
+    /// made the OSD claim a mic mute that never touched the capture endpoint.
+    #[test]
+    fn output_mute_usage_is_not_the_microphone() {
+        assert_eq!(
+            classify_consumer_audio_key(0x00E2),
+            ConsumerAudioKey::OutputMute
+        );
+    }
+
+    /// 0x00CF (Microphone) and 0x0169 (AC Mute Microphone) are the real capture
+    /// keys — Fn+F4 on the Xiaomi keyboards reports one of these.
+    #[test]
+    fn microphone_usages_target_the_capture_endpoint() {
+        assert_eq!(
+            classify_consumer_audio_key(0x00CF),
+            ConsumerAudioKey::MicMute
+        );
+        assert_eq!(
+            classify_consumer_audio_key(0x0169),
+            ConsumerAudioKey::MicMute
+        );
+    }
+
+    /// Backlight / app-launch / volume usages must not reach the mic branch.
+    #[test]
+    fn unrelated_usages_stay_out_of_the_audio_path() {
+        for usage in [0x0271u16, 0x01BB, 0x01B3, 0x01B6, 0x0221, 0x0073, 0x0000] {
+            assert_eq!(
+                classify_consumer_audio_key(usage),
+                ConsumerAudioKey::NotAudio,
+                "usage {usage:#06X} must not be classified as an audio key"
+            );
+        }
     }
 }

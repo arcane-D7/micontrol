@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use rand::RngCore;
@@ -206,7 +206,12 @@ pub async fn discover_devices(duration: Duration) -> Vec<KdeDevice> {
 
 /// Async UDP socket for discovery (broadcast + dual behavior).
 fn discovery_socket() -> std::io::Result<tokio::net::UdpSocket> {
-    let std_sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    // Bind the well-known KDE Connect discovery port (1716) instead of an
+    // ephemeral one: inbound announcements arrive on 1716, and a fixed port is
+    // what makes a deterministic firewall rule possible. An ephemeral bind used
+    // to both break inbound discovery AND pop the Windows firewall dialog on
+    // every run (no rule could ever cover a moving port).
+    let std_sock = std::net::UdpSocket::bind(("0.0.0.0", KDE_UDP_PORT))?;
     std_sock.set_nonblocking(true)?;
     std_sock.set_broadcast(true)?;
     tokio::net::UdpSocket::from_std(std_sock)
@@ -267,23 +272,6 @@ pub async fn send_ping(device: &KdeDevice, timeout: Duration) -> Result<bool, St
     }
     let text = String::from_utf8_lossy(&buffer);
     Ok(text.contains("kdeconnect.ping.reply"))
-}
-
-// ── Shared discovery cache (for status/UI refresh) ──────────────────────────
-
-static CACHE: OnceLock<Arc<Mutex<Vec<KdeDevice>>>> = OnceLock::new();
-
-pub fn cache() -> &'static Arc<Mutex<Vec<KdeDevice>>> {
-    CACHE.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-}
-
-/// Refresh the shared cache with a bounded discovery sweep.
-pub async fn refresh_cache(duration: Duration) -> Vec<KdeDevice> {
-    let devs = discover_devices(duration).await;
-    if let Ok(mut c) = cache().lock() {
-        *c = devs.clone();
-    }
-    devs
 }
 
 #[cfg(test)]
@@ -352,6 +340,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live LAN discovery: binds 0.0.0.0:1716 (triggers a Windows firewall dialog for every new test-binary hash). Run manually: cargo test discover_returns_empty -- --ignored"]
     fn discover_returns_empty_without_network() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

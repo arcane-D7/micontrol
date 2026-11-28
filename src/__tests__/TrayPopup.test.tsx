@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/react';
 import TrayPopup from '../pages/TrayPopup';
 import type { Hardware } from '../pages/tabs/shared';
+import type { BatteryInfo } from '../types/hardware';
 
 // Mock Tauri APIs
 vi.mock('@tauri-apps/api/core', () => ({
@@ -35,9 +36,9 @@ vi.mock('../lib/brightnessPresets', () => ({
   getActivePreset: vi.fn(() => null),
 }));
 
-function makeMockHardware(): Hardware {
+function makeMockHardware(batteryOverrides: Partial<BatteryInfo> = {}): Hardware {
   return {
-    battery: { level: 75, is_charging: false, is_plugged: true },
+    battery: { level: 75, is_charging: false, is_plugged: true, ...batteryOverrides },
     performanceMode: 'balance',
     setPerformanceMode: vi.fn().mockResolvedValue(undefined),
     loading: false,
@@ -66,5 +67,28 @@ describe('TrayPopup', () => {
     // The tray popup should have mode buttons (balance is the default)
     const buttons = document.querySelectorAll('button');
     expect(buttons.length).toBeGreaterThan(0);
+  });
+
+  it('shows the charger-connected state, not "Discharging", with the charger plugged in', () => {
+    // Reported bug: 96 % on AC with ChargeRate = 0 (is_charging=false,
+    // is_plugged=true) rendered "Discharging" in the tray popup.
+    const hw = makeMockHardware({ is_charging: false, is_plugged: true });
+    const { container } = render(<TrayPopup hardware={hw} />);
+    // "AC connected" was renamed to "Charger connected" in the glossary pass
+    // (theme-migration §4.4): the object, not the adapter label.
+    expect(container.textContent).toContain('Charger connected');
+    expect(container.textContent).not.toContain('Discharging');
+  });
+
+  it('shows "Charging" while current flows into the battery', () => {
+    const hw = makeMockHardware({ is_charging: true, is_plugged: true });
+    const { container } = render(<TrayPopup hardware={hw} />);
+    expect(container.textContent).toContain('Charging');
+  });
+
+  it('shows "Discharging" only on battery', () => {
+    const hw = makeMockHardware({ is_charging: false, is_plugged: false });
+    const { container } = render(<TrayPopup hardware={hw} />);
+    expect(container.textContent).toContain('Discharging');
   });
 });

@@ -317,7 +317,7 @@ Abra o Git Bash e execute:
 ```bash
 GHIDRA="/c/Temp/ghidra12/ghidra_12.1_PUBLIC"
 BINARY="/c/Temp/iotservice_analysis/IoTService.exe"
-SCRIPTS="/c/Users/mafsc/Documents/Projects/miPC/.agents/skills/ghidra/scripts/ghidra_scripts"
+SCRIPTS="/c/Projects/miPC/.agents/skills/ghidra/scripts/ghidra_scripts"
 OUTDIR="/c/Temp/iotservice_analysis"
 PROJDIR="$OUTDIR/proj"
 
@@ -333,6 +333,8 @@ mkdir -p "$PROJDIR"
 ```
 
 > **Atenção:** O script `ExportStrings.java` deve estar na pasta `ghidra_scripts/` apontada por `-scriptPath`. Certifique-se de usar o nome exato do arquivo (case-sensitive no Java).
+>
+> **Nota (2026-11-11):** o directório `.agents/skills/ghidra/` já não existe no repositório — aponte `SCRIPTS` para a cópia local de `ExportStrings.java` que estiver a usar.
 
 ### Passo 3 — Filtrar strings relevantes (PowerShell)
 

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Accordion } from './ui/accordion';
 
 interface FunctionExplainProps {
   /** Short inline description shown next to the control. */
@@ -13,67 +13,24 @@ interface FunctionExplainProps {
 
 /**
  * Collapsible "how this works" explanation used on hardware controls that are
- * otherwise a single toggle/button. Provides a clear, always-visible one-line
- * summary plus an expandable detailed explanation (what the feature does,
- * what it affects, and when to use it) — improving UX without cluttering the UI.
+ * otherwise a single toggle/button.
+ *
+ * O corpo passou a ser o `Accordion` da casa (details/summary + hairline) em
+ * vez de um `<div>` com estilos inline: isto era o único consumidor do padrão
+ * e trazia bordas/raios próprios a fugir aos tokens. A API não mudou.
  */
 export default function FunctionExplain({ summary, details, bullets, note }: FunctionExplainProps) {
-  const [open, setOpen] = useState(false);
-
   return (
-    <div
-      style={{
-        marginTop: 8,
-        border: '1px solid var(--border, rgba(0,0,0,0.1))',
-        borderRadius: 8,
-        padding: '8px 12px',
-        background: 'var(--surface-2, rgba(0,0,0,0.02))',
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        style={{
-          background: 'none',
-          border: 'none',
-          padding: 0,
-          cursor: 'pointer',
-          fontSize: 12,
-          color: 'var(--text-muted)',
-          textAlign: 'left',
-          width: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-        }}
-      >
-        <span aria-hidden="true" style={{ display: 'inline-block', transition: 'transform 150ms' }}>
-          ▸
-        </span>
-        <span>{summary}</span>
-        <span aria-hidden="true" style={{ marginLeft: 'auto', opacity: 0.6 }}>
-          {open ? '−' : '+'}
-        </span>
-      </button>
-
-      {open && (
-        <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6, color: 'var(--text)' }}>
-          <p style={{ margin: '0 0 6px' }}>{details}</p>
-          {bullets && bullets.length > 0 && (
-            <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
-              {bullets.map((b, i) => (
-                <li key={i} style={{ marginBottom: 2 }}>
-                  {b}
-                </li>
-              ))}
-            </ul>
-          )}
-          {note && (
-            <p style={{ margin: '6px 0 0', color: 'var(--text-dim)', fontSize: 11 }}>{note}</p>
-          )}
-        </div>
+    <Accordion summary={summary} className="mc-function-explain">
+      <p>{details}</p>
+      {bullets && bullets.length > 0 && (
+        <ul>
+          {bullets.map((b, i) => (
+            <li key={i}>{b}</li>
+          ))}
+        </ul>
       )}
-    </div>
+      {note && <p className="mc-accordion__note">{note}</p>}
+    </Accordion>
   );
 }

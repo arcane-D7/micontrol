@@ -13,6 +13,8 @@
 use crate::hw::face::config::{EMBEDDING_DIM, MAX_TEMPLATES_PER_NAME, STORE_MAGIC};
 use crate::hw::face::errors::{FaceError, FaceResult};
 use crate::hw::face::FaceSettings;
+use crate::util::state_store;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 /// One enrolled template (feature vector + metadata).
@@ -224,33 +226,110 @@ mod dpapi {
     }
 }
 
-/// Save the store to `path` (DPAPI-encrypted, atomic).
-pub fn save_store(path: &std::path::Path, store: &FaceStore) -> FaceResult<()> {
-    let raw = store.to_bytes()?;
-    let encrypted = dpapi::protect(&raw)?;
-    let mut full = Vec::with_capacity(STORE_MAGIC.len() + encrypted.len());
-    full.extend_from_slice(STORE_MAGIC);
-    full.extend_from_slice(&encrypted);
-
-    // Atomic write: temp + rename.
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &full).map_err(|e| FaceError::Store(format!("write tmp: {e}")))?;
-    std::fs::rename(&tmp, path).map_err(|e| FaceError::Store(format!("rename: {e}")))?;
-    Ok(())
-}
-
-/// Load the store from `path`. Returns an empty store if the file is missing.
-pub fn load_store(path: &std::path::Path) -> FaceResult<FaceStore> {
-    if !path.exists() {
-        return Ok(FaceStore::new());
-    }
-    let full = std::fs::read(path).map_err(|e| FaceError::Store(format!("read: {e}")))?;
+/// Decode one gallery blob (magic + DPAPI ciphertext) into a store.
+fn decode_blob(full: &[u8]) -> FaceResult<FaceStore> {
     if full.len() < STORE_MAGIC.len() || &full[..STORE_MAGIC.len()] != STORE_MAGIC {
         return Err(FaceError::Store("bad store magic".into()));
     }
     let encrypted = &full[STORE_MAGIC.len()..];
     let raw = dpapi::unprotect(encrypted)?;
     FaceStore::from_bytes(&raw)
+}
+
+/// Encode a store into a gallery blob (magic + DPAPI ciphertext).
+fn encode_blob(store: &FaceStore) -> FaceResult<Vec<u8>> {
+    let raw = store.to_bytes()?;
+    let encrypted = dpapi::protect(&raw)?;
+    let mut full = Vec::with_capacity(STORE_MAGIC.len() + encrypted.len());
+    full.extend_from_slice(STORE_MAGIC);
+    full.extend_from_slice(&encrypted);
+    Ok(full)
+}
+
+/// Read the legacy `faces.dat` blob file. Missing file is an empty gallery;
+/// a corrupt blob is an ERROR (never silently treated as "not enrolled").
+fn load_legacy_gallery(path: &std::path::Path) -> FaceResult<FaceStore> {
+    if !path.exists() {
+        return Ok(FaceStore::new());
+    }
+    let full = std::fs::read(path).map_err(|e| FaceError::Store(format!("read: {e}")))?;
+    decode_blob(&full)
+}
+
+/// Production gallery handle: `%PROGRAMDATA%\MiControl\face_consent.json`.
+fn gallery_store() -> FaceResult<state_store::Store<state_store::FaceGalleryState>> {
+    state_store::face_consent_store().map_err(|e| FaceError::Store(format!("gallery store: {e}")))
+}
+
+/// Load the enrollment gallery through the state store, falling back to the
+/// legacy `faces.dat` file while the store is still empty. A corrupt record
+/// is an error on both paths: callers must refuse to act on biometric state
+/// they could not read, never assume an empty (permissive) gallery.
+pub fn load_gallery() -> FaceResult<FaceStore> {
+    let store = gallery_store()?;
+    let legacy = state_store::legacy_face_gallery_path();
+    load_from_gallery_store(&store, &legacy)
+}
+
+/// Shared load path (explicit root variant is used by tests).
+fn load_from_gallery_store(
+    store: &state_store::Store<state_store::FaceGalleryState>,
+    legacy: &std::path::Path,
+) -> FaceResult<FaceStore> {
+    match store.load() {
+        Ok(Some(state)) => {
+            let blob = base64::engine::general_purpose::STANDARD
+                .decode(&state.blob_b64)
+                .map_err(|e| FaceError::Store(format!("gallery blob base64: {e}")))?;
+            decode_blob(&blob)
+        }
+        Ok(None) => load_legacy_gallery(legacy),
+        Err(e) => Err(FaceError::Store(format!("gallery store: {e}"))),
+    }
+}
+
+/// Save the gallery through the state store (DPAPI blob inside the envelope,
+/// atomic tmp + rename + fsync) and retire the legacy `faces.dat` only after
+/// the save succeeds.
+pub fn save_gallery(gallery: &FaceStore) -> FaceResult<()> {
+    let store = gallery_store()?;
+    let blob = encode_blob(gallery)?;
+    let state = state_store::FaceGalleryState {
+        blob_b64: base64::engine::general_purpose::STANDARD.encode(&blob),
+    };
+    store
+        .save(&state)
+        .map_err(|e| FaceError::Store(format!("gallery save: {e}")))?;
+    state_store::retire_legacy_state_file(&state_store::legacy_face_gallery_path());
+    Ok(())
+}
+
+/// Load the gallery from an explicit PROGRAMDATA root (tests).
+pub fn load_gallery_in(program_root: &std::path::Path) -> FaceResult<FaceStore> {
+    let store = state_store::face_consent_store_in(program_root);
+    let legacy = state_store::legacy_face_gallery_path_in(program_root);
+    load_from_gallery_store(&store, &legacy)
+}
+
+/// Save the gallery into an explicit PROGRAMDATA root (tests); the legacy
+/// file beside it is retired after the save succeeds.
+pub fn save_gallery_in(program_root: &std::path::Path, gallery: &FaceStore) -> FaceResult<()> {
+    let store = state_store::face_consent_store_in(program_root);
+    let blob = encode_blob(gallery)?;
+    let state = state_store::FaceGalleryState {
+        blob_b64: base64::engine::general_purpose::STANDARD.encode(&blob),
+    };
+    store
+        .save(&state)
+        .map_err(|e| FaceError::Store(format!("gallery save: {e}")))?;
+    state_store::retire_legacy_state_file(&state_store::legacy_face_gallery_path_in(program_root));
+    Ok(())
+}
+
+/// Load the legacy `faces.dat` file from an explicit path (pre-store format;
+/// read-only since the state store took over).
+pub fn load_legacy_gallery_path(path: &std::path::Path) -> FaceResult<FaceStore> {
+    load_legacy_gallery(path)
 }
 
 #[cfg(test)]
@@ -310,5 +389,75 @@ mod tests {
         let loaded = FaceStore::from_bytes(&bytes).unwrap();
         assert_eq!(loaded.settings.match_threshold, 0.66);
         assert_eq!(loaded.settings.language, "pt");
+    }
+
+    /// Unique per-test scratch PROGRAMDATA root; safe under parallel threads.
+    fn scratch_root(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "micontrol-face-store-{}-{}-{}",
+            tag,
+            std::process::id(),
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch root");
+        dir
+    }
+
+    #[test]
+    fn gallery_store_roundtrip() {
+        let root = scratch_root("roundtrip");
+        let mut store = FaceStore::new();
+        store
+            .add_template("alice", vec![0.1; 512], "front")
+            .unwrap();
+        save_gallery_in(&root, &store).unwrap();
+        let loaded = load_gallery_in(&root).unwrap();
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].name, "alice");
+        assert_eq!(loaded.profiles[0].templates.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_faces_dat_is_read_then_retired_on_save() {
+        let root = scratch_root("legacy");
+        let legacy = crate::util::state_store::legacy_face_gallery_path_in(&root);
+        std::fs::create_dir_all(legacy.parent().unwrap()).expect("dir");
+        let mut legacy_store = FaceStore::new();
+        legacy_store
+            .add_template("bob", vec![0.3; 512], "front")
+            .unwrap();
+        std::fs::write(&legacy, encode_blob(&legacy_store).unwrap()).expect("legacy fixture");
+
+        // The store is empty, so the read falls back to the legacy blob.
+        let loaded = load_gallery_in(&root).unwrap();
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].name, "bob");
+
+        // The next save takes the store over and retires the legacy file.
+        let mut updated = loaded;
+        updated
+            .add_template("carol", vec![0.4; 512], "front")
+            .unwrap();
+        save_gallery_in(&root, &updated).unwrap();
+        assert!(!legacy.exists(), "legacy file retired after a good save");
+        let reloaded = load_gallery_in(&root).unwrap();
+        assert_eq!(reloaded.profiles.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_gallery_refuses_to_load() {
+        let root = scratch_root("corrupt");
+        let spec = crate::util::state_store::face_consent_store_in(&root);
+        std::fs::create_dir_all(spec.path().parent().unwrap()).expect("dir");
+        std::fs::write(spec.path(), "{corrupt").expect("corrupt fixture");
+
+        // A corrupt biometric record is an error, never an empty gallery:
+        // callers must refuse to act on state they could not read.
+        assert!(load_gallery_in(&root).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

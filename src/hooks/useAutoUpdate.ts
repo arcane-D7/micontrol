@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { check } from '@tauri-apps/plugin-updater';
 import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
+import { t } from './useI18n';
 
 export type AppUpdateState =
   'idle' | 'checking' | 'available' | 'downloading' | 'installing' | 'ready' | 'error';
@@ -10,6 +11,27 @@ export interface AppUpdateInfo {
   version: string;
   date: string;
   body: string;
+}
+
+/**
+ * Window event fired by the settings card when the "Auto-update" switch
+ * changes, so the 4-hour loop reacts immediately instead of at the next tick.
+ */
+export const AUTO_UPDATE_CHANGED_EVENT = 'micontrol:auto-update-changed';
+
+/**
+ * Read the persisted auto-update master switch (`HKCU\SOFTWARE\MiControl\AutoUpdateEnabled`).
+ *
+ * The switch is opt-in: an unreadable value means "disabled", which is also the
+ * documented default.
+ */
+async function readAutoUpdateEnabled(): Promise<boolean> {
+  try {
+    const config = await invoke<{ enabled: boolean }>('get_auto_update_config');
+    return config.enabled === true;
+  } catch {
+    return false;
+  }
 }
 
 export function useAutoUpdate() {
@@ -112,9 +134,7 @@ export function useAutoUpdate() {
       // "<app>-<version>-installer.exe".
       const installerPath = await invoke<string | null>('find_latest_downloaded_installer');
       if (!installerPath) {
-        throw new Error(
-          'Downloaded installer not found after update download — cannot install via bridge.',
-        );
+        throw new Error(t('updates.downloadErrorMissing'));
       }
 
       await invoke('install_update', { installerPath });
@@ -141,20 +161,33 @@ export function useAutoUpdate() {
     setErrorMsg('');
   }, []);
 
-  // Check silently on startup (after 3s delay) and every 4 hours
+  // Check silently on startup (after 3s delay) and every 4 hours.
+  //
+  // F9.2: both checks are gated on the persisted "Auto-update" switch. Before
+  // this, `AutoUpdateEnabled` was written by the settings card and read by
+  // nobody, so turning it off changed nothing — the 4-hour checks kept running.
   useEffect(() => {
-    const initialTimer = setTimeout(() => {
+    let cancelled = false;
+
+    const silentCheck = async () => {
+      if (cancelled) return;
+      if (!(await readAutoUpdateEnabled())) return;
+      if (cancelled) return;
       void checkForUpdate(true);
-    }, 3000);
-    const interval = setInterval(
-      () => {
-        void checkForUpdate(true);
-      },
-      4 * 60 * 60 * 1000,
-    );
+    };
+
+    const initialTimer = setTimeout(() => void silentCheck(), 3000);
+    const interval = setInterval(() => void silentCheck(), 4 * 60 * 60 * 1000);
+    // The settings card announces a toggle so the change is effective now
+    // instead of at the next 4-hour tick.
+    const onToggle = () => void silentCheck();
+    window.addEventListener(AUTO_UPDATE_CHANGED_EVENT, onToggle);
+
     return () => {
+      cancelled = true;
       clearTimeout(initialTimer);
       clearInterval(interval);
+      window.removeEventListener(AUTO_UPDATE_CHANGED_EVENT, onToggle);
     };
   }, [checkForUpdate]);
 

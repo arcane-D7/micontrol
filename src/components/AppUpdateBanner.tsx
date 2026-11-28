@@ -1,5 +1,6 @@
 import { t } from '../hooks/useI18n';
 import type { AppUpdateState, AppUpdateInfo } from '../hooks/useAutoUpdate';
+import { Icon } from './ui/icons';
 
 interface Props {
   state: AppUpdateState;
@@ -25,9 +26,9 @@ export default function AppUpdateBanner({
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
-            <div className="card-title" style={{ margin: 0, marginBottom: 4 }}>
+            <h2 className="card-title" style={{ margin: 0, marginBottom: 4 }}>
               {t('updates.appVersion')}
-            </div>
+            </h2>
             <div style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>
               {state === 'checking' ? t('updates.checkingForUpdates') : t('updates.upToDate')}
             </div>
@@ -50,12 +51,12 @@ export default function AppUpdateBanner({
       <div className="card" style={{ marginBottom: 16, borderColor: 'var(--danger)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
-            <div
+            <h2
               className="card-title"
               style={{ margin: 0, marginBottom: 4, color: 'var(--danger)' }}
             >
               {t('updates.updateError')}
-            </div>
+            </h2>
             <div style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>{errorMsg}</div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -85,8 +86,8 @@ export default function AppUpdateBanner({
         className="card"
         style={{
           marginBottom: 16,
-          borderColor: 'oklch(from var(--primary) l c h / 0.4)',
-          background: 'oklch(from var(--primary) l c h / 0.06)',
+          borderColor: 'color-mix(in oklab, var(--primary) 40%, transparent)',
+          background: 'color-mix(in oklab, var(--primary) 6%, transparent)',
         }}
       >
         <div
@@ -98,9 +99,10 @@ export default function AppUpdateBanner({
           }}
         >
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="card-title" style={{ margin: 0, marginBottom: 6 }}>
-              🎉 {t('updates.newVersionAvailable')} — v{updateInfo?.version}
-            </div>
+            <h2 className="card-title" style={{ margin: 0, marginBottom: 6 }}>
+              <Icon name="sparkles" size={16} /> {t('updates.newVersionAvailable')} — v
+              {updateInfo?.version}
+            </h2>
             {updateInfo?.body && (
               <div
                 style={{
@@ -140,9 +142,9 @@ export default function AppUpdateBanner({
   if (state === 'downloading') {
     return (
       <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 12 }}>
+        <h2 className="card-title" style={{ marginBottom: 12 }}>
           {t('updates.downloading')} {progress}%
-        </div>
+        </h2>
         <div
           style={{
             width: '100%',
@@ -172,18 +174,18 @@ export default function AppUpdateBanner({
         className="card"
         style={{
           marginBottom: 16,
-          borderColor: 'oklch(from var(--success) l c h / 0.4)',
-          background: 'oklch(from var(--success) l c h / 0.06)',
+          borderColor: 'color-mix(in oklab, var(--success) 40%, transparent)',
+          background: 'color-mix(in oklab, var(--success) 6%, transparent)',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
-            <div
+            <h2
               className="card-title"
               style={{ margin: 0, marginBottom: 4, color: 'var(--success)' }}
             >
-              ✓ {t('updates.downloadComplete')}
-            </div>
+              <Icon name="check" size={16} /> {t('updates.downloadComplete')}
+            </h2>
             <div style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>
               {t('updates.restarting')}
             </div>
@@ -196,9 +198,9 @@ export default function AppUpdateBanner({
   // installing state
   return (
     <div className="card" style={{ marginBottom: 16 }}>
-      <div className="card-title" style={{ marginBottom: 8 }}>
+      <h2 className="card-title" style={{ marginBottom: 8 }}>
         {t('updates.installing')}
-      </div>
+      </h2>
       <div className="loading-spinner" role="status">
         {t('common.loading')}
       </div>

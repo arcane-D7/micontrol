@@ -14,8 +14,9 @@
 //!    logging; raw error strings never reach the log.
 //! 3. **Bounded storage.** [`MAX_RECORDS`] records, [`MAX_BYTES`] bytes and
 //!    [`RETENTION_MS`] retention, with deterministic oldest-first eviction.
-//! 4. **Atomic writes.** Records are written to a temporary file and renamed,
-//!    so a crash cannot leave a partially written log.
+//! 4. **Atomic writes.** Records persist through the state store
+//!    (`util::state_store`): tmp + fsync + atomic swap, so a crash cannot
+//!    leave a partially written log.
 //! 5. **Disabled means silent.** When logging is disabled, no record is
 //!    produced at all.
 
@@ -132,6 +133,10 @@ pub struct ActionRecord {
     /// Samples in each window (small integers).
     pub before_samples: Option<u32>,
     pub after_samples: Option<u32>,
+    /// How many processes the action covered. A count, never an identifier:
+    /// it carries no name, pid or path.
+    #[serde(default)]
+    pub processes_affected: Option<u32>,
 }
 
 /// Measured comparison attached to a record. Grouped into a struct so the
@@ -171,6 +176,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -194,6 +200,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -217,6 +224,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -240,6 +248,7 @@ impl ActionRecord {
             confidence: None,
             before_samples: None,
             after_samples: None,
+            processes_affected: None,
         }
     }
 
@@ -264,6 +273,16 @@ impl ActionRecord {
         self.confidence = Some(summary.confidence);
         self.before_samples = Some(summary.before_samples);
         self.after_samples = Some(summary.after_samples);
+        self
+    }
+
+    /// Attach how many processes the action covered.
+    ///
+    /// A count is not identifying — the record still has no name, pid, path or
+    /// error text — but it is the difference between "something happened" and
+    /// "three background processes were throttled".
+    pub fn with_affected(mut self, count: u32) -> Self {
+        self.processes_affected = Some(count);
         self
     }
 }
@@ -363,27 +382,153 @@ impl ActionLog {
     }
 }
 
-/// Path of the anonymous action log under the protected data directory.
-pub fn action_log_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("os_turbo_actions.json")
+/// State-store payload: the retained records. `ActionLog` itself carries the
+/// runtime `enabled` flag, which is process state, not persisted state.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ActionLogState {
+    /// Retained records, oldest first.
+    pub records: Vec<ActionRecord>,
 }
 
-/// Persist the log atomically (write to a temp file, then rename).
-pub fn save_action_log(data_dir: &Path, log: &ActionLog) -> std::io::Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let target = action_log_path(data_dir);
-    let temp = target.with_extension("json.tmp");
-    std::fs::write(&temp, log.to_json())?;
-    std::fs::rename(&temp, &target)
-}
-
-/// Load the log, tolerating a missing or corrupt file.
-pub fn load_action_log(data_dir: &Path, enabled: bool) -> ActionLog {
-    let path = action_log_path(data_dir);
-    match std::fs::read_to_string(&path) {
-        Ok(json) => ActionLog::from_json(&json, enabled),
-        Err(_) => ActionLog::new(enabled),
+impl From<&ActionLog> for ActionLogState {
+    fn from(log: &ActionLog) -> Self {
+        Self {
+            records: log.records.clone(),
+        }
     }
+}
+
+impl From<ActionLogState> for ActionLog {
+    fn from(state: ActionLogState) -> Self {
+        let mut log = Self {
+            records: state.records,
+            enabled: true,
+        };
+        log.enforce_caps();
+        log
+    }
+}
+
+/// Production action-log store: `%LOCALAPPDATA%\MiControl\state\os_turbo_log.json`.
+pub fn action_log_store(
+) -> Result<crate::util::state_store::Store<ActionLogState>, crate::util::state_store::StoreError> {
+    Ok(crate::util::state_store::Store::new(
+        crate::util::state_store::os_turbo_log_spec()?,
+    ))
+}
+
+/// Action-log store under an explicit root (tests).
+pub fn action_log_store_in(root: &Path) -> crate::util::state_store::Store<ActionLogState> {
+    crate::util::state_store::Store::new(crate::util::state_store::os_turbo_log_spec_in(root))
+}
+
+/// Legacy pre-store location of the action log (bare JSON array).
+pub fn legacy_action_log_path() -> PathBuf {
+    match std::env::var_os("LOCALAPPDATA") {
+        Some(base) => legacy_action_log_path_in(&PathBuf::from(base)),
+        None => PathBuf::from("os_turbo_actions.json"),
+    }
+}
+
+/// Legacy path under an explicit root (tests).
+pub fn legacy_action_log_path_in(root: &Path) -> PathBuf {
+    root.join("MiControl").join("os_turbo_actions.json")
+}
+
+/// Persist the log through the state store (atomic tmp + rename + fsync) and
+/// retire the legacy file only after the first successful save.
+pub fn save_action_log(log: &ActionLog) -> Result<(), crate::util::state_store::StoreError> {
+    let store = action_log_store()?;
+    store.save(&ActionLogState::from(log))?;
+    crate::util::state_store::retire_legacy_state_file(&legacy_action_log_path());
+    Ok(())
+}
+
+/// Persist the log into an explicit-root store (tests); the legacy file next
+/// to `root` is retired after the save succeeds.
+pub fn save_action_log_in(
+    root: &Path,
+    log: &ActionLog,
+) -> Result<(), crate::util::state_store::StoreError> {
+    let store = action_log_store_in(root);
+    store.save(&ActionLogState::from(log))?;
+    crate::util::state_store::retire_legacy_state_file(&legacy_action_log_path_in(root));
+    Ok(())
+}
+
+/// Load the log, migrating the legacy file once. Missing or corrupt state
+/// degrades to an empty log (warn), never a panic and never a failed start.
+pub fn load_action_log(enabled: bool) -> ActionLog {
+    load_from_store(&action_log_store(), &legacy_action_log_path(), enabled)
+}
+
+/// Explicit-root variant for tests: loads from `root`'s store, importing the
+/// legacy bare-array file beside it on first read.
+pub fn load_action_log_in(root: &Path, enabled: bool) -> ActionLog {
+    let store = action_log_store_in(root);
+    load_from_store(&Ok(store), &legacy_action_log_path_in(root), enabled)
+}
+
+/// Shared load path: store first, legacy import when the store is empty,
+/// warn-and-degrade on corruption.
+fn load_from_store(
+    store: &Result<
+        crate::util::state_store::Store<ActionLogState>,
+        crate::util::state_store::StoreError,
+    >,
+    legacy: &Path,
+    enabled: bool,
+) -> ActionLog {
+    let store = match store {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!(
+                target: "hw::os_turbo_log",
+                "action log store unavailable ({e}); starting an empty log"
+            );
+            return ActionLog::new(enabled);
+        }
+    };
+    match store.load() {
+        Ok(Some(state)) => {
+            let mut log = ActionLog::from(state);
+            log.enabled = enabled;
+            log
+        }
+        Ok(None) => import_legacy_log(store, legacy, enabled),
+        Err(e) => {
+            // Corrupt payload degrades to an empty log; the next successful
+            // save heals the file. Nothing at startup may fail because of it.
+            log::warn!(
+                target: "hw::os_turbo_log",
+                "action log store unreadable ({e}); starting an empty log"
+            );
+            ActionLog::new(enabled)
+        }
+    }
+}
+
+/// Import the legacy bare-array `os_turbo_actions.json`: parse tolerantly,
+/// save through the store, retire the legacy file only after a good save.
+fn import_legacy_log(
+    store: &crate::util::state_store::Store<ActionLogState>,
+    legacy: &Path,
+    enabled: bool,
+) -> ActionLog {
+    let Ok(json) = std::fs::read_to_string(legacy) else {
+        return ActionLog::new(enabled);
+    };
+    let log = ActionLog::from_json(&json, enabled);
+    match store.save(&ActionLogState::from(&log)) {
+        Ok(()) => crate::util::state_store::retire_legacy_state_file(legacy),
+        Err(e) => {
+            log::warn!(
+                target: "hw::os_turbo_log",
+                "legacy action log import failed ({e}); the legacy file is kept"
+            );
+        }
+    }
+    log
 }
 
 #[cfg(test)]
@@ -475,23 +620,88 @@ mod tests {
 
     #[test]
     fn atomic_save_and_load_round_trip() {
-        let dir = std::env::temp_dir().join("micontrol_os_turbo_log_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let root = std::env::temp_dir().join("micontrol_os_turbo_log_test");
+        let _ = std::fs::remove_dir_all(&root);
         let mut log = ActionLog::new(true);
         log.push(sample_record());
-        save_action_log(&dir, &log).expect("save");
-        let loaded = load_action_log(&dir, true);
+        save_action_log_in(&root, &log).expect("save");
+        let loaded = load_action_log_in(&root, true);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.to_json(), log.to_json());
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn missing_file_loads_empty() {
-        let dir = std::env::temp_dir().join("micontrol_os_turbo_log_missing");
-        let _ = std::fs::remove_dir_all(&dir);
-        let loaded = load_action_log(&dir, true);
+        let root = std::env::temp_dir().join("micontrol_os_turbo_log_missing");
+        let _ = std::fs::remove_dir_all(&root);
+        let loaded = load_action_log_in(&root, true);
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn legacy_log_is_imported_and_retired() {
+        let root = std::env::temp_dir().join("micontrol_os_turbo_log_legacy");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("MiControl")).expect("dir");
+        let legacy = root.join("MiControl").join("os_turbo_actions.json");
+        std::fs::write(
+            &legacy,
+            format!(
+                "[{}]",
+                serde_json::to_string(&sample_record()).expect("record")
+            ),
+        )
+        .expect("legacy fixture");
+
+        let loaded = load_action_log_in(&root, true);
+        assert_eq!(loaded.len(), 1, "legacy record imported");
+        let store_path = crate::util::state_store::os_turbo_log_spec_in(&root).path;
+        assert!(store_path.exists(), "store file created by the import");
+        assert!(!legacy.exists(), "legacy file retired after a good save");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_store_degrades_to_empty_and_heals() {
+        let root = std::env::temp_dir().join("micontrol_os_turbo_log_corrupt");
+        let _ = std::fs::remove_dir_all(&root);
+        let spec = crate::util::state_store::os_turbo_log_spec_in(&root);
+        std::fs::create_dir_all(spec.path.parent().expect("parent")).expect("dir");
+        std::fs::write(&spec.path, "{not valid json").expect("corrupt fixture");
+
+        // Corrupt state must never fail the start: degrade to empty.
+        let loaded = load_action_log_in(&root, true);
+        assert!(loaded.is_empty());
+
+        // The next save heals the file and the log round-trips again.
+        let mut log = ActionLog::new(true);
+        log.push(sample_record());
+        save_action_log_in(&root, &log).expect("save");
+        let reloaded = load_action_log_in(&root, true);
+        assert_eq!(reloaded.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn affected_count_round_trips_and_stays_anonymous() {
+        let mut log = ActionLog::new(true);
+        log.push(
+            ActionRecord::applied(
+                TimeBucket::Morning,
+                PolicyAction::ThrottleAllowlistedBackground,
+            )
+            .with_affected(3),
+        );
+        let json = log.to_json();
+        assert!(json.contains("\"processes_affected\":3"), "{json}");
+        let loaded = ActionLog::from_json(&json, true);
+        assert_eq!(loaded.records()[0].processes_affected, Some(3));
+        // A count must not become an identifier: no long digit runs, no names.
+        for token in json.split(|c: char| !c.is_ascii_digit()) {
+            assert!(token.len() < 10, "count field leaked a long identifier");
+        }
+        assert!(!json.to_lowercase().contains(".exe"));
     }
 
     #[test]
@@ -588,6 +798,7 @@ mod tests {
         let _: Option<ConfidenceBucket> = record.confidence;
         let _: Option<u32> = record.before_samples;
         let _: Option<u32> = record.after_samples;
+        let _: Option<u32> = record.processes_affected;
     }
 
     #[test]
@@ -601,13 +812,13 @@ mod tests {
 
     #[test]
     fn concurrent_writers_do_not_corrupt_the_file() {
-        let dir = std::env::temp_dir().join("micontrol_os_turbo_log_concurrent");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("dir");
+        let root = std::env::temp_dir().join("micontrol_os_turbo_log_concurrent");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
 
         let handles: Vec<_> = (0..4)
             .map(|i| {
-                let dir = dir.clone();
+                let root = root.clone();
                 std::thread::spawn(move || {
                     let mut log = ActionLog::new(true);
                     for _ in 0..10 {
@@ -616,7 +827,7 @@ mod tests {
                             HoldReason::CooldownActive,
                         ));
                     }
-                    let _ = save_action_log(&dir, &log);
+                    let _ = save_action_log_in(&root, &log);
                     i
                 })
             })
@@ -626,9 +837,9 @@ mod tests {
         }
 
         // Whatever survived must be valid JSON with bounded size.
-        let loaded = load_action_log(&dir, true);
+        let loaded = load_action_log_in(&root, true);
         assert!(loaded.len() <= MAX_RECORDS);
         assert!(loaded.serialized_len() <= MAX_BYTES);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -1,246 +1,314 @@
+/**
+ * Bateria — bloco 2..5 (herói, barra com marca do limite, fase de carga,
+ * fonte/potência/tempo) e bloco 9 (detalhes).
+ *
+ * Os três estados de leitura da spec §5.5 vivem aqui:
+ *   1. primeira leitura  → skeleton **com a forma** do conteúdo (CLS 0);
+ *   2. dados presentes   → conteúdo completo, "Atualizado há N s" (nada pisca);
+ *   3. leitura falhada   → valores mantidos + hairline de topo `--warning`
+ *                          + "Sem leitura desde as HH:MM" + retry.
+ *   + vazio              → "Este equipamento não reporta bateria".
+ *
+ * Zero `style={{}}` excepto larguras calculadas (barra, marca do limite), que
+ * não têm tradução em classe.
+ *
+ * Merge f4/battery-poc × f4/tabs-cognitive: a estrutura é a do POC aprovado, e
+ * o texto mantém o glossário do tabs-cognitive — "Faltam para os 80%" diz a que
+ * nível a estimativa se refere (um tempo sem alvo não responde a nada).
+ */
+
 import { useState } from 'react';
-import { t } from '../hooks/useI18n';
+import { t, type StringKey } from '../hooks/useI18n';
+import { chargePhase, type ChargePhase } from '../lib/batteryState';
+import {
+  formatCelsius,
+  formatDecimal,
+  formatDuration,
+  formatPercent,
+  formatVoltage,
+  formatWatts,
+  formatWh,
+  NO_DATA_LABEL,
+} from '../lib/format';
 import type { BatteryInfo as BatteryData } from '../types/hardware';
 import InfoModal, { InfoRow, InfoSection } from './InfoModal';
+import { Badge } from './ui/badge';
+import { Card } from './ui/card';
+import { Icon } from './ui/icons';
+import { IconButton } from './ui/icon-button';
+import { BatterySkeleton } from './ui/skeleton';
+import { StatRow } from './ui/stat-row';
 
-interface Props {
+export type PhaseTone = 'neutral' | 'warn' | 'success' | 'muted';
+
+export interface PhaseMessage {
+  key: StringKey;
+  vars?: Record<string, string | number>;
+  tone: PhaseTone;
+}
+
+/**
+ * Copy + tom por fase (spec §5.6.2). Exportada para o teste poder fixar a
+ * tradução de cada transição sem montar o componente.
+ */
+export function chargePhaseMessage(
+  phase: ChargePhase,
+  opts: { care: boolean | null; time: string },
+): PhaseMessage {
+  const { care, time } = opts;
+  switch (phase.kind) {
+    case 'discharging':
+      return time
+        ? { key: 'battery.phase.discharging', vars: { time }, tone: 'neutral' }
+        : { key: 'battery.phase.dischargingNoTime', tone: 'neutral' };
+    case 'holding':
+      return {
+        key: 'battery.phase.holding',
+        vars: { level: phase.level, limit: phase.limit },
+        tone: 'warn',
+      };
+    case 'limitNotApplied':
+      return {
+        key: 'battery.phase.limitNotApplied',
+        vars: { level: phase.level, limit: phase.limit },
+        tone: 'warn',
+      };
+    case 'resuming':
+      return { key: 'battery.phase.resuming', vars: { limit: phase.limit }, tone: 'neutral' };
+    case 'full':
+      return { key: 'battery.phase.full', tone: 'success' };
+    case 'charging':
+      if (phase.target >= 100) {
+        return care === false
+          ? { key: 'battery.phase.careOff', tone: 'muted' }
+          : { key: 'battery.phase.noLimit', tone: 'muted' };
+      }
+      return { key: 'battery.phase.charging', vars: { target: phase.target }, tone: 'neutral' };
+    default:
+      return { key: 'battery.phase.dischargingNoTime', tone: 'neutral' };
+  }
+}
+
+/** Banda de saúde explícita — um número sem escala não significa nada. */
+export function healthBand(pct: number): {
+  key: StringKey;
+  tone: 'success' | 'warning' | 'danger';
+} {
+  if (pct >= 80) return { key: 'battery.healthBand.good', tone: 'success' };
+  if (pct >= 60) return { key: 'battery.healthBand.fair', tone: 'warning' };
+  return { key: 'battery.healthBand.poor', tone: 'danger' };
+}
+
+export interface BatteryInfoProps {
   battery: BatteryData | null;
+  /** Limite configurado (0–100); 100 = sem limite. */
+  threshold?: number;
+  /** Alias antigo de `threshold` — aceite para os chamadores da tab cognitiva. */
+  limit?: number;
+  /** null = ainda não se sabe (a ler `get_battery_care`). */
+  care?: boolean | null;
+  /**
+   * O firmware confirmou o limite? `false` = não está no hardware (ou não foi
+   * possível relê-lo) → a fase nunca pode dizer "em pausa ao limite".
+   */
+  limitApplied?: boolean | null;
+  /** Segundos desde a última leitura que chegou a este ecrã. */
+  updatedAgoSec?: number | null;
+  /** "14:32" quando a última leitura falhou; null quando está tudo bem. */
+  staleSince?: string | null;
+  /** `battery === null` **e** erro: o equipamento não reporta bateria. */
+  unavailable?: boolean;
+  onRetry?: () => void;
 }
 
-function formatTime(minutes: number | null): string {
-  if (minutes == null || minutes < 0) return t('common.unknown');
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  return h > 0
-    ? `${h}${t('battery.hours')} ${m}${t('battery.minutes')}`
-    : `${m}${t('battery.minutes')}`;
+function levelTone(level: number): string {
+  if (level > 30) return '';
+  return level > 15 ? ' mc-bar__fill--low' : ' mc-bar__fill--critical';
 }
 
-function healthColor(pct: number): string {
-  if (pct >= 80) return 'success';
-  if (pct >= 60) return 'warning';
-  return 'error';
-}
-
-function batteryColor(level: number): string {
-  if (level > 30) return 'battery';
-  if (level > 15) return 'battery warning';
-  return 'battery critical';
-}
-
-/** mWh → Wh string */
-function mwhToWh(mwh: number): string {
-  return (mwh / 1000).toFixed(1);
-}
-
-/** mWh + voltage_mv → estimated mAh */
-function mwhToMah(mwh: number, voltage_mv: number): string | null {
-  if (voltage_mv <= 0) return null;
-  return Math.round((mwh * 1000) / voltage_mv).toLocaleString();
-}
-
-export default function BatteryInfo({ battery }: Props) {
+export default function BatteryInfo({
+  battery,
+  threshold,
+  limit: limitAlias,
+  care = null,
+  limitApplied = null,
+  updatedAgoSec = null,
+  staleSince = null,
+  unavailable = false,
+  onRetry = () => {},
+}: BatteryInfoProps) {
   const [showInfo, setShowInfo] = useState(false);
 
   if (!battery) {
+    if (unavailable) {
+      return (
+        <Card title={t('battery.status')}>
+          <div className="mc-empty">
+            <Icon name="battery" size={24} className="mc-empty__icon" />
+            <div>
+              <div className="mc-empty__title">{t('battery.unavailable')}</div>
+              <div className="mc-empty__desc">{t('battery.unavailableHint')}</div>
+            </div>
+          </div>
+        </Card>
+      );
+    }
     return (
-      <div className="card">
-        <div className="card-title">{t('battery.title')}</div>
-        <div className="skeleton" style={{ height: 120 }} />
-      </div>
+      <Card title={t('battery.status')}>
+        <BatterySkeleton label={t('battery.reading')} />
+      </Card>
     );
   }
 
-  const statusKey = battery.is_charging ? 'charging' : battery.is_plugged ? 'full' : 'discharging';
-  const designedMah = mwhToMah(battery.designed_capacity_mwh, battery.voltage_mv);
-  const fullMah = mwhToMah(battery.full_capacity_mwh, battery.voltage_mv);
+  /** `threshold` é o nome canónico; `limit` sobrevive como alias de compat. */
+  const configured = threshold ?? limitAlias ?? 100;
+  const limit = care === false ? 100 : configured;
+
+  const phase = chargePhase({
+    level: battery.level,
+    isCharging: battery.is_charging,
+    isPlugged: battery.is_plugged,
+    limit,
+    limitApplied,
+    minutesRemaining: battery.time_remaining_minutes,
+  });
+  const message = chargePhaseMessage(phase, {
+    care,
+    time: formatDuration(battery.time_remaining_minutes),
+  });
+  const toneClass =
+    message.tone === 'warn'
+      ? ' mc-hero__phase--warn'
+      : message.tone === 'success'
+        ? ' mc-hero__phase--success'
+        : message.tone === 'muted'
+          ? ' mc-hero__phase--muted'
+          : '';
+
+  const power = battery.is_plugged
+    ? `${t('battery.plugConnected')}${
+        battery.ac_input_power_mw ? ` · ${formatWatts(battery.ac_input_power_mw)}` : ''
+      }`
+    : t('battery.onBattery');
+
+  const eta =
+    phase.kind === 'discharging'
+      ? formatDuration(phase.minutes)
+      : phase.kind === 'charging' && battery.time_to_full_minutes != null
+        ? formatDuration(battery.time_to_full_minutes)
+        : '';
+
+  // Glossário §4.4: um tempo sem alvo não responde a "quando é que chega aos
+  // 80%?". O rótulo diz a que nível a estimativa se refere.
+  const etaTarget =
+    phase.kind === 'charging' && eta !== '' && limit < 100
+      ? t('battery.timeToFullAt', { limit })
+      : '';
+
+  // A taxa de descarga não se lê em mais nenhum sítio do cartão.
+  const dischargeRate =
+    !battery.is_charging && battery.charge_rate_mw < 0
+      ? formatWatts(Math.abs(battery.charge_rate_mw))
+      : '';
 
   return (
-    <div className="card">
-      {/* Card header with info button */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 16,
-        }}
-      >
-        <div className="card-title" style={{ margin: 0 }}>
-          {t('battery.title')}
-        </div>
-        <button
-          onClick={() => setShowInfo(true)}
-          title={t('battery.infoModal.title')}
-          style={{
-            background: 'none',
-            border: 'none',
-            cursor: 'pointer',
-            color: 'var(--text-dim)',
-            fontSize: 16,
-            lineHeight: 1,
-            padding: '2px 4px',
-            borderRadius: 'var(--r-xs)',
-            transition: 'color var(--t-fast)',
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--text)')}
-          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-dim)')}
-        >
-          ⓘ
-        </button>
-      </div>
-
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 6,
-        }}
-      >
-        <span
-          className={`badge ${battery.is_charging ? 'success' : battery.is_plugged ? 'info' : 'warning'}`}
-        >
-          {t(`battery.${statusKey}` as Parameters<typeof t>[0])}
-        </span>
-        <span style={{ fontWeight: 700, fontSize: 18, lineHeight: 1 }}>{battery.level}%</span>
-      </div>
-      <div className="progress-bar" style={{ marginBottom: 8 }}>
-        <div
-          className={`progress-fill ${batteryColor(battery.level)}`}
-          style={{ width: `${battery.level}%` }}
-        />
-      </div>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 16,
-        }}
-        title={t('battery.healthHint')}
-      >
-        <span className={`badge ${healthColor(battery.health_percent)}`}>
-          {t('battery.health')}
-        </span>
-        <span style={{ fontSize: 13, color: 'var(--text-dim)', fontWeight: 500 }}>
-          {battery.health_percent.toFixed(1)}%
-        </span>
-      </div>
-
-      <div className="stat-row">
-        <span className="stat-label">{t('battery.manufacturer')}</span>
-        <span className="stat-value">{battery.manufacturer}</span>
-      </div>
-      <div className="stat-row">
-        <span className="stat-label">{t('battery.designedCapacity')}</span>
-        <span className="stat-value">
-          {mwhToWh(battery.designed_capacity_mwh)} {t('battery.wh')}
-          {designedMah && (
-            <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 5 }}>
-              (≈{designedMah} {t('battery.mah')})
+    <Card
+      title={t('battery.status')}
+      stale={Boolean(staleSince)}
+      action={
+        <>
+          {updatedAgoSec != null && (
+            <span className="mc-card__meta">
+              {updatedAgoSec <= 1
+                ? t('battery.updatedNow')
+                : t('battery.updatedAgo', { s: updatedAgoSec })}
             </span>
           )}
-        </span>
-      </div>
-      <div className="stat-row">
-        <span className="stat-label">{t('battery.fullCapacity')}</span>
-        <span className="stat-value">
-          {mwhToWh(battery.full_capacity_mwh)} {t('battery.wh')}
-          {fullMah && (
-            <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 5 }}>
-              (≈{fullMah} {t('battery.mah')})
+          <IconButton
+            icon="info"
+            label={t('battery.infoModal.title')}
+            onClick={() => setShowInfo(true)}
+          />
+        </>
+      }
+    >
+      <div className="mc-hero">
+        <Icon name="battery" size={24} level={battery.level} className="mc-hero__icon" />
+        <div className="mc-hero__main">
+          <div className="mc-hero__row">
+            <span className="mc-hero__value">{formatPercent(battery.level)}</span>
+            {phase.kind === 'holding' && (
+              <Badge tone="warning" dot>
+                {t('battery.phase.holdingBadge')}
+              </Badge>
+            )}
+            {phase.kind === 'full' && (
+              <Badge tone="success" dot>
+                {t('battery.phase.fullBadge')}
+              </Badge>
+            )}
+          </div>
+
+          <div
+            className="mc-bar"
+            role="img"
+            aria-label={t('battery.levelBarLabel', { level: battery.level })}
+          >
+            <div
+              className={`mc-bar__fill${levelTone(battery.level)}`}
+              style={{ width: `${Math.min(100, Math.max(0, battery.level))}%` }}
+            />
+            {limit < 100 && (
+              <span
+                className="mc-bar__mark"
+                style={{ left: `calc(${limit}% - 1px)` }}
+                title={t('battery.limitMark', { limit })}
+              />
+            )}
+          </div>
+
+          <div className={`mc-hero__phase${toneClass}`} data-testid="charge-phase">
+            {t(message.key, message.vars)}
+          </div>
+
+          <div className="mc-hero__meta">
+            <span className="mc-hero__meta-item">
+              <Icon name="plug" size={16} />
+              {power}
             </span>
-          )}
-        </span>
-      </div>
-      {/* Cycle count intentionally NOT shown: the COSMX BX70 firmware never
-          reports it (WMI CycleCount and powercfg both return 0), so displaying
-          it would present a false "0 cycles" as real data. */}
-      {battery.voltage_mv > 0 && (
-        <div className="stat-row">
-          <span className="stat-label">{t('battery.voltage')}</span>
-          <span className="stat-value" style={{ fontFamily: 'var(--font-mono)' }}>
-            {(battery.voltage_mv / 1000).toFixed(2)} {t('battery.voltageUnit')}
-          </span>
+            {eta && (
+              <span className="mc-hero__meta-item">
+                <Icon name="bolt" size={16} />
+                {etaTarget ? `${etaTarget}: ${eta}` : eta}
+              </span>
+            )}
+            {dischargeRate && (
+              <span className="mc-hero__meta-item">
+                <Icon name="bolt" size={16} />
+                {t('battery.dischargeRate')} {dischargeRate}
+              </span>
+            )}
+          </div>
         </div>
-      )}
-      {/* S48-002: slow-charger hint next to the charging voltage/power block.
-          While actively charging, an adapter under 45 W stretches a full
-          charge into many hours — warn the user inline (matching the OSD). */}
+      </div>
+
       {battery.is_charging &&
         battery.ac_input_power_mw != null &&
         battery.ac_input_power_mw < 45_000 && (
-          <div
-            className="badge warning"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              margin: '0 0 12px',
-              width: '100%',
-              justifyContent: 'center',
-            }}
-            title={t('battery.slowChargerHint')}
-          >
-            ⚠ {t('battery.slowCharger')}
+          <div className="mc-note mc-note--warning" title={t('battery.slowChargerHint')}>
+            {t('battery.slowCharger')} — {formatWatts(battery.ac_input_power_mw)}
           </div>
         )}
-      {battery.temperature_celsius != null && (
-        <div className="stat-row">
-          <span className="stat-label">{t('battery.temperature')}</span>
-          <span className="stat-value">
-            {battery.temperature_celsius.toFixed(1)} {t('battery.celsius')}
-          </span>
-        </div>
-      )}
-      {battery.ac_input_power_mw != null && battery.is_plugged && (
-        <div className="stat-row">
-          <span className="stat-label">{t('battery.acInputPower')}</span>
-          <span
-            className="stat-value"
-            style={{
-              fontFamily: 'var(--font-mono)',
-              color: 'var(--success, #4caf50)',
-              fontWeight: 600,
-            }}
-          >
-            ⚡ {(battery.ac_input_power_mw / 1000).toFixed(0)} W
-          </span>
-        </div>
-      )}
-      {battery.charge_rate_mw !== 0 && (
-        <div className="stat-row">
-          <span className="stat-label">
-            {battery.charge_rate_mw > 0 ? t('battery.chargeRate') : t('battery.dischargeRate')}
-          </span>
-          <span
-            className="stat-value"
-            style={{
-              color: battery.charge_rate_mw > 0 ? 'var(--success, #4caf50)' : undefined,
-              fontWeight: battery.charge_rate_mw > 0 ? 600 : undefined,
-              fontFamily: 'var(--font-mono)',
-            }}
-          >
-            {battery.charge_rate_mw > 0 && '⚡ '}
-            {(Math.abs(battery.charge_rate_mw) / 1000).toFixed(1)} W
-          </span>
-        </div>
-      )}
-      {battery.is_charging && battery.time_to_full_minutes != null && (
-        <div className="stat-row">
-          <span className="stat-label">{t('battery.timeToFull')}</span>
-          <span className="stat-value">{formatTime(battery.time_to_full_minutes)}</span>
-        </div>
-      )}
-      {!battery.is_charging && !battery.is_plugged && battery.time_remaining_minutes != null && (
-        <div className="stat-row">
-          <span className="stat-label">{t('battery.timeRemaining')}</span>
-          <span className="stat-value">{formatTime(battery.time_remaining_minutes)}</span>
+
+      {staleSince && (
+        <div className="mc-note mc-note--warning" role="status">
+          <Icon name="info" size={16} />
+          <span>{t('battery.stale', { time: staleSince })}</span>
+          <span className="mc-note__spacer" />
+          <IconButton icon="refresh" label={t('battery.retry')} onClick={onRetry} />
         </div>
       )}
 
-      {/* Info modal */}
       <InfoModal
         open={showInfo}
         onClose={() => setShowInfo(false)}
@@ -266,6 +334,91 @@ export default function BatteryInfo({ battery }: Props) {
           </InfoRow>
         </InfoSection>
       </InfoModal>
-    </div>
+    </Card>
+  );
+}
+
+export interface BatteryDetailsProps {
+  battery: BatteryData;
+}
+
+/** Bloco 9 — as 5 linhas de "a bateria está boa?". */
+export function BatteryDetails({ battery }: BatteryDetailsProps) {
+  const band = healthBand(battery.health_percent);
+  const healthPct = battery.designed_capacity_mwh
+    ? Math.round((battery.full_capacity_mwh / battery.designed_capacity_mwh) * 100)
+    : null;
+
+  // Estimativa mAh a partir dos mWh e da tensão atual (o backend só dá mWh).
+  const designedMah =
+    battery.voltage_mv > 0
+      ? formatDecimal((battery.designed_capacity_mwh * 1000) / battery.voltage_mv, 0)
+      : null;
+
+  return (
+    <Card
+      title={t('battery.details')}
+      action={
+        battery.manufacturer ? (
+          <span className="mc-card__meta">{battery.manufacturer}</span>
+        ) : undefined
+      }
+    >
+      <StatRow
+        icon={<Icon name="shield" size={20} />}
+        label={t('battery.factoryCapacity')}
+        value={formatWh(battery.designed_capacity_mwh)}
+        hint={
+          designedMah != null ? (
+            <span className="mc-stat__hint">
+              ≈ {designedMah} {t('battery.mah')}
+            </span>
+          ) : undefined
+        }
+        mono
+      />
+      <StatRow
+        icon={<Icon name="battery" size={20} />}
+        label={t('battery.maxCapacity')}
+        value={formatWh(battery.full_capacity_mwh)}
+        hint={
+          <>
+            <Badge tone={band.tone} dot>
+              {t(band.key)}
+            </Badge>
+            {healthPct != null && (
+              <span className="mc-stat__hint">
+                {t('battery.healthOfFactory', { pct: healthPct })}
+              </span>
+            )}
+          </>
+        }
+        mono
+      />
+      <StatRow
+        icon={<Icon name="bolt" size={20} />}
+        label={t('battery.voltage')}
+        value={formatVoltage(battery.voltage_mv)}
+        mono
+        dim={battery.voltage_mv <= 0}
+      />
+      <StatRow
+        icon={<Icon name="thermometer" size={20} />}
+        label={t('battery.temperature')}
+        value={formatCelsius(battery.temperature_celsius)}
+        mono
+        dim={battery.temperature_celsius == null}
+      />
+      {battery.is_plugged && (
+        <StatRow
+          icon={<Icon name="plug" size={20} />}
+          label={t('battery.chargerSupplying')}
+          value={battery.ac_input_power_mw ? formatWatts(battery.ac_input_power_mw) : NO_DATA_LABEL}
+          hint={!battery.ac_input_power_mw ? t('battery.notExposed') : undefined}
+          mono
+          dim={!battery.ac_input_power_mw}
+        />
+      )}
+    </Card>
   );
 }

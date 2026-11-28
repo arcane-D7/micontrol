@@ -10,7 +10,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::hw::errors::HardwareResult;
+use crate::util::process_spawn;
 use tauri::Manager;
+
+/// Best-effort ACL/whoami helpers answer in milliseconds; 10 s covers a cold
+/// disk without stalling crash recovery (D2/D12: no unbounded child).
+const ACL_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Registry key for tracking clean vs abnormal shutdowns.
 #[cfg(windows)]
@@ -47,6 +52,83 @@ const USER_QUIT_SENTINEL_REL: &str = r"MiControl\watchdog_user_quit";
 #[cfg(windows)]
 const HEARTBEAT_REL: &str = r"MiControl\heartbeat";
 
+/// Consecutive async-runtime probe failures after which the app escalates to
+/// the bridge watchdog by writing [`STARVATION_MARKER`].
+///
+/// One probe takes up to 5 s and the heartbeat ticker sleeps 10 s, so 10
+/// consecutive failures ≈ 2.5 minutes of a wedged tokio runtime — long enough
+/// to rule out a brief thread-pool spike, short enough to matter (the 06-Nov
+/// incident lasted 2 h 46 min because `ui_ok` had no consumer).
+pub const STARVATION_ESCALATE_FAILS: u32 = 10;
+
+/// Machine-readable escalation marker (under `%ProgramData%\MiControl`).
+///
+/// Written by this module when the async runtime has been starved for
+/// [`STARVATION_ESCALATE_FAILS`] consecutive probes; read by the SYSTEM
+/// bridge watchdog, which force-restarts the app. Format:
+/// `"<epoch_ms>\n<pid>\n<fails>\n"` — same shape as the heartbeat, so a
+/// human reading either file sees the same fields.
+pub const STARVATION_MARKER: &str = "runtime_starved";
+
+/// How long a starvation marker is trusted by the watchdog.
+///
+/// The writer refreshes it every [`STARVATION_ESCALATE_FAILS`] failures
+/// (~2.5 min); anything older belongs to a previous session and must be
+/// ignored (`pid` is checked as well).
+pub const STARVATION_MARKER_TTL_MS: u64 = 180_000;
+
+/// Snapshot of the escalation marker (producer: `write_starvation_marker`,
+/// consumer: the bridge watchdog).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StarvationState {
+    /// Wall-clock time the marker was written (epoch ms).
+    pub ts_ms: u64,
+    /// PID of the app that reported the starvation.
+    pub pid: u32,
+    /// Consecutive failed async-runtime probes at the time of writing.
+    pub fails: u32,
+}
+
+/// Serialise a starvation marker. Pure, so the writer and the watchdog's
+/// parser can be tested against the same bytes.
+pub fn format_starvation_marker(state: StarvationState) -> String {
+    format!("{}\n{}\n{}\n", state.ts_ms, state.pid, state.fails)
+}
+
+/// Parse a starvation marker. Strict: all three lines must be present and
+/// valid, otherwise the watchdog ignores the file (never acts on garbage).
+pub fn parse_starvation_marker(content: &str) -> Result<StarvationState, &'static str> {
+    let mut lines = content.lines();
+    let ts_ms = lines
+        .next()
+        .ok_or("missing timestamp")?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "invalid timestamp")?;
+    let pid = lines
+        .next()
+        .ok_or("missing pid")?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "invalid pid")?;
+    let fails = lines
+        .next()
+        .ok_or("missing fails")?
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "invalid fails")?;
+    if ts_ms == 0 {
+        return Err("zero timestamp");
+    }
+    if pid == 0 {
+        return Err("zero pid");
+    }
+    if fails == 0 {
+        return Err("zero fails");
+    }
+    Ok(StarvationState { ts_ms, pid, fails })
+}
+
 /// Crash recovery status information.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CrashRecoveryStatus {
@@ -68,7 +150,22 @@ pub struct CrashRecoveryStatus {
 /// 3. Registers WER crash dump collection
 /// 4. Marks the current session as "running" (not yet cleanly exited)
 pub fn init_crash_recovery() -> HardwareResult<CrashRecoveryStatus> {
-    let abnormal_restart_detected = check_abnormal_restart();
+    let flagged = check_abnormal_restart();
+    // The flag lives in HKCU and is only cleared by the app's own clean-exit
+    // path, so an installer/uninstaller kill (WM_CLOSE + taskkill, or the NSIS
+    // /UPDATE teardown) always leaves it set. The session marker knows better:
+    // when it classified the previous session as an installer shutdown, the
+    // flag is stale, not evidence of a crash. Without this, every update
+    // produced "Abnormal restart detected" one line after "previous session
+    // was terminated by the installer (intentional, not a crash)".
+    let installer_announced = crate::util::session_marker::previous_session_ended_at_installer();
+    if flagged && installer_announced {
+        log::info!(
+            target: "hw::crash_recovery",
+            "Abnormal-restart flag ignored — the installer announced the previous shutdown (intentional, not a crash)"
+        );
+    }
+    let abnormal_restart_detected = abnormal_restart_from_flag(flagged, installer_announced);
 
     if abnormal_restart_detected {
         log::warn!(
@@ -146,6 +243,14 @@ fn check_abnormal_restart() -> bool {
     {
         false
     }
+}
+
+/// Decide whether the persisted flag really means "the previous session
+/// crashed", given what the session marker knows about how it ended.
+///
+/// Pure so the installer-suppression rule is testable without the registry.
+fn abnormal_restart_from_flag(flagged: bool, installer_announced: bool) -> bool {
+    flagged && !installer_announced
 }
 
 /// Mark the current session as "running" — if the process dies without
@@ -294,21 +399,21 @@ fn register_wer() -> bool {
         // user listing). icacls grants the current user modify rights; best
         // effort — failure is logged, not fatal.
         {
-            let whoami = std::process::Command::new("whoami.exe")
-                .output()
+            let mut cmd = std::process::Command::new("whoami.exe");
+            let whoami = process_spawn::run_capture(&mut cmd, ACL_SPAWN_TIMEOUT)
                 .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .map(|o| o.stdout_str().trim().to_string())
                 .unwrap_or_default();
             if !whoami.is_empty() {
                 let dir = dump_dir.display().to_string();
-                let out = std::process::Command::new("icacls.exe")
-                    .args([&dir, "/grant", &format!("{whoami}:(OI)(CI)M"), "/Q"])
-                    .output();
-                if let Some(o) = out.ok().filter(|o| !o.status.success()) {
+                let mut cmd = std::process::Command::new("icacls.exe");
+                cmd.args([&dir, "/grant", &format!("{whoami}:(OI)(CI)M"), "/Q"]);
+                let outcome = process_spawn::run_capture(&mut cmd, ACL_SPAWN_TIMEOUT).ok();
+                if let Some(o) = outcome.filter(|o| !o.status.success()) {
                     log::warn!(
                         target: "hw::crash_recovery",
                         "icacls grant on dump dir failed: {}",
-                        String::from_utf8_lossy(&o.stderr).trim()
+                        o.stderr_str().trim()
                     );
                 }
             }
@@ -360,6 +465,93 @@ fn user_quit_sentinel_path() -> Option<std::path::PathBuf> {
 pub fn watchdog_enabled_path() -> Option<std::path::PathBuf> {
     let pd = std::env::var_os("ProgramData")?;
     Some(std::path::PathBuf::from(pd).join(r"MiControl\watchdog_enabled"))
+}
+
+/// Machine-wide escalation marker path (see [`STARVATION_MARKER`]).
+#[cfg(windows)]
+pub fn starvation_marker_path() -> Option<std::path::PathBuf> {
+    let pd = std::env::var_os("ProgramData")?;
+    Some(
+        std::path::PathBuf::from(pd)
+            .join("MiControl")
+            .join(STARVATION_MARKER),
+    )
+}
+
+/// Is this failure count an escalation boundary?
+///
+/// The first crossing at [`STARVATION_ESCALATE_FAILS`] writes the marker; every
+/// further multiple refreshes its timestamp so the watchdog keeps trusting it
+/// while the runtime stays wedged.
+fn should_escalate(fails: u32) -> bool {
+    fails >= STARVATION_ESCALATE_FAILS && fails.is_multiple_of(STARVATION_ESCALATE_FAILS)
+}
+
+/// Should this failure be logged?
+///
+/// The 06-Nov starvation produced 666 identical ERROR lines in 2 h 46 min —
+/// the log became useless and nothing acted on it. Log the first two failures
+/// (so a short spike is diagnosable) and then only at escalation boundaries.
+fn should_log_failure(fails: u32) -> bool {
+    fails <= 2 || should_escalate(fails)
+}
+
+/// Write/refresh the escalation marker. Best effort — a read-only ProgramData
+/// only degrades to "no escalation", never a panic.
+#[cfg(windows)]
+fn write_starvation_marker(fails: u32) {
+    let Some(path) = starvation_marker_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let body = format_starvation_marker(StarvationState {
+        ts_ms,
+        pid: std::process::id(),
+        fails,
+    });
+    match std::fs::write(&path, body) {
+        Ok(()) => log::error!(
+            target: "hw::crash_recovery",
+            "async runtime starved {fails} consecutive probes — escalated to the bridge \
+             watchdog ({}); expecting a force-restart",
+            path.display()
+        ),
+        Err(e) => log::warn!(
+            target: "hw::crash_recovery",
+            "async runtime starved {fails} consecutive probes but the escalation \
+             marker could not be written ({}): {e}",
+            path.display()
+        ),
+    }
+}
+
+/// Remove the escalation marker once the runtime schedules tasks again.
+#[cfg(windows)]
+fn clear_starvation_marker(recovered_after: u32) {
+    let Some(path) = starvation_marker_path() else {
+        return;
+    };
+    if path.exists() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => log::info!(
+                target: "hw::crash_recovery",
+                "async runtime recovered after {recovered_after} failed probes — \
+                 escalation marker cleared"
+            ),
+            Err(e) => log::warn!(
+                target: "hw::crash_recovery",
+                "async runtime recovered but the escalation marker could not be \
+                 removed ({}): {e}",
+                path.display()
+            ),
+        }
+    }
 }
 
 /// Enable or disable the MiControlBridge watchdog.
@@ -466,6 +658,11 @@ static ASYNC_PROBE_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// Consecutive async-probe failures. ui_ok flips to 0 only after two probes
 /// in a row fail (~20 s of starvation at the 10 s heartbeat cadence), so a
 /// brief worker-thread spike does not trigger a watchdog restart.
+///
+/// The counter also drives escalation: at [`STARVATION_ESCALATE_FAILS`] the
+/// app writes [`STARVATION_MARKER`] for the bridge watchdog. Before 2026-11-07
+/// this counter only produced one ERROR log line per tick — 666 lines over
+/// 2 h 46 min with no action.
 static ASYNC_PROBE_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Is the tokio runtime (the one Tauri commands and poll loops run on) still
@@ -487,23 +684,32 @@ fn async_runtime_alive() -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if ASYNC_PROBE_DONE.load(std::sync::atomic::Ordering::SeqCst) {
-            ASYNC_PROBE_FAILS.store(0, std::sync::atomic::Ordering::SeqCst);
+            let previous = ASYNC_PROBE_FAILS.swap(0, std::sync::atomic::Ordering::SeqCst);
+            if previous > 0 {
+                clear_starvation_marker(previous);
+            }
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     let fails = ASYNC_PROBE_FAILS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    if fails == 1 {
-        log::warn!(
-            target: "hw::crash_recovery",
-            "async runtime probe failed once (workers may be starved)"
-        );
-    } else {
-        log::error!(
-            target: "hw::crash_recovery",
-            "async runtime probe failed {fails} consecutive times — runtime starved"
-        );
+    if should_escalate(fails) {
+        // Crossing the threshold (and every refresh after it) is both the
+        // log line and the machine-readable escalation to the watchdog.
+        write_starvation_marker(fails);
+    } else if should_log_failure(fails) {
+        if fails == 1 {
+            log::warn!(
+                target: "hw::crash_recovery",
+                "async runtime probe failed once (workers may be starved)"
+            );
+        } else {
+            log::error!(
+                target: "hw::crash_recovery",
+                "async runtime probe failed {fails} consecutive times — runtime starved"
+            );
+        }
     }
     fails >= 2
 }
@@ -514,6 +720,16 @@ fn async_runtime_alive() -> bool {
 /// crash — the exact "zombie" state that previously kept the process alive
 /// with a fresh heartbeat but no UI. The runtime probe (S56) covers the other
 /// freeze mode: window alive but every invoke stuck on starved workers.
+///
+/// RECHECK-2 (2026-11-14): `get_webview_window("main")` is NOT a WebView2
+/// liveness check. In production the renderer was GONE (zero
+/// `msedgewebview2.exe` children of the app, 53 h uptime) while the Tauri
+/// window object still existed, so this function answered `true`, `ui_ok`
+/// stayed 1 and the watchdog never restarted the zombie: the owner was left
+/// with a dead window whose `execute_js` failed with wry
+/// `0x8007139F (RO_E_INVALID_STATE)`. A window handle is a Rust-side registry
+/// entry; the renderer is a separate process tree and its absence is the
+/// signal.
 #[cfg(windows)]
 fn ui_is_alive() -> bool {
     let Some(app) = APP_HANDLE.get() else {
@@ -522,7 +738,93 @@ fn ui_is_alive() -> bool {
     if app.get_webview_window("main").is_none() {
         return false;
     }
+    if !renderer_state_is_alive(webview2_child_count(), renderer_uptime_ms()) {
+        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::error!(
+                target: "hw::crash_recovery",
+                "WebView2 renderer is gone (no msedgewebview2.exe child process) while the \
+                 window object still exists — reporting ui_ok=0 so the watchdog can restart \
+                 this zombie instead of leaving a dead window"
+            );
+        }
+        return false;
+    }
     async_runtime_alive()
+}
+
+/// Name of the WebView2 renderer process (child of the host app).
+#[cfg(windows)]
+const WEBVIEW2_PROCESS: &str = "msedgewebview2.exe";
+
+/// How long after the first heartbeat a missing renderer is tolerated.
+///
+/// The renderer spawns during WebView2 setup, which can trail the first
+/// heartbeat by a second or two — this window is deliberately generous because
+/// a false `ui_ok=0` costs a restart.
+#[cfg(windows)]
+const WEBVIEW_STARTUP_GRACE_MS: u64 = 90_000;
+
+/// Decide from the measured facts. Pure so both directions are unit-tested.
+///
+/// `count == None` means the snapshot API failed: an unknown state must never
+/// be reported as a dead UI (that would restart a healthy app).
+pub(crate) fn renderer_state_is_alive(count: Option<usize>, uptime_ms: u64) -> bool {
+    match count {
+        None => true,
+        Some(n) if n > 0 => true,
+        Some(_) => uptime_ms < WEBVIEW_STARTUP_GRACE_MS,
+    }
+}
+
+/// Milliseconds since this module first asked (slightly LATER than process
+/// start, which makes the grace window conservative).
+#[cfg(windows)]
+fn renderer_uptime_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+/// Number of `msedgewebview2.exe` processes whose parent is this process.
+///
+/// `None` when the toolhelp snapshot could not be taken — see
+/// [`renderer_state_is_alive`] for why that must not look like a crash.
+#[cfg(windows)]
+fn webview2_child_count() -> Option<usize> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+    // leak-check: RAII guard closes the toolhelp snapshot on every return path.
+    let snapshot = crate::util::win_handle::OwnedHandle::new(raw);
+    if snapshot.is_invalid() {
+        return None;
+    }
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let me = std::process::id();
+    let mut count = 0usize;
+    let mut more = unsafe { Process32FirstW(snapshot.raw(), &mut entry) }.is_ok();
+    while more {
+        if entry.th32ParentProcessID == me {
+            let name = String::from_utf16_lossy(&entry.szExeFile);
+            if name
+                .trim_end_matches('\0')
+                .eq_ignore_ascii_case(WEBVIEW2_PROCESS)
+            {
+                count += 1;
+            }
+        }
+        more = unsafe { Process32NextW(snapshot.raw(), &mut entry) }.is_ok();
+    }
+    Some(count)
 }
 
 /// Mark the app's liveness for the watchdog. Called AFTER WebView2 setup
@@ -549,7 +851,19 @@ pub fn write_heartbeat() {
         // its tokio ticker are still running.
         let ui_ok = if ui_is_alive() { 1 } else { 0 };
         let contents = format!("{ts_ms}\n{pid}\n{ui_ok}\n");
-        let ok = std::fs::write(&path, contents).is_ok();
+        // Write-then-rename: the watchdog parses all three lines strictly, so
+        // it must never observe a truncated file mid-write (a torn read would
+        // look like "unreadable heartbeat" and could cost the app a restart).
+        // `fs::rename` replaces the destination on Windows.
+        let tmp = path.with_extension("tmp");
+        let mut ok =
+            std::fs::write(&tmp, &contents).is_ok() && std::fs::rename(&tmp, &path).is_ok();
+        if !ok {
+            // Fallback (e.g. AV holds the temp file): direct write. The
+            // watchdog tolerates a torn read with a short retry.
+            let _ = std::fs::remove_file(&tmp);
+            ok = std::fs::write(&path, contents).is_ok();
+        }
         if !ok {
             log::warn!(
                 target: "hw::crash_recovery",
@@ -586,5 +900,99 @@ pub fn start_heartbeat_ticker() {
                 })
                 .expect("failed to spawn heartbeat thread");
         });
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The HKCU flag survives an installer kill (the app never reaches its
+    /// clean-exit path), which used to raise "Abnormal restart detected" right
+    /// after the session marker said the installer had announced the shutdown.
+    #[test]
+    fn an_installer_shutdown_never_counts_as_an_abnormal_restart() {
+        assert!(abnormal_restart_from_flag(true, false));
+        assert!(!abnormal_restart_from_flag(true, true));
+        assert!(!abnormal_restart_from_flag(false, false));
+        assert!(!abnormal_restart_from_flag(false, true));
+    }
+
+    #[test]
+    fn starvation_marker_round_trips() {
+        let state = StarvationState {
+            ts_ms: 1_794_044_373_192,
+            pid: 2944,
+            fails: 10,
+        };
+        let body = format_starvation_marker(state);
+        assert_eq!(body, "1794044373192\n2944\n10\n");
+        assert_eq!(parse_starvation_marker(&body).expect("round trip"), state);
+        // Trailing whitespace / extra lines must not break the consumer.
+        assert_eq!(
+            parse_starvation_marker("1794044373192\r\n2944\r\n10\r\n").expect("crlf"),
+            state
+        );
+    }
+
+    #[test]
+    fn starvation_marker_rejects_truncated_and_garbage() {
+        for bad in [
+            "",
+            "1794044373192",
+            "1794044373192\n2944",
+            "1794044373192\n2944\n",
+            "garbage\n2944\n12\n",
+            "1794044373192\nnope\n12\n",
+            "1794044373192\n2944\nmany\n",
+            "0\n2944\n12\n",
+            "1794044373192\n0\n12\n",
+            "1794044373192\n2944\n0\n",
+        ] {
+            assert!(parse_starvation_marker(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    /// Escalation must happen at N consecutive failures (and refresh on every
+    /// further multiple), never before.
+    #[test]
+    fn escalation_starts_at_ten_consecutive_failures() {
+        assert_eq!(STARVATION_ESCALATE_FAILS, 10);
+        for fails in 0..STARVATION_ESCALATE_FAILS {
+            assert!(!should_escalate(fails), "fails={fails} must not escalate");
+        }
+        assert!(should_escalate(10));
+        assert!(!should_escalate(11));
+        assert!(should_escalate(20), "the marker must be refreshed");
+        assert!(should_escalate(30));
+    }
+
+    /// The 06-Nov storm was one ERROR line per probe (666 lines). With
+    /// throttling the same 30 failures produce five lines.
+    #[test]
+    fn failure_logs_are_throttled() {
+        let logged: Vec<u32> = (1..=30).filter(|f| should_log_failure(*f)).collect();
+        assert_eq!(
+            logged,
+            vec![1, 2, 10, 20, 30],
+            "only the first spike, the second failure and escalation boundaries are logged"
+        );
+    }
+
+    /// RECHECK-2: production had zero `msedgewebview2.exe` children with the
+    /// window object still registered, and `ui_ok` stayed 1 for hours.
+    #[test]
+    fn a_missing_renderer_is_reported_as_a_dead_ui() {
+        // Healthy: renderer present.
+        assert!(renderer_state_is_alive(Some(4), 300_000));
+        // Dead renderer after the startup grace: the UI is a zombie.
+        assert!(!renderer_state_is_alive(Some(0), 300_000));
+        assert!(!renderer_state_is_alive(Some(0), WEBVIEW_STARTUP_GRACE_MS));
+        // Still inside the grace window: the renderer may not have spawned yet.
+        assert!(renderer_state_is_alive(Some(0), 5_000));
+        // Unknown state (snapshot failed) must never force a restart.
+        assert!(renderer_state_is_alive(None, 300_000));
     }
 }

@@ -1,3 +1,5 @@
+import Switch from './ui/switch';
+
 interface ToggleSwitchProps {
   checked: boolean;
   onChange: (v: boolean) => void;
@@ -7,10 +9,9 @@ interface ToggleSwitchProps {
 }
 
 /**
- * A standalone themed toggle switch (track + knob), matching the
- * `.toggle-switch` / `.toggle-track` / `.toggle-knob` CSS classes used by
- * `ToggleRow`. Use it anywhere a bare `<input type="checkbox">` would
- * otherwise render with the ugly native checkbox.
+ * ToggleSwitch — o mesmo `Switch`, sem a linha label+descrição.
+ * Existe para não partir as chamadas que já usam este nome; os dois donos do
+ * mesmo controlo passam a ser um só (`ui/switch`).
  */
 export default function ToggleSwitch({
   checked,
@@ -20,17 +21,13 @@ export default function ToggleSwitch({
   id,
 }: ToggleSwitchProps) {
   return (
-    <label className="toggle-switch" style={{ opacity: disabled ? 0.55 : 1 }} title={ariaLabel}>
-      <input
-        id={id}
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        aria-label={ariaLabel}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <span className="toggle-track" />
-      <span className="toggle-knob" />
-    </label>
+    <Switch
+      checked={checked}
+      onChange={onChange}
+      disabled={disabled}
+      ariaLabel={ariaLabel}
+      id={id}
+      bare
+    />
   );
 }

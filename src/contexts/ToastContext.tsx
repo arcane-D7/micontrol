@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useRef, useState } from 'react';
 import { t as i18n } from '../hooks/useI18n';
+import { Icon } from '../components/ui/icons';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -75,7 +76,13 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast--${t.type}`}>
             <span className="toast__icon">
-              {t.type === 'error' ? '⚠' : t.type === 'success' ? '✓' : 'ℹ'}
+              {t.type === 'error' ? (
+                <Icon name="alert-triangle" size={16} />
+              ) : t.type === 'success' ? (
+                <Icon name="check" size={16} />
+              ) : (
+                <Icon name="info" size={16} />
+              )}
             </span>
             <span className="toast__message">{t.message}</span>
             {t.onRetry && (
@@ -89,7 +96,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 {i18n('common.retry')}
               </button>
             )}
-            <button className="toast__close" onClick={() => dismiss(t.id)} aria-label="Dismiss">
+            <button
+              className="toast__close"
+              onClick={() => dismiss(t.id)}
+              aria-label={i18n('common.dismiss')}
+            >
               ×
             </button>
           </div>

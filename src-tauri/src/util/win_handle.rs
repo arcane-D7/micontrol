@@ -63,6 +63,13 @@ impl OwnedHandle {
         self.0 == INVALID_HANDLE_VALUE || self.0.is_invalid()
     }
 
+    /// Consume the guard and return the raw handle WITHOUT closing it —
+    /// ownership transfers to the caller (e.g. handing a connected pipe
+    /// instance to a worker thread). `Drop` of the guard becomes a no-op.
+    pub fn into_raw(mut self) -> HANDLE {
+        std::mem::replace(&mut self.0, INVALID_HANDLE_VALUE)
+    }
+
     /// Release the handle now (idempotent — `Drop` becomes a no-op).
     pub fn close(mut self) {
         self.close_inner();
@@ -103,6 +110,12 @@ impl OwnedEvent {
     /// Raw event handle for `OVERLAPPED.hEvent` / `WaitForSingleObject`.
     pub fn raw(&self) -> HANDLE {
         self.0.raw()
+    }
+
+    /// Consume the guard and return the raw event WITHOUT closing it
+    /// (ownership transfers to the caller).
+    pub fn into_raw(self) -> HANDLE {
+        self.0.into_raw()
     }
 }
 

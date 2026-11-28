@@ -5,6 +5,7 @@ import InfoModal from '../../components/InfoModal';
 import ToggleSwitch from '../../components/ToggleSwitch';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { Icon } from '../../components/ui/icons';
 
 interface FaceStatus {
   service_installed: boolean;
@@ -157,7 +158,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
       return;
     }
     if (!password) {
-      setMsg({ type: 'err', text: 'Enter the Windows sign-in password.' });
+      setMsg({ type: 'err', text: t('face.enroll.enterPassword') });
       return;
     }
     setBusy(true);
@@ -166,7 +167,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
       await invoke('face_set_password', { user: name, password });
       setPwConfigured(true);
       setPassword('');
-      setMsg({ type: 'ok', text: `Password stored for "${name}" (LSA Secret).` });
+      setMsg({ type: 'ok', text: t('face.enroll.passwordStored', { name }) });
       setStep('camera');
     } catch (e) {
       setMsg({ type: 'err', text: getFriendlyErr(e) });
@@ -230,7 +231,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
 
   const doCapture = async () => {
     if (!name.trim()) {
-      setMsg({ type: 'err', text: 'Pick a Windows account first.' });
+      setMsg({ type: 'err', text: t('face.enroll.pickAccountFirst') });
       return;
     }
     setBusy(true);
@@ -248,7 +249,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
       );
       setMsg({
         type: 'ok',
-        text: `Enrolled "${r.name}" (${r.frames} frames, label "${r.label}").`,
+        text: t('face.enroll.enrolled', { name: r.name, frames: r.frames, label: r.label }),
       });
       onEnrolled();
     } catch (e) {
@@ -259,10 +260,12 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
   };
 
   const stepTitle: Record<EnrollStep, string> = {
-    user: '1 · Windows account',
-    hello: '2 · Verify with PIN / fingerprint',
-    password: pwConfigured ? '3 · Unlock credential saved ✓' : '3 · Unlock credential (optional)',
-    camera: '4 · Camera capture',
+    user: t('face.enroll.step.user'),
+    hello: t('face.enroll.step.hello'),
+    password: pwConfigured
+      ? t('face.enroll.step.passwordSaved')
+      : t('face.enroll.step.passwordOptional'),
+    camera: t('face.enroll.step.camera'),
   };
 
   return (
@@ -272,7 +275,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
         stopPreview();
         onClose();
       }}
-      title={`Enroll face — ${stepTitle[step]}`}
+      title={t('face.enroll.title', { step: stepTitle[step] })}
     >
       <div style={{ display: 'grid', gap: 16 }}>
         {/* ── Step indicator (clean pills, states) ─────────────────────────── */}
@@ -308,8 +311,14 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   border: active ? '1px solid var(--accent-soft)' : '1px solid transparent',
                 }}
               >
-                {done ? '✓ ' : `${i + 1}. `}
-                {s === 'password' ? 'credential' : s === 'camera' ? 'capture' : s}
+                {done ? <Icon name="check" size={14} /> : `${i + 1}. `}{' '}
+                {s === 'password'
+                  ? t('face.enroll.pill.credential')
+                  : s === 'camera'
+                    ? t('face.enroll.pill.capture')
+                    : s === 'user'
+                      ? t('face.enroll.pill.user')
+                      : t('face.enroll.pill.hello')}
               </span>
             );
           })}
@@ -329,12 +338,11 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
               }}
             >
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                Which <b>Windows account</b> should face unlock work for? The wizard only needs your
-                sign-in permission.
+                {t('face.enroll.accountQuestion')}
               </p>
               <label style={{ display: 'grid', gap: 5 }}>
                 <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 600 }}>
-                  Account
+                  {t('face.enroll.account')}
                 </span>
                 <select
                   className="text-input"
@@ -344,7 +352,9 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                 >
                   {userList.length === 0 && (
                     <option value="">
-                      {userListErr ? '— could not load users —' : 'Loading users…'}
+                      {userListErr
+                        ? t('face.enroll.usersLoadFailed')
+                        : t('face.enroll.loadingUsers')}
                     </option>
                   )}
                   {userList.map((u) => (
@@ -354,24 +364,26 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   ))}
                 </select>
                 {userListErr && (
-                  <span style={{ fontSize: 11.5, color: 'var(--warning)' }}>⚠️ {userListErr}</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--warning)' }}>
+                    <Icon name="alert-triangle" size={16} /> {userListErr}
+                  </span>
                 )}
               </label>
               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                 <label style={{ display: 'grid', gap: 5, flex: 1, minWidth: 140 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 600 }}>
-                    Label
+                    {t('face.enroll.label')}
                   </span>
                   <input
                     className="text-input"
-                    placeholder="e.g. front, glasses"
+                    placeholder={t('face.enroll.labelPlaceholder')}
                     value={label}
                     onChange={(e) => setLabel(e.target.value)}
                   />
                 </label>
                 <label style={{ display: 'grid', gap: 5, width: 110 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 600 }}>
-                    Photos
+                    {t('face.enroll.photos')}
                   </span>
                   <input
                     className="text-input"
@@ -393,20 +405,19 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   paddingTop: 10,
                 }}
               >
-                Next, Windows will ask you to prove it&apos;s really you with the{' '}
-                <b>PIN or fingerprint</b> you already configured. No password is typed here.
+                {t('face.enroll.helloNote')}
               </p>
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button className="btn btn-secondary" disabled={busy} onClick={onClose}>
-                Cancel
+                {t('common.cancel')}
               </button>
               <button
                 className="btn btn-primary"
                 disabled={busy || !name.trim()}
                 onClick={() => setStep('hello')}
               >
-                Continue →
+                {t('face.enroll.continue')}
               </button>
             </div>
           </>
@@ -426,9 +437,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
               }}
             >
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                This is your <b>everyday sign-in</b> — the very first thing we need is proof that
-                it&apos;s really you. A Windows dialog will appear. Use the{' '}
-                <b>same PIN or fingerprint</b> you use to unlock this PC.
+                {t('face.enroll.helloIntro')}
               </p>
               {helloResult && !helloResult.verified && (
                 <p
@@ -464,10 +473,18 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button className="btn btn-secondary" disabled={busy} onClick={() => setStep('user')}>
-                ← Back
+                {t('face.enroll.back')}
               </button>
               <button className="btn btn-primary" disabled={busy} onClick={() => void doHello()}>
-                {busy ? '⏳ Waiting…' : '🔑 Verify with PIN / fingerprint'}
+                {busy ? (
+                  <>
+                    <Icon name="hourglass" size={16} /> {t('face.enroll.waiting')}
+                  </>
+                ) : (
+                  <>
+                    <Icon name="key" size={16} /> {t('face.enroll.verify')}
+                  </>
+                )}
               </button>
             </div>
           </>
@@ -489,29 +506,23 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
               {pwConfigured ? (
                 <>
                   <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                    The unlock credential for <b>{name}</b> is <b>already stored</b> — nothing else
-                    to do here. You&apos;ll keep signing in with your PIN as usual.
+                    {t('face.enroll.storedFor', { name })}
                   </p>
                   <p
                     style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}
                   >
-                    Want to change it? Go back to the previous step, clear the saved credential, and
-                    re-enter the password when you next enroll.
+                    {t('face.enroll.changeHint')}
                   </p>
                 </>
               ) : (
                 <>
                   <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                    <b>Optional.</b> To let the camera unlock the lock screen, Windows needs the{' '}
-                    <b>account credential itself</b>&nbsp;— the PIN is protected by Windows and it
-                    will not hand it over to third-party software. We store that credential{' '}
-                    <b>sealed in the Windows LSA</b>, read it only at the lock screen, and it never
-                    leaves this PC.
+                    {t('face.enroll.optionalNote')}
                   </p>
                   <input
                     className="text-input"
                     type="password"
-                    placeholder={`Windows account password for ${name} (used once, stored sealed)`}
+                    placeholder={t('face.enroll.passwordPlaceholder', { name })}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     autoFocus
@@ -525,8 +536,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                       lineHeight: 1.5,
                     }}
                   >
-                    You will <b>keep signing in with your PIN</b>. The camera just needs this once
-                    to unlock the screen — you can skip and add it later.
+                    {t('face.enroll.pinReminder')}
                   </p>
                 </>
               )}
@@ -552,7 +562,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                 disabled={busy}
                 onClick={() => setStep('hello')}
               >
-                ← Back
+                {t('face.enroll.back')}
               </button>
               {!pwConfigured && (
                 <button
@@ -560,7 +570,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   disabled={busy}
                   onClick={() => void savePassword(true)}
                 >
-                  Skip — PIN only
+                  {t('face.enroll.skipPinOnly')}
                 </button>
               )}
               <button
@@ -568,11 +578,17 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                 disabled={busy || (!pwConfigured && !password)}
                 onClick={() => void savePassword(pwConfigured === true)}
               >
-                {busy
-                  ? '⏳ Storing…'
-                  : pwConfigured
-                    ? 'Continue →'
-                    : '🔐 Save credential & continue'}
+                {busy ? (
+                  <>
+                    <Icon name="hourglass" size={16} /> {t('face.enroll.storing')}
+                  </>
+                ) : pwConfigured ? (
+                  t('face.enroll.continue')
+                ) : (
+                  <>
+                    <Icon name="lock" size={16} /> {t('face.enroll.saveCredential')}
+                  </>
+                )}
               </button>
             </div>
           </>
@@ -598,12 +614,14 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
               {jpeg ? (
                 <img
                   src={`data:image/jpeg;base64,${jpeg}`}
-                  alt="camera preview"
+                  alt={t('face.enroll.cameraPreviewAlt')}
                   style={{ width: '100%', height: '100%', objectFit: 'contain' }}
                 />
               ) : (
                 <span style={{ color: 'var(--text-dim)', fontSize: 13 }}>
-                  {camErr ? `Camera error: ${camErr}` : 'Starting camera…'}
+                  {camErr
+                    ? t('face.enroll.cameraError', { error: camErr })
+                    : t('face.enroll.startingCamera')}
                 </span>
               )}
               <div
@@ -619,13 +637,13 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   padding: '3px 0',
                 }}
               >
-                Live preview — look directly at the camera
+                {t('face.enroll.livePreview')}
               </div>
             </div>
             {camErr && (
               <p style={{ margin: 0, color: 'var(--warning)', fontSize: 12.5 }}>
-                ⚠️ {camErr} — check that the camera is not in use by another app, then close and
-                reopen this dialog.
+                <Icon name="alert-triangle" size={16} />{' '}
+                {t('face.enroll.cameraBusy', { error: camErr })}
               </p>
             )}
             <div
@@ -637,8 +655,7 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
               }}
             >
               <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6 }}>
-                Captures <b>{frames} frame(s)</b> for <b>{name}</b> and stores a{' '}
-                <b>reference feature vector</b> — no photos are saved, only math.
+                {t('face.enroll.captureNote', { frames, name })}
               </p>
             </div>
             {msg && (
@@ -665,10 +682,18 @@ function EnrollWizard({ onClose, onEnrolled }: { onClose: () => void; onEnrolled
                   setStep('password');
                 }}
               >
-                ← Back
+                {t('face.enroll.back')}
               </button>
               <button className="btn btn-primary" disabled={busy} onClick={() => void doCapture()}>
-                {busy ? '⏳ Capturing…' : `📷 Capture ${frames} frame${frames !== 1 ? 's' : ''}`}
+                {busy ? (
+                  <>
+                    <Icon name="hourglass" size={16} /> {t('face.enroll.capturing')}
+                  </>
+                ) : (
+                  <>
+                    <Icon name="camera" size={16} /> {t('face.enroll.capture', { frames })}
+                  </>
+                )}
               </button>
             </div>
           </>
@@ -700,7 +725,7 @@ export default function FaceUnlockTab() {
       const s = await invoke<FaceSettings>('face_get_settings');
       setSettings({ ...DEFAULT_SETTINGS, ...s });
     } catch (e) {
-      setMsg({ type: 'err', text: `load: ${String(e)}` });
+      setMsg({ type: 'err', text: t('face.loadError', { error: String(e) }) });
     }
   }, []);
 
@@ -742,9 +767,9 @@ export default function FaceUnlockTab() {
     try {
       await invoke('face_set_settings', { settings });
       setDirty(false);
-      show('ok', 'Settings saved.');
+      show('ok', t('face.settings.saved'));
     } catch (e) {
-      show('err', `settings error: ${String(e)}`);
+      show('err', t('face.settings.error', { error: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -766,13 +791,7 @@ export default function FaceUnlockTab() {
 
   const removeAllModels = async () => {
     // Confirm before deleting downloaded models (~250 MB).
-    if (
-      !window.confirm(
-        'Remove all downloaded/installed Face Unlock models?\n\n' +
-          'This frees disk space (~250 MB) and disables face enrollment/unlock ' +
-          'until the models are downloaded again.',
-      )
-    ) {
+    if (!window.confirm(t('face.maint.confirmRemove'))) {
       return;
     }
     setBusy(true);
@@ -786,12 +805,15 @@ export default function FaceUnlockTab() {
       show(
         r.warnings.length > 0 ? 'err' : 'ok',
         r.removed.length > 0
-          ? `Removed ${r.removed.length} file(s).${r.warnings.length ? ` Warnings: ${r.warnings.join('; ')}` : ''}`
-          : 'No model files found — nothing to remove.',
+          ? t('face.maint.removed', { count: r.removed.length }) +
+              (r.warnings.length
+                ? ` ${t('face.maint.warnings', { warnings: r.warnings.join('; ') })}`
+                : '')
+          : t('face.maint.nothingRemoved'),
       );
       await loadModels();
     } catch (e) {
-      show('err', `remove error: ${getFriendlyErr(e)}`);
+      show('err', t('face.maint.removeError', { error: getFriendlyErr(e) }));
     } finally {
       setBusy(false);
     }
@@ -802,14 +824,9 @@ export default function FaceUnlockTab() {
     try {
       const m = await loadModels();
       const present = !!m && (m.installed || m.staged);
-      show(
-        'ok',
-        present
-          ? 'Models present — download button stays disabled.'
-          : 'No models found — download is enabled again.',
-      );
+      show('ok', present ? t('face.maint.modelsPresent') : t('face.maint.modelsMissing'));
     } catch (e) {
-      show('err', `rescan error: ${getFriendlyErr(e)}`);
+      show('err', t('face.maint.rescanError', { error: getFriendlyErr(e) }));
     } finally {
       setBusy(false);
     }
@@ -837,33 +854,32 @@ export default function FaceUnlockTab() {
           ? 'enroll'
           : 'ready';
 
+  const enrolledCount = status?.enrolled_profiles ?? 0;
   const phaseMeta: Record<string, { dot: string; title: string; subtitle: string }> = {
     off: {
       dot: 'var(--text-dim)',
-      title: 'Face Unlock is off',
-      subtitle: 'Turn it on to unlock this PC with your webcam.',
+      title: t('face.phase.off.title'),
+      subtitle: t('face.phase.off.subtitle'),
     },
     models: {
       dot: 'var(--warning)',
-      title: 'Step 1 of 3 · Download the AI models',
-      subtitle: 'The recognition models (~250 MB) download once and run fully on this machine.',
+      title: t('face.phase.models.title'),
+      subtitle: t('face.phase.models.subtitle'),
     },
     service: {
       dot: 'var(--warning)',
-      title: 'Step 2 of 3 · Start the auth service',
-      subtitle:
-        'A local service watches the lock screen and matches your face. No data leaves the PC.',
+      title: t('face.phase.service.title'),
+      subtitle: t('face.phase.service.subtitle'),
     },
     enroll: {
       dot: 'var(--accent)',
-      title: 'Step 3 of 3 · Enroll your face',
-      subtitle:
-        'Add a reference face. Only a mathematical feature vector is stored, never a photo.',
+      title: t('face.phase.enroll.title'),
+      subtitle: t('face.phase.enroll.subtitle'),
     },
     ready: {
       dot: 'var(--success)',
-      title: `Face Unlock is ready · ${status?.enrolled_profiles ?? 0} face${(status?.enrolled_profiles ?? 0) !== 1 ? 's' : ''} enrolled`,
-      subtitle: 'Everything is healthy. Lock the PC (Win+L) and look at the camera to sign in.',
+      title: t('face.phase.ready.title', { count: enrolledCount }),
+      subtitle: t('face.phase.ready.subtitle'),
     },
   };
   const meta = phaseMeta[phase];
@@ -886,9 +902,9 @@ export default function FaceUnlockTab() {
         // staged copy is enough; the installer copies it on reinstall
       }
       await loadModels();
-      show('ok', 'AI models are ready.');
+      show('ok', t('face.downloadReady'));
     } catch (e) {
-      show('err', `download error: ${getFriendlyErr(e)}`);
+      show('err', t('face.downloadError', { error: getFriendlyErr(e) }));
     } finally {
       setDownloading(false);
       setDownloadProgress(null);
@@ -907,7 +923,9 @@ export default function FaceUnlockTab() {
         );
         show(
           r.ok ? 'ok' : 'err',
-          r.ok ? 'Service installed & started.' : `install failed: ${r.stderr}`,
+          r.ok
+            ? t('face.maint.serviceInstalled')
+            : t('face.maint.installFailed', { error: r.stderr }),
         );
       } else {
         const r = await invoke<{
@@ -920,13 +938,15 @@ export default function FaceUnlockTab() {
         show(
           'ok',
           r.action === 'already_running'
-            ? 'The auth service is already running.'
-            : `Service ${r.action === 'started' ? 'started' : 'start request sent'}.`,
+            ? t('face.maint.serviceRunning')
+            : r.action === 'started'
+              ? t('face.maint.serviceStarted')
+              : t('face.maint.serviceStartSent'),
         );
       }
       await load();
     } catch (e) {
-      show('err', `service error: ${getFriendlyErr(e)}`);
+      show('err', t('face.maint.serviceError', { error: getFriendlyErr(e) }));
     } finally {
       setBusy(false);
     }
@@ -939,9 +959,9 @@ export default function FaceUnlockTab() {
         settings: { ...settings, face_unlock_enabled: enabled },
       });
       setSettings((s) => ({ ...s, face_unlock_enabled: enabled }));
-      show('ok', enabled ? 'Face Unlock enabled.' : 'Face Unlock disabled (tile hidden).');
+      show('ok', enabled ? t('face.toggle.enabled') : t('face.toggle.disabled'));
     } catch (e) {
-      show('err', `toggle error: ${String(e)}`);
+      show('err', t('face.toggle.error', { error: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -949,10 +969,7 @@ export default function FaceUnlockTab() {
 
   return (
     <div className="page">
-      <PageHeader
-        title="Face Unlock"
-        subtitle="Unlock this PC with a look at your webcam. The whole pipeline runs locally, offline."
-      />
+      <PageHeader title={t('face.title')} subtitle={t('face.subtitle')} />
 
       {/* Hero — single source of truth for where the user is in the journey */}
       <div className="card" style={{ padding: '24px 26px' }}>
@@ -985,43 +1002,44 @@ export default function FaceUnlockTab() {
             </p>
             {phase === 'ready' ? (
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {['AI models', 'Auth service', 'Face enrolled'].map((label) => (
-                  <span
-                    key={label}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      color: 'var(--success)',
-                      background: 'var(--surface-2)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 999,
-                      padding: '4px 12px',
-                    }}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-                      <circle cx="6" cy="6" r="5" fill="currentColor" opacity="0.22" />
-                      <path
-                        d="M3.6 6.2l1.8 1.8 3-3.6"
-                        stroke="currentColor"
-                        strokeWidth="1.4"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                    {label}
-                  </span>
-                ))}
+                {[t('face.badge.models'), t('face.badge.service'), t('face.badge.enrolled')].map(
+                  (label) => (
+                    <span
+                      key={label}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        color: 'var(--success)',
+                        background: 'var(--surface-2)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 999,
+                        padding: '4px 12px',
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                        <circle cx="6" cy="6" r="5" fill="currentColor" opacity="0.22" />
+                        <path
+                          d="M3.6 6.2l1.8 1.8 3-3.6"
+                          stroke="currentColor"
+                          strokeWidth="1.4"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      {label}
+                    </span>
+                  ),
+                )}
               </div>
             ) : (
               <div style={{ display: 'flex', gap: 10, flexDirection: 'column', maxWidth: 480 }}>
                 {phase === 'off' && (
                   <>
                     <div style={{ fontSize: 14, color: 'var(--text-muted)' }}>
-                      Enabling shows the Face Unlock tile at the sign-in screen. You can set it up
-                      step by step right after.
+                      {t('face.off.enableNote')}
                     </div>
                     <button
                       className="btn btn-primary"
@@ -1029,7 +1047,7 @@ export default function FaceUnlockTab() {
                       onClick={() => void toggleMaster(true)}
                       disabled={busy}
                     >
-                      Enable Face Unlock
+                      {t('face.off.enable')}
                     </button>
                   </>
                 )}
@@ -1041,8 +1059,12 @@ export default function FaceUnlockTab() {
                     disabled={busy || downloading || modelsInstalled}
                   >
                     {downloading
-                      ? `Downloading${downloadProgress !== null ? ` ${Math.round(downloadProgress)}%` : ''}…`
-                      : 'Download AI models (~250 MB)'}
+                      ? downloadProgress !== null
+                        ? t('face.downloading', {
+                            percent: `${Math.round(downloadProgress)}%`,
+                          })
+                        : t('face.downloadingNoPct')
+                      : t('face.download')}
                   </button>
                 )}
                 {phase === 'service' && (
@@ -1052,7 +1074,7 @@ export default function FaceUnlockTab() {
                     onClick={() => void doServiceAction()}
                     disabled={busy}
                   >
-                    {svcInstalled ? 'Restart the auth service' : 'Install the auth service'}
+                    {svcInstalled ? t('face.service.restart') : t('face.service.install')}
                   </button>
                 )}
                 {phase === 'enroll' && (
@@ -1062,7 +1084,7 @@ export default function FaceUnlockTab() {
                     onClick={() => setEnrollOpen(true)}
                     disabled={busy}
                   >
-                    Add my face
+                    {t('face.addMyFace')}
                   </button>
                 )}
                 {(downloading || downloadProgress !== null) && (
@@ -1106,32 +1128,32 @@ export default function FaceUnlockTab() {
       >
         {[
           {
-            label: 'AI models',
+            label: t('face.badge.models'),
             done: modelsInstalled,
             active: phase === 'models',
             note: modelsInstalled
-              ? 'Downloaded once, run on-device'
+              ? t('face.checklist.modelsDone')
               : downloading
-                ? 'Downloading…'
-                : '~250 MB download',
+                ? t('face.downloadingNoPct')
+                : t('face.checklist.modelsNote'),
           },
           {
-            label: 'Auth service',
+            label: t('face.badge.service'),
             done: svcRunning,
             active: phase === 'service',
             note: svcRunning
-              ? 'Running with auto-restart'
+              ? t('face.checklist.serviceRunning')
               : svcInstalled
-                ? 'Installed, needs start'
-                : 'Local background service',
+                ? t('face.checklist.serviceInstalled')
+                : t('face.checklist.serviceNote'),
           },
           {
-            label: 'Face enrolled',
+            label: t('face.badge.enrolled'),
             done: hasFaces,
             active: phase === 'enroll',
             note: hasFaces
-              ? `${status?.enrolled_profiles ?? 0} face${(status?.enrolled_profiles ?? 0) !== 1 ? 's' : ''}`
-              : 'Reference face required',
+              ? t('face.checklist.faceCount', { count: enrolledCount })
+              : t('face.checklist.faceNote'),
           },
         ].map((step) => (
           <div
@@ -1211,17 +1233,14 @@ export default function FaceUnlockTab() {
             <circle cx="8" cy="11.1" r="0.9" fill="var(--warning)" />
           </svg>
           <p className="page-subtitle" style={{ margin: 0, maxWidth: '78ch' }}>
-            Face Unlock here uses a <b>{t('face.single_rgb_camera')}</b>, which is far less secure
-            than the infrared sensor of Windows Hello. A high-quality photo or video may bypass it,
-            so avoid enabling it on machines storing sensitive data. A restore point is recommended
-            before using the lock-screen provider.
+            {t('face.risk')}
           </p>
         </div>
       )}
 
       {diagnostics && (
         <div className="card">
-          <div className="card-title">{t('face.diagnostics')}</div>
+          <h2 className="card-title">{t('face.diagnostics')}</h2>
           <div
             style={{
               display: 'grid',
@@ -1266,7 +1285,11 @@ export default function FaceUnlockTab() {
                         fontFamily: isBool ? undefined : 'var(--font-mono)',
                       }}
                     >
-                      {isBool ? (okState ? 'OK' : 'Failed') : String(value)}
+                      {isBool
+                        ? okState
+                          ? t('face.diag.ok')
+                          : t('face.diag.failed')
+                        : String(value)}
                     </div>
                   </div>
                 );
@@ -1274,17 +1297,17 @@ export default function FaceUnlockTab() {
           </div>
           <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
             <div>
-              Models dir: <code>{String(diagnostics.models_dir ?? '')}</code>
+              {t('face.diag.modelsDir')} <code>{String(diagnostics.models_dir ?? '')}</code>
             </div>
             <div>
-              Data dir: <code>{String(diagnostics.data_dir ?? '')}</code>
+              {t('face.diag.dataDir')} <code>{String(diagnostics.data_dir ?? '')}</code>
             </div>
           </div>
         </div>
       )}
       {diagnosticsError && (
         <div className="card">
-          <div className="card-title">{t('face.diagnostics_error')}</div>
+          <h2 className="card-title">{t('face.diagnostics_error')}</h2>
           <p style={{ margin: 0, fontSize: 13, color: 'var(--error)' }}>{diagnosticsError}</p>
         </div>
       )}
@@ -1300,11 +1323,11 @@ export default function FaceUnlockTab() {
           }}
         >
           <div>
-            <div className="card-title" style={{ marginBottom: 4 }}>
-              Settings
-            </div>
+            <h2 className="card-title" style={{ marginBottom: 4 }}>
+              {t('common.settings')}
+            </h2>
             <p className="page-subtitle" style={{ margin: 0 }}>
-              Tune how strictly the camera matches your face. Defaults work well for most people.
+              {t('face.settings.subtitle')}
             </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1319,7 +1342,7 @@ export default function FaceUnlockTab() {
               disabled={busy || !dirty}
               style={{ minWidth: 96 }}
             >
-              {busy ? 'Saving…' : 'Save'}
+              {busy ? t('face.settings.saving') : t('common.save')}
             </button>
           </div>
         </div>
@@ -1344,7 +1367,7 @@ export default function FaceUnlockTab() {
                 marginBottom: 10,
               }}
             >
-              Matching strictness
+              {t('face.settings.group.matching')}
             </div>
             <div style={{ display: 'grid', gap: 12 }}>
               <label style={{ display: 'grid', gap: 5 }}>
@@ -1362,10 +1385,10 @@ export default function FaceUnlockTab() {
                 />
                 <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
                   {settings.match_threshold < 0.55
-                    ? 'Loose — unlock nearly always works'
+                    ? t('face.settings.thresholdLoose')
                     : settings.match_threshold > 0.7
-                      ? 'Strict — only confident matches'
-                      : 'Balanced'}
+                      ? t('face.settings.thresholdStrict')
+                      : t('face.settings.thresholdBalanced')}
                   {' · '}
                   {settings.match_threshold.toFixed(2)}
                 </span>
@@ -1379,12 +1402,12 @@ export default function FaceUnlockTab() {
                 }}
               >
                 <span style={{ fontSize: 13, color: 'var(--text)' }}>
-                  Reject if 2+ faces in frame
+                  {t('face.settings.multiFace')}
                 </span>
                 <ToggleSwitch
                   checked={settings.multi_face_protection_enabled}
                   onChange={(v) => set({ multi_face_protection_enabled: v })}
-                  ariaLabel="Reject if 2+ faces in frame"
+                  ariaLabel={t('face.settings.multiFace')}
                 />
               </label>
               <label
@@ -1396,12 +1419,12 @@ export default function FaceUnlockTab() {
                 }}
               >
                 <span style={{ fontSize: 13, color: 'var(--text)' }}>
-                  Require liveness (blink / turn)
+                  {t('face.settings.liveness')}
                 </span>
                 <ToggleSwitch
                   checked={settings.liveness_enabled}
                   onChange={(v) => set({ liveness_enabled: v })}
-                  ariaLabel="Require liveness"
+                  ariaLabel={t('face.settings.livenessAria')}
                 />
               </label>
               <label
@@ -1413,12 +1436,12 @@ export default function FaceUnlockTab() {
                 }}
               >
                 <span style={{ fontSize: 13, color: 'var(--text)' }}>
-                  Reject photos / videos (anti-spoof)
+                  {t('face.settings.antispoof')}
                 </span>
                 <ToggleSwitch
                   checked={settings.antispoof_enabled}
                   onChange={(v) => set({ antispoof_enabled: v })}
-                  ariaLabel="Reject photos and videos"
+                  ariaLabel={t('face.settings.antispoofAria')}
                 />
               </label>
             </div>
@@ -1436,7 +1459,7 @@ export default function FaceUnlockTab() {
                 marginBottom: 10,
               }}
             >
-              Sign-in screens
+              {t('face.settings.group.signIn')}
             </div>
             <div style={{ display: 'grid', gap: 12 }}>
               <label
@@ -1453,7 +1476,7 @@ export default function FaceUnlockTab() {
                 <ToggleSwitch
                   checked={settings.face_unlock_logon_enabled}
                   onChange={(v) => set({ face_unlock_logon_enabled: v })}
-                  ariaLabel="Show tile at sign-in"
+                  ariaLabel={t('face.show_tile_at_sign_in')}
                 />
               </label>
               <label
@@ -1465,12 +1488,12 @@ export default function FaceUnlockTab() {
                 }}
               >
                 <span style={{ fontSize: 13, color: 'var(--text)' }}>
-                  Show tile at lock (Win+L)
+                  {t('face.settings.showTileLock')}
                 </span>
                 <ToggleSwitch
                   checked={settings.face_unlock_workstation_enabled}
                   onChange={(v) => set({ face_unlock_workstation_enabled: v })}
-                  ariaLabel="Show tile at workstation unlock"
+                  ariaLabel={t('face.settings.showTileLockAria')}
                 />
               </label>
               <label style={{ display: 'grid', gap: 5 }}>
@@ -1488,13 +1511,13 @@ export default function FaceUnlockTab() {
                 />
                 <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
                   {settings.renew_days === 0
-                    ? 'Off — never remind'
-                    : `Every ${settings.renew_days} day${settings.renew_days !== 1 ? 's' : ''}`}
+                    ? t('face.settings.renewOff')
+                    : t('face.settings.renewEvery', { count: settings.renew_days })}
                 </span>
               </label>
               <label style={{ display: 'grid', gap: 5 }}>
                 <span style={{ fontSize: 13, color: 'var(--text)' }}>
-                  Failed attempts before lockout
+                  {t('face.settings.lockout')}
                 </span>
                 <input
                   type="range"
@@ -1506,8 +1529,7 @@ export default function FaceUnlockTab() {
                   style={{ width: '100%', accentColor: 'var(--accent)' }}
                 />
                 <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
-                  {settings.lockout_max_fails} attempt{settings.lockout_max_fails !== 1 ? 's' : ''}{' '}
-                  then fall back to password
+                  {t('face.settings.lockoutNote', { count: settings.lockout_max_fails })}
                 </span>
               </label>
             </div>
@@ -1521,7 +1543,7 @@ export default function FaceUnlockTab() {
           style={{ marginTop: 16, fontSize: 13 }}
           aria-expanded={showAdvanced}
         >
-          {showAdvanced ? 'Hide advanced options' : 'Advanced options'}
+          {showAdvanced ? t('face.settings.advancedHide') : t('face.settings.advanced')}
           <svg
             width="14"
             height="14"
@@ -1554,7 +1576,7 @@ export default function FaceUnlockTab() {
               }}
             >
               <span style={{ fontSize: 13, color: 'var(--text)' }}>
-                Match margin (anti-misrouting)
+                {t('face.settings.matchMargin')}
               </span>
               <input
                 className="text-input"
@@ -1590,8 +1612,7 @@ export default function FaceUnlockTab() {
               />
             </label>
             <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-              Advanced values tune the recognition internals. Leave them alone unless you know what
-              they do.
+              {t('face.settings.advancedHint')}
             </span>
           </div>
         )}
@@ -1599,7 +1620,7 @@ export default function FaceUnlockTab() {
 
       {/* Master toggle + password + templates together under "Manage" */}
       <div className="card">
-        <div
+        <h2
           className="card-title"
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
         >
@@ -1608,13 +1629,12 @@ export default function FaceUnlockTab() {
             checked={settings.face_unlock_enabled}
             onChange={(v) => void toggleMaster(v)}
             disabled={busy}
-            ariaLabel="Face Unlock power"
+            ariaLabel={t('face.face_unlock_power')}
           />
-        </div>
+        </h2>
         {phase === 'off' ? (
           <p className="page-subtitle" style={{ margin: 0 }}>
-            Turn it on and follow the checklist above. Your enrolled faces, settings and stored
-            password are kept while it is off.
+            {t('face.powerOffNote')}
           </p>
         ) : (
           <div
@@ -1635,7 +1655,7 @@ export default function FaceUnlockTab() {
                   marginBottom: 6,
                 }}
               >
-                Enrolled faces
+                {t('face.enrolledFaces')}
               </span>
               <TemplateList compact />
               <button
@@ -1643,13 +1663,9 @@ export default function FaceUnlockTab() {
                 style={{ marginTop: 8 }}
                 onClick={() => setEnrollOpen(true)}
                 disabled={busy || (modelsKnown && !modelsInstalled)}
-                title={
-                  modelsKnown && !modelsInstalled
-                    ? 'Download the AI models first — no recognition models are present.'
-                    : undefined
-                }
+                title={modelsKnown && !modelsInstalled ? t('face.modelsFirstTitle') : undefined}
               >
-                Add another face
+                {t('face.addAnother')}
               </button>
             </div>
             <div>
@@ -1662,11 +1678,10 @@ export default function FaceUnlockTab() {
                   marginBottom: 6,
                 }}
               >
-                Sign-in password
+                {t('face.signInPassword')}
               </span>
               <p className="page-subtitle" style={{ margin: 0 }}>
-                Stored in a Windows LSA secret and read only by the credential provider at the lock
-                screen. It never leaves this PC. Set or update it inside the enroll flow.
+                {t('face.signInPasswordNote')}
               </p>
               <button
                 className="btn btn-secondary"
@@ -1674,7 +1689,7 @@ export default function FaceUnlockTab() {
                 onClick={() => setEnrollOpen(true)}
                 disabled={busy || (modelsKnown && !modelsInstalled)}
               >
-                Manage password
+                {t('face.managePassword')}
               </button>
             </div>
           </div>
@@ -1688,7 +1703,7 @@ export default function FaceUnlockTab() {
         style={{ fontSize: 13, marginBottom: showMaintenance ? 10 : 0 }}
         aria-expanded={showMaintenance}
       >
-        {showMaintenance ? 'Hide maintenance' : 'Maintenance'}
+        {showMaintenance ? t('face.maintenanceHide') : t('face.maintenance')}
         <svg
           width="14"
           height="14"
@@ -1718,24 +1733,24 @@ export default function FaceUnlockTab() {
               style={{ marginRight: 0 }}
               onClick={() => void doServiceAction()}
               disabled={busy}
-              title="Reinstall or self-heal the auth service if it crashed. No UAC prompt."
+              title={t('face.maint.reinstallTitle')}
             >
-              Reinstall / restart auth service
+              {t('face.maint.reinstall')}
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => void rescanModels()}
               disabled={busy}
-              title="Re-scan for downloaded or installed models"
+              title={t('face.maint.rescanTitle')}
             >
-              Re-scan models
+              {t('face.maint.rescan')}
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => void runDiagnostics()}
               disabled={busy}
             >
-              Run diagnostics
+              {t('face.maint.diagnostics')}
             </button>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1743,12 +1758,12 @@ export default function FaceUnlockTab() {
               className="btn btn-danger"
               onClick={() => void removeAllModels()}
               disabled={busy}
-              title="Delete downloaded models (frees ~250 MB)"
+              title={t('face.maint.removeTitle')}
             >
-              Remove all models
+              {t('face.maint.remove')}
             </button>
             <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-              Removing models frees ~250 MB but disables enrollment until you download them again.
+              {t('face.maint.removeNote')}
             </span>
           </div>
         </div>
@@ -1829,7 +1844,7 @@ function TemplateList({ compact = false }: { compact?: boolean }) {
   if (profiles.length === 0) {
     return (
       <p className="page-subtitle" style={{ color: 'var(--text-dim)' }}>
-        No faces enrolled yet.
+        {t('face.templates.empty')}
       </p>
     );
   }
@@ -1851,7 +1866,7 @@ function TemplateList({ compact = false }: { compact?: boolean }) {
           <div style={{ minWidth: 0 }}>
             <b>{p.name}</b>{' '}
             <span style={{ color: 'var(--text-dim)' }}>
-              ({p.templates} template{p.templates !== 1 ? 's' : ''})
+              {t('face.templates.count', { count: p.templates })}
             </span>
             {p.labels.length > 0 && (
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{p.labels.join(', ')}</div>
@@ -1863,7 +1878,7 @@ function TemplateList({ compact = false }: { compact?: boolean }) {
             disabled={busy}
             style={{ fontSize: 12, padding: '4px 10px', flexShrink: 0 }}
           >
-            Delete
+            {t('face.templates.delete')}
           </button>
         </li>
       ))}

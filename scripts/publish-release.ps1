@@ -49,18 +49,7 @@ if (-not (Test-Path $keyPath)) { throw "Signing key not found at $keyPath" }
 $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $keyPath -Raw).Trim()
 Write-Host "==> key loaded from $keyPath"
 
-# 2. Build the app (NSIS bundle validates the payload file set; it also stays
-#    available as a manual fallback installer).
-Write-Host '==> tauri build (NSIS, validated)...' -ForegroundColor Cyan
-Push-Location $root
-try {
-  pnpm --dir $root exec tauri build -f face --bundles nsis
-  if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
-} finally {
-  Pop-Location
-}
-
-# 3. Build/publish the STATIC setup shell (stable hash!).
+# 2. Build/publish the STATIC setup shell (stable hash!).
 #    - If a signed shell is cached in setup-shell\ and -RebuildShell is not
 #      given, REUSE the exact same bytes (hash stays identical across
 #      releases). This is the whole point: one installer, one hash, forever.
@@ -85,7 +74,7 @@ if ((Test-Path $shellCached) -and -not $RebuildShell) {
   Copy-Item $shellRaw $shellCached -Force
   # Authenticode-sign the shell (same cert the Tauri bundler uses).
   Write-Host '    signing shell (signtool)...'
-  $certThumb = '4678FB4266F446C72CF4A181D6A348B9EE9C9661'
+  $certThumb = '7838982959B86B5E7795A4025208A7E68F34F755'  # self-signed code-signing (2026-11-14)
   # SDK layout: bin\<version>\<arch>\signtool.exe (NOT bin\*-x64\).
   $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter 'signtool.exe' -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match '\\x64\\' } |
@@ -97,6 +86,19 @@ if ((Test-Path $shellCached) -and -not $RebuildShell) {
 }
 $shellHash = (Get-FileHash $shellCached -Algorithm SHA256).Hash
 Write-Host "    shell SHA256: $shellHash"
+
+# 3. Build the app (NSIS bundle validates the payload file set — the static
+#    shell MUST already exist in the bundle before this step, otherwise the
+#    bundle ships a 0-byte placeholder; it also stays available as a manual
+#    fallback installer).
+Write-Host '==> tauri build (NSIS, validated)...' -ForegroundColor Cyan
+Push-Location $root
+try {
+  pnpm --dir $root exec tauri build -f face --bundles nsis
+  if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
+} finally {
+  Pop-Location
+}
 
 # 4. Build the versioned payload zip (what the shell actually installs).
 #    FAIL-CLOSED (S65-004): if any REQUIRED payload entry (executable,

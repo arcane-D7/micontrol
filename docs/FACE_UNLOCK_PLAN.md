@@ -1,7 +1,7 @@
 # Face Unlock Module for miControl — Implementation Plan
 
 > **Date:** 2026-08-02
-> **Status:** Approved — implementation in progress
+> **Status:** Implemented — `src-tauri/src/hw/face/` (camera, liveness, matcher, credential vault, pipe server), `src-tauri/src/bin/micontrol_face_svc.rs` (LocalSystem service) and `src-tauri/cp/` (credential provider DLL). Built behind the `face` Cargo feature (`pnpm run tauri build -f face`); `face-opencv` is an optional variant. This document is kept as the design record.
 > **Reference:** Analysis of `everglow01/Windows-Face-Hello` (v1.0.6, reference), `caochitam/windows-face-unlock`, `zs1083339604/FaceWinUnlock-Tauri`
 
 ## 1. Goal

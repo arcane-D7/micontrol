@@ -23,9 +23,35 @@
 
 #![cfg(windows)]
 
-use std::os::windows::process::CommandExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+
+/// Append a diagnostic line to `C:\ProgramData\MiControl\logs\ecram_service.log`.
+///
+/// The service runs as SYSTEM with no console: `eprintln!` output is discarded,
+/// so before this there was no way to see why the bridge died (the two 7031
+/// events left no trace). Write-through, size-rotated via the shared helper.
+fn service_log(line: &str) {
+    eprintln!("[ecram_service] {line}");
+    let path = std::path::Path::new(r"C:\ProgramData\MiControl\logs\ecram_service.log");
+    let _ = micontrol_lib::util::log_rotation::append_line(
+        path,
+        line,
+        micontrol_lib::util::log_rotation::DEFAULT_MAX_BYTES,
+        micontrol_lib::util::log_rotation::DEFAULT_MAX_FILES,
+    );
+}
+
+/// Log every panic (thread name + location) before the default hook runs.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed");
+        service_log(&format!("PANIC in thread '{name}': {info}"));
+        default_hook(info);
+    }));
+}
 
 // ── ECRAM low-level IOCTL access ─────────────────────────────────────────────
 
@@ -888,109 +914,70 @@ mod ec_command {
         Ok((ssid, connected, connected))
     }
 
-    // ── Charging threshold (EC ERAM registers) ──────────────────────────────
+    // ── Charging threshold (ERAM 0xA4/0xA7 — NOT WRITABLE HERE) ────────────────
     //
-    // The original IoTService.exe applies the charging threshold via WMI
-    // (SetChargingLimit, msg_type 0x1003 → Worker_WMI). Our ecram_service
-    // replaces IoTService.exe, so the MCPI pipe does not exist. Instead we
-    // write the threshold directly to the EC ERAM registers:
-    //   - 0xA4 (Battery Care master enable): 0x01 = respect threshold
-    //   - 0xA7 (charging threshold): value in percent (40..=100)
-    // These registers live in the ACPI ERAM region (get_eram_base() + offset).
-    // The ecram_service runs as SYSTEM named "IoTService.exe" in the
-    // DriverStore, so it passes the IoTDriver security check and can access
-    // ERAM via the IOCTL path.
+    // The limit is stored in ERAM 0xA4 (LONL bit0) and 0xA7 (HBDA, percent),
+    // both inside the SystemMemory region 0xFE0B0300. IoTDriver.sys does NOT
+    // allow that region through its ECRAM IOCTLs (STATUS_ACCESS_DENIED /
+    // 0x80070005) even for this SYSTEM service — the driver only permits
+    // 0xFE0B0F00+0x80, 0xFE0B0AB8+8 and 0xFE0B0E00+0x100.
+    //
+    // These ops therefore CANNOT apply the limit. They used to attempt the
+    // write, swallow the failure and answer with the registry value, which is
+    // how the UI came to show "80%" while the EC charged to 94%. They now
+    // answer with the truth: the real path is the ACPI WMAA method
+    // (MICommonInterface.MiInterface, FUN2=0x1000 / FUN3=0x02), implemented in
+    // the app (`hw::charging`), not here.
 
-    const CHARGE_CARE_OFFSET: u64 = 0xA4;
-    const CHARGE_THRESHOLD_OFFSET: u64 = 0xA7;
+    const CHARGE_UNAVAILABLE: &str = "ERAM 0xFE0B03A4/0xFE0B03A7 is blocked by IoTDriver \
+         (0x80070005); the charging limit is applied through ACPI WMAA 0x1000/0x02 \
+         (MICommonInterface.MiInterface), not through this service";
 
-    fn eram_base() -> u64 {
-        // Hardcoded fallback (matches ecram::get_eram_base() on the TM2424).
-        // The service cannot import the crate's discovery, so use the same
-        // DSDT-derived address; the fallback is correct for this platform.
-        0xFE0B0300
+    /// Reject: this service cannot apply the charging limit.
+    pub fn set_charging_threshold(_threshold: u8) -> Result<u8, String> {
+        Err(CHARGE_UNAVAILABLE.to_string())
     }
 
-    /// Set the charging threshold on the EC.
-    ///
-    /// Enables Battery Care (0xA4 = 0x01) and writes the threshold
-    /// (0xA7 = threshold). Valid thresholds are 40, 50, 60, 70, 80, 100.
-    /// Returns the effective threshold.
-    pub fn set_charging_threshold(threshold: u8) -> Result<u8, String> {
-        const VALID: [u8; 6] = [40, 50, 60, 70, 80, 100];
-        if !VALID.contains(&threshold) {
-            return Err(format!("invalid charging threshold: {threshold}"));
-        }
-        let base = eram_base();
-        let _ = ecram::send_handshake();
-        ecram::write_ecram(base + CHARGE_CARE_OFFSET, &[0x01])?;
-        ecram::write_ecram(base + CHARGE_THRESHOLD_OFFSET, &[threshold])?;
-        Ok(threshold)
-    }
-
-    /// Read the charging threshold from the EC.
-    ///
-    /// Returns (battery_care_enabled, threshold). If the EC read fails,
-    /// falls back to the registry value `HKLM\SOFTWARE\MI\IoTDriver\ChargingThreshold`.
+    /// Reject: reading ERAM 0xA4/0xA7 here would only return an invented value.
     pub fn get_charging_threshold() -> Result<(bool, u8), String> {
-        let base = eram_base();
-        let _ = ecram::send_handshake();
-
-        let care = match ecram::read_ecram(base + CHARGE_CARE_OFFSET, 1) {
-            Ok(data) if !data.is_empty() => data[0] != 0,
-            _ => false,
-        };
-        let threshold = match ecram::read_ecram(base + CHARGE_THRESHOLD_OFFSET, 1) {
-            Ok(data) if !data.is_empty() => data[0].clamp(40, 100),
-            _ => {
-                // Fallback to registry (same key the app persists).
-                read_charge_threshold_registry().unwrap_or(100)
-            }
-        };
-        Ok((care, threshold))
+        Err(CHARGE_UNAVAILABLE.to_string())
     }
 
-    fn read_charge_threshold_registry() -> Option<u8> {
-        use windows::Win32::System::Registry::{
-            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ,
-        };
+    // ── charge_limit_read (WMAA 0x1000/0x02, READ-ONLY) ────────────────────────
+    //
+    // The ERAM path is dead (driver-blocked above), but this SYSTEM service CAN
+    // read the limit the honest way: MICommonInterface instance queries are
+    // admin-only, and this service is SYSTEM. `micontrol_lib::hw::charging`
+    // owns the WMAA contract (FUN2=0x1000 / FUN3=0x02, SGER check, level-code
+    // validation, percent mapping), so the service and the app cannot drift.
+    //
+    // This is what makes the battery readback fast and independent of the
+    // bridge pipe: the app reads the limit here first and never needs a
+    // scheduled task for it.
+    //
+    // READ-ONLY by protocol policy: setting the limit stays with the app's
+    // elevated allowlist path, and `iot_set_charging_threshold` above keeps
+    // refusing (writes are impersonated + consent-gated, reads are not).
 
-        let subkey: Vec<u16> = "SOFTWARE\\MI\\IoTDriver\0".encode_utf16().collect();
-        let mut hkey = windows::Win32::System::Registry::HKEY::default();
-        let result = unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                windows::core::PCWSTR(subkey.as_ptr()),
-                0,
-                KEY_READ,
-                &mut hkey,
-            )
-        };
-        if result.is_err() {
-            return None;
-        }
+    /// Answer one `charge_limit_read` request as a JSON response string.
+    pub fn charge_limit_read_response() -> String {
+        format_charge_limit_read(
+            micontrol_lib::hw::charging::read_hardware_threshold().map_err(|e| e.to_string()),
+        )
+    }
 
-        let value_name: Vec<u16> = "ChargingThreshold\0".encode_utf16().collect();
-        let mut val: u32 = 0;
-        let mut len: u32 = std::mem::size_of::<u32>() as u32;
-        let value_type = windows::Win32::System::Registry::REG_NONE;
-        let result = unsafe {
-            RegQueryValueExW(
-                hkey,
-                windows::core::PCWSTR(value_name.as_ptr()),
-                None,
-                Some(&mut value_type.clone() as *mut _),
-                Some(&mut val as *mut u32 as *mut u8),
-                Some(&mut len),
-            )
-        };
-        unsafe {
-            let _ = RegCloseKey(hkey);
+    /// Format a pre-computed read result into the wire response (pure, so the
+    /// shape is unit-tested without touching WMI).
+    fn format_charge_limit_read<E: std::fmt::Display>(read: Result<u8, E>) -> String {
+        match read {
+            Ok(percent) => {
+                let code = micontrol_lib::hw::charging::percent_to_code(percent).unwrap_or(0);
+                format!(
+                    r#"{{"ok":true,"cmd":"charge_limit_read","percent":{percent},"code":{code}}}"#
+                )
+            }
+            Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
         }
-        if result.is_err() || val == 0 {
-            return None;
-        }
-        Some(val.clamp(40, 100) as u8)
     }
 
     #[cfg(test)]
@@ -1113,6 +1100,30 @@ mod ec_command {
         }
 
         #[test]
+        fn charge_limit_read_answer_has_the_wire_shape() {
+            let ok = super::format_charge_limit_read::<String>(Ok(80));
+            assert_eq!(
+                ok,
+                "{\"ok\":true,\"cmd\":\"charge_limit_read\",\"percent\":80,\"code\":1}"
+            );
+            for (percent, code) in [
+                (40u8, 8u8),
+                (50, 7),
+                (60, 6),
+                (70, 5),
+                (80, 1),
+                (90, 4),
+                (100, 0),
+            ] {
+                let body = super::format_charge_limit_read::<String>(Ok(percent));
+                assert!(body.contains(&format!("\"percent\":{percent}")), "{body}");
+                assert!(body.contains(&format!("\"code\":{code}")), "{body}");
+            }
+            let refused = super::format_charge_limit_read::<String>(Err("WMI down".into()));
+            assert_eq!(refused, "{\"ok\":false,\"error\":\"WMI down\"}");
+        }
+
+        #[test]
         fn charging_threshold_validates_values() {
             // These must NOT touch hardware — set_charging_threshold returns
             // an error for invalid values before any ECRAM write.
@@ -1156,39 +1167,112 @@ mod pipe_server {
     use std::ffi::OsStr;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use std::time::{Duration, Instant};
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{
+        CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{
+        GetTokenInformation, RevertToSelf, TokenUser, PSID, TOKEN_QUERY, TOKEN_USER,
+    };
     use windows::Win32::Storage::FileSystem::{
         FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, ImpersonateNamedPipeClient,
+        PeekNamedPipe, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_UNLIMITED_INSTANCES,
+        PIPE_WAIT,
     };
-    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::System::Threading::{
+        CreateEventW, GetCurrentThread, OpenThreadToken, WaitForSingleObject,
+    };
     use windows::Win32::System::IO::CancelIoEx;
 
     const PIPE_NAME: &str = r"\\.\pipe\ecram_service";
     const PIPE_BUF_SIZE: u32 = 4096;
     const BUFSIZE: u32 = 4096;
 
-    /// Build a SECURITY_ATTRIBUTES with a DACL that grants Everyone read/write
-    /// access to the named pipe.
+    /// Maximum time a connected client may take to deliver one complete
+    /// request. The pipe server is single-threaded: a client that opens the
+    /// pipe and never sends a `}` (e.g. a 16-byte MCPI header) used to block
+    /// the only pipe instance forever. The app's recovery then saw the pipe
+    /// as busy/unavailable and force-killed the service (SCM event 7031).
+    const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+    /// Upper bound on concurrent client handler threads. A local flood must
+    /// not be able to spawn unbounded threads in the SYSTEM service.
     ///
-    /// When the service runs as `NT AUTHORITY\SYSTEM`, pipes created without
-    /// explicit security inherit a DACL that only SYSTEM can access — the
-    /// unprivileged MiControl app would then fail to open
-    /// `\\.\pipe\ecram_service` (ERROR_ACCESS_DENIED). Granting Everyone
-    /// access mirrors what the original Xiaomi IoTService does and is safe
-    /// because the pipe payloads are opaque EC commands with their own
-    /// authentication at the app layer.
+    /// 16 was too tight for a real event: at the 2026-11-12 09:40 resume the
+    /// app, the bridge and the thermal poller all reconnected at once and the
+    /// service dropped 14 connections in 500 ms ("Too many concurrent pipe
+    /// clients"), which the app's watchdog read as a dead service and restarted
+    /// (9 s without IoT commands). Clients are short-lived — a slot is held
+    /// only for one request — so a larger ceiling costs nothing at rest.
+    const MAX_CONCURRENT_CLIENTS: usize = 64;
+    static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+
+    /// RAII slot in the concurrent-client budget.
+    struct ClientSlot;
+
+    impl ClientSlot {
+        fn acquire() -> Option<Self> {
+            let mut current = ACTIVE_CLIENTS.load(Ordering::SeqCst);
+            loop {
+                if current >= MAX_CONCURRENT_CLIENTS {
+                    return None;
+                }
+                match ACTIVE_CLIENTS.compare_exchange(
+                    current,
+                    current + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => return Some(ClientSlot),
+                    Err(actual) => current = actual,
+                }
+            }
+        }
+    }
+
+    impl Drop for ClientSlot {
+        fn drop(&mut self) {
+            ACTIVE_CLIENTS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// DACL applied to every pipe instance.
     ///
-    /// Implementation: build the DACL from the canonical SDDL string
-    /// `D:(A;;GA;;;WD)` (Everyone/World → Generic All) via
-    /// `ConvertStringSecurityDescriptorToSecurityDescriptorW`. This is the
-    /// deterministic way to grant Everyone access and works identically
+    /// The service runs as `NT AUTHORITY\SYSTEM`; pipes created without an
+    /// explicit security descriptor inherit a SYSTEM-only DACL, which the
+    /// unprivileged MiControl app cannot open (`ERROR_ACCESS_DENIED`). The
+    /// client that must keep working is the interactively logged-on user, so
+    /// the DACL grants:
+    ///
+    ///   * `SY` — `NT AUTHORITY\SYSTEM`, full control (the service account;
+    ///     also covers the SYSTEM bridge/watchdog clients),
+    ///   * `IU` — `INTERACTIVE`, generic read + generic write (the app).
+    ///
+    /// SEC-01: this was `D:(A;;GA;;;WD)` — Everyone, generic all — so *any*
+    /// local process could talk to the SYSTEM service. The write gate below
+    /// is the second half of the fix; this constant is the first.
+    const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GRGW;;;IU)";
+
+    /// SID string of `NT AUTHORITY\SYSTEM`.
+    const SYSTEM_SID: &str = "S-1-5-18";
+
+    /// Response for a mutating request whose client is neither SYSTEM nor the
+    /// user signed in on the console.
+    const WRITE_DENIED_RESPONSE: &str =
+        r#"{"ok":false,"error":"permission denied: pipe write requires the signed-in user"}"#;
+
+    /// Build a SECURITY_ATTRIBUTES holding the DACL from [`PIPE_SDDL`].
+    ///
+    /// Implementation: `ConvertStringSecurityDescriptorToSecurityDescriptorW`
+    /// parses the SDDL into a real SECURITY_DESCRIPTOR and works identically
     /// whether the process runs as the interactive user or as SYSTEM.
     ///
     /// Previous iterations used `BuildExplicitAccessWithNameW` +
@@ -1213,10 +1297,7 @@ mod pipe_server {
         };
 
         unsafe {
-            let sddl: Vec<u16> = "D:(A;;GA;;;WD)"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain(std::iter::once(0)).collect();
             let mut psd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
 
             let result = ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -1244,6 +1325,183 @@ mod pipe_server {
         }
     }
 
+    /// Ops that change hardware or device state.
+    ///
+    /// Everything else this pipe accepts is a read: `read`, `read_region`,
+    /// `ping` and the `iot_get …` queries. Only these require the
+    /// write-authorization gate (SEC-01).
+    fn op_is_mutating(op: &str) -> bool {
+        matches!(
+            op,
+            "write"
+                | "iot_reset_device"
+                | "iot_empty_wifi"
+                | "iot_connect_wifi"
+                | "iot_send_laptop_status"
+                | "iot_write_wifi_item"
+                | "iot_delete_wifi_item"
+                | "iot_set_device_status"
+                | "iot_set_charging_threshold"
+        )
+    }
+
+    /// True when this request must pass the write-authorization gate.
+    /// Unparseable requests are not mutating — `process_request` answers them
+    /// with a JSON error and touches no hardware.
+    fn request_needs_write_auth(request: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(request.trim())
+            .ok()
+            .and_then(|v| v.get("op").and_then(|o| o.as_str()).map(op_is_mutating))
+            .unwrap_or(false)
+    }
+
+    /// SEC-01 policy: a mutating pipe operation is allowed for SYSTEM and for
+    /// the user signed in on the console, and for nobody else.
+    ///
+    /// Kept pure so the decision is unit-testable without a live pipe and a
+    /// second logon: [`current_thread_sid`] and [`console_user_sid`] resolve
+    /// the SIDs, this function owns the rule.
+    fn write_allowed_for(user_sid: &str, console_sid: &str, is_system: bool) -> bool {
+        if is_system || user_sid.eq_ignore_ascii_case(SYSTEM_SID) {
+            return true;
+        }
+        !console_sid.is_empty() && user_sid.eq_ignore_ascii_case(console_sid)
+    }
+
+    /// Impersonation of the connected pipe client, reverted on drop.
+    ///
+    /// Every early return in [`client_may_write`] and every panic must leave
+    /// the handler thread running as the service account again: a leaked
+    /// impersonation token would run the rest of the request — and the next
+    /// request served by this thread — as the client.
+    struct ImpersonationGuard;
+
+    impl Drop for ImpersonationGuard {
+        fn drop(&mut self) {
+            let _ = unsafe { RevertToSelf() };
+        }
+    }
+
+    /// Swap the handler thread's token for the connected client's.
+    fn impersonate_pipe_client(handle: HANDLE) -> Result<ImpersonationGuard, String> {
+        unsafe { ImpersonateNamedPipeClient(handle) }
+            .map_err(|e| format!("ImpersonateNamedPipeClient: {e}"))?;
+        Ok(ImpersonationGuard)
+    }
+
+    /// `S-1-5-…` string of the user that owns `token` (`TokenUser`).
+    fn token_user_sid(token: HANDLE) -> Result<String, String> {
+        unsafe {
+            let mut needed = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+            if needed == 0 {
+                return Err(format!(
+                    "GetTokenInformation(TokenUser) size probe failed: {}",
+                    io::Error::last_os_error()
+                ));
+            }
+            // u64 buffer: TOKEN_USER and the SID it points at are pointer-aligned.
+            let mut buf = vec![0u64; (needed as usize).div_ceil(std::mem::size_of::<u64>())];
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            )
+            .map_err(|e| format!("GetTokenInformation(TokenUser): {e}"))?;
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            sid_to_string(user.User.Sid)
+        }
+    }
+
+    /// Render a SID as its `S-1-5-…` string.
+    fn sid_to_string(sid: PSID) -> Result<String, String> {
+        unsafe {
+            let mut raw = PWSTR::null();
+            ConvertSidToStringSidW(sid, &mut raw)
+                .map_err(|e| format!("ConvertSidToStringSidW: {e}"))?;
+            let text = raw.to_string().map_err(|e| format!("SID text: {e}"));
+            LocalFree(HLOCAL(raw.0.cast()));
+            text
+        }
+    }
+
+    /// SID of the user signed in on the physical console, if any.
+    ///
+    /// `WTSQueryUserToken` needs SYSTEM with `SeTcbPrivilege`, which the
+    /// service has. When it cannot answer (nobody logged on, or the binary
+    /// runs in console mode as a normal user) the caller fails closed.
+    fn console_user_sid() -> Option<String> {
+        unsafe {
+            let session_id = WTSGetActiveConsoleSessionId();
+            if session_id == u32::MAX {
+                return None;
+            }
+            let mut token = HANDLE::default();
+            if WTSQueryUserToken(session_id, &mut token).is_err() {
+                return None;
+            }
+            let sid = token_user_sid(token);
+            CloseHandle(token).ok();
+            sid.ok()
+        }
+    }
+
+    /// SID of the current user of this thread — the impersonated client while
+    /// an [`ImpersonationGuard`] is alive.
+    fn current_thread_sid() -> Result<String, String> {
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, false, &mut token)
+                .map_err(|e| format!("OpenThreadToken: {e}"))?;
+            let sid = token_user_sid(token);
+            CloseHandle(token).ok();
+            sid
+        }
+    }
+
+    /// SEC-01: may the connected client mutate hardware state?
+    ///
+    /// Runs on the client handler thread while the client is still connected.
+    /// Denies on every failure path (cannot impersonate, cannot read the
+    /// token, no resolvable console user): an unauthenticated client must
+    /// never fall through to `write_ecram` or an `iot_*` mutator.
+    fn client_may_write(handle: HANDLE) -> bool {
+        // Resolve the console user BEFORE impersonating: WTSQueryUserToken
+        // needs SeTcbPrivilege, which the impersonated client does not have —
+        // resolving it inside the impersonation would fail and wrongly deny
+        // the signed-in user.
+        let console_sid = console_user_sid().unwrap_or_default();
+        let guard = match impersonate_pipe_client(handle) {
+            Ok(guard) => guard,
+            Err(e) => {
+                super::service_log(&format!("write auth: {e}"));
+                return false;
+            }
+        };
+        let user_sid = match current_thread_sid() {
+            Ok(sid) => sid,
+            Err(e) => {
+                super::service_log(&format!("write auth: cannot read client token: {e}"));
+                return false;
+            }
+        };
+        let is_system = user_sid.eq_ignore_ascii_case(SYSTEM_SID);
+        let allowed = write_allowed_for(&user_sid, &console_sid, is_system);
+        // RevertToSelf before the request runs: the EC IOCTLs must execute as
+        // the service account, never as the (possibly restricted) client.
+        drop(guard);
+        if allowed {
+            super::service_log(&format!("write auth: allowed for {user_sid}"));
+        } else {
+            super::service_log(&format!(
+                "write auth: denied client {user_sid} (console user '{console_sid}')"
+            ));
+        }
+        allowed
+    }
+
     /// Run the named pipe server. Blocks until `shutdown` is set.
     ///
     /// S64: the pipe is created with `PIPE_UNLIMITED_INSTANCES` and is
@@ -1263,7 +1521,7 @@ mod pipe_server {
         // leak-check: audited — every exit path closes the handle explicitly (S67).
         let pipe_name_w: Vec<u16> = OsStr::new(PIPE_NAME).encode_wide().chain(Some(0)).collect();
 
-        eprintln!("[ecram_service] pipe server starting on {PIPE_NAME}");
+        super::service_log(&format!("pipe server starting on {PIPE_NAME}"));
 
         // Create a permissive DACL so the unprivileged app can connect even
         // when we run as SYSTEM.
@@ -1279,7 +1537,13 @@ mod pipe_server {
                 CreateNamedPipeW(
                     PCWSTR(pipe_name_w.as_ptr()),
                     PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    // Message-type pipe: the JSON protocol is request/response,
+                    // so preserving message boundaries is correct. Message-mode
+                    // pipes still accept byte-mode clients (the app's
+                    // read_ecram_via_pipe), while clients that ask for
+                    // PIPE_READMODE_MESSAGE (send_pipe_request) are no longer
+                    // rejected with 0x80070057.
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                     PIPE_UNLIMITED_INSTANCES,
                     PIPE_BUF_SIZE,
                     PIPE_BUF_SIZE,
@@ -1291,16 +1555,29 @@ mod pipe_server {
             };
 
             if handle == INVALID_HANDLE_VALUE {
-                eprintln!(
-                    "[ecram_service] CreateNamedPipeW failed: {}",
+                super::service_log(&format!(
+                    "CreateNamedPipeW failed: {} — retrying in 1 s",
                     io::Error::last_os_error()
-                );
+                ));
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }
 
-            let event = unsafe {
-                CreateEventW(None, true, false, PCWSTR::null()).expect("CreateEventW failed")
+            // A failed CreateEventW used to panic the pipe thread, which left
+            // the service RUNNING with no pipe at all (observed live: IoTSvc
+            // running, \\.\pipe\ecram_service ERROR_PATH_NOT_FOUND). Retry.
+            let event = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+                Ok(event) => event,
+                Err(e) => {
+                    super::service_log(&format!(
+                        "CreateEventW failed: {e} — closing instance and retrying in 1 s"
+                    ));
+                    unsafe {
+                        CloseHandle(handle).ok();
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
             };
 
             let mut overlapped = unsafe {
@@ -1345,28 +1622,191 @@ mod pipe_server {
                 break;
             }
 
-            handle_client(handle);
+            // Serve this client on its own thread and go straight back to
+            // creating the next instance. The old loop called handle_client
+            // inline, so the pipe name had NO instance while a request was
+            // being served — concurrent probes got ERROR_PIPE_BUSY (or a
+            // transient path-not-found), which is what made the app's
+            // recovery force-kill the service. Thread-per-client also means a
+            // slow EC command no longer blocks every other query.
+            let Some(slot) = ClientSlot::acquire() else {
+                super::service_log("Too many concurrent pipe clients — dropping this connection");
+                unsafe {
+                    DisconnectNamedPipe(handle).ok();
+                    CloseHandle(handle).ok();
+                    CloseHandle(event).ok();
+                }
+                continue;
+            };
 
-            // Recycle the instance for the next client WITHOUT removing the pipe
-            // name, so there is never a window where the pipe is unavailable.
+            // The connect event is not needed past this point; the thread only
+            // owns the pipe instance.
             unsafe {
-                DisconnectNamedPipe(handle).ok();
-                CloseHandle(handle).ok();
                 CloseHandle(event).ok();
             }
+
+            // HANDLE contains a raw pointer in windows-rs, so pass its numeric
+            // value across the thread boundary and rebuild it inside.
+            let raw_handle = handle.0 as isize;
+            std::thread::spawn(move || {
+                let _slot = slot;
+                let handle = HANDLE(raw_handle as *mut core::ffi::c_void);
+                handle_client(handle);
+                // Release the WMI/COM connections this request opened BEFORE the
+                // thread exits. At thread exit COM tears the apartment down (and
+                // unloads the WMI providers) first, and Rust runs the
+                // `thread_local!` destructors after that; releasing a cached
+                // `IWbemServices` there calls a vtable slot in unmapped memory
+                // and takes this whole service down with it. Live evidence:
+                // 43 `0xc0000005` crashes in 11 h of `IoTSvc` (SCM 7034,
+                // `WIN32_EXIT_CODE 1067`), all of them inside that destructor,
+                // reached from `{"op":"charge_limit_read"}` which reads the EC
+                // charge limit over WMI.
+                micontrol_lib::hw::wmi_cache::release_current_thread();
+                unsafe {
+                    DisconnectNamedPipe(handle).ok();
+                    CloseHandle(handle).ok();
+                }
+            });
         }
 
-        eprintln!("[ecram_service] pipe server shutting down");
+        super::service_log("pipe server shutting down");
     }
 
     fn handle_client(handle: HANDLE) {
+        // A panic while serving one client must never take the bridge down:
+        // an unexpected service exit makes the SCM log 7031, and every client
+        // loses the pipe until the restart. Swallow the unwind, log it and
+        // keep the accept loop alive.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_client_inner(handle)));
+        if let Err(payload) = result {
+            let msg = panic_payload_message(&payload);
+            super::service_log(&format!("PANIC while handling pipe client: {msg}"));
+            write_response(
+                handle,
+                r#"{"ok":false,"error":"internal error handling request"}"#,
+            );
+        }
+    }
+
+    /// What the read loop concluded about the client's request.
+    enum ClientRead {
+        /// The client connected and closed without sending anything.
+        Empty,
+        /// No complete request within `CLIENT_REQUEST_TIMEOUT`.
+        Timeout,
+        /// The request is not JSON (binary MCPI header, garbage, ...).
+        Binary { prefix: Vec<u8>, len: usize },
+        /// More than `BUFSIZE` bytes arrived without a complete request.
+        TooLarge,
+        /// A complete (or timed-out partial) JSON request.
+        Request(String),
+    }
+
+    fn handle_client_inner(handle: HANDLE) {
+        match read_client_request(handle) {
+            ClientRead::Empty => {}
+            ClientRead::Timeout => {
+                super::service_log(
+                    "Pipe client sent no complete request within the timeout; dropping it \
+                     (previous behaviour blocked the only pipe instance forever)",
+                );
+            }
+            ClientRead::TooLarge => {
+                write_response(
+                    handle,
+                    r#"{"ok":false,"error":"request exceeds 4096 bytes"}"#,
+                );
+            }
+            ClientRead::Binary { prefix, len } => {
+                if is_mcpi_prefix(&prefix) {
+                    super::service_log(&format!(
+                        "Rejected binary MCPI request ({len} bytes, magic {:02X?}) — this pipe speaks JSON",
+                        &prefix[..prefix.len().min(4)]
+                    ));
+                    write_response(
+                        handle,
+                        r#"{"ok":false,"error":"binary MCPI protocol is not supported on this pipe; send a JSON request"}"#,
+                    );
+                } else {
+                    super::service_log(&format!(
+                        "Rejected non-JSON request ({len} bytes) without waiting for a terminator"
+                    ));
+                    write_response(
+                        handle,
+                        r#"{"ok":false,"error":"invalid request: expected a JSON object"}"#,
+                    );
+                }
+            }
+            ClientRead::Request(request) => {
+                // SEC-01: mutating ops (EC writes, IoT resets/wifi/charge) are
+                // authenticated before the request reaches `process_request`.
+                // Reads stay open to Interactive Users, which is what the app
+                // needs; a write from anyone but SYSTEM or the signed-in user
+                // is answered (not dropped) so the client can report why.
+                let response = if request_needs_write_auth(&request) && !client_may_write(handle) {
+                    WRITE_DENIED_RESPONSE.to_string()
+                } else {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        process_request(&request)
+                    })) {
+                        Ok(response) => response,
+                        Err(payload) => {
+                            let msg = panic_payload_message(&payload);
+                            super::service_log(&format!(
+                                "PANIC in process_request (request len {}): {msg}",
+                                request.len()
+                            ));
+                            r#"{"ok":false,"error":"internal error processing request"}"#
+                                .to_string()
+                        }
+                    }
+                };
+                write_response(handle, &response);
+            }
+        }
+    }
+
+    /// Read one request from the client with a bounded wait.
+    ///
+    /// The old loop called blocking `ReadFile` until the buffer ended with
+    /// `}`. A binary MCPI client writes a 16-byte header and waits for a
+    /// response: the `}` never arrives, so the single-threaded server stayed
+    /// stuck in `ReadFile` forever. `PeekNamedPipe` + a deadline fixes that
+    /// without touching the JSON framing.
+    fn read_client_request(handle: HANDLE) -> ClientRead {
         let mut read_buf = [0u8; BUFSIZE as usize];
         let mut total_read = 0usize;
+        let deadline = Instant::now() + CLIENT_REQUEST_TIMEOUT;
 
         loop {
             if total_read >= read_buf.len() {
-                break;
+                return ClientRead::TooLarge;
             }
+
+            // Wait for bytes without blocking past the deadline. Peek works
+            // for byte- and message-mode pipes and never consumes data.
+            loop {
+                let mut available = 0u32;
+                let peek =
+                    unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) };
+                if peek.is_err() {
+                    // Pipe broken/disconnected — nothing more will arrive.
+                    return finish_read(&read_buf[..total_read]);
+                }
+                if available > 0 {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    if total_read == 0 {
+                        return ClientRead::Timeout;
+                    }
+                    return finish_read(&read_buf[..total_read]);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
             let mut bytes_read = 0u32;
             let result = unsafe {
                 ReadFile(
@@ -1377,26 +1817,83 @@ mod pipe_server {
                 )
             };
             if result.is_err() || bytes_read == 0 {
-                break;
+                return finish_read(&read_buf[..total_read]);
             }
             total_read += bytes_read as usize;
 
-            let s = String::from_utf8_lossy(&read_buf[..total_read]);
-            if s.trim_end().ends_with('}') {
-                break;
+            // Reject non-JSON as soon as the first chunk shows it. This is
+            // what keeps a binary MCPI caller from wedging the server.
+            if !looks_like_json_prefix(&read_buf[..total_read]) {
+                return ClientRead::Binary {
+                    prefix: read_buf[..total_read.min(8)].to_vec(),
+                    len: total_read,
+                };
+            }
+
+            if let Some(request) = complete_json_request(&read_buf[..total_read]) {
+                return ClientRead::Request(request);
             }
         }
+    }
 
-        if total_read == 0 {
-            return;
+    /// Classify whatever was accumulated when the loop stopped.
+    fn finish_read(bytes: &[u8]) -> ClientRead {
+        if bytes.is_empty() {
+            return ClientRead::Empty;
         }
+        if !looks_like_json_prefix(bytes) {
+            return ClientRead::Binary {
+                prefix: bytes[..bytes.len().min(8)].to_vec(),
+                len: bytes.len(),
+            };
+        }
+        ClientRead::Request(String::from_utf8_lossy(bytes).trim().to_string())
+    }
 
-        let request = String::from_utf8_lossy(&read_buf[..total_read]);
-        let response = process_request(&request);
+    /// True while the buffered bytes can still be the start of a JSON object.
+    /// Leading ASCII whitespace is tolerated.
+    fn looks_like_json_prefix(bytes: &[u8]) -> bool {
+        match bytes.iter().find(|b| !b.is_ascii_whitespace()) {
+            None => true,
+            Some(b) => *b == b'{',
+        }
+    }
 
+    /// Return the request text once it parses as a complete JSON value.
+    fn complete_json_request(bytes: &[u8]) -> Option<String> {
+        let text = String::from_utf8_lossy(bytes);
+        let trimmed = text.trim();
+        if !trimmed.ends_with('}') {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .map(|_| trimmed.to_string())
+    }
+
+    /// True when the first bytes are the MCPI wire magic ("MCPI").
+    fn is_mcpi_prefix(prefix: &[u8]) -> bool {
+        prefix.starts_with(b"MCPI")
+    }
+
+    fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        }
+    }
+
+    fn write_response(handle: HANDLE, response: &str) {
         let resp_bytes = response.as_bytes();
         let mut written = 0u32;
         unsafe {
+            // FlushFileBuffers must stay: DisconnectNamedPipe DISCARDS data
+            // the client has not consumed yet, and the caller disconnects
+            // immediately after this function. Clients poll for the reply, so
+            // the flush returns as soon as they read it (or close the pipe).
             WriteFile(handle, Some(resp_bytes), Some(&mut written), None).ok();
             FlushFileBuffers(handle).ok();
         }
@@ -1608,6 +2105,11 @@ mod pipe_server {
                     Err(e) => format!(r#"{{"ok":false,"error":"{e}"}}"#),
                 }
             }
+            // READ-ONLY charge-limit readback, served through the WMI WMAA
+            // method this SYSTEM service can call (see ec_command comment).
+            // No threshold, no shell data: the response carries only the
+            // firmware level in percent + code.
+            "charge_limit_read" => ec_command::charge_limit_read_response(),
             "iot_get_charging_threshold" => match ec_command::get_charging_threshold() {
                 Ok((care, threshold)) => format!(
                     r#"{{"ok":true,"cmd":"get_charging_threshold","battery_care_enabled":{care},"threshold":{threshold}}}"#
@@ -1616,7 +2118,7 @@ mod pipe_server {
             },
             "ping" => r#"{"ok":true,"pong":true}"#.to_string(),
             _ => format!(
-                r#"{{"ok":false,"error":"unknown op '{op}' — valid: read, write, read_region, ping, iot_get, iot_reset_device, iot_empty_wifi, iot_connect_wifi, iot_send_laptop_status, iot_write_wifi_item, iot_delete_wifi_item, iot_set_device_status, iot_set_charging_threshold, iot_get_charging_threshold"}}"#
+                r#"{{"ok":false,"error":"unknown op '{op}' — valid: read, write, read_region, ping, charge_limit_read, iot_get, iot_reset_device, iot_empty_wifi, iot_connect_wifi, iot_send_laptop_status, iot_write_wifi_item, iot_delete_wifi_item, iot_set_device_status, iot_set_charging_threshold, iot_get_charging_threshold"}}"#
             ),
         }
     }
@@ -1632,6 +2134,304 @@ mod pipe_server {
                 u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| format!("invalid hex byte: {e}"))
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+
+        #[test]
+        fn charge_limit_read_op_is_dispatched() {
+            let response = super::process_request(r#"{"op":"charge_limit_read"}"#);
+            assert!(
+                response.contains("\"ok\":true") || response.contains("\"ok\":false"),
+                "{response}"
+            );
+            assert!(!response.contains("unknown op"), "{response}");
+        }
+
+        use super::*;
+
+        /// A 16-byte MCPI header (magic "MCPI") must be classified as binary
+        /// on the first chunk, not waited on for a `}` that never comes.
+        #[test]
+        fn mcpi_header_is_rejected_without_waiting_for_json() {
+            let header = [
+                0x4Du8, 0x43, 0x50, 0x49, // "MCPI"
+                0x01, 0x00, // version
+                0x01, 0x00, // src id
+                0x02, 0x00, // dst id
+                0x01, 0x40, // msg type
+                0x00, 0x00, 0x00, 0x00, // payload len
+            ];
+            assert!(is_mcpi_prefix(&header));
+            assert!(!looks_like_json_prefix(&header));
+            assert!(complete_json_request(&header).is_none());
+        }
+
+        #[test]
+        fn json_request_is_accepted() {
+            let req = br#"{"op":"ping"}"#;
+            assert!(looks_like_json_prefix(req));
+            assert_eq!(
+                complete_json_request(req).as_deref(),
+                Some(r#"{"op":"ping"}"#)
+            );
+            assert_eq!(
+                process_request(r#"{"op":"ping"}"#),
+                r#"{"ok":true,"pong":true}"#
+            );
+        }
+
+        #[test]
+        fn partial_json_is_not_treated_as_complete() {
+            assert!(looks_like_json_prefix(br#"{"op":"pi"#));
+            assert!(complete_json_request(br#"{"op":"pi"#).is_none());
+        }
+
+        #[test]
+        fn leading_whitespace_is_tolerated() {
+            assert!(looks_like_json_prefix(b"\r\n\t "));
+            assert!(looks_like_json_prefix(b" \r\n{\"op\":\"ping\"}"));
+        }
+
+        #[test]
+        fn invalid_json_returns_error_not_panic() {
+            let response = process_request("not json");
+            assert!(response.contains(r#""ok":false"#), "{response}");
+            assert!(response.contains("invalid JSON"), "{response}");
+        }
+
+        /// SEC-01: the pipe DACL must not contain an ACE for Everyone, and
+        /// must keep SYSTEM (service account) and INTERACTIVE (the app's
+        /// logged-on user) so the app keeps working.
+        #[test]
+        fn pipe_dacl_excludes_everyone_and_keeps_system_and_interactive() {
+            assert!(
+                !PIPE_SDDL.contains(";;;WD"),
+                "SEC-01: pipe DACL still grants Everyone (WD): {PIPE_SDDL}"
+            );
+            assert!(
+                !PIPE_SDDL.contains(";;;AN"),
+                "SEC-01: pipe DACL must not grant Anonymous (AN): {PIPE_SDDL}"
+            );
+            assert!(
+                PIPE_SDDL.contains(";;;SY"),
+                "SEC-01: pipe DACL must grant NT AUTHORITY\\SYSTEM (SY): {PIPE_SDDL}"
+            );
+            assert!(
+                PIPE_SDDL.contains(";;;IU"),
+                "SEC-01: pipe DACL must grant INTERACTIVE (IU): {PIPE_SDDL}"
+            );
+        }
+
+        /// SEC-01: round-trip the SECURITY_DESCRIPTOR the service actually
+        /// hands to `CreateNamedPipeW` and assert on the DACL Win32 renders
+        /// back — the object, not just the constant.
+        #[test]
+        fn built_pipe_security_descriptor_has_no_everyone_ace() {
+            let sa = build_pipe_security_attributes().expect("pipe SDDL must parse");
+            let text = security_descriptor_to_sddl(sa.lpSecurityDescriptor)
+                .expect("pipe security descriptor must convert back to SDDL");
+            assert!(
+                !text.contains(";;;WD"),
+                "SEC-01: the built pipe DACL grants Everyone: {text}"
+            );
+            assert!(
+                text.contains(";;;SY"),
+                "SEC-01: the built pipe DACL must grant SYSTEM: {text}"
+            );
+            assert!(
+                text.contains(";;;IU"),
+                "SEC-01: the built pipe DACL must grant INTERACTIVE: {text}"
+            );
+        }
+
+        /// SEC-01: a pipe instance created with the service's own
+        /// SECURITY_ATTRIBUTES must have a DACL with no Everyone ACE. This
+        /// creates a REAL kernel pipe object under a unique test-only name
+        /// (never the production name) and reads its DACL back.
+        #[test]
+        fn pipe_instance_created_with_service_dacl_excludes_everyone() {
+            // leak-check: test-only — the server instance and the client handle
+            // are both closed explicitly before the test returns (no OwnedHandle:
+            // GetSecurityInfo needs the raw server handle in between).
+            use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+            use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+            use windows::Win32::Security::{ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+            use windows::Win32::System::Pipes::{
+                CreateNamedPipeW, PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+            };
+
+            let name = format!(r"\\.\pipe\ecram_service_sec01_test_{}", std::process::id());
+            let name_w: Vec<u16> = OsStr::new(&name).encode_wide().chain(Some(0)).collect();
+            let sa = build_pipe_security_attributes().expect("pipe SDDL must parse");
+
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(name_w.as_ptr()),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                    1,
+                    PIPE_BUF_SIZE,
+                    PIPE_BUF_SIZE,
+                    0,
+                    Some(&sa as *const _),
+                )
+            };
+            assert_ne!(
+                handle,
+                INVALID_HANDLE_VALUE,
+                "CreateNamedPipeW for the test instance failed: {}",
+                io::Error::last_os_error()
+            );
+
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+            let rc = unsafe {
+                GetSecurityInfo(
+                    handle,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    None,
+                    None,
+                    Some(&mut dacl),
+                    None,
+                    Some(&mut sd),
+                )
+            };
+            let text = if rc == ERROR_SUCCESS && !sd.0.is_null() {
+                security_descriptor_to_sddl(sd.0)
+            } else {
+                None
+            };
+            if !sd.0.is_null() {
+                unsafe {
+                    LocalFree(HLOCAL(sd.0));
+                }
+            }
+
+            let text = text.expect("pipe DACL must be readable");
+            println!("pipe instance created with the service DACL: {text}");
+            assert!(
+                !text.contains(";;;WD"),
+                "SEC-01: created pipe DACL grants Everyone: {text}"
+            );
+            assert!(
+                text.contains(";;;SY"),
+                "SEC-01: created pipe DACL must grant SYSTEM: {text}"
+            );
+            assert!(
+                text.contains(";;;IU"),
+                "SEC-01: created pipe DACL must grant INTERACTIVE: {text}"
+            );
+
+            // Compatibility: the signed-in user must still be able to OPEN the
+            // pipe for read+write, exactly as the app does. A DACL that locks
+            // the app out is as broken as the old Everyone grant.
+            use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+            use windows::Win32::Storage::FileSystem::{
+                CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                OPEN_EXISTING,
+            };
+            let client = unsafe {
+                CreateFileW(
+                    PCWSTR(name_w.as_ptr()),
+                    (GENERIC_READ | GENERIC_WRITE).0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    HANDLE::default(),
+                )
+            }
+            .unwrap_or(INVALID_HANDLE_VALUE);
+            assert_ne!(
+                client,
+                INVALID_HANDLE_VALUE,
+                "the interactive user must be able to open the pipe: {}",
+                io::Error::last_os_error()
+            );
+            unsafe {
+                CloseHandle(client).ok();
+                CloseHandle(handle).ok();
+            }
+        }
+
+        /// Render the DACL of a security descriptor as SDDL.
+        fn security_descriptor_to_sddl(sd: *mut core::ffi::c_void) -> Option<String> {
+            use windows::core::PWSTR;
+            use windows::Win32::Foundation::{LocalFree, HLOCAL};
+            use windows::Win32::Security::Authorization::{
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+            };
+            use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+            unsafe {
+                let mut raw = PWSTR::null();
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    PSECURITY_DESCRIPTOR(sd),
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut raw,
+                    None,
+                )
+                .ok()?;
+                let text = raw.to_string().ok();
+                LocalFree(HLOCAL(raw.0.cast()));
+                text
+            }
+        }
+
+        /// SEC-01: only SYSTEM and the console user may mutate hardware state.
+        #[test]
+        fn write_allowed_only_for_system_and_console_user() {
+            let console = "S-1-5-21-1111-2222-3333-1001";
+
+            assert!(
+                write_allowed_for("S-1-5-18", console, true),
+                "SYSTEM must be allowed"
+            );
+            assert!(
+                write_allowed_for(console, console, false),
+                "the signed-in console user must be allowed"
+            );
+            assert!(
+                !write_allowed_for("S-1-5-21-1111-2222-3333-1002", console, false),
+                "another local user must be refused"
+            );
+            assert!(
+                !write_allowed_for(console, "", false),
+                "no resolvable console user must refuse (fail closed)"
+            );
+            assert!(
+                !write_allowed_for("S-1-1-0", console, false),
+                "Everyone is not a user"
+            );
+        }
+
+        /// SEC-01: mutating ops must be recognised so the gate runs for them
+        /// and only them (reads stay free for INTERACTIVE clients).
+        #[test]
+        fn mutating_ops_require_the_write_gate() {
+            assert!(request_needs_write_auth(
+                r#"{"op":"write","addr":"0xFE0B0300","data":"01"}"#
+            ));
+            assert!(request_needs_write_auth(
+                r#"{"op":"iot_set_charging_threshold","threshold":80}"#
+            ));
+            assert!(request_needs_write_auth(r#"{"op":"iot_reset_device"}"#));
+            assert!(!request_needs_write_auth(
+                r#"{"op":"read_region","region":"SMA2"}"#
+            ));
+            assert!(!request_needs_write_auth(
+                r#"{"op":"read","addr":"0x1","size":1}"#
+            ));
+            assert!(!request_needs_write_auth(r#"{"op":"ping"}"#));
+            assert!(!request_needs_write_auth(
+                r#"{"op":"iot_get","cmd":"model"}"#
+            ));
+            assert!(!request_needs_write_auth("not json"));
+        }
     }
 }
 
@@ -1707,13 +2507,46 @@ mod service {
                 }
 
                 let shutdown = Arc::new(AtomicBool::new(false));
-                let shutdown_clone = shutdown.clone();
+                let shutdown_watch = shutdown.clone();
 
                 let pipe_thread = std::thread::spawn(move || {
-                    pipe_server::run_pipe_server(shutdown_clone);
+                    // The pipe thread is the whole point of this service. If it
+                    // ever returns or panics, the service must not sit there
+                    // "RUNNING" with no pipe (observed live: IoTSvc running,
+                    // pipe open → ERROR_PATH_NOT_FOUND). Restart it.
+                    while !shutdown_watch.load(Ordering::SeqCst) {
+                        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            pipe_server::run_pipe_server(shutdown_watch.clone());
+                        }));
+                        if let Err(payload) = run {
+                            let msg = payload
+                                .downcast_ref::<&str>()
+                                .map(|s| (*s).to_string())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown panic payload".to_string());
+                            super::service_log(&format!("PANIC in pipe server thread: {msg}"));
+                        }
+                        if shutdown_watch.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        super::service_log(
+                            "pipe server exited unexpectedly — restarting it in 1 s",
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
                 });
 
                 set_service_state(h, SERVICE_RUNNING);
+
+                // A crash must be restarted by the SCM in seconds, not waited out
+                // until a healer episode comes round. The live machine had NO
+                // failure actions at all (`sc qfailure IoTSvc` -> `RESET_PERIOD 0`
+                // with no `ACTIONS`), so every unexpected exit left `IoTSvc`
+                // stopped until the bridge's repair cooldown expired. Configuring
+                // it here (rather than only in the repair path) means a HEALTHY
+                // service gets the ladder too, which the repair path can never do
+                // because it only runs when something is already wrong.
+                ensure_self_recovery_actions();
 
                 while !SHUTDOWN.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -1722,6 +2555,12 @@ mod service {
                 shutdown.store(true, Ordering::SeqCst);
                 let _ = pipe_thread.join();
                 set_service_state(h, SERVICE_STOPPED);
+                // Loud, controlled shutdown line: an intentional `sc stop` must be
+                // distinguishable in our own log from an abrupt exit (which is what
+                // the SCM reports as 1067 with no line here at all).
+                super::service_log(
+                    "service stopped: reported SERVICE_STOPPED to the SCM (controlled stop)",
+                );
             }
             Err(e) => {
                 eprintln!("[ecram_service] RegisterServiceCtrlHandlerW failed: {e}");
@@ -1729,8 +2568,47 @@ mod service {
         }
     }
 
+    /// Install and verify the SCM restart ladder for this very service.
+    ///
+    /// Best-effort by design: a service account that cannot reconfigure its own
+    /// entry must not fail the start, but the readback makes the gap visible in
+    /// `ecram_service.log` instead of leaving "no recovery" as an invisible
+    /// property of the machine.
+    fn ensure_self_recovery_actions() {
+        use micontrol_lib::util::win_service::{self, FailureAction};
+
+        /// `sc failure reset= 86400`: forget the failure count after a day, so a
+        /// long outage is not remembered as one endless failure streak.
+        const RESET_PERIOD_SECS: u32 = 86_400;
+
+        let ladder = [
+            FailureAction::restart(5_000),
+            FailureAction::restart(10_000),
+            FailureAction::restart(30_000),
+        ];
+        if let Err(e) = win_service::set_failure_actions(SERVICE_NAME, &ladder, RESET_PERIOD_SECS) {
+            super::service_log(&format!(
+                "recovery actions NOT configured for {SERVICE_NAME} ({e}); \
+                 an unexpected exit will not be restarted by the SCM"
+            ));
+            return;
+        }
+        match win_service::failure_actions(SERVICE_NAME) {
+            Ok(readback) if readback.actions == ladder => super::service_log(
+                "recovery actions verified: restart/5000, restart/10000, restart/30000 (reset 86400s)",
+            ),
+            Ok(readback) => super::service_log(&format!(
+                "recovery actions read back as {readback:?}, not the restart ladder"
+            )),
+            Err(e) => super::service_log(&format!(
+                "recovery actions written but unreadable ({e})"
+            )),
+        }
+    }
+
     extern "system" fn service_control_handler(control: u32) {
         if control == SERVICE_CONTROL_STOP {
+            super::service_log("received SERVICE_CONTROL_STOP from the SCM");
             SHUTDOWN.store(true, Ordering::SeqCst);
         }
     }
@@ -2061,19 +2939,20 @@ fn cli_mode(args: &[String]) -> i32 {
         }
         // Install/repair the IoTSvc Windows service pointing at the given
         // binary path. This exists because the NSIS installer CANNOT produce
-        // the binPath that starts successfully:
-        //   `sc create ... binPath= "C:\...\IoTService.exe" service`
-        // with the quotes + `service` token EMBEDDED IN THE VALUE. NSIS's
+        // the binPath that starts successfully: the SCM must store the
+        // QUOTED path + `service` token EMBEDDED IN THE VALUE. NSIS's
         // ExecToLog passes the command line through CommandLineToArgvW, which
-        // strips outer quotes, so the SCM stores a BARE path and `sc start`
-        // fails with error 2 ("cannot find the file") even when the file
-        // exists (verified empirically across installs — only the quoted
-        // form reaches RUNNING). std::process::Command escapes the embedded
-        // quotes correctly (`\"` → literal quote in the token), exactly like
-        // hw::ecram_service_mgmt::install_service does.
+        // strips outer quotes, so the SCM would store a BARE path and the
+        // start fails with error 2 ("cannot find the file") even when the
+        // file exists (verified empirically across installs — only the quoted
+        // form reaches RUNNING). CreateSpec::binary_path stores the string
+        // VERBATIM, exactly what the old escaped Command arg produced.
         // Deletes any existing entry (async-safe via SCM semantics: delete is
         // synchronous when no handles are open) and recreates + starts.
         "install-service" => {
+            use micontrol_lib::util::win_service::{
+                self, CreateSpec, FailureAction, ServiceErrorControl, ServiceStartType,
+            };
             if args.len() < 2 {
                 eprintln!("Usage: install-service <path-to-IoTService.exe>");
                 return 1;
@@ -2085,108 +2964,64 @@ fn cli_mode(args: &[String]) -> i32 {
             }
             let bin_path = format!("\"{target}\" service");
             // Stop + delete any existing IoTSvc (ignore errors).
-            let _ = std::process::Command::new("sc")
-                .args(["stop", "IoTSvc"])
-                .creation_flags(0x08000000)
-                .output();
+            let _ = win_service::stop_request("IoTSvc");
             std::thread::sleep(std::time::Duration::from_millis(1500));
-            let _ = std::process::Command::new("sc")
-                .args(["delete", "IoTSvc"])
-                .creation_flags(0x08000000)
-                .output();
-            // DeleteService is async; wait until `sc query` reports gone.
+            let _ = win_service::delete("IoTSvc");
+            // DeleteService is async; wait until the SCM reports the entry gone.
             for _ in 0..20 {
-                let out = std::process::Command::new("sc")
-                    .args(["query", "IoTSvc"])
-                    .creation_flags(0x08000000)
-                    .output();
-                let gone = match out {
-                    Ok(o) => !o.status.success(),
-                    Err(_) => true,
-                };
-                if gone {
-                    break;
+                match win_service::query("IoTSvc") {
+                    Ok(info) if info.state == win_service::ServiceState::Absent => break,
+                    Ok(_) => {}
+                    // Query failed: the entry cannot be observed either way —
+                    // let the create retry logic deal with 1072 below.
+                    Err(_) => break,
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             // Create with the QUOTED binPath + `service` token (the proven form).
-            let create = std::process::Command::new("sc")
-                .args([
-                    "create",
-                    "IoTSvc",
-                    "binPath=",
-                    &bin_path,
-                    "start=",
-                    "auto",
-                    "DisplayName=",
-                    "MiControl IoT Bridge Service",
-                ])
-                .creation_flags(0x08000000)
-                .output();
-            match create {
-                Ok(o) if o.status.success() => {
-                    let _ = std::process::Command::new("sc")
-                        .args(["config", "IoTSvc", "obj=", "LocalSystem"])
-                        .creation_flags(0x08000000)
-                        .output();
-                    let _ = std::process::Command::new("sc")
-                        .args([
-                            "failure",
-                            "IoTSvc",
-                            "reset=",
-                            "86400",
-                            "actions=",
-                            "restart/5000/restart/10000/restart/30000",
-                        ])
-                        .creation_flags(0x08000000)
-                        .output();
-                    // Start + poll for RUNNING (StartService returns at START_PENDING).
-                    let start = std::process::Command::new("sc")
-                        .args(["start", "IoTSvc"])
-                        .creation_flags(0x08000000)
-                        .output();
-                    let start_err = match &start {
-                        Ok(o) => {
-                            String::from_utf8_lossy(&o.stdout).to_string()
-                                + &String::from_utf8_lossy(&o.stderr)
-                        }
-                        Err(e) => e.to_string(),
-                    };
-                    if let Ok(o) = &start {
-                        if !o.status.success() && !start_err.contains("1056") {
-                            eprintln!("ERROR: sc start IoTSvc failed: {start_err}");
-                            return 1;
-                        }
+            let spec = CreateSpec {
+                binary_path: bin_path.clone(),
+                display_name: "MiControl IoT Bridge Service".to_string(),
+                start_type: ServiceStartType::Auto,
+                error_control: ServiceErrorControl::Normal,
+                deps: Vec::new(),
+            };
+            match win_service::create("IoTSvc", &spec) {
+                Ok(()) => {
+                    // LocalSystem + own-process + auto start are properties of
+                    // CreateServiceW above; only failure actions remain.
+                    let actions = [
+                        FailureAction::restart(5000),
+                        FailureAction::restart(10000),
+                        FailureAction::restart(30000),
+                    ];
+                    if let Err(e) = win_service::set_failure_actions("IoTSvc", &actions, 86400) {
+                        eprintln!("warning: IoTSvc failure actions not set: {e}");
+                    }
+                    // Start (already-running 1056 tolerated inside start()).
+                    if let Err(e) = win_service::start("IoTSvc") {
+                        eprintln!("ERROR: start IoTSvc failed: {e}");
+                        return 1;
                     }
                     // Poll RUNNING (up to ~15 s).
                     for _ in 0..30 {
-                        let q = std::process::Command::new("sc")
-                            .args(["query", "IoTSvc"])
-                            .creation_flags(0x08000000)
-                            .output();
-                        let text = match &q {
-                            Ok(o) => String::from_utf8_lossy(&o.stdout),
-                            Err(_) => std::borrow::Cow::Borrowed(""),
-                        };
-                        if text.contains("RUNNING") {
-                            println!("OK: IoTSvc is RUNNING (binPath={bin_path})");
-                            return 0;
+                        match win_service::query("IoTSvc") {
+                            Ok(info) if info.state == win_service::ServiceState::Running => {
+                                println!("OK: IoTSvc is RUNNING (binPath={bin_path})");
+                                return 0;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!("warning: IoTSvc query during start poll: {e}");
+                            }
                         }
                         std::thread::sleep(std::time::Duration::from_millis(500));
                     }
                     eprintln!("ERROR: IoTSvc did not reach RUNNING within 15s");
                     1
                 }
-                Ok(o) => {
-                    eprintln!(
-                        "ERROR: sc create IoTSvc failed: {}{}",
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    );
-                    1
-                }
                 Err(e) => {
-                    eprintln!("ERROR: could not run sc.exe: {e}");
+                    eprintln!("ERROR: create IoTSvc failed: {e}");
                     1
                 }
             }
@@ -2199,6 +3034,12 @@ fn cli_mode(args: &[String]) -> i32 {
 }
 
 fn main() {
+    install_panic_hook();
+    service_log(&format!(
+        "ecram_service starting (v{}, pid {})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    ));
     // When started by SCM, the args are the SCM's service-name invocation:
     // the Service Control Manager launches the binPath and passes the service
     // NAME as argv[1] (e.g. `IoTService.exe IoTSvc`), NOT `service`.

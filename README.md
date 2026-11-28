@@ -11,7 +11,16 @@
 
 ## Features
 
-- **Hardware Control** — Manage fan curves, battery charge thresholds, display brightness & HDR, audio volume & devices, keyboard backlight, and touchpad settings.
+- **Hardware Control** — Manage fan curves, battery charge thresholds, display brightness & HDR, audio volume & devices, and touchpad settings; read the keyboard backlight level from EC RAM.
+- **Overview Dashboard** — One screen with the machine's identity (model, CPU, GPU, NPU, RAM, disk, panel), live temperatures with their source, memory/storage health, battery state, and shortcuts into every other tab.
+- **Task Manager** — Process list sortable by CPU, GPU, NPU, RAM, name or PID, with per-process detail and a guarded kill action.
+- **System Optimization (OS Turbo)** — Measured, reversible Windows tweaks grouped by risk tier, with a debloater accordion and a rollback path.
+- **Startup Manager** — Every place Windows can launch something at sign-in in one list: `HKCU`/`HKLM` Run keys (64- and 32-bit views), per-user and common Startup folders, and logon scheduled tasks. Enable/disable uses the same `StartupApproved` blobs Task Manager writes; `HKLM` and common-folder entries go through the elevated bridge.
+- **Color & Display Calibration** — Load/unload ICC profiles per display, browse and apply profiles from the catalog, launch the Windows calibration wizard, and toggle eye-protection (colour temperature).
+- **System Cleanup** — Scan and remove caches/temp data by category, with a per-category report of what was freed and what failed.
+- **Security Overview** — Windows Defender status and one-click access to Windows Security.
+- **Cross-Device** — Phone Link status and quick actions, LocalSend file transfer, scrcpy screen mirroring, Syncthing folder sync, NFC pairing, BLE presence, and on-device transcription.
+- **Face Unlock** — Optional Windows credential provider backed by a LocalSystem service (Rust, ONNX models) that unlocks the lock screen with the built-in RGB webcam. Built behind the `face` Cargo feature.
 - **IoT Service Integration** — Communicate with the embedded controller via EC RAM access, handle hotkeys, and cast the screen wirelessly.
 - **EC RAM Access** — Direct embedded controller RAM read/write via a custom `IoTService.exe` replacement binary that proxies IOCTLs to the Xiaomi `IoTDriver.sys` kernel driver. Uses named pipe IPC (`\\.\pipe\ecram_service`) with JSON protocol. See [RE Analysis Report](docs/RE_ANALYSIS_REPORT.md) for full reverse engineering details.
 - **EC Command Protocol** — Full implementation of the 4-phase EC command state machine with 16 cmd_ids covering cloud binding status, WiFi provisioning, firmware/model queries, device ID, and laptop power status notifications. See [EC Command Protocol RE Report](docs/EC_COMMAND_PROTOCOL_RE.md) for protocol details.
@@ -33,18 +42,19 @@ Grab the latest NSIS installer from the [Releases page](https://github.com/arcan
 
 #### Prerequisites
 
-| Tool        | Version | Notes                       |
-| ----------- | ------- | --------------------------- |
-| Rust        | stable  | rustup default stable       |
-| Node.js     | 20+     | LTS recommended             |
-| Windows SDK | 10.0+   | Included with Visual Studio |
+| Tool        | Version | Notes                           |
+| ----------- | ------- | ------------------------------- |
+| Rust        | stable  | rustup default stable           |
+| Node.js     | 24+     | pinned by `.nvmrc` (24.15.0)    |
+| pnpm        | 11.5.0  | via Corepack (`packageManager`) |
+| Windows SDK | 10.0+   | Included with Visual Studio     |
 
 #### Steps
 
 ```bash
 # Clone the repository
 git clone https://github.com/arcane-D7/micontrol.git
-cd miPC
+cd miControl
 
 # Install frontend dependencies (pnpm)
 pnpm install
@@ -58,11 +68,23 @@ pnpm run tauri build
 
 #### Running Checks
 
+The single source of truth for local and CI checks is `scripts/health-check.mjs`:
+
+```bash
+pnpm run health-check                 # every check
+pnpm run health-check -- --list       # list the steps
+pnpm run health-check -- --step=fmt,clippy,tsc
+```
+
+It runs version consistency, `cargo fmt --check`, `cargo clippy --all-targets --features face -D warnings`, `cargo test --features face`, `tsc --noEmit`, ESLint, Prettier, Vitest with coverage, the Vite build, the i18n completeness check, the kernel-handle leak gate and a toolchain consistency check. `ci.yml` and `release.yml` invoke this exact script, so the pipeline cannot drift from what you run locally.
+
+The individual commands, if you need them:
+
 ```bash
 # Rust
 cargo check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features face -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml --features face
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
 # Frontend
@@ -108,7 +130,7 @@ miPC is a Tauri v2 desktop application with a React 19 frontend and a Rust backe
 └─────────────────────────────────────────────────┘
 ```
 
-- **Frontend** — React 19 with TypeScript, Vite, and Tailwind CSS. Tab-based UI with lazy-loaded pages.
+- **Frontend** — React 19 with TypeScript and Vite. Hand-written CSS with design tokens (`src/styles/`) — no CSS framework. Tab-based UI with lazy-loaded pages, grouped sidebar navigation and a custom lightweight i18n layer (`src/hooks/useI18n.ts`).
 - **Backend** — Rust modules organized by hardware domain (`hw/battery.rs`, `hw/display.rs`, `hw/ecram.rs`, `hw/fan.rs`, `hw/wmi_ec.rs`, etc.), exposed via Tauri command handlers.
 - **Elevated Bridge** — A secure subprocess for privileged operations (driver installs, EC RAM access). Every request is HMAC-signed, nonce-protected against replay, and logged to an integrity-verified audit trail.
 - **EC RAM Service** — A custom `IoTService.exe` replacement binary (`src-tauri/src/bin/ecram_service.rs`) that proxies IOCTLs to the Xiaomi `IoTDriver.sys` kernel driver. Communicates with MiControl via named pipe IPC (`\\.\pipe\ecram_service`, JSON protocol). Required because the driver validates the calling process name and directory. See [RE Analysis Report](docs/RE_ANALYSIS_REPORT.md) for details.
@@ -130,8 +152,15 @@ miPC is a Tauri v2 desktop application with a React 19 frontend and a Rust backe
 | [AI Features](docs/ai-features.md)                                 | AI system advisor — data handling, privacy, supported models (OpenAI, Ollama)                                                                             |
 | [Release Process](docs/release.md)                                 | Build, signing, publication, and EC RAM Service deployment                                                                                                |
 | [Crash Reporting](docs/crash-reporting.md)                         | Sentry integration, privacy controls, consent-gated reporting                                                                                             |
-| [Privacy Policy Versioning](docs/privacy-policy-versioning.md)     | Policy version tracking, consent audit log, re-consent flow                                                                                               |
-| [Stability Report v4](docs/STABILITY_REPORT_v4.md)                 | Multi-agent audit — security, architecture, UI/UX, performance, AI responsibility                                                                         |
+| [Privacy Policy Versioning](docs/privacy-policy-versioning.md)     | Policy version tracking, HMAC consent audit log, credential-store consent (re-consent flow: known gap)                                                    |
+| [Stability Report v4](docs/STABILITY_REPORT_v4.md)                 | Multi-agent audit — security, architecture, UI/UX, performance, AI responsibility (historical snapshot)                                                   |
+| [Logging](docs/LOGGING.md)                                         | Where logs live, rotation (8 MiB × 7), lifecycle markers, WARN/ERROR de-duplication, how to read a bug report                                             |
+| [Edge Slide Protocol RE](docs/edge-slide-protocol-re.md)           | Real touchpad edge-slide protocol — HID reports, registry flags, haptic tick, and why our routing was wrong                                               |
+| [Installer Decoupling](docs/installer-decoupling.md)               | Static setup shell + versioned payload architecture, signing, install/update/uninstall flows                                                              |
+| [Branch Protection](docs/branch-protection.md)                     | Required CI checks, review rules and CODEOWNERS for `main`                                                                                                |
+| [Hardware Gap Analysis](docs/HARDWARE_GAP_ANALYSIS.md)             | Xiaomi PC Manager vs MiControl feature-by-feature comparison and implementation status                                                                    |
+| [Face Unlock Plan](docs/FACE_UNLOCK_PLAN.md)                       | Credential-provider architecture, pipe protocol, liveness/recognition pipeline, build feature                                                             |
+| [Docs Audit 2026-11-11](docs/DOCS-AUDIT-2026-11-11.md)             | Documentation-vs-code audit: per-file status, stale claims found, corrections applied                                                                     |
 
 ---
 
@@ -155,6 +184,19 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 This project follows a [Code of Conduct](CODE_OF_CONDUCT.md) — be respectful, inclusive, and constructive.
 
+### Pre-commit Hooks
+
+This project uses [husky](https://typicode.github.io/husky/) and [lint-staged](https://github.com/lint-staged/lint-staged) to run pre-commit checks. `pnpm install` installs the hook automatically.
+
+On every commit the hook (`.husky/pre-commit`) runs, in order:
+
+1. `npx lint-staged` — `eslint --fix` + `prettier --write` on staged `src/**/*.{ts,tsx}`, `prettier --write` on staged `src/**/*.{json,css,md}`
+2. `cargo fmt --manifest-path src-tauri/Cargo.toml` — formats the whole Rust workspace
+3. `npx tsc --noEmit`
+4. `pnpm run version:check`
+
+If any check fails, the commit is aborted. Fix the issues and try again.
+
 ---
 
 ## License
@@ -168,31 +210,7 @@ This project follows a [Code of Conduct](CODE_OF_CONDUCT.md) — be respectful, 
 - [Tauri](https://tauri.app/) — Desktop application framework
 - [React](https://react.dev/) — UI library
 - [Vite](https://vitejs.dev/) — Frontend tooling
-- [Tailwind CSS](https://tailwindcss.com/) — Utility-first CSS
+- [GSAP](https://gsap.com/) and [three.js](https://threejs.org/) — landing-page motion and 3D
+- [lucide](https://lucide.dev/) — Icon set
+- [Sentry](https://sentry.io/) — Consent-gated crash reporting
 - The open-source community for the tools and libraries that make this project possible
-
-**Full Tauri build:**
-
-```bash
-pnpm run tauri build
-```
-
-These checks run automatically in CI on every pull request.
-
-### Pre-commit Hooks
-
-This project uses [husky](https://typicode.github.io/husky/) and [lint-staged](https://github.com/lint-staged/lint-staged) to run pre-commit checks.
-
-When you first clone the repository, run:
-
-```bash
-pnpm install
-```
-
-This will automatically install the husky pre-commit hook. On every commit, lint-staged will:
-
-- Run `eslint --fix` and `prettier --write` on staged TypeScript/JavaScript files
-- Run `prettier --write` on staged JSON, CSS, and Markdown files
-- Run `rustfmt` on staged Rust files
-
-If any check fails, the commit will be aborted. Fix the issues and try again.

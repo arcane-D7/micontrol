@@ -21,7 +21,17 @@
 //!   capturing the exact previous state for faithful restore.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+/// Spawn timeout for the best-effort reg.exe writes: they are one-key writes
+/// that answer in milliseconds; 10 s covers a cold disk without hanging the
+/// toggle (B7/D2: no child without a bounded wait).
+const REG_SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// `run_ps` scripts remove Appx packages and toggle services, which can be
+/// slow; 15 s bounds a hung PowerShell (tree-killed on expiry).
+const PS_SPAWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// One optimization toggle: what it changes, how to apply/restore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,17 +420,17 @@ fn restore_telemetry_level() -> HardwareResult<()> {
 /// there directly (equivalent and persistent) and stop/start via `sc`.
 #[cfg(windows)]
 fn apply_diagtrack(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const SVC_PATH: &str = r"SYSTEM\CurrentControlSet\Services\DiagTrack";
     let prev_start = read_hklm_dword(SVC_PATH, "Start");
     let start_val: u32 = if disable { 4 } else { 2 };
     write_hklm_dword(SVC_PATH, "Start", start_val)?;
-    let verb = if disable { "stop" } else { "start" };
-    let _ = std::process::Command::new("sc.exe")
-        .args([verb, "DiagTrack"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+    // Fire-and-forget exactly like the old `sc stop` / `sc start`: the
+    // request goes to the SCM, which applies it in its own time.
+    if disable {
+        let _ = crate::util::win_service::stop_request("DiagTrack");
+    } else {
+        let _ = crate::util::win_service::start("DiagTrack");
+    }
     if disable {
         mark_applied("diagtrack_service", Some((SVC_PATH, prev_start)))?;
     } else {
@@ -434,33 +444,18 @@ fn apply_diagtrack(disable: bool) -> HardwareResult<()> {
 }
 
 /// Disable/enable the CEIP + diagnostics scheduled tasks.
+///
+/// All spawns go through the single `util::schtasks` port (timeout,
+/// `CREATE_NO_WINDOW`, catalogued errors); "task not present on this build"
+/// is a successful no-op, exactly like the S55 fix established.
 #[cfg(windows)]
 fn apply_ceip_tasks(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut failures = Vec::new();
     for task in CEIP_TASKS {
-        let verb = if disable { "/DISABLE" } else { "/ENABLE" };
-        let out = std::process::Command::new("schtasks")
-            .args(["/Change", verb, "/TN", task])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                // S55 FIX: schtasks/sc write errors to STDOUT, not stderr.
-                let text = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                if text.to_lowercase().contains("does not exist")
-                    || text.to_lowercase().contains("não existe")
-                {
-                    log::info!("[sys_opt] CEIP task {task} not present on this build — skipped");
-                } else {
-                    failures.push(format!("{task}: {}", text.trim()));
-                }
+        match crate::util::schtasks::set_enabled(task, !disable) {
+            Ok(()) => {}
+            Err(e) if crate::util::schtasks::is_not_found(&e) => {
+                log::info!("[sys_opt] CEIP task {task} not present on this build - skipped");
             }
             Err(e) => failures.push(format!("{task}: {e}")),
         }
@@ -556,46 +551,29 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
             "ceip_tasks" => apply_ceip_tasks(enabled),
             "compat_appraiser" => {
                 // The Compatibility Appraiser is inside CEIP tasks; standalone
-                // control via its own task.
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                // control via its own task, through the single `util::schtasks`
+                // port (timeout, CREATE_NO_WINDOW, catalogued errors).
                 // S55 FIX: on several 24H2 builds this task no longer exists —
                 // "task not found" is a successful no-op, not an error.
                 const APPRAISER_TASK: &str =
                     r"\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser";
-                let out = std::process::Command::new("schtasks")
-                    .args([
-                        "/Change",
-                        if enabled { "/DISABLE" } else { "/ENABLE" },
-                        "/TN",
-                        APPRAISER_TASK,
-                    ])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-                    .map_err(|e| HardwareError::Other(format!("schtasks: {e}")))?;
-                let combined = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                if !out.status.success()
-                    && !combined.to_lowercase().contains("does not exist")
-                    && !combined.to_lowercase().contains("não existe")
-                {
-                    return Err(HardwareError::Other(format!(
-                        "Compatibility Appraiser task: {}",
-                        combined.trim()
-                    )));
-                }
-                if out.status.success() {
-                    log::info!(
-                        "[sys_opt] Compatibility Appraiser task {}",
-                        if enabled { "enabled" } else { "disabled" }
-                    );
-                } else {
-                    log::info!(
-                        "[sys_opt] Compatibility Appraiser task not present on this build — no-op"
-                    );
+                match crate::util::schtasks::set_enabled(APPRAISER_TASK, !enabled) {
+                    Ok(()) => {
+                        log::info!(
+                            "[sys_opt] Compatibility Appraiser task {}",
+                            if enabled { "enabled" } else { "disabled" }
+                        );
+                    }
+                    Err(e) if crate::util::schtasks::is_not_found(&e) => {
+                        log::info!(
+                            "[sys_opt] Compatibility Appraiser task not present on this build - no-op"
+                        );
+                    }
+                    Err(e) => {
+                        return Err(HardwareError::Other(format!(
+                            "Compatibility Appraiser task: {e}"
+                        )));
+                    }
                 }
                 if enabled {
                     mark_applied("compat_appraiser", None)
@@ -760,20 +738,17 @@ pub fn set_tweak(id: &str, enabled: bool) -> HardwareResult<()> {
 /// Run a PowerShell command hidden and return stdout (or an error with stderr).
 #[cfg(windows)]
 fn run_ps(script: &str) -> HardwareResult<String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    let out = process_spawn::run_capture(&mut cmd, PS_SPAWN_TIMEOUT)
         .map_err(|e| HardwareError::Other(format!("powershell spawn: {e}")))?;
-    if !out.status.success() {
+    if !out.success() {
         return Err(HardwareError::Other(format!(
             "powershell failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            out.stderr_str().trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout_str())
 }
 
 /// Guard: a package name must not be in the protected list. Each protected
@@ -1036,33 +1011,33 @@ fn apply_widgets(disable: bool) -> HardwareResult<()> {
             }
         }
         // Best-effort taskbar setting (works on builds without UCPD guard).
-        let _ = std::process::Command::new("reg.exe")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                "/v",
-                "TaskbarDa",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
+        let mut cmd = std::process::Command::new("reg.exe");
+        cmd.args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+            "/v",
+            "TaskbarDa",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ]);
+        let _ = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
         // Best-effort policy (service tokens are denied on some builds).
-        let _ = std::process::Command::new("reg.exe")
-            .args([
-                "add",
-                r"HKLM\SOFTWARE\Policies\Microsoft\Dsh",
-                "/v",
-                "AllowNewsAndInterests",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
+        let mut cmd = std::process::Command::new("reg.exe");
+        cmd.args([
+            "add",
+            r"HKLM\SOFTWARE\Policies\Microsoft\Dsh",
+            "/v",
+            "AllowNewsAndInterests",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ]);
+        let _ = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
         mark_applied("red_widgets", None)?;
         log::info!("[sys_opt] Widgets disabled");
     } else {
@@ -1072,19 +1047,19 @@ fn apply_widgets(disable: bool) -> HardwareResult<()> {
         ) {
             log::warn!("[sys_opt] Widgets restore via winget failed (install manually from Store): {e}");
         }
-        let _ = std::process::Command::new("reg.exe")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                "/v",
-                "TaskbarDa",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "1",
-                "/f",
-            ])
-            .output();
+        let mut cmd = std::process::Command::new("reg.exe");
+        cmd.args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+            "/v",
+            "TaskbarDa",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "1",
+            "/f",
+        ]);
+        let _ = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
         mark_restored("red_widgets")?;
         log::info!("[sys_opt] Widgets restored");
     }
@@ -1100,30 +1075,32 @@ fn apply_widgets(disable: bool) -> HardwareResult<()> {
 /// logged, not fatal.
 #[cfg(windows)]
 fn apply_cortana_relics(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let v: u32 = if disable { 0 } else { 1 };
-    let policy = std::process::Command::new("reg.exe")
-        .args([
-            "add",
-            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search",
-            "/v",
-            "AllowCortana",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            &v.to_string(),
-            "/f",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    if let Ok(o) = &policy {
-        if !o.status.success() {
+    let mut cmd = std::process::Command::new("reg.exe");
+    cmd.args([
+        "add",
+        r"HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search",
+        "/v",
+        "AllowCortana",
+        "/t",
+        "REG_DWORD",
+        "/d",
+        &v.to_string(),
+        "/f",
+    ]);
+    let policy = process_spawn::run_capture(&mut cmd, REG_SPAWN_TIMEOUT);
+    match &policy {
+        Ok(o) if !o.success() => {
             log::warn!(
                 "[sys_opt] Cortana policy write denied (best-effort skipped): {}",
-                String::from_utf8_lossy(&o.stdout).trim()
+                o.stdout_str().trim()
             );
         }
+        // Spawn/timeout failures stay best-effort too, but they are logged.
+        Err(e) => {
+            log::warn!("[sys_opt] Cortana policy write failed (best-effort skipped): {e}");
+        }
+        Ok(_) => {}
     }
     let _ = run_ps(
         "Get-AppxPackage -Name 'Microsoft.549981C3F5F10' | Remove-AppxPackage -ErrorAction SilentlyContinue",
@@ -1149,8 +1126,6 @@ fn apply_cortana_relics(disable: bool) -> HardwareResult<()> {
 /// same persistent change; `sc stop` still works (SYSTEM has that right).
 #[cfg(windows)]
 fn apply_unused_services(disable: bool) -> HardwareResult<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut failures = Vec::new();
     for svc in UNUSED_SERVICES {
         let svc_path = format!(r"SYSTEM\CurrentControlSet\Services\{svc}");
@@ -1161,10 +1136,8 @@ fn apply_unused_services(disable: bool) -> HardwareResult<()> {
                 failures.push(format!("{svc}: {e}"));
                 continue;
             }
-            let _ = std::process::Command::new("sc.exe")
-                .args(["stop", svc])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            // Fire-and-forget stop, exactly like the old `sc stop`.
+            let _ = crate::util::win_service::stop_request(svc);
             mark_applied("services_unused", Some((&svc_path, prev)))?;
         }
     }
@@ -1228,22 +1201,5 @@ pub fn get_status() -> HardwareResult<Vec<SysOptStatus>> {
                 tier: risk_tier(t.id).to_string(),
             })
             .collect())
-    }
-}
-
-/// Re-apply every enabled tweak (used at app boot — feature updates and some
-/// Windows servicing actions reset HKLM policies; O&O ShutUp10 offers the
-/// same "re-apply after updates" feature).
-pub fn restore_all() {
-    #[cfg(windows)]
-    {
-        for t in TWEAKS {
-            if is_applied(t.id) {
-                match set_tweak(t.id, true) {
-                    Ok(()) => log::info!("[sys_opt] re-applied tweak {}", t.id),
-                    Err(e) => log::warn!("[sys_opt] re-apply {} failed: {e}", t.id),
-                }
-            }
-        }
     }
 }

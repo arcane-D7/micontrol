@@ -73,6 +73,40 @@ pub struct BootstrapResult {
     pub sig_verified: bool,
 }
 
+/// True when `path` holds a plausible static setup shell binary.
+///
+/// The size window is the only cheap, offline check that catches the failure
+/// mode found on 2026-11-08: `C:\Program Files\MiControl\setup\micontrol_setup.exe`
+/// existed but was **0 bytes** — `Path::is_file()` is true for it, so the
+/// bootstrap fast path and `install_update` both treated it as a working shell
+/// and then failed to spawn it (ERROR_BAD_EXE_FORMAT).
+///
+/// A binary outside `MIN_SHELL_SIZE..=MAX_SHELL_SIZE` is never a valid shell.
+pub fn is_valid_shell(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => m.is_file() && (MIN_SHELL_SIZE..=MAX_SHELL_SIZE).contains(&m.len()),
+        Err(_) => false,
+    }
+}
+
+/// Human description of why `path` cannot be used as a setup shell.
+///
+/// Used in error messages so the user/log says "0 bytes" or "missing" instead
+/// of a generic "failed to launch".
+pub fn shell_problem(path: &Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(m) if !m.is_file() => format!("{} is not a file", path.display()),
+        Ok(m) => format!(
+            "{} is {} bytes (expected {}..{} bytes) — truncated or not a shell",
+            path.display(),
+            m.len(),
+            MIN_SHELL_SIZE,
+            MAX_SHELL_SIZE
+        ),
+        Err(_) => format!("{} is missing", path.display()),
+    }
+}
+
 /// Ensure the setup shell exists at `install_dir\setup\micontrol_setup.exe`.
 ///
 /// If the file is already present and non-trivially sized, it is returned
@@ -88,21 +122,51 @@ pub struct BootstrapResult {
 pub fn ensure_shell(install_dir: &Path, repo: Option<&str>) -> Result<BootstrapResult, String> {
     let shell_path = install_dir.join("setup").join("micontrol_setup.exe");
 
-    // Fast path: the shell is already installed.
-    if shell_path.is_file() {
-        let len = std::fs::metadata(&shell_path).map(|m| m.len()).unwrap_or(0);
-        if len >= MIN_SHELL_SIZE {
+    // Fast path: the shell is already installed and plausible.
+    if is_valid_shell(&shell_path) {
+        return Ok(BootstrapResult {
+            shell_path,
+            downloaded: false,
+            sig_verified: true, // trusted pre-existing install
+        });
+    }
+    if shell_path.exists() {
+        // Present but too small / too large — treat as corrupt and re-download.
+        eprintln!(
+            "setup shell is unusable ({}); re-downloading",
+            shell_problem(&shell_path)
+        );
+    }
+
+    // Local self-heal (2026-11-14): the installer keeps the bundled shell at
+    // the install root as a pristine source. Deploying from it is network-free
+    // and fixes the class of failure where the NSIS hook's copy silently
+    // failed (the deployed shell stayed a 0-byte file for a week).
+    let local_src = install_dir.join("micontrol_setup.exe");
+    if is_valid_shell(&local_src) {
+        let tmp = shell_path.with_extension("exe.part");
+        let _ = std::fs::remove_file(&tmp);
+        if let Some(parent) = tmp.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&local_src, &tmp)
+            .map_err(|e| format!("cannot copy {}: {e}", local_src.display()))?;
+        if is_valid_shell(&tmp) {
+            std::fs::rename(&tmp, &shell_path).map_err(|e| {
+                format!(
+                    "cannot move {} to {}: {e}",
+                    tmp.display(),
+                    shell_path.display()
+                )
+            })?;
             return Ok(BootstrapResult {
                 shell_path,
                 downloaded: false,
-                sig_verified: true, // trusted pre-existing install
+                sig_verified: verify_authenticode_file(&local_src),
             });
         }
-        // Present but too small — treat as corrupt and re-download.
-        eprintln!(
-            "shell file {} present but only {len} bytes; re-downloading",
-            shell_path.display()
-        );
+        let _ = std::fs::remove_file(&tmp);
     }
 
     let repo = repo.unwrap_or(DEFAULT_REPO);
@@ -397,5 +461,75 @@ mod tests {
     fn default_repo_constant_matches_shell_crate() {
         // Keep in sync with ctx::DEFAULT_REPO in the shell crate.
         assert_eq!(DEFAULT_REPO, "arcane-D7/micontrol");
+    }
+
+    /// Temp dir helper shared by the validation tests.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("micontrol-bootstrap-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn zero_byte_shell_is_not_valid() {
+        // The exact 2026-11-08 failure: the file exists, `is_file()` is true,
+        // but it cannot be spawned. Size validation must reject it.
+        let dir = scratch("zero");
+        let shell = dir.join("micontrol_setup.exe");
+        std::fs::write(&shell, b"").unwrap();
+        assert!(shell.is_file(), "precondition: the file does exist");
+        assert!(!is_valid_shell(&shell));
+        let problem = shell_problem(&shell);
+        assert!(problem.contains("0 bytes"), "got: {problem}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_shell_is_not_valid_and_says_so() {
+        let dir = scratch("missing");
+        let shell = dir.join("micontrol_setup.exe");
+        assert!(!is_valid_shell(&shell));
+        assert!(shell_problem(&shell).contains("missing"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shell_size_window_bounds_are_enforced() {
+        let dir = scratch("bounds");
+        let shell = dir.join("micontrol_setup.exe");
+
+        // One byte below MIN → invalid.
+        std::fs::write(&shell, vec![0u8; (MIN_SHELL_SIZE - 1) as usize]).unwrap();
+        assert!(!is_valid_shell(&shell));
+
+        // Exactly MIN → valid (the window is inclusive).
+        std::fs::write(&shell, vec![0u8; MIN_SHELL_SIZE as usize]).unwrap();
+        assert!(is_valid_shell(&shell));
+
+        // Above MAX → invalid (a "shell" that big is something else).
+        std::fs::write(&shell, vec![0u8; (MAX_SHELL_SIZE + 1) as usize]).unwrap();
+        assert!(!is_valid_shell(&shell));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_valid_shell_short_circuits_the_download() {
+        // Same as `fast_path_returns_existing_shell_without_downloading`, but
+        // through the shared validator: a valid shell never hits the network.
+        let dir = scratch("valid");
+        let setup = dir.join("setup");
+        std::fs::create_dir_all(&setup).unwrap();
+        std::fs::write(
+            setup.join("micontrol_setup.exe"),
+            vec![0u8; MIN_SHELL_SIZE as usize],
+        )
+        .unwrap();
+        let result = ensure_shell(&dir, Some("nonexistent-org/nonexistent-repo"))
+            .expect("a valid shell must not be re-downloaded");
+        assert!(!result.downloaded);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

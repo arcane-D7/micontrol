@@ -119,4 +119,16 @@ describe('AiConfigForm', () => {
       expect(mockOnTestConnection).toHaveBeenCalledTimes(1);
     });
   });
+
+  it('does not warn for OpenAI endpoints (exact host)', () => {
+    renderForm();
+    expect(screen.queryByText('settings.customEndpointWarning')).not.toBeInTheDocument();
+  });
+
+  it('warns for a look-alike host that merely contains openai.com', () => {
+    renderForm({
+      settings: { ...mockSettings, openai_base_url: 'https://openai.com.evil.example/v1' },
+    });
+    expect(screen.getByText('settings.customEndpointWarning')).toBeInTheDocument();
+  });
 });

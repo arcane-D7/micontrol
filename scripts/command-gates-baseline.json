@@ -1,0 +1,5 @@
+{
+  "comment": "Per-site inventory of privileged-mutation command handlers that bypass elevation AND validation. Ratchet baseline for scripts/check-command-gates.mjs; regenerate with --update. Expected to stay EMPTY: any entry is an unguarded BIOS/EC/service/driver/HKLM writer reachable from the webview.",
+  "total": 0,
+  "sites": {}
+}

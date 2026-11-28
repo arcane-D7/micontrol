@@ -6,7 +6,7 @@ Thank you for your interest in contributing to miPC! This document outlines the 
 
 ### Prerequisites
 
-- **Node.js** 24+ (see `.nvmrc`) and **pnpm** (via Corepack)
+- **Node.js** 24+ (see `.nvmrc`, pinned to 24.15.0) and **pnpm** 11.5.0 (via Corepack)
 - **Rust** stable toolchain (install via [rustup](https://rustup.rs/))
 - **Windows 10/11** (this is a Windows-only application)
 - **Visual Studio Build Tools** with C++ workload
@@ -39,22 +39,26 @@ micontrol/
 ├── src/                    # React frontend (TypeScript)
 │   ├── components/          # Reusable UI components
 │   ├── hooks/              # Custom React hooks
-│   ├── pages/              # Page/tab components (18 tabs)
-│   ├── i18n/               # Internationalization
-│   └── styles/             # CSS and styling
+│   ├── pages/              # Window shells (MainWindow, TrayPopup) + tabs/ (24 lazy-loaded)
+│   ├── i18n/               # Internationalization (en/pt/es/fr JSON)
+│   └── styles/             # CSS and design tokens
 ├── src-tauri/              # Rust backend (Tauri v2)
 │   ├── src/
-│   │   ├── hw/             # Hardware abstraction layer (HAL)
+│   │   ├── hw/             # Hardware abstraction layer (HAL, ~55 modules)
 │   │   │   ├── battery.rs      # Battery health & AC adapter (WMI)
 │   │   │   ├── ecram.rs        # EC RAM access (IOCTL + pipe client)
 │   │   │   ├── fan.rs          # Fan speed & performance mode (WMI)
 │   │   │   ├── wmi_ec.rs       # WMI EC read/write (MICommonInterface)
 │   │   │   └── wmi_cache.rs    # WMI connection caching
 │   │   ├── bin/
-│   │   │   └── ecram_service.rs # Custom IoTService.exe replacement
-│   │   ├── commands/       # Tauri command handlers
-│   │   ├── util/           # Utility modules
+│   │   │   ├── ecram_service.rs    # Custom IoTService.exe replacement
+│   │   │   ├── micontrol_bridge.rs # SYSTEM bridge service (updates, elevated ops)
+│   │   │   └── micontrol_face_svc.rs # Face Unlock service (`face` feature)
+│   │   ├── commands/       # Tauri command handlers (ai, hardware, system, privacy, …)
+│   │   ├── util/           # Utility modules (logging, consent audit, crash report, …)
+│   │   ├── elevated.rs     # Elevated helper (--elevated)
 │   │   └── lib.rs          # Application entry point
+│   ├── shell/              # Static installer shell crate
 │   └── Cargo.toml          # Rust dependencies
 ├── .github/workflows/      # CI/CD pipelines
 └── docs/                   # Documentation
@@ -64,11 +68,15 @@ micontrol/
 
 1. Create a feature branch: `git checkout -b feature/your-feature`
 2. Make your changes
-3. Run the health check:
+3. Run the health check (the same script CI runs):
+   ```bash
+   pnpm run health-check
+   ```
+   Or the individual steps:
    ```bash
    cargo fmt --manifest-path src-tauri/Cargo.toml --check
-   cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-   cargo test --manifest-path src-tauri/Cargo.toml
+   cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --features face -- -D warnings
+   cargo test --manifest-path src-tauri/Cargo.toml --features face
    npx tsc --noEmit
    pnpm run lint
    pnpm run build
@@ -117,9 +125,10 @@ The custom `ecram_service.rs` binary (`src-tauri/src/bin/ecram_service.rs`) is a
 
 ### Testing
 
-- Rust tests: `cargo test --manifest-path src-tauri/Cargo.toml`
-- Frontend tests: `pnpm test`
-- Integration tests: `cargo test --manifest-path src-tauri/Cargo.toml --test '*'`
+- Rust tests: `cargo test --manifest-path src-tauri/Cargo.toml --features face`
+- Frontend tests: `pnpm test` (Vitest)
+- Integration tests: `cargo test --manifest-path src-tauri/Cargo.toml --features face --test '*'`
+- Everything at once: `pnpm run health-check`
 
 ### Pull Request Process
 

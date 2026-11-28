@@ -13,7 +13,7 @@ strip = true
 
 [package]
 name = "micontrol"
-version = "0.2.20"
+version = "0.2.22"
 edition = "2021"
 default-run = "micontrol"
 
@@ -113,7 +113,9 @@ windows = { version = "0.58", features = [
   "Win32_System_Com_StructuredStorage",
   "Win32_Devices_PortableDevices",
   "Win32_System_Services",
+  "Win32_System_TaskScheduler",
   "Win32_System_Threading",
+  "Win32_System_JobObjects",
   "Win32_System_ProcessStatus",
   "Win32_System_Pipes",
   "Win32_Security",
@@ -125,6 +127,7 @@ windows = { version = "0.58", features = [
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_UI_Input",
   "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_System_Time",
   "Win32_System_Power",
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_System_LibraryLoader",
@@ -136,6 +139,7 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio_Endpoints",
   "Win32_NetworkManagement_WiFi",
   "Media_Casting",
+  "Media_Playback",
   "Devices_Enumeration",
   "Foundation",
   "Foundation_Collections",

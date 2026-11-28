@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { QRCodeCanvas } from 'qrcode.react';
 import { PageHeader } from './PageHeader';
 import { t } from '../../hooks/useI18n';
+import { useToast } from '../../contexts/ToastContext';
 import ToggleRow from '../../components/ToggleRow';
+import { Icon, type IconName } from '../../components/ui/icons';
 
 // ── Types matching Rust structs ──────────────────────────────────────────────
 
@@ -70,10 +73,36 @@ interface SendReport {
   total_bytes: number;
 }
 
+/// Payload of the `localsend-incoming` event: a sender is waiting for the user
+/// to accept or decline. Nothing is written to disk until it is accepted.
+interface IncomingTransfer {
+  sessionId: string;
+  alias: string;
+  fingerprint: string;
+  deviceType?: string | null;
+  files: { name: string; size: number }[];
+  totalBytes: number;
+  expiresInSeconds: number;
+}
+
+/// Human size for the consent prompt (the backend reports raw bytes).
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 interface ReceiverStatus {
   running: boolean;
   port: number;
   received_count: number;
+}
+
+/// Receiver settings: which devices skip the prompt, and the per-file cap.
+interface LocalSendConfig {
+  auto_accept_fingerprints: string[];
+  max_upload_mb: number;
 }
 
 // ── MIOT-07 scrcpy camera ───────────────────────────────────────────────────
@@ -153,6 +182,7 @@ export default function CrossDeviceTab() {
   const [status, setStatus] = useState<PhoneLinkStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const { addToast } = useToast();
 
   // BLE presence (MIOT-05)
   const [presence, setPresence] = useState<PresenceStatus | null>(null);
@@ -177,6 +207,8 @@ export default function CrossDeviceTab() {
     name: 'MiControl-PC',
   });
   const [advBusy, setAdvBusy] = useState(false);
+  // Actual publisher state from `ble_advertise_status` (null = unknown yet).
+  const [advActive, setAdvActive] = useState<boolean | null>(null);
 
   // LocalSend (MIOT-06)
   const [peers, setPeers] = useState<LocalSendPeer[]>([]);
@@ -185,6 +217,12 @@ export default function CrossDeviceTab() {
   const [sendingTo, setSendingTo] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<string | null>(null);
   const [receiver, setReceiver] = useState<ReceiverStatus | null>(null);
+  // Incoming LocalSend transfer waiting for Accept/Decline.
+  const [incoming, setIncoming] = useState<IncomingTransfer | null>(null);
+  const [consentBusy, setConsentBusy] = useState(false);
+  const [rememberIncoming, setRememberIncoming] = useState(false);
+  const [lsConfig, setLsConfig] = useState<LocalSendConfig | null>(null);
+  const [maxMbDraft, setMaxMbDraft] = useState('');
 
   // scrcpy camera (MIOT-07)
   const [camera, setCamera] = useState<ScrcpyStatus | null>(null);
@@ -262,6 +300,17 @@ export default function CrossDeviceTab() {
     }
   }, []);
 
+  // Receiver settings (auto-accept list + size cap) for the LocalSend card.
+  const fetchLsConfig = useCallback(async () => {
+    try {
+      const cfg = await invoke<LocalSendConfig>('localsend_config');
+      setLsConfig(cfg);
+      setMaxMbDraft(String(cfg.max_upload_mb));
+    } catch {
+      setLsConfig(null);
+    }
+  }, []);
+
   const fetchCamera = useCallback(async () => {
     try {
       const s = await invoke<ScrcpyStatus>('scrcpy_status');
@@ -303,6 +352,16 @@ export default function CrossDeviceTab() {
     }
   }, []);
 
+  // Read the *real* publisher state. The config flag only says what the user
+  // asked for; `ble_advertise_status` says whether the radio is advertising.
+  const fetchAdvertiseStatus = useCallback(async () => {
+    try {
+      setAdvActive(await invoke<boolean>('ble_advertise_status'));
+    } catch {
+      setAdvActive(null);
+    }
+  }, []);
+
   // Persist + start/stop the BLE advertiser.
   const handleAdvToggle = async (enabled: boolean) => {
     setAdvBusy(true);
@@ -310,6 +369,9 @@ export default function CrossDeviceTab() {
       const next: BleAdvertiseConfig = { ...advCfg, enabled };
       await invoke('set_ble_advertise_config', { config: next });
       setAdvCfg(next);
+      // The publisher starts or aborts asynchronously on its own COM thread,
+      // so give it a moment before reading the state back.
+      window.setTimeout(() => void fetchAdvertiseStatus(), 400);
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
@@ -321,19 +383,45 @@ export default function CrossDeviceTab() {
     void fetchStatus();
     void fetchPresence();
     void fetchReceiver();
+    void fetchLsConfig();
     void fetchCamera();
     void fetchTranscription();
     void fetchNfc();
     void fetchAdvertise();
+    void fetchAdvertiseStatus();
   }, [
     fetchStatus,
     fetchPresence,
     fetchReceiver,
+    fetchLsConfig,
     fetchCamera,
     fetchTranscription,
     fetchNfc,
     fetchAdvertise,
+    fetchAdvertiseStatus,
   ]);
+
+  // Poll the publisher state while the tab is open: the advertiser can abort
+  // on its own (Bluetooth switched off, radio reclaimed) without any user
+  // action, and the UI must stop claiming it is advertising when it is not.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void fetchAdvertiseStatus();
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [fetchAdvertiseStatus]);
+
+  // Consent prompt: the receiver emits `localsend-incoming` and blocks the
+  // sender until the user answers here. No answer within the advertised window
+  // means the transfer is declined — nothing is written to disk.
+  useEffect(() => {
+    const unlisten = listen<IncomingTransfer>('localsend-incoming', (event) => {
+      setIncoming(event.payload);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
 
   const handleDiscover = async () => {
     setDiscovering(true);
@@ -379,6 +467,59 @@ export default function CrossDeviceTab() {
         const r = await invoke<ReceiverStatus>('localsend_receiver_start');
         setReceiver(r);
       }
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleConsent = async (accept: boolean, remember: boolean) => {
+    if (!incoming) return;
+    setConsentBusy(true);
+    try {
+      await invoke('localsend_respond_consent', {
+        sessionId: incoming.sessionId,
+        accept,
+        remember,
+      });
+      addToast({
+        message: accept
+          ? t('crossDevice.lsAccepted', { alias: incoming.alias })
+          : t('crossDevice.lsDeclined', { alias: incoming.alias }),
+        type: accept ? 'success' : 'info',
+      });
+    } catch (e) {
+      // The prompt expired before the answer arrived (sender gave up).
+      setErrorMsg(String(e));
+    } finally {
+      setIncoming(null);
+      setConsentBusy(false);
+      void fetchReceiver();
+    }
+  };
+
+  const handleForgetDevice = async (fingerprint: string) => {
+    try {
+      const cfg = await invoke<LocalSendConfig>('localsend_set_auto_accept', {
+        fingerprint,
+        enabled: false,
+      });
+      setLsConfig(cfg);
+      addToast({ message: t('crossDevice.lsForgotDevice'), type: 'info' });
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleSaveMaxMb = async () => {
+    const mb = Math.floor(Number(maxMbDraft));
+    if (!Number.isFinite(mb) || mb < 1) return;
+    try {
+      const cfg = await invoke<LocalSendConfig>('localsend_set_max_upload_mb', {
+        maxUploadMb: mb,
+      });
+      setLsConfig(cfg);
+      setMaxMbDraft(String(cfg.max_upload_mb));
+      addToast({ message: t('crossDevice.lsMaxSizeSaved'), type: 'success' });
     } catch (e) {
       setErrorMsg(String(e));
     }
@@ -616,11 +757,16 @@ export default function CrossDeviceTab() {
     }
   };
 
+  // Phone Link actions now do something observable when the app is already
+  // running (it usually is — PhoneExperienceHost is a background process):
+  // the backend activates the existing window and errors if it cannot. Every
+  // action therefore reports a toast instead of failing silently.
   const handleLaunch = async () => {
     try {
       await invoke('launch_phone_link');
+      addToast({ message: t('crossDevice.launchOk'), type: 'success' });
     } catch (e) {
-      setErrorMsg(String(e));
+      addToast({ message: `${t('crossDevice.launchError')}: ${String(e)}`, type: 'error' });
     }
   };
 
@@ -635,8 +781,9 @@ export default function CrossDeviceTab() {
   const handleFeature = async (feature: string) => {
     try {
       await invoke('launch_phone_link_feature', { feature });
+      addToast({ message: t('crossDevice.launchOk'), type: 'success' });
     } catch (e) {
-      setErrorMsg(String(e));
+      addToast({ message: `${t('crossDevice.launchError')}: ${String(e)}`, type: 'error' });
     }
   };
 
@@ -652,31 +799,31 @@ export default function CrossDeviceTab() {
   const features = [
     {
       id: 'Phone',
-      icon: '📞',
+      icon: 'phone',
       labelKey: 'crossDevice.featureCalls',
       descKey: 'crossDevice.featureCallsDesc',
     },
     {
       id: 'Messages',
-      icon: '💬',
+      icon: 'message',
       labelKey: 'crossDevice.featureMessages',
       descKey: 'crossDevice.featureMessagesDesc',
     },
     {
       id: 'Photos',
-      icon: '📸',
+      icon: 'camera',
       labelKey: 'crossDevice.featurePhotos',
       descKey: 'crossDevice.featurePhotosDesc',
     },
     {
       id: 'ScreenMirror',
-      icon: '📱',
+      icon: 'smartphone',
       labelKey: 'crossDevice.featureScreenMirror',
       descKey: 'crossDevice.featureScreenMirrorDesc',
     },
     {
       id: 'Apps',
-      icon: '🎯',
+      icon: 'target',
       labelKey: 'crossDevice.featureApps',
       descKey: 'crossDevice.featureAppsDesc',
     },
@@ -689,7 +836,7 @@ export default function CrossDeviceTab() {
       {/* Error message */}
       {errorMsg && (
         <div className="alert alert-error" style={{ marginBottom: 16 }}>
-          ⚠ {errorMsg}
+          <Icon name="alert-triangle" size={16} /> {errorMsg}
         </div>
       )}
 
@@ -756,10 +903,10 @@ export default function CrossDeviceTab() {
           <h3>{t('crossDevice.features')}</h3>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
             <button className="btn btn-primary" onClick={handleLaunch}>
-              📱 {t('crossDevice.launchApp')}
+              <Icon name="smartphone" size={16} /> {t('crossDevice.launchApp')}
             </button>
             <button className="btn btn-secondary" onClick={handleOpenSettings}>
-              ⚙️ {t('crossDevice.openSettings')}
+              <Icon name="gear" size={16} /> {t('crossDevice.openSettings')}
             </button>
           </div>
 
@@ -786,7 +933,7 @@ export default function CrossDeviceTab() {
                   gap: 4,
                 }}
               >
-                <span style={{ fontSize: 24 }}>{f.icon}</span>
+                <Icon name={f.icon as IconName} size={24} />
                 <span style={{ fontWeight: 600 }}>{t(f.labelKey as Parameters<typeof t>[0])}</span>
                 <span className="text-muted" style={{ fontSize: 12 }}>
                   {t(f.descKey as Parameters<typeof t>[0])}
@@ -799,7 +946,9 @@ export default function CrossDeviceTab() {
 
       {/* BLE Presence (MIOT-05) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>🛰️ {t('crossDevice.presenceTitle')}</h3>
+        <h3>
+          <Icon name="satellite" size={16} /> {t('crossDevice.presenceTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.presenceDesc')}
         </p>
@@ -816,23 +965,24 @@ export default function CrossDeviceTab() {
         {/* Connected state + scan now button — always available */}
         {connectedPhone && (
           <p className="status-ok" style={{ fontSize: 13, marginTop: 10 }}>
-            📱 {t('crossDevice.presenceConnected', { phone: connectedPhone })}
+            <Icon name="smartphone" size={16} />{' '}
+            {t('crossDevice.presenceConnected', { phone: connectedPhone })}
           </p>
         )}
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 12 }}>
           <button className="btn btn-primary" onClick={handleScanNow} disabled={scanning}>
-            📡 {scanning ? '…' : t('crossDevice.presenceScanNow')}
+            <Icon name="radio" size={16} /> {scanning ? '…' : t('crossDevice.presenceScanNow')}
           </button>
           {presenceCfg.enabled && (
             <button className="btn btn-secondary" onClick={handleSavePresence}>
-              💾 {t('crossDevice.presenceSave')}
+              <Icon name="save" size={16} /> {t('crossDevice.presenceSave')}
             </button>
           )}
         </div>
 
         {presenceSaved && (
           <p className="status-ok" style={{ fontSize: 13 }}>
-            ✓ {t('crossDevice.presenceSaved')}
+            <Icon name="check" size={16} /> {t('crossDevice.presenceSaved')}
           </p>
         )}
 
@@ -946,7 +1096,9 @@ export default function CrossDeviceTab() {
 
       {/* BLE advertising (PC discoverability, MIOT-38) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>📡 {t('crossDevice.advTitle')}</h3>
+        <h3>
+          <Icon name="radio" size={16} /> {t('crossDevice.advTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.advDesc')}
         </p>
@@ -987,12 +1139,28 @@ export default function CrossDeviceTab() {
                   }
                 }}
               >
-                💾 {t('crossDevice.presenceSave')}
+                <Icon name="save" size={16} /> {t('crossDevice.presenceSave')}
               </button>
             </div>
-            <p className="status-ok" style={{ fontSize: 13, marginTop: 10 }}>
-              {t('crossDevice.advActive')}
-            </p>
+            {/* Real publisher state, not the config flag. `ble_advertise_status`
+                is polled every 5 s and re-read after every change, so a radio
+                that refused the publisher (Bluetooth off) is visible instead
+                of the UI claiming "advertising" forever. */}
+            {advActive === true && (
+              <p className="status-ok" style={{ fontSize: 13, marginTop: 10 }}>
+                {t('crossDevice.advActive')}
+              </p>
+            )}
+            {advActive === false && (
+              <p className="status-warn" style={{ fontSize: 13, marginTop: 10 }}>
+                {t('crossDevice.advStopped')}
+              </p>
+            )}
+            {advActive === null && (
+              <p className="text-muted" style={{ fontSize: 13, marginTop: 10 }}>
+                {t('crossDevice.advChecking')}
+              </p>
+            )}
           </>
         )}
       </div>
@@ -1049,7 +1217,7 @@ export default function CrossDeviceTab() {
               <button
                 onClick={() => setScanModalOpen(false)}
                 disabled={scanning}
-                aria-label="Close"
+                aria-label={t('common.close')}
                 style={{
                   background: 'none',
                   border: 'none',
@@ -1060,7 +1228,7 @@ export default function CrossDeviceTab() {
                   padding: '0 4px',
                 }}
               >
-                ✕
+                <Icon name="x" size={16} />
               </button>
             </div>
             <p className="text-muted" style={{ fontSize: 12, marginBottom: 12 }}>
@@ -1069,7 +1237,9 @@ export default function CrossDeviceTab() {
 
             {scanning ? (
               <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-dim)' }}>
-                <div style={{ fontSize: 28, marginBottom: 8 }}>📡</div>
+                <div style={{ marginBottom: 8 }}>
+                  <Icon name="radio" size={28} />
+                </div>
                 {t('crossDevice.presenceScanModalSearching')}
               </div>
             ) : scanError ? (
@@ -1153,7 +1323,7 @@ export default function CrossDeviceTab() {
                 onClick={() => void handleRescan()}
                 disabled={scanning}
               >
-                🔄 {t('crossDevice.presenceScanModalRescan')}
+                <Icon name="refresh" size={16} /> {t('crossDevice.presenceScanModalRescan')}
               </button>
               <button className="btn btn-secondary" onClick={() => setScanModalOpen(false)}>
                 {t('crossDevice.presenceScanModalCancel')}
@@ -1164,7 +1334,9 @@ export default function CrossDeviceTab() {
       )}
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>📡 {t('crossDevice.lsTitle')}</h3>
+        <h3>
+          <Icon name="radio" size={16} /> {t('crossDevice.lsTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.lsDesc')}
         </p>
@@ -1195,10 +1367,119 @@ export default function CrossDeviceTab() {
           </p>
         )}
 
+        {/* Receiver settings: opt-in devices + size cap */}
+        {lsConfig && (
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span>{t('crossDevice.lsMaxSize')}</span>
+              <input
+                className="text-input"
+                type="number"
+                min={1}
+                value={maxMbDraft}
+                onChange={(e) => setMaxMbDraft(e.target.value)}
+                style={{ width: 90, fontSize: 12 }}
+              />
+              <button
+                className="btn btn-secondary"
+                style={{ padding: '2px 8px', fontSize: 12 }}
+                onClick={() => void handleSaveMaxMb()}
+                disabled={maxMbDraft === String(lsConfig.max_upload_mb)}
+              >
+                {t('crossDevice.lsSave')}
+              </button>
+            </div>
+            {lsConfig.auto_accept_fingerprints.length > 0 && (
+              <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <span>{t('crossDevice.lsAutoAccept')}:</span>
+                {lsConfig.auto_accept_fingerprints.map((fp) => (
+                  <span key={fp} style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                    <code>{fp.slice(0, 10)}…</code>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: '0 6px', fontSize: 11 }}
+                      title={t('crossDevice.lsReject')}
+                      onClick={() => void handleForgetDevice(fp)}
+                    >
+                      <Icon name="x" size={16} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Consent: nothing is written until the user answers */}
+        {incoming && (
+          <div
+            role="alertdialog"
+            aria-label={t('crossDevice.lsIncomingTitle')}
+            style={{
+              marginBottom: 12,
+              padding: 12,
+              borderRadius: 8,
+              border: '1px solid var(--warning)',
+              background: 'var(--surface-hover)',
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              <Icon name="download" size={16} /> {t('crossDevice.lsIncomingTitle')}
+            </div>
+            <div style={{ fontSize: 13, marginBottom: 6 }}>
+              {t('crossDevice.lsIncomingFrom', {
+                alias: incoming.alias,
+                count: incoming.files.length,
+              })}
+            </div>
+            <ul style={{ margin: '0 0 8px 18px', fontSize: 12, color: 'var(--text-dim)' }}>
+              {incoming.files.slice(0, 5).map((f, i) => (
+                <li key={`${f.name}-${i}`}>
+                  {f.name} — {formatBytes(f.size)}
+                </li>
+              ))}
+              {incoming.files.length > 5 && <li>+{incoming.files.length - 5}</li>}
+            </ul>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                disabled={consentBusy}
+                onClick={() => void handleConsent(true, rememberIncoming)}
+              >
+                {t('crossDevice.lsAccept')}
+              </button>
+              <button
+                className="btn btn-secondary"
+                disabled={consentBusy}
+                onClick={() => void handleConsent(false, false)}
+              >
+                {t('crossDevice.lsReject')}
+              </button>
+              <label style={{ fontSize: 12, display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={rememberIncoming}
+                  onChange={(e) => setRememberIncoming(e.target.checked)}
+                />
+                {t('crossDevice.lsRemember')}
+              </label>
+            </div>
+            <p style={{ fontSize: 11, color: 'var(--text-dim)', margin: '8px 0 0' }}>
+              {t('crossDevice.lsConsentNote', { seconds: incoming.expiresInSeconds })}
+            </p>
+          </div>
+        )}
+
         {/* Discover + send */}
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
           <button className="btn btn-secondary" onClick={handleDiscover} disabled={discovering}>
-            {discovering ? t('crossDevice.lsDiscovering') : `🔎 ${t('crossDevice.lsDiscover')}`}
+            {discovering ? (
+              t('crossDevice.lsDiscovering')
+            ) : (
+              <>
+                <Icon name="search" size={16} /> {t('crossDevice.lsDiscover')}
+              </>
+            )}
           </button>
           {peers.length > 0 && (
             <span className="text-muted" style={{ fontSize: 12 }}>
@@ -1220,7 +1501,9 @@ export default function CrossDeviceTab() {
               border: '1px solid var(--border)',
             }}
           >
-            <span style={{ fontSize: 22 }}>📱</span>
+            <span>
+              <Icon name="smartphone" size={20} />
+            </span>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600 }}>{peer.alias}</div>
               <div className="text-muted" style={{ fontSize: 12 }}>
@@ -1248,14 +1531,16 @@ export default function CrossDeviceTab() {
 
         {sendResult && (
           <p className="status-ok" style={{ fontSize: 13 }}>
-            ✓ {sendResult}
+            <Icon name="check" size={16} /> {sendResult}
           </p>
         )}
       </div>
 
       {/* scrcpy — phone camera (MIOT-07) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>📷 {t('crossDevice.cameraTitle')}</h3>
+        <h3>
+          <Icon name="camera" size={16} /> {t('crossDevice.cameraTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.cameraDesc')}
         </p>
@@ -1274,9 +1559,13 @@ export default function CrossDeviceTab() {
                 onClick={handleInstallCamera}
                 disabled={installingCamera}
               >
-                {installingCamera
-                  ? t('crossDevice.installing')
-                  : `⬇️ ${t('crossDevice.cameraInstallBtn')}`}
+                {installingCamera ? (
+                  t('crossDevice.installing')
+                ) : (
+                  <>
+                    <Icon name="download" size={16} /> {t('crossDevice.cameraInstallBtn')}
+                  </>
+                )}
               </button>
               {cameraInstallMsg && (
                 <span
@@ -1331,7 +1620,9 @@ export default function CrossDeviceTab() {
 
       {/* On-device transcription (MIOT-08) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>🎙️ {t('crossDevice.transcribeTitle')}</h3>
+        <h3>
+          <Icon name="microphone" size={16} /> {t('crossDevice.transcribeTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.transcribeDesc')}
         </p>
@@ -1350,9 +1641,13 @@ export default function CrossDeviceTab() {
                 onClick={handleInstallSherpa}
                 disabled={installingSherpa}
               >
-                {installingSherpa
-                  ? t('crossDevice.installing')
-                  : `⬇️ ${t('crossDevice.transcribeInstallBtn')}`}
+                {installingSherpa ? (
+                  t('crossDevice.installing')
+                ) : (
+                  <>
+                    <Icon name="download" size={16} /> {t('crossDevice.transcribeInstallBtn')}
+                  </>
+                )}
               </button>
               {sherpaInstallMsg && (
                 <span
@@ -1402,11 +1697,15 @@ export default function CrossDeviceTab() {
             onClick={handleDownloadModel}
             disabled={downloadingModel || transc?.modelReady}
           >
-            {downloadingModel
-              ? t('crossDevice.transcribeDownloading')
-              : transc?.modelReady
-                ? `✓ ${t('crossDevice.transcribeModelReady')}`
-                : t('crossDevice.transcribeDownloadModel')}
+            {downloadingModel ? (
+              t('crossDevice.transcribeDownloading')
+            ) : transc?.modelReady ? (
+              <>
+                <Icon name="check" size={16} /> {t('crossDevice.transcribeModelReady')}
+              </>
+            ) : (
+              t('crossDevice.transcribeDownloadModel')
+            )}
           </button>
         </div>
         {transc && !transc.modelReady && (
@@ -1428,7 +1727,9 @@ export default function CrossDeviceTab() {
 
       {/* KDE Connect (MIOT-10) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>🔗 {t('crossDevice.kdeTitle')}</h3>
+        <h3>
+          <Icon name="link" size={16} /> {t('crossDevice.kdeTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.kdeDesc')}
         </p>
@@ -1439,9 +1740,13 @@ export default function CrossDeviceTab() {
             onClick={handleKdeDiscover}
             disabled={kdeDiscovering}
           >
-            {kdeDiscovering
-              ? t('crossDevice.kdeDiscovering')
-              : `🔎 ${t('crossDevice.kdeDiscover')}`}
+            {kdeDiscovering ? (
+              t('crossDevice.kdeDiscovering')
+            ) : (
+              <>
+                <Icon name="search" size={16} /> {t('crossDevice.kdeDiscover')}
+              </>
+            )}
           </button>
           {kdeDevices.length > 0 && (
             <span className="text-muted" style={{ fontSize: 12 }}>
@@ -1469,7 +1774,9 @@ export default function CrossDeviceTab() {
               border: '1px solid var(--border)',
             }}
           >
-            <span style={{ fontSize: 22 }}>📱</span>
+            <span>
+              <Icon name="smartphone" size={20} />
+            </span>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 600 }}>{dev.deviceName}</div>
               <div className="text-muted" style={{ fontSize: 12 }}>
@@ -1499,7 +1806,9 @@ export default function CrossDeviceTab() {
 
       {/* NFC pairing guidance (MIOT-11) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>📶 {t('crossDevice.nfcTitle')}</h3>
+        <h3>
+          <Icon name="wifi" size={16} /> {t('crossDevice.nfcTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.nfcDesc')}
         </p>
@@ -1509,12 +1818,12 @@ export default function CrossDeviceTab() {
             <p style={{ fontSize: 13, marginBottom: 8 }}>{nfc.instructions}</p>
             {nfc.ndefText && (
               <div className="alert alert-success" style={{ marginBottom: 8, fontSize: 13 }}>
-                ✓ {t('crossDevice.nfcTagReady')}
+                <Icon name="check" size={16} /> {t('crossDevice.nfcTagReady')}
               </div>
             )}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
               <button className="btn btn-primary" onClick={handleNfcOpenLink}>
-                🔗 {t('crossDevice.nfcOpenLink')}
+                <Icon name="link" size={16} /> {t('crossDevice.nfcOpenLink')}
               </button>
               {nfc.storeUri && (
                 <a
@@ -1523,7 +1832,7 @@ export default function CrossDeviceTab() {
                   target="_blank"
                   rel="noreferrer"
                 >
-                  🛒 {t('crossDevice.nfcUpdateStore')}
+                  <Icon name="shopping-cart" size={16} /> {t('crossDevice.nfcUpdateStore')}
                 </a>
               )}
             </div>
@@ -1588,7 +1897,9 @@ export default function CrossDeviceTab() {
 
       {/* Custom NFC tag programmer (MIOT-11 revamp) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>🏷️ {t('crossDevice.nfcCustomTitle')}</h3>
+        <h3>
+          <Icon name="tag" size={16} /> {t('crossDevice.nfcCustomTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.nfcCustomDesc')}
         </p>
@@ -1643,7 +1954,13 @@ export default function CrossDeviceTab() {
                 onClick={() => void handleNfcBuildCustom()}
                 disabled={nfcBuilding || !nfcTarget.trim()}
               >
-                {nfcBuilding ? '…' : '✨ ' + t('crossDevice.nfcCustomBuild')}
+                {nfcBuilding ? (
+                  '…'
+                ) : (
+                  <>
+                    <Icon name="sparkles" size={16} /> {t('crossDevice.nfcCustomBuild')}
+                  </>
+                )}
               </button>
             </div>
           </>
@@ -1654,7 +1971,9 @@ export default function CrossDeviceTab() {
             className="alert alert-success"
             style={{ fontSize: 13, marginTop: 12, overflowWrap: 'anywhere' }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>✓ {nfcBuilt.description}</div>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>
+              <Icon name="check" size={16} /> {nfcBuilt.description}
+            </div>
             {nfcBuilt.recordType === 'uri' && nfcTarget.trim() && (
               <div
                 style={{
@@ -1701,7 +2020,9 @@ export default function CrossDeviceTab() {
 
       {/* Syncthing folder sync (MIOT-12) */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>🔄 {t('crossDevice.syncTitle')}</h3>
+        <h3>
+          <Icon name="refresh" size={16} /> {t('crossDevice.syncTitle')}
+        </h3>
         <p className="text-muted" style={{ marginBottom: 12 }}>
           {t('crossDevice.syncDesc')}
         </p>
@@ -1745,7 +2066,9 @@ export default function CrossDeviceTab() {
               <div className="info-grid">
                 <div className="info-row">
                   <span className="info-label">{t('crossDevice.syncReachable')}</span>
-                  <span className="info-value status-ok">✓</span>
+                  <span className="info-value status-ok">
+                    <Icon name="check" size={16} />
+                  </span>
                 </div>
                 {sync.version && (
                   <div className="info-row">
@@ -1800,7 +2123,7 @@ export default function CrossDeviceTab() {
                       className={f.paused ? 'text-muted' : 'status-ok'}
                       style={{ fontSize: 12 }}
                     >
-                      {f.paused ? '⏸' : '▶'}
+                      {f.paused ? <Icon name="pause" size={16} /> : <Icon name="play" size={12} />}
                     </span>
                     <button
                       className="btn btn-secondary"
@@ -1832,7 +2155,9 @@ export default function CrossDeviceTab() {
 
       {/* Info Card */}
       <div className="card">
-        <h3>ℹ️ {t('crossDevice.supportedDevices')}</h3>
+        <h3>
+          <Icon name="info" size={16} /> {t('crossDevice.supportedDevices')}
+        </h3>
         <p className="text-muted">{t('crossDevice.installHint')}</p>
       </div>
     </>
@@ -1861,7 +2186,9 @@ function DeviceRow({
         border: '1px solid var(--border)',
       }}
     >
-      <div style={{ fontSize: 20 }}>{dev.paired ? '📱' : '📶'}</div>
+      <div>
+        {dev.paired ? <Icon name="smartphone" size={18} /> : <Icon name="wifi" size={18} />}
+      </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{

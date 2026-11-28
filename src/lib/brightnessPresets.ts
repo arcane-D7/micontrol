@@ -1,20 +1,22 @@
 import type { AiBrightnessConfig } from '../types/hardware';
+import type { IconName } from '../components/ui/icons';
+import type { StringKey } from '../hooks/useI18n';
 
 export interface BrightnessPreset {
   key: string;
-  label: string;
-  icon: string;
-  /** Description hint shown on hover */
-  hint: string;
+  labelKey: StringKey;
+  icon: IconName;
+  /** Description hint key shown on hover */
+  hintKey: StringKey;
   config: Omit<AiBrightnessConfig, 'enabled'>;
 }
 
 export const BRIGHTNESS_PRESETS: BrightnessPreset[] = [
   {
     key: 'eco',
-    label: 'Eco',
-    icon: '🌿',
-    hint: 'Gentle transitions, capped brightness — saves battery',
+    labelKey: 'brightness.presets.eco.label',
+    icon: 'leaf',
+    hintKey: 'brightness.presets.eco.hint',
     config: {
       min_brightness: 15,
       max_brightness: 75,
@@ -25,9 +27,9 @@ export const BRIGHTNESS_PRESETS: BrightnessPreset[] = [
   },
   {
     key: 'padrao',
-    label: 'Standard',
-    icon: '🏙️',
-    hint: 'Balanced reactivity and smooth transitions',
+    labelKey: 'brightness.presets.standard.label',
+    icon: 'building',
+    hintKey: 'brightness.presets.standard.hint',
     config: {
       min_brightness: 10,
       max_brightness: 100,
@@ -38,9 +40,9 @@ export const BRIGHTNESS_PRESETS: BrightnessPreset[] = [
   },
   {
     key: 'vivido',
-    label: 'Vivid',
-    icon: '⚡',
-    hint: 'Fast, aggressive adaptation across full brightness range',
+    labelKey: 'brightness.presets.vivid.label',
+    icon: 'bolt',
+    hintKey: 'brightness.presets.vivid.hint',
     config: {
       min_brightness: 5,
       max_brightness: 100,

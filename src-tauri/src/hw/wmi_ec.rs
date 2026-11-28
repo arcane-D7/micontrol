@@ -27,6 +27,7 @@
 //!  14     dword FRD3   Extended result data
 //! ```
 
+use crate::hw::adapter_power::AdapterPowerReading;
 use crate::hw::errors::{HardwareError, HardwareResult};
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +100,23 @@ fn make_buffer(fun1: u16, fun2: u16, fun3: u16, fun4: u32) -> [u8; BUFFER_SIZE] 
     buf
 }
 
-/// Performance mode IDs (FUN3 for FUN2=0x0800 write commands).
+/// WMAA `FUN2=0x0800` write-profile IDs (`FUN3`).
+///
+/// PITFALL — these names are the ones this app has always used, but they are
+/// **not** the EC's mode register values. The ACPI write branch treats them
+/// differently (decoded from `ssdt24.dsl`):
+///
+/// * `2/3/4/9/0x0A` write `QFAN` (EC RAM `0x68`) — the register the read path
+///   reports. These are the only values whose effect is readable back.
+/// * `5..=8` write `SMMT`/`SMMD` (EC RAM `0x4A`/`0x4B`) plus a DPTF OEM
+///   variable and never touch `QFAN`. On this firmware they are DPTF power
+///   profiles, **not** the fan/performance mode: writing `6` ("Balanced" here)
+///   while the EC sits at `9` leaves it at `9`, and `SGER` still says success.
+///
+/// The EC's own numbering (SSDB `SetPerformanceMode`, EC RAM `0x68`) is
+/// 0=Silence, 1=Balance, 2=Turbo, 3=Decepticon, 4..8=hidden profiles,
+/// 9=SmartAdaptive, 10=Smart, 11=LongBattery, 14=SmartAcceleration. See
+/// [`EcActiveMode`] for the read-back side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum EcPerformanceMode {
@@ -122,6 +139,109 @@ impl EcPerformanceMode {
             0x0A => Some(Self::Extreme),
             _ => None,
         }
+    }
+}
+
+/// The EC's **active** performance mode, as the ACPI read path can report it.
+///
+/// This is deliberately *not* [`EcPerformanceMode`]. The firmware's WMAA read
+/// (`FUN2=0x0800`, decoded from `ssdt24.dsl` / `dsdt.dsl` on this platform)
+/// returns EC RAM byte `0x68` (`QFAN`) through `FUNR(0x16)`, and the AML switch
+/// only has branches for five values:
+///
+/// ```text
+/// FNKN = Q_EC.FUNR(0x16)
+/// If (FNKN == 0x02) FRD0 = 0x02      // Turbo
+/// If (FNKN == 0x03) FRD0 = 0x03      // Decepticon
+/// If (FNKN == 0x09) FRD0 = 0x09      // SmartAdaptive
+/// If (FNKN == 0x04) FRD0 = 0x04      // Overdrive (hidden profile)
+/// If (FNKN == 0x0A) FRD0 = 0x0A      // Smart
+/// // no Else: every other QFAN value leaves FRD0 = 0
+/// ```
+///
+/// So a raw `0` does **not** mean "Silence": it means *the EC is in a mode the
+/// ACPI read path cannot name* (Silence, Balance, the hidden 5/6/7/8 profiles,
+/// LongBattery, …). Reporting it as a real mode would be a lie in the other
+/// direction, so it gets [`EcActiveMode::Unreported`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EcActiveMode {
+    /// QFAN 0x02 — the SSDB "Turbo" profile.
+    Turbo,
+    /// QFAN 0x03 — the SSDB "Decepticon" profile.
+    Decepticon,
+    /// QFAN 0x04 — hidden DPTF profile ODV1=4.
+    Overdrive,
+    /// QFAN 0x09 — SMMT-driven adaptive profile (the EC feeds NTDP dynamically
+    /// while on AC). This is the value the owner's machine sat at.
+    SmartAdaptive,
+    /// QFAN 0x0A — the SSDB "Smart" profile.
+    Smart,
+    /// Any other QFAN value: the read path collapses them all to 0, so the
+    /// exact mode is unknown from this channel alone.
+    Unreported,
+}
+
+impl EcActiveMode {
+    /// Map a raw `FRD0` byte from `FUN2=0x0800 / FUN3=0` to a readable mode.
+    pub fn from_raw(val: u16) -> Self {
+        match val {
+            2 => Self::Turbo,
+            3 => Self::Decepticon,
+            4 => Self::Overdrive,
+            9 => Self::SmartAdaptive,
+            0x0A => Self::Smart,
+            _ => Self::Unreported,
+        }
+    }
+
+    /// Stable machine-readable label (also used by the TS types).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Turbo => "turbo",
+            Self::Decepticon => "decepticon",
+            Self::Overdrive => "overdrive",
+            Self::SmartAdaptive => "smart_adaptive",
+            Self::Smart => "smart",
+            Self::Unreported => "unreported",
+        }
+    }
+
+    /// `false` only for [`EcActiveMode::Unreported`] — the case where the EC is
+    /// in a mode the WMAA read cannot name.
+    pub fn is_reported(self) -> bool {
+        self != Self::Unreported
+    }
+}
+
+/// Did a WMAA profile write really latch the EC mode?
+///
+/// The write path and the read path do **not** address the same thing for
+/// every mode. Decoded from `ssdt24.dsl` (WMAA `FUN1=0xFB00`):
+///
+/// * `FUN3 = 2, 3, 4, 9, 0x0A` → `ECWT(value, QFAN)` + `QV20(1,0x16)`, i.e. the
+///   value lands in the register the read path reports (EC RAM `0x68`).
+/// * `FUN3 = 5, 6, 7, 8` → `ECWT(0, SMMT)` + `ECWT(mode, SMMD)` (SMMT/SMMD are
+///   EC RAM `0x4A`/`0x4B`) + `NTDP(mode)`, i.e. a DPTF/OEM-variable profile.
+///   **QFAN is never written**, so the readback cannot change and the UI must
+///   not claim the mode was applied.
+/// * Any other `FUN3` → no EC write at all (the AML only sets `SGER = 0x8000`).
+///
+/// `SGER = 0x8000` is set unconditionally at the end of that AML branch, which
+/// is why `set_performance_mode(6)` used to report success while nothing moved.
+///
+/// Verification therefore depends on whether the requested value is one the
+/// read path can report:
+/// * reportable (`2/3/4/9/0x0A`) → the readback must equal the request;
+/// * unreportable (`5..=8`, and everything else) → the only evidence available
+///   is a *transition* to the unreported bucket (`0`), so a readback of `0`
+///   after a non-zero `before` proves the register moved; `0 → 0` proves
+///   nothing and stays unverified.
+pub fn qfan_write_verified(requested: u16, before: u16, after: u16) -> bool {
+    if EcActiveMode::from_raw(requested).is_reported() {
+        after == requested
+    } else {
+        after == 0 && before != 0
     }
 }
 
@@ -550,10 +670,119 @@ mod imp {
 // Response: SGER=0x8000 means success. FRD0/FRD1 contain the result data.
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Attempts for a transient provider stall (`0x80041002`) on a WMAA read.
+///
+/// Measured on this host: 1 716 elevated reads in 53 h, 129 of them failed
+/// with `WBEM_E_NOT_FOUND` (7.5 %), and every retry in the historical log
+/// returned a value moments later. Three attempts cover the stall without
+/// making a genuinely broken provider slow (each failed call returns in ~5 ms,
+/// so the extra cost is the 200 + 400 ms backoff).
+pub(crate) const TRANSIENT_READ_ATTEMPTS: u32 = 3;
+
+/// Attempts for a read that is cheap to retry and expensive to lose.
+///
+/// The charge-limit register (`WMAA 0x1000/0x02`) is read once per 5 min by the
+/// reconciler and on every Battery-tab open, and a failed read makes the hold
+/// phase fall back to `unknown` (8 times in 7.75 h of production). Measured
+/// stalls of the SAME provider run into seconds while the 600 ms budget of the
+/// generic path gives up after ~1 s. Five attempts with a 250 ms linear
+/// backoff cost 2.5 s at worst, once per 5 min, and still fail honestly when
+/// the provider is really gone.
+pub(crate) const PATIENT_READ_ATTEMPTS: u32 = 5;
+pub(crate) const PATIENT_READ_BACKOFF_MS: u64 = 250;
+
+/// Is this error the provider stall that must be retried?
+///
+/// ONLY `0x80041002` (WBEM_E_NOT_FOUND) — on this provider that HRESULT is
+/// raised while it rebuilds its method parameters and the next call succeeds.
+/// `0x80041010` (WBEM_E_INVALID_CLASS) is the opposite: a class that is really
+/// absent, where retrying only wastes time. Never widen this predicate to
+/// "any WMI error" — a permission failure must fail fast.
+pub(crate) fn is_transient_provider_stall(message: &str) -> bool {
+    message.contains("0x80041002")
+}
+
+/// Run `call`, retrying ONLY the transient provider stall.
+///
+/// Split out (with the sleep injected) so the retry policy is unit-tested
+/// without touching WMI: the production caller passes
+/// `std::thread::sleep`, tests count the sleeps instead.
+fn with_transient_retry<T, F, S>(call: F, sleep: S) -> HardwareResult<T>
+where
+    F: FnMut() -> HardwareResult<T>,
+    S: FnMut(u64),
+{
+    with_transient_retry_config(call, sleep, TRANSIENT_READ_ATTEMPTS, 200)
+}
+
+/// [`with_transient_retry`] with an explicit attempt/backoff budget.
+fn with_transient_retry_config<T, F, S>(
+    mut call: F,
+    mut sleep: S,
+    attempts: u32,
+    base_backoff_ms: u64,
+) -> HardwareResult<T>
+where
+    F: FnMut() -> HardwareResult<T>,
+    S: FnMut(u64),
+{
+    let mut attempt = 0u32;
+    loop {
+        match call() {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= attempts || !is_transient_provider_stall(&e.to_string()) {
+                    return Err(e);
+                }
+                // The provider needs a moment to rebuild the method parameters;
+                // 200 ms was enough in the measured recovery, 400 ms covers the
+                // slower stalls. Linear, not exponential: the whole budget is
+                // the caller's timeout.
+                let backoff_ms = base_backoff_ms * u64::from(attempt);
+                log::debug!(
+                    target: "hw::wmi_ec",
+                    "WMAA read hit a degraded WMI provider ({e}); retry {attempt}/{} after {backoff_ms} ms",
+                    attempts - 1
+                );
+                sleep(backoff_ms);
+            }
+        }
+    }
+}
+
 /// Read a WMAA register via WMI MiInterface.
+///
+/// Retries the transient provider stall in-process (see
+/// [`is_transient_provider_stall`]). Before this, a stall answered `Err` to
+/// `run_elevated_impl`, which could not tell "the command failed" from "the
+/// pipe failed" and therefore re-dispatched a SECOND elevation through the
+/// scheduled task: two process spawns and two failures for one 5 ms hiccup
+/// (129 failed helper runs in 53 h, each matching an app-side failure at the
+/// same second). A stall also blanked the charge-limit read-back, which is
+/// what made the hold supervisor flap to `phase=unknown`.
 #[cfg(windows)]
 pub fn wmi_read(fun2: u16, fun3: u16) -> HardwareResult<WmaaResponse> {
-    imp::wmi_call(FUN1_READ, fun2, fun3, 0)
+    with_transient_retry(
+        || imp::wmi_call(FUN1_READ, fun2, fun3, 0),
+        |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+    )
+}
+
+/// Read a WMAA register with the patient retry budget.
+///
+/// Only for registers that are polled rarely and whose loss is visible: the
+/// charge-limit reconciler reads `0x1000/0x02` once per 5 min and a blank
+/// read-back makes the hold phase fall back to `unknown`. Never use this on a
+/// hot poll path — a stalled provider would hold the caller ~2.5 s.
+#[cfg(windows)]
+pub fn wmi_read_patient(fun2: u16, fun3: u16) -> HardwareResult<WmaaResponse> {
+    with_transient_retry_config(
+        || imp::wmi_call(FUN1_READ, fun2, fun3, 0),
+        |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        PATIENT_READ_ATTEMPTS,
+        PATIENT_READ_BACKOFF_MS,
+    )
 }
 
 /// Write a WMAA register via WMI MiInterface.
@@ -588,12 +817,41 @@ pub fn get_performance_mode() -> HardwareResult<EcPerformanceMode> {
     ))
 }
 
+/// Read the EC's active mode as `(raw, decoded)`.
+///
+/// `raw` is the firmware's `FRD0` verbatim (QFAN for the five reportable
+/// values, `0` otherwise) so callers can show the truth even when it is not a
+/// name we know.
+pub fn read_active_mode() -> HardwareResult<(u16, EcActiveMode)> {
+    #[cfg(windows)]
+    {
+        let resp = wmi_read(FUN2_EC_FUNC, 0)?;
+        if !resp.is_success() {
+            return Err(HardwareError::Wmi(format!(
+                "WMAA read failed: SGER=0x{:04X}",
+                resp.sger
+            )));
+        }
+        Ok((resp.frd0, EcActiveMode::from_raw(resp.frd0)))
+    }
+    #[cfg(not(windows))]
+    Err(HardwareError::NotSupported(
+        "WMI only available on Windows".into(),
+    ))
+}
+
 /// Set the performance mode via the EC.
 ///
 /// WORKING FORM — DO NOT MODIFY: Uses wmi_write(FUN2_EC_FUNC=0x0800, mode, 0).
 /// This sets the EC performance mode via the ACPI WMAA method through
 /// the MICommonInterface WMI class. Does NOT require IoTDriver.
 /// Modes: Performance=5, Balanced=6, Quiet=7, SuperQuiet=8, UltraPerformance=9, Extreme=0x0A
+///
+/// IMPORTANT (verified live 2026-11-10): `SGER=0x8000` is returned for every
+/// `FUN3` in this branch, including values the AML never acts on. Modes
+/// `5..=8` write SMMT/SMMD + a DPTF variable and **leave QFAN untouched**, so
+/// a readback cannot confirm them; only `2/3/4/9/0x0A` land in QFAN and are
+/// readable back. Use [`qfan_write_verified`] — never trust `Ok(())` here.
 pub fn set_performance_mode(mode: EcPerformanceMode) -> HardwareResult<()> {
     #[cfg(windows)]
     {
@@ -662,23 +920,60 @@ pub fn read_battery_health() -> HardwareResult<u32> {
     ))
 }
 
-/// Read the AC adapter power in watts.
+/// Read the AC adapter power in watts (ADPW).
 ///
 /// WORKING FORM — DO NOT MODIFY: Uses wmi_read(FUN2_SENSOR=0x1000, FUN3=0x06).
 /// Reads AC adapter power via ACPI WMAA method. Does NOT require IoTDriver.
 /// IMPORTANT: This function calls wmi_cache::with_wmi() internally, so it
 /// MUST NOT be called from inside another with_wmi() closure.
+///
+/// `0x80041002` (`WBEM_E_NOT_FOUND`) is retried once, immediately. On this
+/// provider that HRESULT is raised while building the method parameters
+/// (`params.Put(InData)`) when the provider is in a degraded state — the
+/// production log shows it interleaved with successes for the *same* call
+/// (18 451 `ok=true` vs 1 337 failures on 2026-11-02…06), and the next attempt
+/// moments later always returned a value. A single retry therefore recovers
+/// most of the samples that used to be lost.
 pub fn read_adapter_power() -> HardwareResult<u32> {
     #[cfg(windows)]
     {
-        let resp = wmi_read(FUN2_SENSOR, 0x06)?;
-        if !resp.is_success() {
-            return Err(HardwareError::Wmi(format!(
-                "WMAA read failed: SGER=0x{:04X}",
-                resp.sger
-            )));
+        // Measured on this machine (2026-11-08, bridge as SYSTEM): the first
+        // WMAA call of a fresh WMI connection returns 0x80041002, and every
+        // call after it returns the real wattage (65 W). So attempt a few
+        // times before giving up — the answer is there, the provider just
+        // needs a warm-up call.
+        const ATTEMPTS: u32 = 3;
+        let mut last = None;
+        for attempt in 0..ATTEMPTS {
+            match read_adapter_power_once() {
+                Ok(watts) => return Ok(watts),
+                Err(e) => {
+                    use crate::hw::adapter_power::{classify_failure, AdapterPowerFailure};
+                    let degraded =
+                        classify_failure(&e.to_string()) == AdapterPowerFailure::ProviderDegraded;
+                    if !degraded || attempt + 1 == ATTEMPTS {
+                        return Err(e);
+                    }
+                    log::debug!(
+                        target: "hw::wmi_ec",
+                        "adapter power read hit a degraded WMI provider ({e}); retry {}/{}",
+                        attempt + 1,
+                        ATTEMPTS - 1
+                    );
+                    // The provider needs a moment to rebuild its method
+                    // parameters; a short backoff is enough (measured: the
+                    // second call ~0.4 s later returns the real wattage).
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        200 * u64::from(attempt + 1),
+                    ));
+                    last = Some(e);
+                }
+            }
         }
-        Ok(resp.frd1)
+        match last {
+            Some(e) => Err(e),
+            None => Err(HardwareError::Wmi("adapter power read failed".into())),
+        }
     }
     #[cfg(not(windows))]
     Err(HardwareError::NotSupported(
@@ -686,24 +981,60 @@ pub fn read_adapter_power() -> HardwareResult<u32> {
     ))
 }
 
-/// Set the hotkey brightness data (HBDA).
-pub fn set_brightness_data(level: u32) -> HardwareResult<()> {
-    #[cfg(windows)]
-    {
-        let resp = wmi_write(FUN2_SENSOR, 0x02, level)?;
-        if !resp.is_success() {
-            return Err(HardwareError::Wmi(format!(
-                "WMAA write failed: SGER=0x{:04X}",
-                resp.sger
-            )));
-        }
-        Ok(())
+/// One WMAA `0x1000 / 0x06` read, no retry.
+#[cfg(windows)]
+fn read_adapter_power_once() -> HardwareResult<u32> {
+    let resp = wmi_read(FUN2_SENSOR, 0x06)?;
+    if !resp.is_success() {
+        return Err(HardwareError::Wmi(format!(
+            "WMAA read failed: SGER=0x{:04X}",
+            resp.sger
+        )));
     }
-    #[cfg(not(windows))]
-    Err(HardwareError::NotSupported(
-        "WMI only available on Windows".into(),
-    ))
+    Ok(resp.frd1)
 }
+
+/// Read the AC adapter power as a structured result.
+///
+/// Only `WBEM_E_INVALID_CLASS` / invalid namespace — a real capability fact —
+/// is reported as `Ok(supported: false)`. `WBEM_E_NOT_FOUND` (`0x80041002`) is
+/// a degraded-provider hiccup on this machine and stays an `Err`, so the
+/// caller retries on the next poll instead of hiding the field forever.
+///
+/// The "once per process" log lives here because the dispatch may run inside
+/// the long-lived bridge service (many requests, one process).
+pub fn read_adapter_power_status() -> HardwareResult<AdapterPowerReading> {
+    use crate::hw::adapter_power::{classify_failure, AdapterPowerFailure};
+    use std::sync::Once;
+
+    match read_adapter_power() {
+        Ok(watts) => Ok(AdapterPowerReading::watts(watts)),
+        Err(e) => {
+            let message = e.to_string();
+            if classify_failure(&message) == AdapterPowerFailure::HardwareUnsupported {
+                static LOGGED: Once = Once::new();
+                LOGGED.call_once(|| {
+                    log::info!(
+                        target: "hw::wmi_ec",
+                        "AC adapter power class absent on this hardware ({message}) — \
+                         returning a structured 'unsupported' result instead of an error"
+                    );
+                });
+                Ok(AdapterPowerReading::unsupported(message))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+// REMOVED — this pair is the charging-protection setter.
+//
+// WMAA `FUN2=0x1000, FUN3=0x02` writes `LONL`/`HBDA` (the battery limit), not
+// display brightness (`DBLL` lives at ERAM 0xAE and is not reachable through
+// WMAA). Any caller of this function would silently rewrite the charge limit:
+// FUN4=1 → 80%, 4 → 90%, 5 → 70%, 6 → 60%, 7 → 50%, 8 → 40%, 0 → no limit.
+// Use `crate::hw::charging::set_charging_threshold` instead.
 
 /// Set the SAGV (System Agent Geyserville) mode.
 pub fn set_sagv_mode(mode: u32) -> HardwareResult<()> {
@@ -905,5 +1236,162 @@ mod tests {
         assert_eq!(resp.futr, 0x1000);
         assert_eq!(resp.frd0, 0x0006);
         assert_eq!(resp.frd1, 100);
+    }
+
+    #[test]
+    fn active_mode_only_names_the_five_aml_branches() {
+        // The AML switch has cases for exactly these QFAN values.
+        assert_eq!(EcActiveMode::from_raw(2), EcActiveMode::Turbo);
+        assert_eq!(EcActiveMode::from_raw(3), EcActiveMode::Decepticon);
+        assert_eq!(EcActiveMode::from_raw(4), EcActiveMode::Overdrive);
+        assert_eq!(EcActiveMode::from_raw(9), EcActiveMode::SmartAdaptive);
+        assert_eq!(EcActiveMode::from_raw(0x0A), EcActiveMode::Smart);
+        // Everything else falls through to FRD0 = 0: the mode is NOT "Silence",
+        // it is simply not reportable through this channel.
+        for raw in [0u16, 1, 5, 6, 7, 8, 11, 12, 13, 14, 0xFFFF] {
+            assert_eq!(
+                EcActiveMode::from_raw(raw),
+                EcActiveMode::Unreported,
+                "raw {raw} must not be named"
+            );
+            assert!(!EcActiveMode::from_raw(raw).is_reported());
+        }
+    }
+
+    #[test]
+    fn active_mode_labels_are_stable() {
+        assert_eq!(EcActiveMode::Turbo.label(), "turbo");
+        assert_eq!(EcActiveMode::Decepticon.label(), "decepticon");
+        assert_eq!(EcActiveMode::Overdrive.label(), "overdrive");
+        assert_eq!(EcActiveMode::SmartAdaptive.label(), "smart_adaptive");
+        assert_eq!(EcActiveMode::Smart.label(), "smart");
+        assert_eq!(EcActiveMode::Unreported.label(), "unreported");
+    }
+
+    #[test]
+    fn reportable_writes_need_an_exact_readback() {
+        // Live-verified: FUN3=0x0A latched QFAN=0x0A and the readback followed.
+        assert!(qfan_write_verified(0x0A, 9, 0x0A));
+        assert!(qfan_write_verified(9, 0x0A, 9));
+        assert!(qfan_write_verified(2, 9, 2));
+        // A write the AML ignores must never verify.
+        assert!(!qfan_write_verified(0x0A, 9, 9));
+        assert!(!qfan_write_verified(2, 0x0A, 0x0A));
+    }
+
+    #[test]
+    fn smm_profile_writes_only_verify_on_a_real_transition() {
+        // Live-verified: FUN3=6 left QFAN at 9, so the readback is unchanged.
+        assert!(!qfan_write_verified(6, 9, 9));
+        assert!(!qfan_write_verified(5, 9, 9));
+        assert!(!qfan_write_verified(7, 9, 9));
+        assert!(!qfan_write_verified(8, 9, 9));
+        // A move into the unreported bucket is evidence the register changed…
+        assert!(qfan_write_verified(6, 9, 0));
+        assert!(qfan_write_verified(8, 2, 0));
+        // …but 0 → 0 proves nothing and must stay unverified.
+        assert!(!qfan_write_verified(6, 0, 0));
+    }
+
+    /// Production shape: 62 app-visible + 129 helper-level stalls in 53 h, all
+    /// the same `WBEM_E_NOT_FOUND` while the provider rebuilt its parameters.
+    #[test]
+    fn only_the_provider_stall_is_retried() {
+        assert!(is_transient_provider_stall("Hardware error: 0x80041002"));
+        assert!(is_transient_provider_stall(
+            "WMI query failed: provider returned 0x80041002 (WBEM_E_NOT_FOUND)"
+        ));
+        // A truly absent class, an access denial and an IO error must fail fast.
+        assert!(!is_transient_provider_stall(
+            "Hardware error: 0x80041010 (WBEM_E_INVALID_CLASS)"
+        ));
+        assert!(!is_transient_provider_stall(
+            "Hardware error: 0x80070005 (Access is denied)"
+        ));
+        assert!(!is_transient_provider_stall(
+            "Timeout: blocking hardware operation exceeded 5 seconds"
+        ));
+        assert!(!is_transient_provider_stall(""));
+    }
+
+    #[test]
+    fn a_stall_recovered_on_the_second_call_never_surfaces() {
+        let mut calls = 0u32;
+        let mut sleeps = Vec::new();
+        let result: HardwareResult<u16> = with_transient_retry(
+            || {
+                calls += 1;
+                if calls < 2 {
+                    Err(HardwareError::Wmi("0x80041002".into()))
+                } else {
+                    Ok(65)
+                }
+            },
+            |ms| sleeps.push(ms),
+        );
+        assert_eq!(result.unwrap(), 65);
+        assert_eq!(calls, 2, "one retry is enough for a single stall");
+        assert_eq!(sleeps, vec![200], "first backoff is 200 ms");
+    }
+
+    #[test]
+    fn a_persistent_stall_gives_up_after_the_declared_attempts() {
+        let mut calls = 0u32;
+        let mut sleeps = Vec::new();
+        let result: HardwareResult<u16> = with_transient_retry(
+            || {
+                calls += 1;
+                Err(HardwareError::Wmi("0x80041002".into()))
+            },
+            |ms| sleeps.push(ms),
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, TRANSIENT_READ_ATTEMPTS);
+        // Never a third sleep: the last failure is returned, not retried.
+        assert_eq!(sleeps.len() as u32, TRANSIENT_READ_ATTEMPTS - 1);
+        assert_eq!(sleeps, vec![200, 400]);
+    }
+
+    #[test]
+    fn the_patient_budget_covers_the_slow_stalls_that_blank_the_charge_read() {
+        // The charge register is polled once per 5 min; a 600 ms budget gave up
+        // while the measured stalls of this provider ran into seconds, and the
+        // hold supervisor flapped to `unknown` eight times in 7.75 h.
+        let mut calls = 0u32;
+        let mut sleeps = Vec::new();
+        let result: HardwareResult<u16> = with_transient_retry_config(
+            || {
+                calls += 1;
+                Err(HardwareError::Wmi("0x80041002".into()))
+            },
+            |ms| sleeps.push(ms),
+            PATIENT_READ_ATTEMPTS,
+            PATIENT_READ_BACKOFF_MS,
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, PATIENT_READ_ATTEMPTS);
+        assert_eq!(sleeps, vec![250, 500, 750, 1000]);
+        assert!(
+            sleeps.iter().sum::<u64>() >= 2_000,
+            "the patient budget must span the multi-second stalls, got {sleeps:?}"
+        );
+        assert!(
+            sleeps.iter().sum::<u64>() <= 3_000,
+            "and stay far below the caller's timeout, got {sleeps:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_transient_error_is_not_retried() {
+        let mut calls = 0u32;
+        let result: HardwareResult<u16> = with_transient_retry(
+            || {
+                calls += 1;
+                Err(HardwareError::Wmi("0x80070005".into()))
+            },
+            |_| panic!("a hard failure must not back off"),
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "permission failures fail fast");
     }
 }

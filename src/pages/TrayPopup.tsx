@@ -5,6 +5,8 @@ import type { useHardware } from '../hooks/useHardware';
 import type { PerformanceMode } from '../types/hardware';
 import { useSettings } from '../hooks/useSettings';
 import { BRIGHTNESS_PRESETS, getActivePreset } from '../lib/brightnessPresets';
+import { batteryState, batteryStateBadge } from '../lib/batteryState';
+import { Icon, type IconName } from '../components/ui/icons';
 
 type Hardware = ReturnType<typeof useHardware>;
 
@@ -12,19 +14,19 @@ interface Props {
   hardware: Hardware;
 }
 
-type ModeEntry = { key: PerformanceMode; label: string; i18nKey: string };
+type ModeEntry = { key: PerformanceMode; icon: IconName; i18nKey: string };
 
 const STANDARD_MODES: ModeEntry[] = [
-  { key: 'silence', label: '🔇', i18nKey: 'silence' },
-  { key: 'balance', label: '⚖️', i18nKey: 'balance' },
-  { key: 'turbo', label: '⚡', i18nKey: 'turbo' },
-  { key: 'long_battery', label: '🔋', i18nKey: 'longBattery' },
-  { key: 'decepticon', label: '💥', i18nKey: 'decepticon' },
+  { key: 'silence', icon: 'volume-x', i18nKey: 'silence' },
+  { key: 'balance', icon: 'scale', i18nKey: 'balance' },
+  { key: 'turbo', icon: 'bolt', i18nKey: 'turbo' },
+  { key: 'long_battery', icon: 'leaf', i18nKey: 'longBattery' },
+  { key: 'decepticon', icon: 'thermometer', i18nKey: 'decepticon' },
 ];
 
 const AI_MODES: ModeEntry[] = [
-  { key: 'smart', label: '🧠', i18nKey: 'smart' },
-  { key: 'smart_acceleration', label: '🚀', i18nKey: 'smartAcceleration' },
+  { key: 'smart', icon: 'brain', i18nKey: 'smart' },
+  { key: 'smart_acceleration', icon: 'rocket', i18nKey: 'smartAcceleration' },
 ];
 
 export default function TrayPopup({ hardware }: Props) {
@@ -51,6 +53,12 @@ export default function TrayPopup({ hardware }: Props) {
   const [isAdjustingVolume, setIsAdjustingVolume] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const { isConfigured: hasAiApi, settings, updateKey } = useSettings();
+
+  // Three states: charging / AC connected (plugged, not charging) / discharging.
+  // The two-state form used to claim "Discharging" with the charger plugged in.
+  const trayBatteryState = battery
+    ? batteryState(battery.is_charging, battery.is_plugged)
+    : 'discharging';
 
   const requestTrayResize = useCallback(() => {
     const el = rootRef.current;
@@ -165,7 +173,7 @@ export default function TrayPopup({ hardware }: Props) {
                 disabled={loading}
                 title={t(`performance.modes.${m.i18nKey}` as Parameters<typeof t>[0])}
               >
-                {m.label}
+                <Icon name={m.icon} size={16} />
               </button>
             ))}
           </div>
@@ -183,7 +191,7 @@ export default function TrayPopup({ hardware }: Props) {
                     : t(`performance.modes.${m.i18nKey}` as Parameters<typeof t>[0])
                 }
               >
-                {m.label}
+                <Icon name={m.icon} size={16} />
               </button>
             ))}
           </div>
@@ -196,9 +204,23 @@ export default function TrayPopup({ hardware }: Props) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <div style={{ flex: 1 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600 }}>{battery.level}%</span>
-                  <span className={`badge ${battery.is_charging ? 'success' : 'warning'}`}>
-                    {battery.is_charging ? t('battery.charging') : t('battery.discharging')}
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>
+                    {battery.level}%
+                    {battery.is_plugged && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 500,
+                          color: 'var(--text-dim)',
+                          marginLeft: 6,
+                        }}
+                      >
+                        {t('battery.acConnected')}
+                      </span>
+                    )}
+                  </span>
+                  <span className={`badge ${batteryStateBadge(trayBatteryState)}`}>
+                    {t(`battery.${trayBatteryState}` as Parameters<typeof t>[0])}
                   </span>
                 </div>
                 <div className="progress-bar">
@@ -219,7 +241,7 @@ export default function TrayPopup({ hardware }: Props) {
             <div className="tray-quick-card">
               <div className="tray-quick-head">
                 <span className="tray-quick-title" aria-hidden="true">
-                  🔊 Audio
+                  <Icon name="volume-high" size={16} /> {t('nav.audio')}
                 </span>
                 <button
                   className="tray-chip-btn"
@@ -250,10 +272,12 @@ export default function TrayPopup({ hardware }: Props) {
             <div className="tray-quick-card">
               <div className="tray-quick-head">
                 <span className="tray-quick-title" aria-hidden="true">
-                  📶 WiFi
+                  <Icon name="wifi" size={16} /> {t('nav.wifi')}
                 </span>
               </div>
-              <div className="tray-quick-meta">{t('tray.openApp')} → WiFi Manager</div>
+              <div className="tray-quick-meta">
+                {t('tray.openApp')} {t('main.wifiManager')}
+              </div>
             </div>
           </div>
         </div>
@@ -268,8 +292,16 @@ export default function TrayPopup({ hardware }: Props) {
               style={{ width: '100%', justifyContent: 'space-between' }}
               onClick={() => setShowDisplay((v) => !v)}
             >
-              <span aria-hidden="true">🖥️ {t('tray.displaySettings')}</span>
-              <span style={{ fontSize: 10, opacity: 0.6 }}>{showDisplay ? '▲' : '▼'}</span>
+              <span aria-hidden="true">
+                <Icon name="monitor" size={16} /> {t('tray.displaySettings')}
+              </span>
+              <span style={{ fontSize: 10, opacity: 0.6 }}>
+                {showDisplay ? (
+                  <Icon name="chevron-up" size={12} />
+                ) : (
+                  <Icon name="chevron-down" size={12} />
+                )}
+              </span>
             </button>
 
             {showDisplay && (
@@ -347,7 +379,7 @@ export default function TrayPopup({ hardware }: Props) {
                           <button
                             key={p.key}
                             className={`tray-mode-btn${isActive ? ' active' : ''}`}
-                            title={p.hint}
+                            title={t(p.hintKey)}
                             onClick={() =>
                               void setAiBrightnessConfig({
                                 enabled: true,
@@ -355,7 +387,7 @@ export default function TrayPopup({ hardware }: Props) {
                               })
                             }
                           >
-                            {p.icon} {p.label}
+                            <Icon name={p.icon} size={16} /> {t(p.labelKey)}
                           </button>
                         );
                       })}
@@ -371,8 +403,16 @@ export default function TrayPopup({ hardware }: Props) {
               style={{ width: '100%', justifyContent: 'space-between' }}
               onClick={() => setShowFan((v) => !v)}
             >
-              <span aria-hidden="true">💨 {t('tray.fanControl')}</span>
-              <span style={{ fontSize: 10, opacity: 0.6 }}>{showFan ? '▲' : '▼'}</span>
+              <span aria-hidden="true">
+                <Icon name="wind" size={16} /> {t('tray.fanControl')}
+              </span>
+              <span style={{ fontSize: 10, opacity: 0.6 }}>
+                {showFan ? (
+                  <Icon name="chevron-up" size={12} />
+                ) : (
+                  <Icon name="chevron-down" size={12} />
+                )}
+              </span>
             </button>
 
             {showFan && (
@@ -402,7 +442,14 @@ export default function TrayPopup({ hardware }: Props) {
                         disabled={loading}
                         title={t(`fan.modes.${mode}` as Parameters<typeof t>[0])}
                       >
-                        {mode === 'auto' ? '🔄' : mode === 'fixed' ? '🔧' : '🔇'} {shortLabel}
+                        {mode === 'auto' ? (
+                          <Icon name="refresh" size={16} />
+                        ) : mode === 'fixed' ? (
+                          <Icon name="wrench" size={16} />
+                        ) : (
+                          <Icon name="volume-x" size={16} />
+                        )}{' '}
+                        {shortLabel}
                       </button>
                     );
                   })}
@@ -417,7 +464,9 @@ export default function TrayPopup({ hardware }: Props) {
                       gap: 12,
                     }}
                   >
-                    <span>{fan.speed_rpm} RPM</span>
+                    <span>
+                      {fan.speed_rpm != null ? `${fan.speed_rpm.toLocaleString()} RPM` : '— RPM'}
+                    </span>
                     <span>
                       {fan.gpu_temp_celsius != null ? `${fan.gpu_temp_celsius}°C GPU` : '— GPU'}
                     </span>
@@ -430,7 +479,9 @@ export default function TrayPopup({ hardware }: Props) {
 
         {/* Appearance — opacity slider */}
         <div className="tray-section">
-          <div className="tray-section-label">🎨 {t('tray.appearance')}</div>
+          <div className="tray-section-label">
+            <Icon name="palette" size={16} /> {t('tray.appearance')}
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
               {t('tray.opacity')}: {Math.round(opacity * 100)}%

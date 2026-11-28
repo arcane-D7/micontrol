@@ -4,13 +4,190 @@
 //! for display info queries on Windows.
 
 use crate::hw::errors::{HardwareError, HardwareResult};
+use crate::util::process_spawn;
+use crate::util::state_store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicU8, Ordering};
 
-/// Set to `false` after the first `set_brightness_igcl` failure so we never
-/// retry a DLL that cannot load — avoids a WARN log on every brightness change.
+/// `false` while IGCL writes are known to fail, so a broken ControlLib is not
+/// retried on every brightness change. It is re-armed by the slow retry
+/// (`IGCL_RETRY_SECS`) and by a successful device re-enumeration (P10).
 static IGCL_SET_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+// ── Brightness source state (P10) ────────────────────────────────────────────
+//
+// IGCL can be present (ControlLib.dll loads) yet enumerate ZERO devices, which
+// silently pins brightness to the WMI path for the whole session. The old code
+// logged two WARNs ("no IGCL devices enumerated" + "falling back to WMI
+// permanently") with no state, no reason and no retry. This block keeps the
+// live source, exposes it through `DisplayInfo`, logs one clear transition and
+// persists it so a post-mortem (or the next session's UI) still shows why the
+// machine is on the fallback.
+const SOURCE_UNKNOWN: u8 = 0;
+const SOURCE_IGCL: u8 = 1;
+const SOURCE_WMI_FALLBACK: u8 = 2;
+static BRIGHTNESS_SOURCE: AtomicU8 = AtomicU8::new(SOURCE_UNKNOWN);
+
+/// Retry IGCL slowly after a failure: a driver update / GPU re-enumeration can
+/// restore it without restarting the app. (P10 requirement: ~10 min.)
+const IGCL_RETRY_SECS: u64 = 600;
+
+fn igcl_retry_at() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
+    static RETRY_AT: std::sync::OnceLock<std::sync::Mutex<Option<std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    RETRY_AT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn schedule_igcl_retry() {
+    let mut guard = crate::util::panic::lock_or_recover(igcl_retry_at());
+    *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(IGCL_RETRY_SECS));
+}
+
+/// Pure deadline check so the slow-retry window is unit-testable with an
+/// injected `now` (no sleeps).
+fn retry_due(deadline: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    deadline.is_some_and(|at| now >= at)
+}
+
+/// True once the slow IGCL retry window has elapsed (and consumes it).
+fn igcl_retry_due() -> bool {
+    let mut guard = crate::util::panic::lock_or_recover(igcl_retry_at());
+    let due = retry_due(*guard, std::time::Instant::now());
+    if due {
+        *guard = None;
+    }
+    due
+}
+
+fn brightness_source_name(source: u8) -> &'static str {
+    match source {
+        SOURCE_IGCL => "igcl",
+        SOURCE_WMI_FALLBACK => "wmi-fallback",
+        _ => "unknown",
+    }
+}
+
+/// Current brightness backend, for logs / `DisplayInfo` / the UI.
+pub fn brightness_source() -> &'static str {
+    let current = BRIGHTNESS_SOURCE.load(Ordering::Relaxed);
+    if current != SOURCE_UNKNOWN {
+        return brightness_source_name(current);
+    }
+    persisted_brightness_source()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BrightnessSourceState {
+    source: String,
+    reason: String,
+    updated_at_ms: u64,
+}
+
+fn brightness_source_path() -> std::path::PathBuf {
+    if let Ok(override_path) = std::env::var("MICONTROL_BRIGHTNESS_SOURCE_PATH") {
+        return std::path::PathBuf::from(override_path);
+    }
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base)
+        .join("MiControl")
+        .join("brightness_source.json")
+}
+
+fn persist_brightness_source(source: &str, reason: &str) {
+    let state = BrightnessSourceState {
+        source: source.to_string(),
+        reason: reason.to_string(),
+        updated_at_ms: now_ms(),
+    };
+    let path = brightness_source_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match serde_json::to_string_pretty(&state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::debug!(target: "hw::display", "failed to persist brightness source: {e}");
+            }
+        }
+        Err(e) => log::debug!(target: "hw::display", "failed to serialize brightness source: {e}"),
+    }
+}
+
+/// Last persisted source (previous session), used only until the first live
+/// brightness operation records the current one.
+fn persisted_brightness_source() -> &'static str {
+    static CACHED: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    CACHED.get_or_init(|| {
+        let Ok(data) = std::fs::read_to_string(brightness_source_path()) else {
+            return "unknown";
+        };
+        let Ok(state) = serde_json::from_str::<BrightnessSourceState>(&data) else {
+            return "unknown";
+        };
+        match state.source.as_str() {
+            "igcl" => "igcl",
+            "wmi-fallback" => "wmi-fallback",
+            _ => "unknown",
+        }
+    })
+}
+
+/// Record a source transition. Logs exactly ONE line per change (the previous
+/// code emitted a WARN on every failed brightness write) and persists the state.
+fn set_brightness_source(source: u8, reason: &str) {
+    let previous = BRIGHTNESS_SOURCE.swap(source, Ordering::Relaxed);
+    if previous == source {
+        return;
+    }
+    let name = brightness_source_name(source);
+    if source == SOURCE_WMI_FALLBACK {
+        log::info!(
+            target: "hw::display",
+            "brightness source: {name} ({reason}); writes use WMI, IGCL retried every {IGCL_RETRY_SECS}s"
+        );
+    } else {
+        log::info!(target: "hw::display", "brightness source: {name} ({reason})");
+    }
+    persist_brightness_source(name, reason);
+}
+
+/// Called by the IGCL session when ControlLib.dll loads but no device is
+/// usable (P10). Keeps the diagnostic to a single line via
+/// `set_brightness_source` (which only logs on transitions).
+#[cfg(windows)]
+fn report_igcl_unavailable(reason: &str) {
+    set_brightness_source(SOURCE_WMI_FALLBACK, reason);
+    schedule_igcl_retry();
+}
+
+/// Called by the IGCL session when a device shows up again.
+#[cfg(windows)]
+fn report_igcl_available(reason: &str) {
+    IGCL_SET_AVAILABLE.store(true, Ordering::Relaxed);
+    *crate::util::panic::lock_or_recover(igcl_retry_at()) = None;
+    set_brightness_source(SOURCE_IGCL, reason);
+}
+
+/// Probe IGCL once per process so `DisplayInfo.brightness_source` reports the
+/// live backend instead of the value persisted by the previous session.
+///
+/// Cheap: it opens the (already cached, load-once) IGCL session and reads the
+/// current brightness; subsequent calls are a no-op because the source is then
+/// known.
+#[cfg(windows)]
+fn probe_brightness_source_once() {
+    if BRIGHTNESS_SOURCE.load(Ordering::Relaxed) != SOURCE_UNKNOWN {
+        return;
+    }
+    match get_brightness_igcl() {
+        Ok(_) => report_igcl_available("IGCL brightness read succeeded"),
+        Err(e) => set_brightness_source(SOURCE_WMI_FALLBACK, &format!("IGCL unavailable: {e}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn probe_brightness_source_once() {}
 
 /// Persistent IGCL session (load-once, never-close).
 ///
@@ -40,7 +217,12 @@ mod igcl_session {
         /// unload ControlLib.dll (its internal threads keep executing it).
         #[allow(dead_code)]
         lib: Library,
+        /// API handle returned by `ctlInit`. Kept so re-enumeration (P10) does
+        /// not need a second `ctlInit`.
+        api: CtlApiHandle,
         device: *mut std::ffi::c_void,
+        /// Last `ctlEnumerateDevices` attempt — throttles recovery retries.
+        last_enum: std::time::Instant,
     }
 
     // SAFETY: the session is opened once at first use; the handles are opaque
@@ -51,6 +233,40 @@ mod igcl_session {
 
     pub static IGG_SESSION: LazyLock<Mutex<Option<IgclSession>>> =
         LazyLock::new(|| Mutex::new(None));
+
+    /// Minimum interval between `ctlEnumerateDevices` recovery attempts when
+    /// the session has no usable device (P10). Brightness writes additionally
+    /// gate on a 10-minute retry, so the driver is never hammered.
+    const REENUM_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Enumerate IGCL display devices.
+    ///
+    /// * `Ok(Some(device))` — usable device handle.
+    /// * `Ok(None)` — the driver reports zero devices (driver/device not
+    ///   supported by IGCL, e.g. no Intel GPU exposed to ControlLib).
+    /// * `Err(msg)` — symbol missing or a hard HRESULT.
+    fn enumerate_devices(
+        lib: &Library,
+        api: CtlApiHandle,
+    ) -> Result<Option<*mut std::ffi::c_void>, String> {
+        let ctl_enumerate: libloading::Symbol<FnCtlEnumerateDevices> =
+            unsafe { lib.get(b"ctlEnumerateDevices\0") }
+                .map_err(|e| format!("ctlEnumerateDevices symbol missing: {e}"))?;
+        let mut count: u32 = 0;
+        let rc = unsafe { ctl_enumerate(api, &mut count, std::ptr::null_mut()) };
+        if rc != 0 && (rc & 0x8000_0000) != 0 {
+            return Err(format!("ctlEnumerateDevices count failed rc=0x{rc:08X}"));
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
+        let rc2 = unsafe { ctl_enumerate(api, &mut count, devices.as_mut_ptr()) };
+        if rc2 != 0 && (rc2 & 0x8000_0000) != 0 {
+            return Err(format!("ctlEnumerateDevices fill failed rc=0x{rc2:08X}"));
+        }
+        Ok(devices.first().copied().filter(|d| !d.is_null()))
+    }
 
     /// Open (or reuse) a persistent IGCL session. Returns the stored handles
     /// without ever calling `ctlClose` or unloading the library.
@@ -70,7 +286,24 @@ mod igcl_session {
     /// Library so the DLL stays mapped.
     pub fn get_session() -> Result<(Library, *mut std::ffi::c_void), String> {
         let mut guard = IGG_SESSION.lock().map_err(|e| e.to_string())?;
-        if let Some(s) = guard.as_ref() {
+        if let Some(s) = guard.as_mut() {
+            // P10: a null device used to stick for the whole session ("falling
+            // back to WMI permanently"). Re-enumerate slowly — never reload or
+            // unload the DLL — so a driver re-init or GPU re-enumeration can
+            // restore hardware brightness without restarting the app.
+            if s.device.is_null() && s.last_enum.elapsed() >= REENUM_MIN_INTERVAL {
+                s.last_enum = std::time::Instant::now();
+                match enumerate_devices(&s.lib, s.api) {
+                    Ok(Some(device)) => {
+                        s.device = device;
+                        super::report_igcl_available("IGCL device appeared on re-enumeration");
+                    }
+                    Ok(None) => {
+                        log::debug!("[igcl_session] re-enumeration still reports 0 IGCL devices");
+                    }
+                    Err(e) => log::debug!("[igcl_session] re-enumeration failed: {e}"),
+                }
+            }
             // Session already stored — its `lib` handle keeps ControlLib.dll
             // mapped for the whole process. A failed reload here only means
             // the caller falls back to WMI; the DLL stays mapped regardless.
@@ -104,9 +337,14 @@ mod igcl_session {
                     );
                     let s = IgclSession {
                         lib,
+                        api: std::ptr::null_mut(),
                         device: std::ptr::null_mut(),
+                        last_enum: std::time::Instant::now(),
                     };
                     *guard = Some(s);
+                    super::report_igcl_unavailable(
+                        "ControlLib.dll has no ctlInit symbol (incompatible IGCL build)",
+                    );
                     let lib_for_caller = loader_reload(&path).ok_or_else(|| {
                         "ControlLib.dll reload failed after ctlInit symbol error".to_string()
                     })?;
@@ -137,52 +375,39 @@ mod igcl_session {
             }
         }
 
-        // ── ctlEnumerateDevices: best-effort ────────────────────────────────
+        // ── ctlEnumerateDevices: best-effort, one clear diagnostic ──────────
         // Warnings are non-fatal; a failed enumerate leaves a null device and
         // runtime ops fall back to WMI — but the DLL stays mapped either way.
-        let mut device: *mut std::ffi::c_void = std::ptr::null_mut();
-        let ctl_enumerate: libloading::Symbol<FnCtlEnumerateDevices> = unsafe {
-            match lib.get(b"ctlEnumerateDevices\0") {
-                Ok(s) => s,
-                Err(e) => {
-                    log::warn!("[igcl_session] ctlEnumerateDevices symbol missing: {e}");
-                    // Still store the session (DLL stays mapped for the whole
-                    // process) and return a reloaded caller handle.
-                    let s = IgclSession { lib, device };
-                    *guard = Some(s);
-                    let lib_for_caller = loader_reload(&path).ok_or_else(|| {
-                        "ControlLib.dll reload failed after enumerate symbol error".to_string()
-                    })?;
-                    return Ok((lib_for_caller, device));
-                }
+        // P10: ONE diagnostic line (via the brightness-source transition) and a
+        // slow retry, instead of a WARN here plus a "falls back permanently"
+        // WARN from the caller.
+        let device = match enumerate_devices(&lib, api_handle) {
+            Ok(Some(device)) => {
+                super::report_igcl_available("IGCL device enumerated at session start");
+                device
+            }
+            Ok(None) => {
+                super::report_igcl_unavailable(&format!(
+                    "ControlLib.dll loaded ({path}) but ctlEnumerateDevices returned 0 devices — \
+                     this Intel display driver does not expose IGCL devices"
+                ));
+                std::ptr::null_mut()
+            }
+            Err(e) => {
+                super::report_igcl_unavailable(&format!(
+                    "ControlLib.dll loaded ({path}) but IGCL enumeration failed: {e}"
+                ));
+                std::ptr::null_mut()
             }
         };
-        let mut count: u32 = 0;
-        let erc = unsafe { ctl_enumerate(api_handle, &mut count, std::ptr::null_mut()) };
-        if erc != 0 && (erc & 0x8000_0000) != 0 {
-            log::warn!(
-                "[igcl_session] ctlEnumerateDevices count failed rc=0x{erc:08X} — \
-                 storing session with null device (DLL stays mapped)"
-            );
-        } else if count > 0 {
-            let mut devices = vec![std::ptr::null_mut::<std::ffi::c_void>(); count as usize];
-            let erc2 = unsafe { ctl_enumerate(api_handle, &mut count, devices.as_mut_ptr()) };
-            if erc2 != 0 && (erc2 & 0x8000_0000) != 0 {
-                log::warn!(
-                    "[igcl_session] ctlEnumerateDevices fill failed rc=0x{erc2:08X} — \
-                     keeping null device (DLL stays mapped)"
-                );
-            } else {
-                device = devices[0];
-            }
-        } else {
-            log::warn!(
-                "[igcl_session] no IGCL devices enumerated — storing session with null device"
-            );
-        }
 
         // ALWAYS store the session: the Library must never be dropped.
-        let s = IgclSession { lib, device };
+        let s = IgclSession {
+            lib,
+            api: api_handle,
+            device,
+            last_enum: std::time::Instant::now(),
+        };
         *guard = Some(s);
         // Re-load for the caller so the stored session keeps its own refcount:
         // LoadLibrary increments the module refcount and does NOT unload it.
@@ -349,6 +574,15 @@ pub fn is_calibration_in_progress() -> bool {
 pub struct DisplayInfo {
     pub brightness: u8,
     pub hdr_enabled: bool,
+    /// True when at least one connected display reports HDR (advanced color)
+    /// support. The UI disables the toggle when this is false, instead of
+    /// offering a switch that would write to paths that cannot honour it.
+    #[serde(default)]
+    pub hdr_supported: bool,
+    /// Advanced-color state per display, so "HDR enabled" can say *which*
+    /// monitor it means instead of an aggregate true/false.
+    #[serde(default)]
+    pub hdr_displays: Vec<HdrDisplayState>,
     pub refresh_rate_hz: u32,
     /// All Hz values supported by the primary display at its current resolution.
     pub available_refresh_rates: Vec<u32>,
@@ -357,10 +591,25 @@ pub struct DisplayInfo {
     /// Intel PSR2 DRRS (Panel Self Refresh 2 Display Refresh Rate Switching).
     /// Controlled via the Intel Arc driver registry key Psr2DrrsEnable.
     pub adaptive_refresh_rate: bool,
+    /// True when the PSR2 DRRS value was written during the current boot, i.e.
+    /// the registry holds the new intent but the driver has not reloaded it.
+    /// There is no API to observe DRRS, so this is the only honest state.
+    #[serde(default)]
+    pub adaptive_refresh_rate_pending_reboot: bool,
     pub ai_brightness: bool,
     pub ai_brightness_config: AiBrightnessConfig,
     /// Current ambient illuminance from the light sensor (lux). None when unavailable.
     pub ambient_lux: Option<f32>,
+    /// Sensor diagnosis (available / no_sensor / frozen_report / unknown) so
+    /// the UI can say "no sensor on this device" or "present but not
+    /// reporting (last reading D Mon)" instead of a generic unavailable.
+    #[serde(default)]
+    pub ambient_sensor: AmbientSensorInfo,
+    /// Which backend actually writes brightness: "igcl", "wmi-fallback" or
+    /// "unknown" (P10). When it is "wmi-fallback" the UI can explain that
+    /// hardware brightness control is unavailable on this driver.
+    #[serde(default)]
+    pub brightness_source: String,
 }
 
 const IGCL_DLL: &str = r"C:\Windows\System32\ControlLib.dll";
@@ -373,18 +622,14 @@ const AI_BRIGHTNESS_SMTH_VALUE: &str = "AiBrightnessSmoothing";
 /// 0 = "curve" (fixed min/max formula), 1 = "smart" (learned user preference curve).
 const AI_BRIGHTNESS_MODE_VALUE: &str = "AiBrightnessMode";
 
-/// Smart-mode persistence file: `%LOCALAPPDATA%\MiControl\smart_brightness.json`.
-///
-/// Tests override this via `MICONTROL_SMART_MODEL_PATH` so unit tests never
-/// clobber the user's real learned model.
-fn smart_model_path() -> std::path::PathBuf {
-    if let Ok(override_path) = std::env::var("MICONTROL_SMART_MODEL_PATH") {
-        return std::path::PathBuf::from(override_path);
-    }
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(base)
-        .join("MiControl")
-        .join("smart_brightness.json")
+/// Smart-mode persistence: `%LOCALAPPDATA%\MiControl\state\smart_model.json`
+/// through the `smart_model` state store (schema 1, user scope). The path is
+/// resolved by the store registry; tests redirect the whole state root via
+/// `MICONTROL_STATE_ROOT`, and the legacy `smart_brightness.json` (still read
+/// once for migration) can be pointed anywhere via `MICONTROL_SMART_MODEL_PATH`
+/// so unit tests never clobber the user's real learned model.
+fn smart_model_store() -> Result<state_store::Store<SmartModel>, state_store::StoreError> {
+    Ok(state_store::Store::new(state_store::smart_model_spec()?))
 }
 
 /// Sensitivity / range configuration for our own adaptive brightness loop.
@@ -437,8 +682,12 @@ impl Default for AiBrightnessConfig {
 // disabling automation entirely.
 //
 // The offset is:
-//   • stored as a signed integer in the range -100..=100
-//   • applied before the final clamp(min, max)
+//   • stored as a signed integer
+//   • bounded by its ORIGIN — ±100 pp for an explicit user action
+//     (MAX_USER_OFFSET_PP), ±30 pp for an offset captured from the loop
+//     (MAX_CAPTURED_OFFSET_PP)
+//   • applied before the final clamp(min, max) — the final target is the only
+//     thing the backlight sees clamped
 //   • reset whenever the user disables auto-brightness or changes its config
 
 /// Last lux-based target (before offset) stored so we can compute the delta.
@@ -447,6 +696,202 @@ static AUTO_LAST_TARGET: AtomicU8 = AtomicU8::new(50);
 static AUTO_OFFSET: AtomicI16 = AtomicI16::new(0);
 /// Whether the offset was explicitly set by the user (false = use 0).
 static AUTO_OFFSET_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Origin of the current `AUTO_OFFSET` (`0` = captured, `1` = user intent).
+/// Kept separate so `AUTO_OFFSET` remains the single source of the value; the
+/// origin only decides which bound applies to it.
+static AUTO_OFFSET_ORIGIN: AtomicU8 = AtomicU8::new(0);
+
+/// Hard limit on an offset the **user** asked for (slider, OSD, hotkey,
+/// Windows slider), in percentage points.
+///
+/// The offset is `user_value - raw_curve_target`, so asking for 100 % while the
+/// curve sits at 26 % needs **+74 pp**. Bounding this at ±30 pp (the previous
+/// `MAX_OVERRIDE_OFFSET_PP`) capped the reachable brightness at `raw + 30` —
+/// 56 % at 29 lux — and made the top 44 % of the slider decorative: the value
+/// was silently trimmed and the loop reverted it once the grace window
+/// expired. Production log: `brightness offset +74 pp out of range — clamped
+/// to +30 pp`, `target=56.1`, panel at 57 %.
+///
+/// The user's intent is absolute, so this bound is the whole 0–100 scale
+/// (±100 pp). The *final* target is still clamped to
+/// `[min_brightness, max_brightness]` by the loop ([`effective_target`]) — that
+/// clamp is the only one the backlight is allowed to see.
+const MAX_USER_OFFSET_PP: i16 = 100;
+
+/// Hard limit on offsets **captured automatically** from the loop, in
+/// percentage points.
+///
+/// The loop treats any ≥2 pp difference between what it last wrote and what the
+/// panel reports as an external change (Fn key, Windows slider, another app)
+/// and shifts the curve to match. That path is a feedback loop: every capture
+/// is measured *after* the previous offset was applied, so an unbounded offset
+/// ratchets upwards until the curve is pinned at max (production reached
+/// `offset: 54`, which is why a clamp was introduced). ±30 pp is wide enough
+/// for a genuine preference shift and small enough that a capture bug or a
+/// corrupted state file cannot saturate the backlight.
+const MAX_CAPTURED_OFFSET_PP: i16 = 30;
+
+/// Where a stored offset came from. The two origins have different bounds (see
+/// [`MAX_USER_OFFSET_PP`] / [`MAX_CAPTURED_OFFSET_PP`]) and must survive a
+/// crash/relaunch, so the origin is persisted alongside the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum OffsetOrigin {
+    /// Captured automatically by the adaptive loop (`diff >= 2` path).
+    ///
+    /// Also the default for state files written before the split: every offset
+    /// those builds persisted came from the capture path, so treating them as
+    /// captured keeps the old anti-runaway guard.
+    #[default]
+    Captured,
+    /// Derived from an explicit user action (slider / OSD / hotkey).
+    User,
+}
+
+impl OffsetOrigin {
+    /// Bound to apply to an offset of this origin, in percentage points.
+    fn limit(self) -> i16 {
+        match self {
+            OffsetOrigin::User => MAX_USER_OFFSET_PP,
+            OffsetOrigin::Captured => MAX_CAPTURED_OFFSET_PP,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            OffsetOrigin::User => "user",
+            OffsetOrigin::Captured => "captured",
+        }
+    }
+
+    fn as_u8(self) -> u8 {
+        match self {
+            OffsetOrigin::User => 1,
+            OffsetOrigin::Captured => 0,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        if value == 1 {
+            OffsetOrigin::User
+        } else {
+            OffsetOrigin::Captured
+        }
+    }
+}
+
+/// Clamp an offset to ±`limit`, logging any trim so a bad input (corrupt file,
+/// capture feedback) shows up in the log instead of being silently absorbed.
+fn clamp_offset(offset: i16, limit: i16, origin: &str) -> i16 {
+    let clamped = offset.clamp(-limit, limit);
+    if clamped != offset {
+        log::warn!(
+            "[display] {origin} brightness offset {offset:+} pp out of range — clamped to \
+             {clamped:+} pp (limit ±{limit})"
+        );
+    }
+    clamped
+}
+
+/// Clamp an explicit user-intent offset (full 0–100 scale, ±100 pp).
+fn clamp_user_offset(offset: i16) -> i16 {
+    clamp_offset(offset, MAX_USER_OFFSET_PP, OffsetOrigin::User.label())
+}
+
+/// Clamp an offset captured automatically by the loop (±30 pp).
+fn clamp_captured_offset(offset: i16) -> i16 {
+    clamp_offset(
+        offset,
+        MAX_CAPTURED_OFFSET_PP,
+        OffsetOrigin::Captured.label(),
+    )
+}
+
+/// Clamp an offset according to its recorded origin.
+fn clamp_offset_for(offset: i16, origin: OffsetOrigin) -> i16 {
+    clamp_offset(offset, origin.limit(), origin.label())
+}
+
+/// The brightness the loop should drive to: the raw curve target plus the
+/// override offset, clamped to the configured range.
+///
+/// Kept pure and separate from the loop so the "user intent reaches 100 %"
+/// guarantee is unit-testable without touching the backlight.
+fn effective_target(raw: f32, offset: f32, min: u8, max: u8) -> f32 {
+    (raw + offset).clamp(min as f32, max as f32)
+}
+
+/// How many percentage points an observed brightness may differ from the value
+/// the current user offset already explains before the loop treats it as a new
+/// preference rather than its own write coming back.
+///
+/// The loop writes the target and reads it back one iteration later; a
+/// smoothing step, driver quantisation or a slightly stale WMI read can all
+/// move the readback by a point or two without any user action.
+const OFFSET_ECHO_TOLERANCE_PP: i16 = 3;
+
+/// What an observed brightness change means for the curve offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureOutcome {
+    /// Offset to apply to the curve.
+    offset: i16,
+    /// Bound to store it under.
+    origin: OffsetOrigin,
+    /// True when the observation was our own output (keep the curve as-is).
+    echo: bool,
+}
+
+/// Decide what an observed brightness change (`diff >= 2` against the value the
+/// loop last wrote) means, given the override currently in force.
+///
+/// Two very different things can produce that difference:
+///   • the user acted (slider, Fn key, Windows slider) — a new preference; or
+///   • the loop's own write came back a step late, quantised, or mid-smoothing.
+///
+/// While an explicit **user** offset is in force (±100 pp), re-deriving it with
+/// the capture bound would silently undo the top of the slider: at 29 lux the
+/// curve gives 26 %, the user picks 100 % (+74 pp), the next iteration reads
+/// 100 %, and `clamp_captured(100 − 26 = 74)` = +30 → 56 %. That is exactly the
+/// regression being fixed, so a user offset is classified with the user bound
+/// and an observation that reproduces it is ignored (echo). A value that does
+/// not reproduce it is a genuinely new preference and is recorded as user
+/// intent, still at full scale.
+///
+/// With no user offset in force, the old feedback rule applies unchanged: the
+/// capture path keeps ±30 pp so repeated captures cannot ratchet the curve to
+/// max (production reached `offset: 54` that way).
+fn classify_capture(
+    observed: u8,
+    raw_target: u8,
+    current_offset: i16,
+    origin: OffsetOrigin,
+    active: bool,
+) -> CaptureOutcome {
+    let candidate = observed as i16 - raw_target as i16;
+    if active && origin == OffsetOrigin::User {
+        let bounded = clamp_user_offset(candidate);
+        if (bounded - current_offset).abs() <= OFFSET_ECHO_TOLERANCE_PP {
+            // Our own write, or a rounding/smoothing step: leave the curve.
+            CaptureOutcome {
+                offset: current_offset,
+                origin: OffsetOrigin::User,
+                echo: true,
+            }
+        } else {
+            CaptureOutcome {
+                offset: bounded,
+                origin: OffsetOrigin::User,
+                echo: false,
+            }
+        }
+    } else {
+        CaptureOutcome {
+            offset: clamp_captured_offset(candidate),
+            origin: OffsetOrigin::Captured,
+            echo: false,
+        }
+    }
+}
 
 // ── Manual-override grace period ─────────────────────────────────────────────
 //
@@ -484,8 +929,12 @@ pub fn user_override_in_grace() -> bool {
 /// "Smart" mode can learn the user's preferred brightness per light level.
 pub fn record_user_brightness_override(user_value: u8) {
     let last_target = AUTO_LAST_TARGET.load(Ordering::Relaxed);
-    let offset = user_value as i16 - last_target as i16;
+    // Explicit user intent: the offset may be the whole scale (±100 pp) so the
+    // full 10–100 slider is reachable whatever the curve is doing. Only the
+    // final target is clamped (to min/max) by the loop.
+    let offset = clamp_user_offset(user_value as i16 - last_target as i16);
     AUTO_OFFSET.store(offset, Ordering::Relaxed);
+    AUTO_OFFSET_ORIGIN.store(OffsetOrigin::User.as_u8(), Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
     AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
     // Persist so a crash/relaunch right after the manual change does not
@@ -506,6 +955,7 @@ pub fn record_user_brightness_override(user_value: u8) {
 /// Reset the offset — call when auto-brightness is toggled or config changes.
 pub fn clear_user_brightness_override() {
     AUTO_OFFSET.store(0, Ordering::Relaxed);
+    AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
     AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
     persist_override_state();
@@ -520,65 +970,58 @@ pub fn clear_user_brightness_override() {
 // as its baseline via seeding, BUT it keeps recomputing the curve and writing
 // over the user's value 2 s later (the "app steals my brightness" regression).
 //
-// Fix: persist {last_manual_ms (epoch abs), offset, offset_active} to
-// `%LOCALAPPDATA%\MiControl\brightness_override.json` on every manual change
+// Fix: persist {last_manual_ms (epoch abs), offset, offset_active} through
+// the brightness state store (C3: `util::state_store`) on every manual change
 // and restore it when the adaptive loop starts in a new process. As long as
 // the user's manual change happened < MANUAL_OVERRIDE_GRACE_MS ago, the
-// relaunched loop stays hands-off.
+// relaunched loop stays hands-off. The store's declared migration imports the
+// legacy `brightness_override.json` (kept until the first store save, which
+// retires it), so the migration here is the same code the store tests cover.
 
-/// Persistence file under `%LOCALAPPDATA%\MiControl`.
-fn brightness_override_path() -> std::path::PathBuf {
-    if let Ok(override_path) = std::env::var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH") {
-        return std::path::PathBuf::from(override_path);
-    }
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("MiControl").join("brightness_override.json")
-}
-
-#[derive(Serialize, Deserialize, Default, Clone, Copy)]
-struct OverrideState {
-    /// Wall-clock ms (since UNIX epoch) of the last manual brightness change.
-    last_manual_ms: u64,
-    /// Signed curve offset the user's manual value implies.
-    offset: i16,
-    /// Whether the offset is active (user has expressed a preference).
-    offset_active: bool,
-}
-
-/// Persist the current manual-override statics to disk (crash survival).
+/// Persist the current manual-override statics through the brightness store
+/// (crash survival). Store failures downgrade to the same warn the direct
+/// write produced; the in-memory statics remain authoritative.
 fn persist_override_state() {
-    let state = OverrideState {
+    let state = state_store::BrightnessOverrideState {
         last_manual_ms: AUTO_LAST_MANUAL_MS.load(Ordering::Relaxed),
         offset: AUTO_OFFSET.load(Ordering::Relaxed),
         offset_active: AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed),
+        origin: match OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed)) {
+            OffsetOrigin::Captured => state_store::BrightnessOffsetOrigin::Captured,
+            OffsetOrigin::User => state_store::BrightnessOffsetOrigin::User,
+        },
     };
-    let path = brightness_override_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match serde_json::to_string(&state) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                log::warn!("[display] Failed to persist brightness override: {e}");
-            }
-        }
-        Err(e) => log::warn!("[display] Failed to serialize brightness override: {e}"),
+    if let Err(e) = state_store::save_brightness_override(&state) {
+        log::warn!("[display] Failed to persist brightness override: {e}");
     }
 }
 
-/// Restore the manual-override statics from disk (new process after crash).
-/// Stale entries (> grace window) restore nothing so a fresh boot never gets
-/// stuck in a perpetual hands-off state.
+/// Restore the manual-override statics (new process after crash). Stale
+/// entries (> grace window) restore nothing so a fresh boot never gets stuck
+/// in a perpetual hands-off state. Corrupt state or store IO failure logs and
+/// starts clean; it never panics and never leaves the statics half-set.
+///
+/// On the first call after the C3 migration this also CONSUMES the legacy
+/// `brightness_override.json` (import into the store), and the next
+/// [`persist_override_state`] save retires the legacy file.
 pub fn restore_override_state() {
-    let path = brightness_override_path();
-    let Ok(data) = std::fs::read_to_string(&path) else {
-        return;
+    // One-time legacy import. Importing before load means the first restore
+    // already sees the migrated payload; the legacy file is only removed by
+    // the next successful save (store contract), never here.
+    if let Err(e) = state_store::migrate_legacy_brightness_override() {
+        log::warn!("[display] brightness override legacy migration skipped: {e}");
+    }
+    let loaded = match state_store::brightness_store().and_then(|store| store.load()) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            // Corrupt state or IO failure: start clean rather than wedging
+            // the adaptive loop (a bad state file must not take brightness
+            // control down with it).
+            log::warn!("[display] brightness override state unreadable, starting clean: {e}");
+            return;
+        }
     };
-    let Ok(state) = serde_json::from_str::<OverrideState>(&data) else {
-        return;
-    };
+    let Some(state) = loaded else { return };
     if state.last_manual_ms == 0 {
         return;
     }
@@ -588,13 +1031,23 @@ pub fn restore_override_state() {
         log::debug!("[adaptive_brightness] persisted override too old ({age}ms) — ignoring");
         return;
     }
+    let origin = OffsetOrigin::from_u8(state.origin.as_u8());
     AUTO_LAST_MANUAL_MS.store(state.last_manual_ms, Ordering::Relaxed);
-    AUTO_OFFSET.store(state.offset, Ordering::Relaxed);
+    // Clamp on restore with the bound of the offset's ORIGIN: a user-intent
+    // offset may legitimately be ±100 pp (the slider's full range), while a
+    // captured offset stays at ±30 pp. State files written before the split
+    // carry no origin and came from the capture path → ±30 pp, exactly as the
+    // old build did. Never apply an offset unclamped: the historical `54` in
+    // production came from the capture feedback loop and pinned the curve.
+    let offset = clamp_offset_for(state.offset, origin);
+    AUTO_OFFSET.store(offset, Ordering::Relaxed);
+    AUTO_OFFSET_ORIGIN.store(origin.as_u8(), Ordering::Relaxed);
     AUTO_OFFSET_ACTIVE.store(state.offset_active, Ordering::Relaxed);
     log::info!(
         "[adaptive_brightness] restored manual override from crash \
-         (age={age}ms, offset={}, active={}) — grace window until manual change",
-        state.offset,
+         (age={age}ms, offset={}, origin={}, active={}) — grace window until manual change",
+        offset,
+        origin.label(),
         state.offset_active
     );
 }
@@ -614,14 +1067,29 @@ pub fn current_brightness() -> u8 {
 pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     // WMI brightness = what Windows Display Settings slider shows (ground truth).
     let brightness = get_brightness_wmi().unwrap_or_else(|_| get_brightness_igcl().unwrap_or(80));
-    let hdr_enabled = get_hdr_state();
-    let refresh_rate_hz = get_refresh_rate().unwrap_or(120);
-    // S25-009: Don't let refresh-rate enumeration failure nuke the entire display info.
-    // If we can't enumerate rates, fall back to the current rate as the only option.
-    let available_refresh_rates = get_available_refresh_rates().unwrap_or_else(|e| {
-        log::warn!(target: "hw::display", "get_available_refresh_rates failed: {e}, using current rate as fallback");
-        vec![refresh_rate_hz]
-    });
+    // P10: make sure `brightness_source` reflects the LIVE backend instead of
+    // the value persisted by the previous session.
+    probe_brightness_source_once();
+    let hdr_displays = hdr_displays();
+    let hdr_enabled = hdr_displays.iter().any(|d| d.enabled);
+    let hdr_supported = hdr_displays.iter().any(|d| d.supported);
+    // One enumeration, one display: `refresh_rate_hz` and
+    // `available_refresh_rates` must describe the SAME device, otherwise the
+    // UI shows a current rate from one monitor and chips from another (the
+    // audit's "120 Hz" over a [50, 85] list, where no chip was active).
+    let (refresh_rate_hz, available_refresh_rates) = match refresh_rate_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            // S25-009: Don't let refresh-rate enumeration failure nuke the
+            // entire display info — fall back to the (GPU-level) WMI rate.
+            log::warn!(
+                target: "hw::display",
+                "refresh-rate enumeration failed: {e}, falling back to the WMI controller rate"
+            );
+            let hz = get_refresh_rate_wmi().unwrap_or(120);
+            (hz, vec![hz])
+        }
+    };
     // DRR is active when the display is set to its highest supported refresh rate.
     let dynamic_refresh_rate_capable = available_refresh_rates
         .last()
@@ -634,24 +1102,42 @@ pub fn get_display_info() -> HardwareResult<DisplayInfo> {
     Ok(DisplayInfo {
         brightness,
         hdr_enabled,
+        hdr_supported,
+        hdr_displays,
         refresh_rate_hz,
         available_refresh_rates,
         dynamic_refresh_rate_capable,
         adaptive_refresh_rate,
+        adaptive_refresh_rate_pending_reboot: drrs_pending_reboot_now(),
         ai_brightness,
         ai_brightness_config,
         ambient_lux,
+        ambient_sensor: ambient_sensor_info(),
+        brightness_source: brightness_source().to_string(),
     })
 }
 
 pub fn set_brightness(level: u8) -> HardwareResult<()> {
     let level = level.clamp(10, 100);
-    // Only try IGCL if it has not already failed permanently.
-    if IGCL_SET_AVAILABLE.load(Ordering::Relaxed) {
-        if let Err(e) = set_brightness_igcl(level) {
-            log::warn!("IGCL brightness failed: {e}, falling back to WMI permanently");
-            IGCL_SET_AVAILABLE.store(false, Ordering::Relaxed);
-            set_brightness_wmi(level)?;
+    // P10: do not disable IGCL for the whole process on the first failure.
+    // Retry it slowly (IGCL_RETRY_SECS) so a driver re-enumeration can restore
+    // hardware brightness without restarting the app.
+    if IGCL_SET_AVAILABLE.load(Ordering::Relaxed) || igcl_retry_due() {
+        match set_brightness_igcl(level) {
+            Ok(()) => {
+                report_igcl_available("IGCL brightness write succeeded");
+            }
+            Err(e) => {
+                IGCL_SET_AVAILABLE.store(false, Ordering::Relaxed);
+                // One clear transition line (set_brightness_source logs only
+                // when the source actually changes) instead of a WARN per write.
+                set_brightness_source(
+                    SOURCE_WMI_FALLBACK,
+                    &format!("IGCL brightness write failed: {e}"),
+                );
+                schedule_igcl_retry();
+                set_brightness_wmi(level)?;
+            }
         }
     } else {
         set_brightness_wmi(level)?;
@@ -713,14 +1199,125 @@ fn write_display_dword(name: &str, value: u32) -> HardwareResult<()> {
     Ok(())
 }
 
+// ── Curve/smart mode persistence (state store, registry imported once) ────────
+//
+// The mode used to live ONLY in the HKLM `AiBrightnessMode` value, which a
+// non-elevated user process cannot write: the choice silently reverted on
+// machines where the write was refused. The `brightness_mode` state store is
+// the source of truth now; the HKLM value is imported once (read-only) on the
+// first load and mirrored best-effort on every change (external tools may
+// still read it), never the other way around.
+
+/// In-process cache of the persisted mode: `get_ai_brightness_config` runs
+/// every 2 s in the adaptive loop, and each read would otherwise re-open the
+/// state file. `None` = not loaded yet.
+static BRIGHTNESS_MODE_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// Registry DWORD → mode string (pure, unit-tested).
+fn mode_from_registry_dword(value: u32) -> &'static str {
+    if value == 1 {
+        "smart"
+    } else {
+        "curve"
+    }
+}
+
+/// Load the persisted mode, running the one-time HKLM import when the store
+/// is empty. Store failures degrade to the default ("curve") and never wedge
+/// the adaptive loop.
+fn load_brightness_mode() -> String {
+    let store = match state_store::brightness_mode_store() {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!("[display] brightness mode store unavailable: {e}");
+            return "curve".to_string();
+        }
+    };
+    match store.load() {
+        Ok(Some(state)) => state.mode,
+        Ok(None) => {
+            // One-time import: whatever the HKLM value says (0 curve / 1
+            // smart); a missing value means the user never chose, so the
+            // default curve is imported and becomes the persisted baseline.
+            let mode = mode_from_registry_dword(read_display_dword(AI_BRIGHTNESS_MODE_VALUE, 0));
+            let state = state_store::BrightnessModeState {
+                mode: mode.to_string(),
+                updated_at_ms: now_ms(),
+            };
+            if let Err(e) = store.save(&state) {
+                log::warn!("[display] brightness mode import save failed: {e}");
+            } else {
+                log::info!(
+                    "[display] imported brightness mode '{mode}' from the registry into the state store"
+                );
+            }
+            mode.to_string()
+        }
+        Err(e) => {
+            log::warn!("[display] brightness mode state unreadable, using default: {e}");
+            "curve".to_string()
+        }
+    }
+}
+
+/// Cached persisted mode ("curve" | "smart"). Test helper
+/// [`reset_brightness_mode_cache_for_tests`] simulates a restart by clearing it.
+fn brightness_mode_cached() -> String {
+    let cache = BRIGHTNESS_MODE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = crate::util::panic::lock_or_recover(cache);
+    if guard.is_none() {
+        *guard = Some(load_brightness_mode());
+    }
+    guard
+        .as_ref()
+        .expect("brightness mode cache initialised")
+        .clone()
+}
+
+/// Persist the mode through the store and refresh the in-process cache.
+/// Persist the Smart/Formula choice from the user process.
+///
+/// The elevated helper runs under a different profile, so routing the mode
+/// through elevation wrote the store where the app never reads it: the user
+/// picked Smart, the UI came back as Formula on every update. The mode is
+/// user-writable state; only the HKLM mirror needs elevation.
+pub fn persist_brightness_mode_for_user(mode: &str) -> HardwareResult<()> {
+    save_brightness_mode(if mode == "smart" { "smart" } else { "curve" })
+}
+
+fn save_brightness_mode(mode: &str) -> HardwareResult<()> {
+    let state = state_store::BrightnessModeState {
+        mode: mode.to_string(),
+        updated_at_ms: now_ms(),
+    };
+    let store = state_store::brightness_mode_store()
+        .map_err(|e| HardwareError::Registry(format!("brightness mode store unavailable: {e}")))?;
+    store
+        .save(&state)
+        .map_err(|e| HardwareError::Registry(format!("brightness mode save failed: {e}")))?;
+    let cache = BRIGHTNESS_MODE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    *crate::util::panic::lock_or_recover(cache) = Some(mode.to_string());
+    log::info!("[display] brightness mode persisted: {mode}");
+    Ok(())
+}
+
+/// Clear the in-process mode cache (tests use this to simulate a restart:
+/// the next read must come from the persisted store again).
+#[cfg(test)]
+fn reset_brightness_mode_cache_for_tests() {
+    if let Some(cache) = BRIGHTNESS_MODE_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
 pub fn get_ai_brightness_config() -> AiBrightnessConfig {
     let enabled = get_ai_brightness_registry().unwrap_or(false);
     let min_b = (read_display_dword(AI_BRIGHTNESS_MIN_VALUE, 10) as u8).clamp(5, 80);
     let max_b = (read_display_dword(AI_BRIGHTNESS_MAX_VALUE, 100) as u8).clamp(min_b + 5, 100);
-    let mode = match read_display_dword(AI_BRIGHTNESS_MODE_VALUE, 0) {
-        1 => "smart".to_string(),
-        _ => "curve".to_string(),
-    };
+    let mode = brightness_mode_cached();
     AiBrightnessConfig {
         enabled,
         min_brightness: min_b,
@@ -732,13 +1329,31 @@ pub fn get_ai_brightness_config() -> AiBrightnessConfig {
 }
 
 pub fn set_ai_brightness_config(config: AiBrightnessConfig) -> HardwareResult<()> {
+    // Mode FIRST, through the user-writable state store: every later HKLM
+    // write (the enabled flag, the mirror, min/max/sens/smoothing) can be
+    // refused for a non-elevated process, and the old order silently dropped
+    // the user's Smart/Formula choice exactly on those machines. The mode
+    // save must not depend on any registry write succeeding.
+    let mode = if config.mode == "smart" {
+        "smart"
+    } else {
+        "curve"
+    };
+    save_brightness_mode(mode)?;
     persist_ai_brightness_registry(config.enabled)?;
+    // Best-effort HKLM mirror for external tooling; a refusal is logged at
+    // DEBUG and never fails the save.
+    let mirror = write_display_dword(
+        AI_BRIGHTNESS_MODE_VALUE,
+        if config.mode == "smart" { 1 } else { 0 },
+    );
+    if let Err(e) = mirror {
+        log::debug!("[display] brightness mode registry mirror skipped (best-effort): {e}");
+    }
     write_display_dword(AI_BRIGHTNESS_MIN_VALUE, config.min_brightness as u32)?;
     write_display_dword(AI_BRIGHTNESS_MAX_VALUE, config.max_brightness as u32)?;
     write_display_dword(AI_BRIGHTNESS_SENS_VALUE, config.sensitivity as u32)?;
     write_display_dword(AI_BRIGHTNESS_SMTH_VALUE, config.smoothing as u32)?;
-    let mode_dword: u32 = if config.mode == "smart" { 1 } else { 0 };
-    write_display_dword(AI_BRIGHTNESS_MODE_VALUE, mode_dword)?;
     Ok(())
 }
 
@@ -776,6 +1391,19 @@ const SMART_MIN_SAMPLES: u32 = 3;
 /// Maximum number of buckets cap — protects the file from unbounded growth
 /// if the sensor reports bizarre lux values.
 const SMART_MAX_BUCKETS: usize = 200;
+/// Upper bound on the **total** number of samples kept in
+/// `smart_brightness.json`.
+///
+/// The audit found 1_315_938 samples — 30+ days of the adaptive loop writing a
+/// sample every 2 s (30/min). That is not user preference, it is the loop
+/// learning from its own output. A sane rolling window is 7 days:
+/// 7 × 24 h × 60 min × 30 samples/min = 302_400 samples. When the loaded model
+/// exceeds it, older mass is decayed (see [`prune_smart_model`]).
+const SMART_MAX_TOTAL_SAMPLES: u32 = 302_400;
+/// Upper bound per lux bucket. A single hot bucket (e.g. a desk lamp holding
+/// the sensor at 4 lux) otherwise accumulates hundreds of thousands of samples
+/// on its own — the audit's bin 4 lux had 283_355.
+const SMART_MAX_SAMPLES_PER_BIN: u32 = 20_000;
 
 /// One lux bucket in the smart brightness model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -801,6 +1429,21 @@ pub struct SmartModel {
     pub bins: std::collections::HashMap<u32, SmartBin>,
 }
 
+impl SmartBin {
+    /// Halve the sample count while preserving the mean and the variance.
+    ///
+    /// `m2` is a *sum* of squared deviations, so it scales linearly with `n`:
+    /// halving both keeps `m2 / (n - 1)` — the variance the UI shows — intact.
+    /// This is the only way to "forget" old samples in an aggregate-only model:
+    /// Welford's statistics carry no timestamps, so a time window cannot be
+    /// applied retroactively. Exponential halving weights recent samples more
+    /// than old ones, which is what a rolling window approximates.
+    fn decay(&mut self) {
+        self.n = (self.n / 2).max(SMART_MIN_SAMPLES);
+        self.m2 *= 0.5;
+    }
+}
+
 impl SmartModel {
     fn new() -> Self {
         Self {
@@ -823,36 +1466,137 @@ impl SmartModel {
     }
 }
 
+/// Trim a loaded model back inside the retention bounds.
+///
+/// Returns `true` when anything changed, so the caller can rewrite the file
+/// once (migration on load) instead of carrying a 1.3 M-sample JSON forever.
+///
+/// Strategy — exponential decay, not deletion, because the model is
+/// aggregate-only (mean/m2, no per-sample timestamps):
+/// 1. every bucket above [`SMART_MAX_SAMPLES_PER_BIN`] is halved until it fits
+///    (283_355 → 17_709 in four halvings), preserving mean and variance;
+/// 2. while the total exceeds [`SMART_MAX_TOTAL_SAMPLES`], the largest bucket is
+///    halved — repeated halving is a geometric down-weighting of old mass and
+///    keeps the *shape* of the distribution (which buckets are "hot") intact.
+///
+/// `min`/`max` are historical extremes and are kept: they are informational
+/// (the stats panel shows the observed range) and cannot be recomputed without
+/// the dropped samples.
+fn prune_smart_model(model: &mut SmartModel) -> bool {
+    let before = model.total_samples();
+    let mut changed = false;
+
+    for bin in model.bins.values_mut() {
+        while bin.n > SMART_MAX_SAMPLES_PER_BIN {
+            bin.decay();
+            changed = true;
+        }
+    }
+
+    while model.total_samples() > SMART_MAX_TOTAL_SAMPLES {
+        let hottest = model.bins.values().map(|b| b.n).max().unwrap_or(0);
+        if hottest <= SMART_MIN_SAMPLES {
+            break; // nothing left worth decaying
+        }
+        match model.bins.iter_mut().max_by_key(|(_, b)| b.n) {
+            Some((_, bin)) => {
+                bin.decay();
+                changed = true;
+            }
+            None => break,
+        }
+    }
+
+    if changed {
+        log::info!(
+            "[display] smart model pruned on load: {before} → {} samples across {} buckets \
+             (caps: {SMART_MAX_TOTAL_SAMPLES} total, {SMART_MAX_SAMPLES_PER_BIN} per bucket)",
+            model.total_samples(),
+            model.bins.len()
+        );
+    }
+    changed
+}
+
 /// In-memory cache of the smart model. Loaded once at startup (or on demand)
 /// and updated on every sample; persisted on change.
 static SMART_MODEL_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<SmartModel>>> =
     std::sync::OnceLock::new();
 
 fn load_smart_model() -> SmartModel {
-    let path = smart_model_path();
-    if let Ok(data) = std::fs::read_to_string(&path) {
-        if let Ok(model) = serde_json::from_str::<SmartModel>(&data) {
-            return model;
+    let store = match smart_model_store() {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!("[display] smart model store unavailable, starting empty: {e}");
+            return SmartModel::new();
+        }
+    };
+    match store.load() {
+        Err(e) => {
+            // Corrupt store file: fall back to the default model and keep
+            // going. Startup must never die on a state file.
+            log::warn!("[display] smart model state unreadable, starting empty: {e}");
+            SmartModel::new()
+        }
+        Ok(Some(mut model)) => {
+            // Migration: an unbounded model (1.3 M samples in production) is
+            // trimmed on load and written back once, so every subsequent start
+            // reads the small version.
+            if prune_smart_model(&mut model) {
+                persist_smart_model(&model);
+            }
+            model
+        }
+        Ok(None) => {
+            // One-time legacy import: the pre-store `smart_brightness.json`.
+            // Pruned BEFORE the store save so an oversized pre-C3 model still
+            // fits the store's declared ceiling; the legacy file is retired
+            // only after that save succeeded.
+            let legacy_path = state_store::legacy_smart_model_path();
+            let Ok(data) = std::fs::read_to_string(&legacy_path) else {
+                return SmartModel::new();
+            };
+            match serde_json::from_str::<SmartModel>(&data) {
+                Ok(mut model) => {
+                    prune_smart_model(&mut model);
+                    if let Err(e) = store.save(&model) {
+                        // Keep the pruned model for this session and leave the
+                        // legacy file in place (it is still the only copy).
+                        log::warn!("[display] smart model legacy import failed: {e}");
+                        return model;
+                    }
+                    state_store::retire_legacy_smart_model();
+                    log::info!(
+                        "[display] migrated legacy smart_brightness.json into the state store"
+                    );
+                    model
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[display] legacy smart_brightness.json unreadable, starting empty: {e}"
+                    );
+                    SmartModel::new()
+                }
+            }
         }
     }
-    SmartModel::new()
 }
 
 fn persist_smart_model(model: &SmartModel) {
-    let path = smart_model_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    match serde_json::to_string_pretty(model) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                log::warn!("[display] Failed to persist smart model: {e}");
-            } else if let Err(e) = crate::util::auth::restrict_file_acl(&path) {
-                log::warn!("[display] Failed to restrict ACL on smart_brightness.json: {e}");
-            }
+    let store = match smart_model_store() {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!("[display] smart model store unavailable: {e}");
+            return;
         }
-        Err(e) => log::warn!("[display] Failed to serialize smart model: {e}"),
+    };
+    if let Err(e) = store.save(model) {
+        log::warn!("[display] Failed to persist smart model: {e}");
+        return;
     }
+    // Retire the legacy file only after a successful store save, so a crash
+    // mid-migration always leaves one valid copy behind.
+    state_store::retire_legacy_smart_model();
 }
 
 /// Access to the smart model (locked).  Loads from disk on first access.
@@ -884,8 +1628,17 @@ pub fn get_smart_model() -> SmartModel {
 
 /// Clear the entire smart model (user clicked "Reset learning").
 pub fn reset_smart_model() {
-    let path = smart_model_path();
-    let _ = std::fs::remove_file(path);
+    // Purge through the store (data + tmp + lock); the legacy
+    // `smart_brightness.json` is gone for good on a reset, so remove it too.
+    match smart_model_store() {
+        Ok(store) => {
+            if let Err(e) = store.purge() {
+                log::warn!("[display] smart model purge failed: {e}");
+            }
+        }
+        Err(e) => log::warn!("[display] smart model store unavailable on reset: {e}"),
+    }
+    let _ = std::fs::remove_file(state_store::legacy_smart_model_path());
     if let Some(cache) = SMART_MODEL_CACHE.get() {
         if let Ok(mut guard) = cache.lock() {
             *guard = Some(SmartModel::new());
@@ -925,6 +1678,12 @@ pub fn record_smart_sample(lux: f32, brightness: u8) {
         bin.min = bin.min.min(brightness);
         bin.max = bin.max.max(brightness);
         let _ = bin;
+        // Session guard: the load-time migration only trims an oversized
+        // model at startup; a long-lived process can still grow past the
+        // caps (30 samples/min at the audit's old rate). Prune BEFORE the
+        // persist below so the store file never outgrows its ceiling
+        // mid-session and the sample count stays a rolling window.
+        prune_smart_model(m);
     });
     let model = get_smart_model();
     // Persist outside the lock to avoid holding it during file I/O.
@@ -934,6 +1693,34 @@ pub fn record_smart_sample(lux: f32, brightness: u8) {
          → bucket={bin_idx} (total={})",
         model.total_samples()
     );
+}
+
+/// Whether a captured brightness value may be fed to the smart model.
+///
+/// While a user-override offset is active, the loop's own output already
+/// contains that offset. A readback that differs from what we set by ≥2 pp is
+/// then almost always our own write coming back (driver quantisation, smoothing
+/// step, another app echoing the value), not a new user preference. Learning it
+/// teaches the model the curve we just applied, and the next iteration adds the
+/// offset on top of the learned mean — the self-reinforcing loop that produced
+/// 1_315_938 samples and `offset: 54` in production.
+fn should_learn_from_capture() -> bool {
+    if AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed) {
+        log::debug!(
+            "[display] smart sample skipped — brightness_override is active, the captured \
+             value contains the loop's own offset"
+        );
+        return false;
+    }
+    true
+}
+
+/// Record a sample captured from an *external* brightness change, unless the
+/// captured value is the loop's own overlaid output.
+fn record_external_change_sample(lux: f32, brightness: u8) {
+    if should_learn_from_capture() {
+        record_smart_sample(lux, brightness);
+    }
 }
 
 /// Compute the std-dev for a bucket (population std-dev using Welford's M2).
@@ -970,95 +1757,809 @@ pub fn smart_predict_brightness(lux: f32) -> Option<u8> {
 
 // ── Ambient light sensor ──────────────────────────────────────────────────────
 
-/// Global flag to force sensor re-initialization on next read.
-/// Set to `true` when a power-resume event is detected so the sensor
-/// instance is re-created instead of returning stale `None`.
-static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-/// Request a sensor reset on the next polling cycle.
-/// Called when a WM_POWERBROADCAST resume event is received.
-pub fn request_sensor_reset() {
-    SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
-    log::info!("[display] Sensor reset requested (power resume event)");
+/// Sensor availability, so the UI says "this device has no ambient light
+/// sensor" (permanent) instead of "unavailable" (transient) for a machine
+/// that simply has none, and so the adaptive loop stops burning reset
+/// requests on a sensor that exists on paper but never delivers data.
+///
+/// States, classified by [`classify_sensor_probe`] from one fresh probe of
+/// the process's committed backend (COM and WinRT are never mixed in one
+/// process, see `LuxBackend`):
+///   Available    — the backend returned a fresh, plausible reading.
+///   NoSensor     — the backend cannot even see a sensor device (no
+///                  enumeration / GetDefault() fails). Permanent in practice:
+///                  the machine has no ALS hardware or its driver is disabled.
+///   FrozenReport — sensor devices enumerate and answer, but no fresh data
+///                  arrives (timestamp does not advance, lux stays at the
+///                  0-lux placeholder). The hardware exists but the
+///                  driver/fusion stack never delivers data; found in
+///                  production on the TCS3408 (reports frozen for 4+ days,
+///                  surviving device restarts and reset requests). Treating
+///                  this as a NEW probe every cycle (the old behaviour) made
+///                  the health supervisor and the loop request sensor resets
+///                  forever; treating it as a state lets the UI say "sensor
+///                  present but not reporting" and lets the loop idle.
+///   Unknown      — not probed yet in this process; settled lazily.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbientSensorState {
+    /// A backend returned a fresh, plausible lux reading.
+    Available,
+    /// No sensor device visible to the committed backend (no ALS here).
+    NoSensor,
+    /// Sensor devices enumerate but never deliver a fresh report (frozen
+    /// timestamp / permanent 0 lux).
+    FrozenReport,
+    /// Not probed yet in this process (the honest unset value).
+    #[default]
+    Unknown,
 }
 
-/// Cached LightSensor instance — re-created only when a reset is requested.
-/// This avoids calling `LightSensor::GetDefault()` on every 2-second poll,
-/// which can be slow and may return `None` transiently after sleep/wake.
-#[cfg(windows)]
-static CACHED_LIGHT_SENSOR: std::sync::OnceLock<
-    std::sync::Mutex<Option<windows::Devices::Sensors::LightSensor>>,
-> = std::sync::OnceLock::new();
-
-/// Fallback ambient-light reader using the WinRT `Windows.Devices.Sensors.LightSensor` API.
-/// This works well in UWP/WinUI apps, but in an unpackaged desktop app it frequently
-/// returns `None` even when a HID ALS sensor is present in Device Manager.
-#[cfg(windows)]
-fn get_ambient_lux_winrt() -> Option<f32> {
-    use windows::Devices::Sensors::LightSensor;
-
-    // Check if a reset was requested (e.g., after sleep/wake)
-    let needs_reset = SENSOR_RESET_REQUESTED.swap(false, Ordering::SeqCst);
-
-    let cache = CACHED_LIGHT_SENSOR.get_or_init(|| std::sync::Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-
-    if needs_reset || guard.is_none() {
-        // Re-create the sensor instance
-        match LightSensor::GetDefault() {
-            Ok(sensor) => {
-                log::debug!(
-                    "[display] WinRT ambient light sensor {}",
-                    if needs_reset {
-                        "re-initialized (reset)"
-                    } else {
-                        "found"
-                    }
-                );
-                *guard = Some(sensor);
-            }
-            Err(_) => {
-                log::debug!("[display] WinRT ambient light sensor not available");
-                *guard = None;
-                return None;
-            }
+impl AmbientSensorState {
+    /// Dense wire code for the process-local atomic (`0` Unknown, `1`
+    /// Available, `2` NoSensor, `3` FrozenReport).
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            AmbientSensorState::Available => 1,
+            AmbientSensorState::NoSensor => 2,
+            AmbientSensorState::FrozenReport => 3,
+            AmbientSensorState::Unknown => 0,
         }
     }
 
-    let sensor = guard.as_ref()?;
-    let reading = sensor.GetCurrentReading().ok()?;
-    let lux = reading.IlluminanceInLux().ok()?;
-    log::debug!("[display] WinRT ambient lux: {lux}");
-    Some(lux)
+    pub const fn from_code(v: u8) -> Self {
+        match v {
+            1 => AmbientSensorState::Available,
+            2 => AmbientSensorState::NoSensor,
+            3 => AmbientSensorState::FrozenReport,
+            _ => AmbientSensorState::Unknown,
+        }
+    }
+
+    /// States whose diagnosis means "poking the stack every cycle is
+    /// provably useless": `NoSensor` has nothing to re-create, and a
+    /// `FrozenReport` stack is held by the rebuild backoff ladder instead
+    /// of per-cycle reset requests (production proof: the TCS3408 froze
+    /// for 4+ days while resets fired every 30 s and changed nothing).
+    /// FrozenReport is NOT terminal: the auto-heal machine re-creates the
+    /// cached stack on its own ladder (see `SENSOR_REBUILD_BACKOFF_MS`),
+    /// which the 2026-11-23 proof showed is what actually revives it.
+    pub fn is_diagnosed(self) -> bool {
+        matches!(
+            self,
+            AmbientSensorState::FrozenReport | AmbientSensorState::NoSensor
+        )
+    }
 }
 
-// Per-thread cache of the classic COM light sensor stack.
+/// One probe of the committed backend: the lux reading (already passed
+/// through the per-sensor selection) plus whether the backend could see
+/// sensor DEVICES at all (the NoSensor vs FrozenReport discriminator).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AmbientProbe {
+    lux: Option<f32>,
+    devices_seen: bool,
+}
+
+/// Latest probe of the persistent sensor state.
+static SENSOR_STATE: AtomicU8 = AtomicU8::new(AmbientSensorState::Unknown.code());
+// ── Auto-heal machine (pure logic, unit-tested) ─────────────────────────────
 //
-// `ISensorManager` (COM) is not `Send`/`Sync`, so we cannot put it in a
-// `static`. This mirrors `wmi_cache.rs`'s thread_local pattern: each worker
-// thread lazily creates the manager + sensor collection once, then reuses it
-// for every 2-second poll. The entry is left as `None` (a) before first use,
-// (b) when a poll fails — the next poll retries from scratch (re-enumerating
-// hot-plugged sensors) — and (c) forever on machines without the sensor.
+// Production proof (2026-11-23): the ALS hardware is fine, but the cached
+// COM/WinRT stack inside a long-lived process stops delivering NEW reports.
+// The frozen state survived from 2026-11-22T00:37 (FrozenReport, lux=None)
+// until the app was killed and reopened (2026-11-23T16:23, Available,
+// lux=30.0). The wedge lives in the stack objects, not in the driver or the
+// device. Therefore a wedged stack must be DISCARDED and RECREATED, with a
+// backoff ladder, and FrozenReport is no longer a terminal diagnosis: the
+// loop never sits idle forever, the heal machine keeps retrying on its own.
+//
+// The machine below is pure logic (no COM/WinRT contact, injected
+// timestamps): the sensor thread feeds it probe evidence and it answers
+// what to do next. Tests simulate stale reports, recovery and the whole
+// ladder without sleeping.
+//
+// Freshness policy (revised the same day, after the installed build proved
+// the opposite failure): a WORKING on-change sensor sat silent for 115 s
+// with valid lux, the 30 s heuristic called it stale, and from 17:41 to
+// 17:55 the log shows a recreation every 30-60 s (auto and forced) while lux
+// kept coming back at 47-51. So the machine must heal DEAD reports and never
+// punish QUIET ones. Wedge evidence now needs four things at once: the stack
+// is NOT handing back plausible lux, the startup grace has expired, the SAME
+// report has been seen three times in a row, and it is older than 3 minutes
+// (the two time gates are configurable). External reset requests may never
+// tear down a stack that is serving fresh data.
+
+/// Default freshness threshold: a committed stack is WEDGED when its newest
+/// report timestamp has not advanced for this long. 3 minutes, not 30 s: the
+/// 2026-11-23 production proof showed an on-change ALS sitting silent for
+/// 115 s while serving perfectly valid lux, and the 30 s heuristic turned
+/// that silence into a rebuild storm (a recreation every 30 s for 15 min).
+/// Silence is not a wedge; only a timestamp that never moves is.
+/// Overridable with `MICONTROL_SENSOR_STALE_AFTER_MS` (milliseconds).
+const SENSOR_STALE_AFTER_MS: u64 = 180_000;
+
+/// Startup grace: no wedge is declared during the first 3 minutes of the
+/// sensor thread, however old the banked report timestamp looks. The FIRST
+/// report of a freshly created stack is legitimately old (an on-change
+/// driver hands back the reading it took when the device powered up), so
+/// age alone cannot be evidence that early.
+/// Overridable with `MICONTROL_SENSOR_GRACE_MS` (milliseconds).
+const SENSOR_STARTUP_GRACE_MS: u64 = 180_000;
+
+/// Consecutive observations in which the newest report timestamp must have
+/// stayed EXACTLY the same before a wedge may be declared. One stuck reading
+/// is a slow sensor; three in a row is the frozen-stack signature. A
+/// timestamp that advances is alive, even at 0 lux in a covered dark room.
+const SENSOR_WEDGE_OBSERVATIONS: u32 = 3;
+
+/// Rebuild backoff ladder. First wedge evidence rebuilds IMMEDIATELY (the
+/// ladder starts armed), then 1 min, 5 min, 15 min, capped at 15 min. A
+/// fresh probe disarms the ladder back to "immediate".
+const SENSOR_REBUILD_BACKOFF_MS: [u64; 3] = [60_000, 300_000, 900_000];
+
+/// Floor between FORCED rebuilds (external reset requests: power resume,
+/// health supervisor). Forced rebuilds bypass the backoff ladder but not
+/// this floor, so a chatty caller cannot turn the heal into a COM hammer.
+/// 3 minutes: the 2026-11-23 log shows a forced recreation every 30 s while
+/// the sensor was happily Available (lux 47-51), which is churn, not healing.
+/// Independent of the stale threshold on purpose: lowering the freshness
+/// window for diagnostics must not re-open the forced-rebuild floodgates.
+const SENSOR_FORCED_REBUILD_FLOOR_MS: u64 = 180_000;
+
+/// Environment override for the freshness threshold (milliseconds).
+const SENSOR_STALE_AFTER_ENV: &str = "MICONTROL_SENSOR_STALE_AFTER_MS";
+
+/// Environment override for the startup grace (milliseconds).
+const SENSOR_GRACE_ENV: &str = "MICONTROL_SENSOR_GRACE_MS";
+
+/// A NoSensor diagnosis (nothing enumerated) is retried at most once per
+/// this window: the machine either has no ALS or its driver is disabled,
+/// and re-creating a stack that cannot enumerate anything is pointless
+/// churn. Deliberately equal to the last backoff step.
+const SENSOR_NOSENSOR_RETRY_MS: u64 = 900_000;
+
+/// The freshness policy the heal machine applies, resolved once per process.
+/// Everything has a sane default and the two time gates are configurable,
+/// so a diagnostics run can tighten them without a code change.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SensorFreshnessPolicy {
+    /// How long the newest report may stay unmoving before it is a wedge.
+    stale_after_ms: u64,
+    /// How long after the thread starts no wedge may be declared at all.
+    grace_ms: u64,
+    /// How many consecutive observations of the SAME report the wedge needs.
+    wedge_observations: u32,
+}
+
+#[cfg(any(windows, test))]
+impl SensorFreshnessPolicy {
+    const fn defaults() -> Self {
+        Self {
+            stale_after_ms: SENSOR_STALE_AFTER_MS,
+            grace_ms: SENSOR_STARTUP_GRACE_MS,
+            wedge_observations: SENSOR_WEDGE_OBSERVATIONS,
+        }
+    }
+}
+
+/// Parse one millisecond override. Absent, empty or unparsable keeps the
+/// default; a valid number is honoured as-is, including `0` (a diagnostics
+/// run that wants the gate gone).
+#[cfg(any(windows, test))]
+fn parse_ms_override(raw: Option<&str>, default_ms: u64) -> u64 {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => v.parse::<u64>().unwrap_or(default_ms),
+        None => default_ms,
+    }
+}
+
+/// Resolve the policy from the two environment values. Pure (the values are
+/// injected) so the parsing contract is unit-testable without a process.
+#[cfg(any(windows, test))]
+fn policy_from_env_values(stale_after: Option<&str>, grace: Option<&str>) -> SensorFreshnessPolicy {
+    SensorFreshnessPolicy {
+        stale_after_ms: parse_ms_override(stale_after, SENSOR_STALE_AFTER_MS),
+        grace_ms: parse_ms_override(grace, SENSOR_STARTUP_GRACE_MS),
+        wedge_observations: SENSOR_WEDGE_OBSERVATIONS,
+    }
+}
+
+/// Process-wide policy, read once (same OnceLock pattern as the other
+/// ambient-sensor kill switches).
 #[cfg(windows)]
-thread_local! {
-    static COM_SENSOR_MANAGER: std::cell::RefCell<Option<ComSensorStack>> = const {
-        std::cell::RefCell::new(None)
-    };
+fn sensor_freshness_policy() -> SensorFreshnessPolicy {
+    static POLICY: std::sync::OnceLock<SensorFreshnessPolicy> = std::sync::OnceLock::new();
+    *POLICY.get_or_init(|| {
+        let stale = std::env::var(SENSOR_STALE_AFTER_ENV).ok();
+        let grace = std::env::var(SENSOR_GRACE_ENV).ok();
+        let policy = policy_from_env_values(stale.as_deref(), grace.as_deref());
+        if policy != SensorFreshnessPolicy::defaults() {
+            log::info!(
+                "[display] ambient sensor freshness policy overridden: \
+                 stale_after={} ms grace={} ms observations={}",
+                policy.stale_after_ms,
+                policy.grace_ms,
+                policy.wedge_observations
+            );
+        }
+        policy
+    })
+}
+
+/// What the heal machine makes of one wedge evaluation.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealStep {
+    /// No wedge evidence: normal probing.
+    Healthy,
+    /// Wedged and the ladder is due: discard and recreate the stack now.
+    Rebuild,
+    /// Wedged but inside a backoff step: hold, do not touch the stack.
+    Hold,
+}
+
+/// Pure backoff ladder for stack recreations. `next_rebuild_at_ms == 0`
+/// means ARMED: the next wedge evidence rebuilds without waiting.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SensorHeal {
+    rebuilds: u64,
+    next_rebuild_at_ms: u64,
+}
+
+#[cfg(any(windows, test))]
+impl SensorHeal {
+    const fn new() -> Self {
+        Self {
+            rebuilds: 0,
+            next_rebuild_at_ms: 0,
+        }
+    }
+
+    /// Armed = a fresh wedge rebuilds immediately instead of waiting.
+    fn armed(&self) -> bool {
+        self.next_rebuild_at_ms == 0
+    }
+
+    fn step(&self, wedged: bool, now_ms: u64) -> HealStep {
+        if !wedged {
+            return HealStep::Healthy;
+        }
+        if self.armed() || now_ms >= self.next_rebuild_at_ms {
+            HealStep::Rebuild
+        } else {
+            HealStep::Hold
+        }
+    }
+
+    /// Record a rebuild that just happened. `forced` (external request)
+    /// restarts the ladder from step one; a stale-driven rebuild walks it
+    /// 1 min, 5 min, 15 min, 15 min. Returns the delay to the next attempt.
+    fn note_rebuild(&mut self, forced: bool, now_ms: u64) -> u64 {
+        if forced {
+            self.rebuilds = 0;
+        }
+        self.rebuilds += 1;
+        let idx = (self.rebuilds - 1).min(SENSOR_REBUILD_BACKOFF_MS.len() as u64 - 1) as usize;
+        let delay = SENSOR_REBUILD_BACKOFF_MS[idx];
+        self.next_rebuild_at_ms = now_ms.saturating_add(delay);
+        delay
+    }
+
+    /// A fresh probe disarms the ladder: any future wedge rebuilds
+    /// immediately again.
+    fn note_fresh(&mut self) {
+        self.rebuilds = 0;
+        self.next_rebuild_at_ms = 0;
+    }
+
+    /// Ms until the next scheduled attempt (0 when armed).
+    fn retry_in_ms(&self, now_ms: u64) -> u64 {
+        self.next_rebuild_at_ms.saturating_sub(now_ms)
+    }
+}
+
+/// What one read of the sensor thread should do with the stack.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadDecision {
+    /// Discard the cached stack objects and re-create them before probing.
+    Recreate { forced: bool },
+    /// Probe the existing stack (creating it on first contact).
+    Probe,
+    /// Answer without any stack contact (backoff hold / NoSensor window).
+    Suppress,
+}
+
+/// Worker-confined evidence and healing state of the sensor stack. Pure
+/// data (no COM/WinRT types), so the whole heal contract (staleness, ladder,
+/// floors, retry windows) is unit-testable with injected timestamps.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone)]
+struct SensorOwnerCore {
+    heal: SensorHeal,
+    /// The freshness policy (threshold, grace, observation count) in force.
+    policy: SensorFreshnessPolicy,
+    /// The committed backend saw sensor DEVICES on its last attempt.
+    devices_seen: bool,
+    /// At least one real creation/probe attempt has been made.
+    attempted: bool,
+    last_attempt_ms: u64,
+    last_rebuild_ms: u64,
+    /// Wall-clock ms the sensor thread started: the grace-period anchor.
+    started_ms: u64,
+    /// Wall-clock ms claimed by the newest report the stack has produced.
+    report_ms: Option<u64>,
+    /// Consecutive observations that found `report_ms` EXACTLY unchanged (or
+    /// still absent). Reset the instant a report advances: this counter is
+    /// what separates a slow on-change sensor from a frozen stack.
+    stalled_observations: u32,
+    /// Wall-clock ms of the FIRST observation of the current stalled run
+    /// (`0` = no stalled run). Ages the no-timestamp fallback, which has no
+    /// report timestamp to measure against.
+    stalled_since_ms: u64,
+    /// The last probe returned a plausible lux value.
+    fresh_lux: bool,
+    /// The current stale episode has been logged (log the transition once).
+    stale_logged: bool,
+}
+
+#[cfg(any(windows, test))]
+impl SensorOwnerCore {
+    /// Core with an explicit policy and an explicit grace anchor: the sensor
+    /// thread builds this from the environment and its own start time, tests
+    /// build it with injected clocks.
+    fn with_policy(started_ms: u64, policy: SensorFreshnessPolicy) -> Self {
+        Self {
+            heal: SensorHeal::new(),
+            policy,
+            devices_seen: false,
+            attempted: false,
+            last_attempt_ms: 0,
+            last_rebuild_ms: 0,
+            started_ms,
+            report_ms: None,
+            stalled_observations: 0,
+            stalled_since_ms: 0,
+            fresh_lux: false,
+            stale_logged: false,
+        }
+    }
+
+    /// How long the current freshness evidence has been unmoving. With a
+    /// report timestamp it is the report's own age; without one (a driver
+    /// that never fills `SENSOR_DATA_TYPE_TIMESTAMP`) it is how long the
+    /// stack has been producing no plausible reading at all.
+    fn stall_age_ms(&self, now_ms: u64) -> u64 {
+        match self.report_ms {
+            Some(ts) => now_ms.saturating_sub(ts),
+            None => now_ms.saturating_sub(self.stalled_since_ms),
+        }
+    }
+
+    /// Wedge evidence: the stack is delivering NOTHING new, by both axes.
+    ///
+    /// Four gates, ALL required (2026-11-23 policy revision):
+    ///
+    /// 1. No plausible lux. A stack that keeps handing over a real reading IS
+    ///    delivering data, whatever its report timestamp claims. An on-change
+    ///    ALS in a steady room sits on one reading for minutes, and recreating
+    ///    it is the churn the installed build proved (lux 47-51, report 115 s
+    ///    old, a rebuild every 30 s for 15 min).
+    /// 2. The startup grace has expired, so the timestamp is not simply the
+    ///    legitimately-old first report of a fresh stack.
+    /// 3. The SAME evidence has been observed `policy.wedge_observations`
+    ///    times in a row, so a sensor that reports slowly is never called
+    ///    wedged.
+    /// 4. The evidence is older than `policy.stale_after_ms`.
+    ///
+    /// When the driver never fills a timestamp (neither
+    /// SENSOR_DATA_TYPE_TIMESTAMP nor ISensorDataReport.GetTimestamp
+    /// answered), gate 4 ages the no-plausible-reading episode instead, and
+    /// devices present with no reading is the FrozenReport signature.
+    fn wedged(&self, now_ms: u64) -> bool {
+        if self.fresh_lux {
+            return false;
+        }
+        if now_ms.saturating_sub(self.started_ms) < self.policy.grace_ms {
+            return false;
+        }
+        if self.stalled_observations < self.policy.wedge_observations {
+            return false;
+        }
+        if self.stall_age_ms(now_ms) < self.policy.stale_after_ms {
+            return false;
+        }
+        match self.report_ms {
+            Some(_) => true,
+            None => self.devices_seen,
+        }
+    }
+
+    /// Does the core's own evidence justify tearing the stack down on an
+    /// EXTERNAL request? Only when it is not serving fresh data: an
+    /// Available stack must never be recreated because a chatty caller asked
+    /// (2026-11-23 proof: a forced recreation every 30 s while lux kept
+    /// coming back at 47-51).
+    fn accepts_forced_rebuild(&self) -> bool {
+        !self.fresh_lux
+    }
+
+    /// Decide what this read does. `reset_pending` is the consumed-later
+    /// flag set by `request_sensor_reset` (power resume, supervisor).
+    fn decide(&self, reset_pending: bool, now_ms: u64) -> ReadDecision {
+        // An external reset request forces a rebuild, evidence-gated (never
+        // on an Available stack) and floor-gated so a chatty caller cannot
+        // hammer COM. Inside the floor the flag stays pending and the normal
+        // ladder logic answers instead.
+        if reset_pending
+            && self.accepts_forced_rebuild()
+            && now_ms.saturating_sub(self.last_rebuild_ms) >= SENSOR_FORCED_REBUILD_FLOOR_MS
+        {
+            return ReadDecision::Recreate { forced: true };
+        }
+        if self.wedged(now_ms) {
+            return match self.heal.step(true, now_ms) {
+                HealStep::Rebuild => ReadDecision::Recreate { forced: false },
+                _ => ReadDecision::Suppress,
+            };
+        }
+        // NoSensor cost window: one real attempt per retry window.
+        if self.attempted
+            && !self.devices_seen
+            && self.last_attempt_ms != 0
+            && now_ms.saturating_sub(self.last_attempt_ms) < SENSOR_NOSENSOR_RETRY_MS
+        {
+            return ReadDecision::Suppress;
+        }
+        ReadDecision::Probe
+    }
+
+    /// Feed one real probe result into the evidence bank.
+    fn note_probe(
+        &mut self,
+        devices_seen: bool,
+        report_ms: Option<u64>,
+        fresh_lux: bool,
+        now_ms: u64,
+    ) {
+        self.attempted = true;
+        self.devices_seen = devices_seen;
+        self.last_attempt_ms = now_ms;
+        self.fresh_lux = fresh_lux;
+        let banked = match (report_ms, fresh_lux) {
+            // Report timestamps must advance; never let a glitch walk the
+            // evidence backwards (a driver restart reporting an old time).
+            (Some(ts), _) => Some(self.report_ms.unwrap_or(ts).max(ts)),
+            // No timestamp but a plausible lux: the report IS fresh by
+            // content (dark room with a working sensor still counts).
+            (None, true) => Some(now_ms),
+            // Neither: keep whatever evidence already exists.
+            (None, false) => self.report_ms,
+        };
+        let advanced = banked != self.report_ms;
+        self.report_ms = banked;
+        if advanced {
+            // Life: the newest report moved, so the stalled run is over and
+            // the observation counter starts again at one sighting of THIS
+            // report (it is itself a candidate for a future stalled run).
+            self.stalled_observations = 1;
+            self.stalled_since_ms = now_ms;
+        } else {
+            self.stalled_observations = self.stalled_observations.saturating_add(1);
+            if self.stalled_since_ms == 0 {
+                self.stalled_since_ms = now_ms;
+            }
+        }
+        // Only SIGNS OF LIFE disarm the ladder: a report that moved, or a
+        // plausible reading. "Not wedged" is not enough, because the startup
+        // grace and a stalled run shorter than three sightings are also "not
+        // wedged" while the stack is still dead; disarming there would put
+        // the backoff back to "immediate" on every poll.
+        if advanced || fresh_lux {
+            self.heal.note_fresh();
+            self.stale_logged = false;
+        }
+    }
+
+    /// Record that the cached stack was discarded and re-created just now.
+    /// Returns the delay to the next scheduled attempt.
+    fn note_rebuild(&mut self, forced: bool, now_ms: u64) -> u64 {
+        self.last_rebuild_ms = now_ms;
+        let delay = self.heal.note_rebuild(forced, now_ms);
+        // The freshness evidence belongs to the DRIVER, not to the stack
+        // object, so it is KEPT across a recreation: a re-created stack that
+        // hands over the same unmoving timestamp has not shown life, and the
+        // ladder must keep walking instead of restarting at "armed".
+        // Only the lux flag resets (the new stack has not read yet); the
+        // stale episode stays logged, so the "stale" line appears once per
+        // episode and not again on every ladder step.
+        self.fresh_lux = false;
+        delay
+    }
+}
+
+/// Latest sensor diagnosis, for the loop / supervisor / `DisplayInfo`.
+pub fn ambient_sensor_state() -> AmbientSensorState {
+    AmbientSensorState::from_code(SENSOR_STATE.load(Ordering::Relaxed))
+}
+
+/// Pure classification of one probe (unit-testable, no COM/WinRT contact):
+/// fresh lux wins; devices seen but no fresh data = frozen; nothing
+/// enumerated = no sensor on this machine.
+fn classify_sensor_probe(lux: Option<f32>, devices_seen: bool) -> AmbientSensorState {
+    match lux {
+        Some(v) if v.is_finite() && v > MIN_PLAUSIBLE_LUX => AmbientSensorState::Available,
+        _ if devices_seen => AmbientSensorState::FrozenReport,
+        _ => AmbientSensorState::NoSensor,
+    }
+}
+
+/// Store a settled state and log TRANSITIONS only (the Available probe runs
+/// every 2 s; logging every settle would spam the log the old resets did).
+fn settle_sensor_state(probe: AmbientProbe) -> AmbientSensorState {
+    let settled = classify_sensor_probe(probe.lux, probe.devices_seen);
+    let previous = SENSOR_STATE.swap(settled.code(), Ordering::Relaxed);
+    if previous != settled.code() {
+        log::info!(
+            "[display] ambient sensor state: {:?} (was {:?}, lux={:?} devices_seen={})",
+            settled,
+            AmbientSensorState::from_code(previous),
+            probe.lux,
+            probe.devices_seen
+        );
+    }
+    settled
+}
+
+// ── Last fresh reading (persisted, hour resolution) ───────────────────────────
+
+/// Wall-clock ms of the last FRESH lux reading this process has seen. `0`
+/// until hydration from the `ambient_sensor` store (so the frozen-sensor
+/// message can show a date from a previous session, e.g. "18 Nov").
+static AMBIENT_LAST_FRESH_MS: AtomicU64 = AtomicU64::new(0);
+/// One-time hydration guard for the persisted last-fresh timestamp.
+static AMBIENT_FRESH_HYDRATED: AtomicBool = AtomicBool::new(false);
+/// Wall-clock ms last WRITTEN to the store; throttles persistence to one
+/// write per hour (a healthy sensor produces a fresh reading every 2 s and
+/// must not turn an atomic-rename state file into a write hotspot).
+static AMBIENT_FRESH_PERSISTED_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Persist the last-fresh stamp at most once per hour (`prev == 0` = never
+/// persisted, always allowed). Pure, so tests can pin the throttle.
+fn should_persist_fresh_stamp(prev_persisted_ms: u64, now_ms: u64) -> bool {
+    prev_persisted_ms == 0 || now_ms.saturating_sub(prev_persisted_ms) >= 3_600_000
+}
+
+/// Persisted last-fresh timestamp for `DisplayInfo` / the UI message. Loads
+/// the store once per process, then tracks the in-session value.
+pub fn ambient_last_fresh_ms() -> Option<u64> {
+    if !AMBIENT_FRESH_HYDRATED.swap(true, Ordering::Relaxed) {
+        match state_store::ambient_sensor_store().and_then(|store| store.load()) {
+            Ok(Some(record)) if record.last_fresh_ms > 0 => {
+                // Never overwrite a value a fresh probe already recorded.
+                AMBIENT_LAST_FRESH_MS
+                    .compare_exchange(
+                        0,
+                        record.last_fresh_ms,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .ok();
+                AMBIENT_FRESH_PERSISTED_MS.store(record.last_fresh_ms, Ordering::Relaxed);
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("[display] ambient sensor record unreadable: {e}"),
+        }
+    }
+    let v = AMBIENT_LAST_FRESH_MS.load(Ordering::Relaxed);
+    (v != 0).then_some(v)
+}
+
+/// Record a fresh (plausible) lux reading and persist the wall-clock stamp
+/// through the `ambient_sensor` store at most once per hour. Failures only
+/// log: the timestamp is diagnostic metadata, never control state.
+fn note_fresh_lux(lux: f32) {
+    if !lux.is_finite() || lux <= MIN_PLAUSIBLE_LUX {
+        return;
+    }
+    let now = now_ms();
+    AMBIENT_LAST_FRESH_MS.store(now, Ordering::Relaxed);
+    if !should_persist_fresh_stamp(AMBIENT_FRESH_PERSISTED_MS.load(Ordering::Relaxed), now) {
+        return;
+    }
+    AMBIENT_FRESH_PERSISTED_MS.store(now, Ordering::Relaxed);
+    let record = state_store::AmbientSensorRecord { last_fresh_ms: now };
+    match state_store::ambient_sensor_store().and_then(|store| store.save(&record)) {
+        Ok(()) => log::debug!("[display] persisted ambient last-fresh stamp ({now}ms)"),
+        Err(e) => log::warn!("[display] could not persist ambient last-fresh stamp: {e}"),
+    }
+}
+
+/// Wire shape for `DisplayInfo.ambient_sensor`: the diagnosis plus the
+/// persisted last-fresh timestamp the UI renders as "last reading D Mon".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AmbientSensorInfo {
+    /// The current diagnosis (available / no_sensor / frozen_report / unknown).
+    pub state: AmbientSensorState,
+    /// Wall-clock ms of the last fresh lux reading (survives restarts, hour
+    /// resolution). `None` = no fresh reading ever recorded.
+    pub last_fresh_ms: Option<u64>,
+}
+
+/// Snapshot for `get_display_info`.
+fn ambient_sensor_info() -> AmbientSensorInfo {
+    AmbientSensorInfo {
+        state: ambient_sensor_state(),
+        last_fresh_ms: ambient_last_fresh_ms(),
+    }
+}
+
+/// Pending flag: request a sensor stack REBUILD on the next polling cycle.
+/// Set to `true` when a power-resume event is detected so the cached sensor
+/// instance is discarded and re-created instead of returning stale `None`.
+/// Consumed by the sensor thread's forced-rebuild path (floor-gated, see
+/// `SensorOwnerCore::decide`), NOT by the stack readers themselves.
+static SENSOR_RESET_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Request a sensor stack rebuild on the next polling cycle.
+///
+/// Callers own the *reason*: a real resume (power listener) is INFO, a
+/// degraded/stuck sensor (health supervisor) is DEBUG noise. This used to
+/// log "(power resume event)" for every caller, which put six fake resumes
+/// in a 7 h window with no suspend at all.
+///
+/// Only `FrozenReport` and `Unknown` ACCEPT a request (2026-11-23 policy):
+///   NoSensor     : there is no device to re-create, the request is refused.
+///   Available    : the stack is serving fresh data; tearing it down and
+///                  re-enumerating COM on somebody's schedule is pure churn.
+///                  The heal machine still owns real wedge evidence, so a
+///                  stack that genuinely dies is recreated on its own ladder.
+///   FrozenReport : the 2026-11-23 proof showed that a wedged cached stack
+///                  heals when it is discarded and re-created (killing the
+///                  process revived the sensor; the hardware was never
+///                  broken), so a request here is a legitimate nudge.
+///   Unknown      : nothing has been diagnosed yet; the request is the honest
+///                  "go look again" a resume or a degraded supervisor wants.
+/// The evidence gate and the floor in `SensorOwnerCore::decide` keep chatty
+/// callers from turning forced rebuilds into COM hammering.
+pub fn request_sensor_reset(reason: &str) {
+    let state = ambient_sensor_state();
+    match state {
+        AmbientSensorState::NoSensor => {
+            log::debug!(
+                "[display] sensor reset suppressed ({reason}): no sensor device to re-create"
+            );
+        }
+        AmbientSensorState::Available => {
+            log::debug!(
+                "[display] sensor reset suppressed ({reason}): sensor is Available, \
+                 recreating a working stack is churn"
+            );
+        }
+        AmbientSensorState::FrozenReport | AmbientSensorState::Unknown => {
+            SENSOR_RESET_REQUESTED.store(true, Ordering::SeqCst);
+            log::debug!("[display] Sensor reset requested ({reason}, state {state:?})");
+        }
+    }
+}
+
+/// FILETIME epoch (1601-01-01 UTC) expressed in 100 ns ticks up to the UNIX
+/// epoch. Sensor report timestamps arrive as FILETIMEs (COM) or as a WinRT
+/// `DateTime`, which is the same 100 ns tick count, so one conversion fits
+/// both backends.
+const FILETIME_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+
+/// Convert a FILETIME (100 ns ticks since 1601-01-01 UTC) to wall-clock ms
+/// since the UNIX epoch. Garbage values before the UNIX epoch → None.
+#[cfg(any(windows, test))]
+fn filetime_ticks_to_epoch_ms(ticks: u64) -> Option<u64> {
+    ticks
+        .checked_sub(FILETIME_UNIX_EPOCH_TICKS)
+        .map(|delta| delta / 10_000)
+}
+
+/// The WinRT `Windows.Devices.Sensors.LightSensor` API works well in
+/// UWP/WinUI apps, but in an unpackaged desktop app it frequently returns
+/// `None` even when a HID ALS sensor is present in Device Manager. It is
+/// therefore only the FALLBACK backend, behind the classic COM Sensor API.
+/// Kill switch for the ambient-light readers (diagnostics, CI and kiosks with a
+/// broken sensor stack). `MICONTROL_DISABLE_AMBIENT_SENSOR` accepts:
+///   "1" / "all"  → both readers off
+///   "com"        → only the classic ISensorManager path off
+///   "winrt"      → only the WinRT LightSensor path off
+/// `0` or empty leaves both enabled.
+#[cfg(windows)]
+fn ambient_sensor_disabled(path: &str) -> bool {
+    static DISABLED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let v = DISABLED.get_or_init(|| {
+        std::env::var("MICONTROL_DISABLE_AMBIENT_SENSOR")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    });
+    match v.as_str() {
+        "" | "0" => false,
+        "1" | "all" => true,
+        other => other == path,
+    }
+}
+
+// ── Classic COM sensor stack (ISensorManager) ───────────────────────────────
+//
+// The stack objects are thread-affine (COM apartment) and NOT Send/Sync, so
+// they cannot live in a global and cannot be shared across threads. They are
+// owned by ONE dedicated worker thread (the "sensor thread", further below):
+// every contact AND every recreation happens on that single thread, which is
+// what makes the auto-heal safe (drop the cached objects, CoCreateInstance
+// fresh ones on the apartment that created them). The 2026-11-23 proof: the
+// wedge lives in the cached objects, so dropping them on their owner thread
+// and re-creating is the cure; recreating them from any OTHER thread that
+// still holds references would be a use-after-free waiting to happen.
+
+/// One sensor's data from a single COM report: the lux value and the
+/// wall-clock ms the report itself claims (`SENSOR_DATA_TYPE_TIMESTAMP` /
+/// `ISensorDataReport::GetTimestamp`). `report_ms` is the auto-heal's
+/// freshness evidence: a stack whose reports stop advancing is wedged even
+/// when the lux value itself still looks plausible.
+#[cfg(windows)]
+struct ComSensorReading {
+    lux: Option<f32>,
+    report_ms: Option<u64>,
+}
+
+/// Extract the report timestamp from a COM `ISensorDataReport`.
+///
+/// Primary source: the `SENSOR_DATA_TYPE_TIMESTAMP` property, which the
+/// sensor pipeline fills as a VT_FILETIME (UTC, 100 ns ticks). Fallback:
+/// `ISensorDataReport::GetTimestamp()`, which hands back a LOCAL
+/// `SYSTEMTIME`; `SystemTimeToFileTime` performs the local-to-UTC
+/// conversion. `None` only when BOTH fail (a driver that never timestamps).
+///
+/// # Safety
+///
+/// The report is a live COM pointer owned by the caller's stack; the call is
+/// synchronous and the PROPVARIANT union member is read only after checking
+/// `vt == VT_FILETIME`.
+#[cfg(windows)]
+unsafe fn com_report_timestamp(
+    report: &windows::Win32::Devices::Sensors::ISensorDataReport,
+) -> Option<u64> {
+    use windows::Win32::Devices::Sensors::SENSOR_DATA_TYPE_TIMESTAMP;
+    use windows::Win32::System::Variant::VT_FILETIME;
+
+    if let Ok(pv) = report.GetSensorValue(&SENSOR_DATA_TYPE_TIMESTAMP) {
+        let anon = &pv.as_raw().Anonymous.Anonymous;
+        if anon.vt == VT_FILETIME.0 {
+            let ft = anon.Anonymous.filetime;
+            let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+            return filetime_ticks_to_epoch_ms(ticks);
+        }
+    }
+    let st = report.GetTimestamp().ok()?;
+    let mut ft = windows::Win32::Foundation::FILETIME::default();
+    windows::Win32::System::Time::SystemTimeToFileTime(&st, &mut ft).ok()?;
+    let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
+    filetime_ticks_to_epoch_ms(ticks)
 }
 
 /// Lazily-created COM sensor manager + ambient-light collection.
+/// Worker-thread-confined (see the module comment above): the sensor thread
+/// drops and re-creates this object when the heal machine says the reports
+/// are wedged, and only that thread ever touches it.
 #[cfg(windows)]
 struct ComSensorStack {
-    /// Sensor collection (owns the enumeration). Manager is kept only for its
-    /// lifetime semantics; both are released together when the thread exits.
+    /// Sensor collection (owns the enumeration). The manager is kept only
+    /// for its lifetime semantics; both are released together on drop.
     collection: windows::Win32::Devices::Sensors::ISensorCollection,
 }
 
 #[cfg(windows)]
 impl ComSensorStack {
     /// (Re)create the sensor stack. Returns None on any failure path so the
-    /// caller falls back to WinRT / sensor-off.
+    /// worker falls back to WinRT / sensor-off.
     fn new() -> Option<Self> {
         use windows::Win32::Devices::Sensors::{
             ISensorManager, SensorManager as CLSID_SensorManager, SENSOR_TYPE_AMBIENT_LIGHT,
@@ -1084,9 +2585,10 @@ impl ComSensorStack {
         }
     }
 
-    /// Read every sensor's current lux value. Returns None if the whole stack
-    /// must be recreated (the caller invalidates the cache).
-    fn read_all(&self) -> Option<Vec<Option<f32>>> {
+    /// Read every sensor's current lux value AND report timestamp. Returns
+    /// None if the whole stack must be recreated (the worker invalidates
+    /// the cache).
+    fn read_all(&self) -> Option<Vec<ComSensorReading>> {
         use windows::Win32::Devices::Sensors::SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX;
         use windows::Win32::Foundation::{E_FAIL, S_OK};
 
@@ -1094,7 +2596,7 @@ impl ComSensorStack {
         // by their wrappers on drop.
         unsafe {
             let count = self.collection.GetCount().ok()?;
-            let mut readings: Vec<Option<f32>> = Vec::with_capacity(count as usize);
+            let mut readings: Vec<ComSensorReading> = Vec::with_capacity(count as usize);
             for i in 0..count {
                 let Ok(sensor) = self.collection.GetAt(i) else {
                     // A sensor appeared/disappeared → invalidate cache.
@@ -1103,20 +2605,35 @@ impl ComSensorStack {
                 let Ok(report) = sensor.GetData() else {
                     // Sensor momentarily unresponsive: report as None this poll,
                     // but don't tear down the whole stack for one glitch.
-                    readings.push(None);
+                    readings.push(ComSensorReading {
+                        lux: None,
+                        report_ms: None,
+                    });
                     continue;
                 };
+                // The report timestamp is the auto-heal's freshness evidence:
+                // captured even when the lux value itself is a placeholder.
+                let report_ms = com_report_timestamp(&report);
                 let pv = report.GetSensorValue(&SENSOR_DATA_TYPE_LIGHT_LEVEL_LUX);
                 match pv {
                     Ok(v) => {
                         let lux = f64::try_from(&v).ok()? as f32;
-                        log::debug!("[display] COM sensor[{i}] ambient lux: {lux}");
-                        readings.push(if lux.is_finite() { Some(lux) } else { None });
+                        log::debug!(
+                            "[display] COM sensor[{i}] ambient lux: {lux} \
+                             (report ts {report_ms:?} ms)"
+                        );
+                        readings.push(ComSensorReading {
+                            lux: if lux.is_finite() { Some(lux) } else { None },
+                            report_ms,
+                        });
                     }
                     Err(e) => {
                         let hr = e.code();
                         if hr == E_FAIL || hr == S_OK {
-                            readings.push(None);
+                            readings.push(ComSensorReading {
+                                lux: None,
+                                report_ms,
+                            });
                         } else {
                             // Unusual HRESULT → invalidate the whole stack.
                             return None;
@@ -1127,52 +2644,6 @@ impl ComSensorStack {
             Some(readings)
         }
     }
-}
-
-/// Primary ambient-light reader using the classic COM Sensor API (`ISensorManager`).
-/// This is the API that Windows itself uses for the "Adaptive brightness" power-plan
-/// setting and it works for unpackaged desktop applications, unlike the WinRT API.
-#[cfg(windows)]
-fn get_ambient_lux_com() -> Option<f32> {
-    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-
-    // S32-003 rationale (sensor selection) lives in `select_responsive_sensor`.
-    //
-    // S26-006: The manager+enumerator are cached per-thread (this runs on the
-    // tokio blocking pool, whose threads are long-lived). The previous
-    // implementation called `CoCreateInstance` + `GetSensorsByType` + `GetAt`
-    // on EVERY 2-second poll, churning COM allocations and MTA registrations
-    // for the whole app lifetime — an unnecessary leak/stress vector. Caching
-    // mirrors the `wmi_cache` thread_local pattern; the cache is invalidated
-    // when a poll fails so hot-plugged sensors are re-enumerated.
-
-    // SAFETY: `CoInitializeEx` is idempotent for the same apartment model and is safe
-    // to call from each thread. If the thread is already in a different apartment model
-    // the call returns RPC_E_CHANGED_MODE, which we ignore because the runtime may have
-    // already initialized COM for us.
-    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-
-    let readings = COM_SENSOR_MANAGER.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let stack = match borrow.as_ref() {
-            Some(s) => s,
-            None => {
-                let s = ComSensorStack::new()?;
-                *borrow = Some(s);
-                borrow.as_ref()?
-            }
-        };
-        let r = stack.read_all();
-        if r.is_none() {
-            // Invalidate on failure so the next poll re-enumerates.
-            *borrow = None;
-        }
-        r
-    });
-    let readings = readings?;
-    let lux = select_responsive_sensor(&readings);
-    log::debug!("[display] COM selected lux: {lux:?}");
-    lux
 }
 
 /// Per-sensor last-read cache used to detect which ALS sensor actually responds
@@ -1267,18 +2738,436 @@ fn select_responsive_sensor_impl(readings: &[Option<f32>]) -> Option<f32> {
     None
 }
 
+/// Which ambient-light backend this process has committed to.
+///
+/// 2026-11-18 (AV in the display tests): calling the classic COM
+/// `ISensorManager` and then the WinRT `LightSensor` in the SAME poll crashed
+/// the process with STATUS_ACCESS_VIOLATION right after the COM stack
+/// returned "no usable reading" — reproduced twice, and each path in
+/// isolation passed. Mixing the two sensor stacks (the WinRT activation
+/// re-enters the same sensorservice singleton the COM manager just created)
+/// is the trigger. The fix is to commit to ONE backend per process: the first
+/// backend that yields a reading wins, and the other is never touched again.
+/// A backend that fails to produce a reading is simply not adopted, so a
+/// machine where WinRT is unavailable still ends up on COM.
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LuxBackend {
+    Winrt,
+    Com,
+}
+
+#[cfg(windows)]
+fn lux_backend_override() -> Option<LuxBackend> {
+    static FORCED: std::sync::OnceLock<Option<LuxBackend>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        match std::env::var("MICONTROL_AMBIENT_SENSOR_BACKEND")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "winrt" => Some(LuxBackend::Winrt),
+            "com" => Some(LuxBackend::Com),
+            _ => None,
+        }
+    })
+}
+
+// ── Dedicated ambient-sensor thread ─────────────────────────────────────────
+//
+// The COM/WinRT stacks are thread-affine, so they live on ONE dedicated
+// thread instead of the shared fixed pool: every contact AND every heal
+// recreation happen on the thread that owns the objects. Readers (the
+// adaptive loop, `get_display_info`, the supervisor) submit a request over
+// a channel and await a bounded reply, so the async loop never blocks on
+// COM directly and a hung stack cannot stall the runtime.
+
+/// One reply from the sensor thread. `contact == false` means the heal
+/// machine suppressed the stack contact this read (backoff hold or NoSensor
+/// retry window): no diagnosis change, honest `None`.
+#[cfg(windows)]
+struct SensorReadout {
+    contact: bool,
+    lux: Option<f32>,
+    devices_seen: bool,
+}
+
+/// Jobs the sensor thread understands. The thread is REQUEST-DRIVEN (it
+/// blocks on the channel): all stack state changes, including heal
+/// recreations, happen while handling a Read, so no timer thread is needed
+/// and the async loop never waits on a lock held by COM.
+#[cfg(windows)]
+enum SensorJob {
+    Read(std::sync::mpsc::Sender<SensorReadout>),
+}
+
+/// How long a read may wait for the sensor thread before the caller gives
+/// up this cycle. A stack that exceeds this is itself wedged: the channel
+/// is reset (sender dropped, fresh thread on the next read), which is the
+/// auto-heal applied to a hung stack.
+#[cfg(windows)]
+const SENSOR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(windows)]
+static SENSOR_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<SensorJob>>> =
+    std::sync::Mutex::new(None);
+
+/// The worker's whole world: the heal core plus the stack objects it owns.
+/// Only `sensor_worker` constructs and touches this.
+#[cfg(windows)]
+struct SensorOwner {
+    core: SensorOwnerCore,
+    backend: Option<LuxBackend>,
+    com: Option<ComSensorStack>,
+    winrt: Option<windows::Devices::Sensors::LightSensor>,
+}
+
+#[cfg(windows)]
+impl SensorOwner {
+    fn new() -> Self {
+        Self {
+            // The grace clock starts HERE, on the thread that owns the
+            // stacks: the first report this thread sees may legitimately
+            // carry an old timestamp.
+            core: SensorOwnerCore::with_policy(now_ms(), sensor_freshness_policy()),
+            backend: None,
+            com: None,
+            winrt: None,
+        }
+    }
+
+    /// Drop the cached stack objects (the wedge lives in them) WITHOUT
+    /// revisiting the backend decision: one backend per process still
+    /// stands, only the OBJECT of that backend is re-created.
+    fn drop_stacks(&mut self) {
+        self.com = None;
+        self.winrt = None;
+    }
+
+    /// Commit to ONE backend for the whole process (the 2026-11-18 AV:
+    /// mixing the COM and WinRT stacks in one process is the trigger).
+    /// Decided on the first contact, never revisited afterwards.
+    fn commit_backend(&mut self) -> LuxBackend {
+        if let Some(b) = self.backend {
+            return b;
+        }
+        let b = match lux_backend_override() {
+            Some(b) => b,
+            None if ambient_sensor_disabled("com") => LuxBackend::Winrt,
+            None => {
+                // SAFETY: CoInitializeEx is idempotent for the same
+                // apartment model; the worker stays MTA for its whole life.
+                let _ = unsafe {
+                    windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_MULTITHREADED,
+                    )
+                };
+                match ComSensorStack::new() {
+                    Some(stack) => {
+                        self.com = Some(stack);
+                        LuxBackend::Com
+                    }
+                    None => LuxBackend::Winrt,
+                }
+            }
+        };
+        self.backend = Some(b);
+        log::info!(
+            "[display] ambient sensor backend committed: {}",
+            match b {
+                LuxBackend::Com => "COM (ISensorManager)",
+                LuxBackend::Winrt => "WinRT (LightSensor)",
+            }
+        );
+        b
+    }
+
+    /// One real contact with the committed stack: (lux, report timestamp,
+    /// devices seen). Failures keep the diagnosis honest instead of tearing
+    /// down the stack: recreation is the heal machine's job, not a reflex.
+    fn probe(&mut self) -> (Option<f32>, Option<u64>, bool) {
+        let backend = self.commit_backend();
+        match backend {
+            LuxBackend::Com if !ambient_sensor_disabled("com") => self.probe_com(),
+            LuxBackend::Winrt if !ambient_sensor_disabled("winrt") => self.probe_winrt(),
+            _ => (None, None, false),
+        }
+    }
+
+    fn probe_com(&mut self) -> (Option<f32>, Option<u64>, bool) {
+        if self.com.is_none() {
+            match ComSensorStack::new() {
+                Some(stack) => self.com = Some(stack),
+                None => return (None, None, false),
+            }
+        }
+        let Some(stack) = self.com.as_ref() else {
+            return (None, None, false);
+        };
+        let readings = match stack.read_all() {
+            Some(r) => r,
+            None => {
+                // The collection stopped answering: invalidate so the next
+                // tick re-enumerates (hot-plug) and the heal machine can
+                // escalate if the new stack stays frozen too.
+                self.com = None;
+                return (None, None, true);
+            }
+        };
+        // S32-003 rationale (sensor selection) lives in `select_responsive_sensor`.
+        let luxes: Vec<Option<f32>> = readings.iter().map(|r| r.lux).collect();
+        let lux = select_responsive_sensor(&luxes);
+        // Wedge evidence: the NEWEST report any sensor in the collection
+        // produced. If every report timestamp is stuck, the stack is wedged
+        // even though the collection still answers.
+        let report_ms = readings.iter().filter_map(|r| r.report_ms).max();
+        log::debug!("[display] COM selected lux: {lux:?} (report ts {report_ms:?} ms)");
+        (lux, report_ms, true)
+    }
+
+    fn probe_winrt(&mut self) -> (Option<f32>, Option<u64>, bool) {
+        use windows::Devices::Sensors::LightSensor;
+        if self.winrt.is_none() {
+            match LightSensor::GetDefault() {
+                Ok(sensor) => {
+                    log::debug!("[display] WinRT ambient light sensor found");
+                    self.winrt = Some(sensor);
+                }
+                Err(_) => {
+                    log::debug!("[display] WinRT ambient light sensor not available");
+                    return (None, None, false);
+                }
+            }
+        }
+        let Some(sensor) = self.winrt.as_ref() else {
+            return (None, None, false);
+        };
+        let Ok(reading) = sensor.GetCurrentReading() else {
+            // Present but not answering this poll: devices seen, no data.
+            return (None, None, true);
+        };
+        let lux = reading.IlluminanceInLux().ok();
+        // The WinRT reading carries its own timestamp (the same 100 ns UTC
+        // tick count as FILETIME): the heal machine uses it exactly like
+        // the COM report timestamp.
+        let report_ms = reading
+            .Timestamp()
+            .ok()
+            .and_then(|dt| filetime_ticks_to_epoch_ms(dt.UniversalTime as u64));
+        log::debug!("[display] WinRT ambient lux: {lux:?} (report ts {report_ms:?} ms)");
+        (lux, report_ms, true)
+    }
+
+    /// Handle one read request: run the heal machine, contact the stack
+    /// only when the machine says so, and report the evidence back.
+    fn handle_read(&mut self) -> SensorReadout {
+        let now = now_ms();
+        let mut reset_pending = SENSOR_RESET_REQUESTED.load(Ordering::SeqCst);
+        if reset_pending && !self.core.accepts_forced_rebuild() {
+            // The stack is serving fresh data: an external request would be
+            // churn, not a heal. DROP the flag instead of leaving it pending,
+            // or the next legitimate wedge would be answered by a caller's
+            // stale request rather than by the ladder.
+            SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+            log::debug!(
+                "[display] ambient sensor reset request dropped: the stack is \
+                 serving fresh data (state {:?})",
+                ambient_sensor_state()
+            );
+            reset_pending = false;
+        }
+        let decision = self.core.decide(reset_pending, now);
+        let mut rebuilt = false;
+        // Rebuild number of THIS tick (0 when no rebuild happens).
+        let mut rebuild_no = 0u64;
+        match decision {
+            ReadDecision::Suppress => {
+                return SensorReadout {
+                    contact: false,
+                    lux: None,
+                    devices_seen: self.core.devices_seen,
+                };
+            }
+            ReadDecision::Recreate { forced } => {
+                if self.core.wedged(now) && !self.core.stale_logged {
+                    self.core.stale_logged = true;
+                    let age = self.core.stall_age_ms(now);
+                    log::info!(
+                        "[display] ambient sensor stale: newest report is {age} ms old \
+                         (threshold {} ms, {} consecutive observations of the same report, \
+                         minimum {}), recreating the cached stack",
+                        self.core.policy.stale_after_ms,
+                        self.core.stalled_observations,
+                        self.core.policy.wedge_observations
+                    );
+                }
+                if forced {
+                    SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+                }
+                // The wedge lives in the cached objects: drop them on their
+                // owner thread and let the probe below re-create fresh ones.
+                self.drop_stacks();
+                let delay = self.core.note_rebuild(forced, now);
+                // Capture the number NOW: a fresh probe right after this
+                // disarms the ladder and zeroes the counter again.
+                rebuild_no = self.core.heal.rebuilds;
+                rebuilt = true;
+                log::info!(
+                    "[display] ambient sensor recreating {} stack (rebuild #{rebuild_no}, {})",
+                    match self.backend {
+                        Some(LuxBackend::Com) => "COM",
+                        Some(LuxBackend::Winrt) => "WinRT",
+                        None => "committed",
+                    },
+                    if forced {
+                        "forced by reset request".to_string()
+                    } else {
+                        format!("next attempt in {delay} ms")
+                    }
+                );
+            }
+            ReadDecision::Probe => {}
+        }
+        let (lux, report_ms, devices_seen) = self.probe();
+        let fresh = lux.is_some_and(|v| v.is_finite() && v > MIN_PLAUSIBLE_LUX);
+        self.core.note_probe(devices_seen, report_ms, fresh, now);
+        if rebuilt {
+            // Close the transition trail: stale -> recreating -> outcome.
+            if self.core.wedged(now) {
+                log::info!(
+                    "[display] ambient sensor still frozen after rebuild #{rebuild_no}: \
+                     next attempt in {} ms",
+                    self.core.heal.retry_in_ms(now)
+                );
+            } else {
+                log::info!(
+                    "[display] ambient sensor available after rebuild #{rebuild_no} (lux={lux:?})"
+                );
+            }
+        }
+        SensorReadout {
+            contact: true,
+            lux,
+            devices_seen,
+        }
+    }
+}
+
+/// Sensor thread body. Panics in job handling are caught: the stacks are
+/// dropped (the next read re-creates them) and the thread keeps serving,
+/// so a COM hiccup cannot silently kill the sensor for the whole session.
+#[cfg(windows)]
+fn sensor_worker(rx: std::sync::mpsc::Receiver<SensorJob>) {
+    let mut owner = SensorOwner::new();
+    while let Ok(job) = rx.recv() {
+        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
+            SensorJob::Read(reply) => {
+                let out = owner.handle_read();
+                let _ = reply.send(out);
+            }
+        }));
+        if handled.is_err() {
+            log::error!("[display] ambient sensor thread panicked: dropping stacks, continuing");
+            owner.drop_stacks();
+        }
+    }
+    log::debug!("[display] ambient sensor thread exiting (channel reset)");
+}
+
+/// Reset the worker channel so the next read starts a fresh thread (and a
+/// fresh stack). Dropping the sender lets a live worker finish its current
+/// job and exit; a hung worker dies with the stack it was holding.
+#[cfg(windows)]
+fn reset_sensor_channel() {
+    *SENSOR_TX
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
+}
+
+/// Send one read to the sensor thread, starting the thread if needed.
+/// Returns None only when the thread is unreachable (spawn failed or the
+/// stack hung past `SENSOR_READ_TIMEOUT`): the caller reports no reading
+/// this cycle instead of blocking anywhere on COM.
+#[cfg(windows)]
+fn read_ambient_via_worker() -> Option<SensorReadout> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    {
+        let mut guard = SENSOR_TX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if guard.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            match std::thread::Builder::new()
+                .name("ambient-sensor".to_string())
+                .spawn(move || sensor_worker(rx))
+            {
+                Ok(_) => {
+                    log::debug!("[display] ambient sensor thread started");
+                    *guard = Some(tx);
+                }
+                Err(e) => {
+                    log::warn!("[display] could not start ambient sensor thread: {e}");
+                    return None;
+                }
+            }
+        }
+        let tx = guard.as_ref()?;
+        if tx.send(SensorJob::Read(reply_tx)).is_err() {
+            // Worker gone: reset the channel so the next read starts fresh.
+            drop(guard);
+            reset_sensor_channel();
+            return None;
+        }
+    }
+    match reply_rx.recv_timeout(SENSOR_READ_TIMEOUT) {
+        Ok(out) => Some(out),
+        Err(e) => {
+            // Timeout or disconnected: the stack (or the thread) is
+            // unreachable. Resetting the channel IS the heal for a hung
+            // stack: the replacement thread re-creates everything.
+            log::warn!("[display] ambient sensor read failed ({e:?}), resetting worker and stack");
+            reset_sensor_channel();
+            None
+        }
+    }
+}
+
 #[cfg(windows)]
 fn get_ambient_lux() -> Option<f32> {
-    // Try the classic COM Sensor API first: it works for unpackaged desktop apps.
-    if let Some(lux) = get_ambient_lux_com() {
-        return Some(lux);
+    // All COM/WinRT contact happens on the dedicated sensor thread (the
+    // stacks are thread-affine); this call is a bounded round-trip to it.
+    // None = thread unreachable (spawn failed or stack hung past the
+    // timeout): report no reading this cycle, the diagnosis stays as is.
+    let readout = read_ambient_via_worker()?;
+    if !readout.contact {
+        // The heal machine held this read (backoff hold / NoSensor retry
+        // window): no stack contact, diagnosis unchanged, honest None.
+        return None;
     }
-    // Fall back to WinRT, which works on some systems depending on the sensor driver.
-    get_ambient_lux_winrt()
+    let probe = AmbientProbe {
+        lux: readout.lux,
+        devices_seen: readout.devices_seen,
+    };
+    settle_sensor_state(probe);
+    let lux = probe
+        .lux
+        .filter(|v| v.is_finite() && *v > MIN_PLAUSIBLE_LUX);
+    if let Some(v) = lux {
+        // Persist the last-fresh stamp (hour resolution) so the frozen-
+        // sensor message can later show a real date ("last reading 18 Nov").
+        note_fresh_lux(v);
+    }
+    lux
 }
 
 #[cfg(not(windows))]
 fn get_ambient_lux() -> Option<f32> {
+    // No COM/WinRT stacks on this platform: honestly NoSensor.
+    settle_sensor_state(AmbientProbe {
+        lux: None,
+        devices_seen: false,
+    });
     None
 }
 
@@ -1407,8 +3296,18 @@ pub async fn adaptive_brightness_loop() {
             let diff = (actual as i16 - prev as i16).abs();
             if diff >= 2 {
                 let raw = AUTO_LAST_TARGET.load(Ordering::Relaxed);
-                let new_offset = actual as i16 - raw as i16;
-                AUTO_OFFSET.store(new_offset, Ordering::Relaxed);
+                let current_offset = AUTO_OFFSET.load(Ordering::Relaxed);
+                let active = AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed);
+                let origin = OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed));
+                // Classify before writing: an active user offset (±100 pp) must
+                // not be re-derived with the capture bound (±30 pp) — that is
+                // what silently trimmed "100 %" to 56 % within one iteration.
+                // A value that reproduces the current offset is our own write
+                // coming back and leaves the curve alone.
+                let outcome = classify_capture(actual, raw, current_offset, origin, active);
+
+                AUTO_OFFSET.store(outcome.offset, Ordering::Relaxed);
+                AUTO_OFFSET_ORIGIN.store(outcome.origin.as_u8(), Ordering::Relaxed);
                 AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
                 AUTO_LAST_MANUAL_MS.store(now_ms(), Ordering::Relaxed);
                 // S38: persist so a crash/relaunch within the grace window
@@ -1416,15 +3315,25 @@ pub async fn adaptive_brightness_loop() {
                 persist_override_state();
                 // Snap smoothed to actual so we don't animate back.
                 smoothed = Some(actual as f32);
+                // Self-clearing: the next iteration must not re-detect the
+                // difference we just absorbed (`last_set` is otherwise only
+                // refreshed by an actual write, which the grace window skips).
+                last_set = Some(actual);
                 log::debug!(
                     "auto_brightness: external change detected \
-                     prev={prev}% actual={actual}% → offset={new_offset:+}, grace armed"
+                     prev={prev}% actual={actual}% raw={raw}% origin={} → offset={:+}{}, grace armed",
+                    outcome.origin.label(),
+                    outcome.offset,
+                    if outcome.echo { " (echo — curve unchanged)" } else { "" }
                 );
                 // Smart-mode learning: this external change (Fn key, Windows
                 // slider) carries the user's preference for the current light
-                // level — log it into the smart model.
+                // level — log it into the smart model, but never while the
+                // override offset is active (the captured value then contains
+                // the loop's own output, which is the feedback loop that
+                // produced 1.3 M samples and `offset: 54` in production).
                 if let Some(lux) = get_ambient_lux().filter(|v| *v > MIN_PLAUSIBLE_LUX) {
-                    record_smart_sample(lux, actual);
+                    record_external_change_sample(lux, actual);
                 }
             }
         }
@@ -1460,12 +3369,24 @@ pub async fn adaptive_brightness_loop() {
             Ok(Some(_)) => {
                 consecutive_invalid_reads = consecutive_invalid_reads.saturating_add(1);
                 if consecutive_invalid_reads >= STUCK_SENSOR_RESET_AFTER {
-                    log::warn!(
-                        "[adaptive_brightness] sensor stuck ({} consecutive invalid \
-                         readings) — requesting sensor reset",
-                        consecutive_invalid_reads
-                    );
-                    request_sensor_reset();
+                    let state = ambient_sensor_state();
+                    if state.is_diagnosed() {
+                        // {FrozenReport, NoSensor}: the auto-heal machine owns
+                        // recovery now (stale reports rebuild the cached stack
+                        // on the 1/5/15 min ladder). The loop must not add
+                        // per-cycle reset pressure on top of it.
+                        log::debug!(
+                            "[adaptive_brightness] sensor diagnosed {state:?} \
+                             - auto-heal ladder owns recovery, no loop reset request"
+                        );
+                    } else {
+                        log::warn!(
+                            "[adaptive_brightness] sensor stuck ({} consecutive invalid \
+                             readings) — requesting sensor reset",
+                            consecutive_invalid_reads
+                        );
+                        request_sensor_reset("sensor stuck (invalid readings)");
+                    }
                     consecutive_invalid_reads = 0;
                 }
                 continue;
@@ -1473,21 +3394,40 @@ pub async fn adaptive_brightness_loop() {
             Ok(None) => {
                 consecutive_invalid_reads = consecutive_invalid_reads.saturating_add(1);
                 if consecutive_invalid_reads >= STUCK_SENSOR_RESET_AFTER {
-                    log::warn!(
-                        "[adaptive_brightness] no valid sensor reading for {} cycles — \
-                         requesting sensor reset",
-                        consecutive_invalid_reads
-                    );
-                    request_sensor_reset();
+                    let state = ambient_sensor_state();
+                    if state.is_diagnosed() {
+                        log::debug!(
+                            "[adaptive_brightness] sensor diagnosed {state:?} \
+                             - auto-heal ladder owns recovery, no loop reset request"
+                        );
+                    } else {
+                        log::warn!(
+                            "adaptive_brightness: no valid sensor reading for {} cycles — \
+                             requesting sensor reset",
+                            consecutive_invalid_reads
+                        );
+                        request_sensor_reset("sensor stuck (no reading)");
+                    }
                     consecutive_invalid_reads = 0;
                 }
                 if !no_sensor_warned {
-                    log::warn!(
-                        "adaptive_brightness: no ambient light sensor found — loop idle. \
-                         LightSensor::GetDefault() returned None. \
-                         Check: (1) sensor driver installed, (2) sensor enabled in Device Manager, \
-                         (3) Devices_Sensors feature in Cargo.toml (confirmed present)."
-                    );
+                    // One line per session, honest about WHICH absence this is:
+                    // a machine with no ALS at all is not the same failure as a
+                    // present-but-frozen sensor. FrozenReport is NOT terminal:
+                    // the sensor thread's auto-heal ladder keeps re-creating
+                    // the cached stack (1/5/15 min backoff) until reports flow.
+                    match ambient_sensor_state() {
+                        AmbientSensorState::FrozenReport => log::info!(
+                            "[adaptive_brightness] ambient sensor present but not reporting - \
+                             loop idle, auto-heal re-creates the stack on its backoff ladder"
+                        ),
+                        _ => log::warn!(
+                            "adaptive_brightness: no ambient light sensor found — loop idle. \
+                             LightSensor::GetDefault() returned None. \
+                             Check: (1) sensor driver installed, (2) sensor enabled in Device \
+                             Manager, (3) Devices_Sensors feature in Cargo.toml (confirmed present)."
+                        ),
+                    }
                     no_sensor_warned = true;
                 }
                 continue;
@@ -1534,13 +3474,20 @@ pub async fn adaptive_brightness_loop() {
         // Apply user-override offset: shifts the entire curve up/down so that
         // when the user manually sets brightness the automation respects that
         // preference and only adjusts relative to it as light changes.
+        //
+        // Bound by ORIGIN, never by the capture limit: a user-intent offset of
+        // +74 pp (100 % chosen at 29 lux, raw target 26 %) is legitimate and
+        // must reach the panel. Only the final target is clamped, to
+        // [min_brightness, max_brightness].
         let offset = if AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed) {
-            AUTO_OFFSET.load(Ordering::Relaxed) as f32
+            let origin = OffsetOrigin::from_u8(AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed));
+            // Defensive clamp at the point of use: a stale process (or an older
+            // build) may have left an out-of-range value in the atomic.
+            clamp_offset_for(AUTO_OFFSET.load(Ordering::Relaxed), origin) as f32
         } else {
             0.0
         };
-        let target =
-            (raw_target + offset).clamp(cfg.min_brightness as f32, cfg.max_brightness as f32);
+        let target = effective_target(raw_target, offset, cfg.min_brightness, cfg.max_brightness);
 
         let current = match smoothed {
             Some(s) => s,
@@ -1745,26 +3692,27 @@ fn get_brightness_wmi() -> HardwareResult<u8> {
 fn set_brightness_wmi(level: u8) -> HardwareResult<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // The spawn helper applies CREATE_NO_WINDOW itself; the timeout
+        // bounds a hung PowerShell WMI call (tree-killed on expiry).
+        const WMI_SET_BRIGHTNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         // WmiSetBrightness requires:
         //  1. Targeting a specific CIM *instance* (not just the class name)
         //  2. Brightness typed as [byte] (UInt8), Timeout as [uint32]
         // Using -ClassName without -InputObject returns "Invalid method Parameter(s)".
-        let cmd = format!(
+        let script = format!(
             "$i=Get-CimInstance -Namespace root/WMI -ClassName WmiMonitorBrightnessMethods; \
              Invoke-CimMethod -InputObject $i -MethodName WmiSetBrightness \
              -Arguments @{{Timeout=[uint32]1;Brightness=[byte]{}}}",
             level
         );
-        let status = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .context("PowerShell spawn for WmiSetBrightness")?;
-        if !status.success() {
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        let output = process_spawn::run_capture(&mut cmd, WMI_SET_BRIGHTNESS_TIMEOUT)
+            .map_err(|e| HardwareError::Display(format!("WmiSetBrightness spawn failed: {e}")))?;
+        if !output.success() {
             return Err(HardwareError::Display(format!(
-                "WmiSetBrightness exited with {status}"
+                "WmiSetBrightness exited with {}",
+                output.status
             )));
         }
     }
@@ -1785,21 +3733,25 @@ fn set_brightness_wmi(level: u8) -> HardwareResult<()> {
 fn disable_windows_adaptive_brightness() {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        // Best-effort: errors are logged, never propagated. The helper
+        // applies CREATE_NO_WINDOW and bounds the child wait (tree-kill).
+        const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         let scheme = "SCHEME_CURRENT";
         let sub = "SUB_VIDEO";
         let guid = "ADAPTBRIGHT";
         for flag in ["/SETACVALUEINDEX", "/SETDCVALUEINDEX"] {
-            let _ = std::process::Command::new("powercfg")
-                .args([flag, scheme, sub, guid, "0"])
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                .output();
+            let mut cmd = std::process::Command::new("powercfg");
+            cmd.args([flag, scheme, sub, guid, "0"]);
+            if let Err(e) = process_spawn::run_capture(&mut cmd, POWERCFG_TIMEOUT) {
+                log::warn!("adaptive_brightness: powercfg {flag} failed: {e}");
+            }
         }
         // Activate the scheme so the change takes effect immediately.
-        let _ = std::process::Command::new("powercfg")
-            .args(["/setactive", scheme])
-            .creation_flags(0x08000000)
-            .output();
+        let mut cmd = std::process::Command::new("powercfg");
+        cmd.args(["/setactive", scheme]);
+        if let Err(e) = process_spawn::run_capture(&mut cmd, POWERCFG_TIMEOUT) {
+            log::warn!("adaptive_brightness: powercfg /setactive failed: {e}");
+        }
         log::info!("adaptive_brightness: disabled Windows ADAPTBRIGHT (power plan)");
     }
 }
@@ -1822,9 +3774,11 @@ fn disable_windows_adaptive_brightness() {
 use windows::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
     QueryDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
     DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, QDC_ONLY_ACTIVE_PATHS,
+    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
 #[cfg(windows)]
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
@@ -1880,83 +3834,342 @@ unsafe fn query_display_config_retry() -> HardwareResult<(
     ))
 }
 
-/// Read the real HDR (Advanced Color) enabled state for the primary display.
-pub fn get_hdr_state() -> bool {
-    #[cfg(windows)]
-    unsafe {
-        // SAFETY: query_display_config_retry() returns valid paths with adapterId/id populated
-        // from the active display topology. The DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO struct
-        // is correctly initialized and its header points to its own base address.
-        let (np, _nm, paths, _modes) = match query_display_config_retry() {
-            Ok(x) => x,
-            Err(_) => return false,
+// ── CCD path enumeration ─────────────────────────────────────────────────────
+//
+// One `QueryDisplayConfig` pass feeds every consumer that needs to know *which*
+// physical displays exist: the per-display HDR state below and the "internal
+// panel" flag used by the refresh-rate control. A single enumeration keeps the
+// two from disagreeing about the topology.
+
+/// One active CCD path, resolved to the GDI device that drives it.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+struct CcdPath {
+    adapter_id: windows::Win32::Foundation::LUID,
+    target_id: u32,
+    /// GDI source name (`\\.\DISPLAY1`) — joins CCD data to the GDI enumeration.
+    gdi_device: String,
+    /// Monitor friendly name when Windows exposes one, else empty.
+    label: String,
+    /// The target is an embedded output (laptop panel).
+    is_embedded: bool,
+    /// `monitorDevicePath` (`\\?\DISPLAY#EDO4503#4&…`) for the monitor on this
+    /// target. Joins CCD to `WmiMonitorID.InstanceName` (EDID panel identity).
+    monitor_device_path: String,
+}
+
+/// Active display paths with their GDI source name and monitor name.
+///
+/// Errors are propagated instead of swallowed: a caller that writes (HDR) must
+/// be able to tell "the topology could not be read" from "no display supports
+/// this", and only the former is retryable.
+#[cfg(windows)]
+fn ccd_paths() -> HardwareResult<Vec<CcdPath>> {
+    // SAFETY: `paths` comes from a successful QueryDisplayConfig; every request
+    // struct's header points at its own base address and outlives the call
+    // (DisplayConfigGetDeviceInfo does not retain it).
+    let (np, _nm, paths, _modes) = unsafe { query_display_config_retry() }?;
+    let mut out = Vec::with_capacity(np as usize);
+    for path in paths.iter().take(np as usize) {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
         };
-        for path in paths.iter().take(np as usize) {
-            let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
-                header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
-                    r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
-                    size: std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
-                    adapterId: path.targetInfo.adapterId,
-                    id: path.targetInfo.id,
-                },
-                ..Default::default()
+        if unsafe { DisplayConfigGetDeviceInfo(&mut source.header as *mut _) } != 0 {
+            continue;
+        }
+        let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        let (label, is_embedded, monitor_device_path) =
+            if unsafe { DisplayConfigGetDeviceInfo(&mut target.header as *mut _) } == 0 {
+                (
+                    wide_to_string(&target.monitorFriendlyDeviceName),
+                    is_embedded_output_technology(target.outputTechnology),
+                    wide_to_string(&target.monitorDevicePath),
+                )
+            } else {
+                (String::new(), false, String::new())
             };
-            // Pass pointer to the header (= base of struct, same address since header is field 0)
-            let rc = DisplayConfigGetDeviceInfo(&mut info.header as *mut _);
-            if rc == 0 {
-                // Anonymous union: value field holds the bitfield
-                // bit 0 = advancedColorSupported, bit 1 = advancedColorEnabled
-                if info.Anonymous.value & 0x2 != 0 {
-                    return true;
-                }
+        out.push(CcdPath {
+            adapter_id: path.targetInfo.adapterId,
+            target_id: path.targetInfo.id,
+            gdi_device: wide_to_string(&source.viewGdiDeviceName),
+            label,
+            is_embedded,
+            monitor_device_path,
+        });
+    }
+    Ok(out)
+}
+
+/// Monitor device instance path (`\\?\DISPLAY#EDO4503#4&…`) per GDI display.
+///
+/// One CCD pass for every consumer: the colour tab needs it to join a display
+/// to its EDID panel (`WmiMonitorID`), and doing that per display would run
+/// `QueryDisplayConfig` N times.
+pub fn monitor_device_paths() -> std::collections::HashMap<String, String> {
+    #[cfg(windows)]
+    {
+        match ccd_paths() {
+            Ok(paths) => paths
+                .into_iter()
+                .filter(|p| !p.monitor_device_path.is_empty())
+                .map(|p| (p.gdi_device, p.monitor_device_path))
+                .collect(),
+            Err(e) => {
+                log::debug!("[edid] CCD monitor device paths unavailable: {e}");
+                std::collections::HashMap::new()
             }
         }
     }
-    false
+    #[cfg(not(windows))]
+    {
+        std::collections::HashMap::new()
+    }
 }
 
-/// Enable or disable HDR (Advanced Color) on the primary display.
+/// Per-display Windows advanced-color (HDR / wide colour gamut) state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HdrDisplayState {
+    /// GDI device name (`\\.\DISPLAY1`).
+    pub device: String,
+    /// Monitor friendly name when Windows exposes one, else empty.
+    pub label: String,
+    /// `advancedColorSupported` — the display can do HDR / WCG.
+    pub supported: bool,
+    /// `advancedColorEnabled` — HDR is currently on for this display.
+    pub enabled: bool,
+}
+
+/// `(advancedColorSupported, advancedColorEnabled)` for one CCD target.
+///
+/// `None` means the target did not answer — unknown, not "unsupported".
+#[cfg(windows)]
+fn advanced_color_info(
+    adapter_id: windows::Win32::Foundation::LUID,
+    target_id: u32,
+) -> Option<(bool, bool)> {
+    let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+            size: std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+            adapterId: adapter_id,
+            id: target_id,
+        },
+        ..Default::default()
+    };
+    // SAFETY: the struct is correctly initialised and the header is its own
+    // base address; the API only reads it during the call. The union field is
+    // the API's bitfield, read immediately after a successful call.
+    if unsafe { DisplayConfigGetDeviceInfo(&mut info.header as *mut _) } != 0 {
+        return None;
+    }
+    // Anonymous union bitfield: bit 0 = supported, bit 1 = enabled.
+    let value = unsafe { info.Anonymous.value };
+    Some((value & 0x1 != 0, value & 0x2 != 0))
+}
+
+/// Advanced-color state of every active display (HDR supported / on).
+///
+/// Read-only and cheap enough for `get_display_info`: one CCD query, one device
+/// info call per path. A path whose target does not answer is reported as not
+/// supported so the UI can explain why a toggle is off.
+pub fn hdr_displays() -> Vec<HdrDisplayState> {
+    #[cfg(windows)]
+    {
+        let Ok(paths) = ccd_paths() else {
+            log::warn!("[hdr] display topology unavailable — HDR state unknown");
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            // SAFETY: adapter id / target id come from a live CCD path.
+            let state = advanced_color_info(path.adapter_id, path.target_id);
+            if state.is_none() {
+                log::debug!(
+                    "[hdr] {} ({}) did not answer GET_ADVANCED_COLOR_INFO",
+                    path.gdi_device,
+                    path.label
+                );
+            }
+            let (supported, enabled) = state.unwrap_or((false, false));
+            out.push(HdrDisplayState {
+                device: path.gdi_device,
+                label: path.label,
+                supported,
+                enabled,
+            });
+        }
+        out
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// True when at least one connected display supports HDR (advanced color).
+pub fn hdr_supported() -> bool {
+    hdr_displays().iter().any(|d| d.supported)
+}
+
+/// Read the real HDR (Advanced Color) state — true when *any* display has it on.
+pub fn get_hdr_state() -> bool {
+    hdr_displays().iter().any(|d| d.enabled)
+}
+
+/// One `SET_ADVANCED_COLOR_STATE` outcome for a single display path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HdrWriteResult {
+    device: String,
+    /// `advancedColorSupported` for this path.
+    supported: bool,
+    /// `Some(0)` = applied, `Some(rc)` = Windows refused, `None` = not attempted
+    /// (unsupported path, reported for the log).
+    rc: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct HdrWriteSummary {
+    /// Paths that report advanced-color support.
+    supported: usize,
+    applied: usize,
+    failed: usize,
+    /// Paths left untouched because they do not support advanced color.
+    skipped: usize,
+}
+
+/// Short per-path label for the single log line of a HDR toggle.
+fn hdr_result_label(result: &HdrWriteResult) -> &'static str {
+    match result.rc {
+        None => "unsupported",
+        Some(0) => "ok",
+        Some(_) => "failed",
+    }
+}
+
+/// Decide the outcome of a HDR toggle from its per-path results.
+///
+/// `Ok` when at least one *supporting* display accepted the change — a laptop
+/// whose panel says yes while two external monitors say no is a success, not an
+/// error (the old code returned `Err` for that, so the UI rolled back a change
+/// the hardware had already applied). When no connected display supports
+/// advanced color the toggle is refused with a message the UI can show verbatim,
+/// so the switch cannot pretend to have done something.
+fn summarize_hdr_write(results: &[HdrWriteResult]) -> HardwareResult<HdrWriteSummary> {
+    let mut summary = HdrWriteSummary::default();
+    for result in results {
+        if !result.supported {
+            summary.skipped += 1;
+            continue;
+        }
+        summary.supported += 1;
+        match result.rc {
+            Some(0) => summary.applied += 1,
+            Some(_) => summary.failed += 1,
+            None => {}
+        }
+    }
+    if summary.supported == 0 {
+        return Err(HardwareError::NotSupported(
+            "no connected display supports HDR (advanced color) — nothing to change".to_string(),
+        ));
+    }
+    if summary.applied == 0 {
+        return Err(HardwareError::Display(format!(
+            "HDR could not be changed on any of the {} display(s) that support it",
+            summary.supported
+        )));
+    }
+    Ok(summary)
+}
+
+/// Enable or disable HDR (Advanced Color) on the displays that support it.
 ///
 /// Uses `DisplayConfigSetDeviceInfo` — operates on the current user's
 /// interactive session and does NOT require administrator privileges.
+///
+/// Only paths whose `advancedColorSupported` bit is set are written; the rest
+/// are left alone. One `info` line records what happened per display, because
+/// this path used to be completely silent (audit §5: no way to prove HDR was
+/// ever toggled).
 fn set_hdr_ccd(enabled: bool) -> HardwareResult<()> {
     #[cfg(windows)]
-    unsafe {
-        // SAFETY: Same as get_hdr_state — paths are valid CCD topology data.
-        // DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE is correctly initialized with
-        // the enableAdvancedColor bit set. DisplayConfigSetDeviceInfo only reads the
-        // struct during the call and does not retain the pointer.
-        let (np, _nm, paths, _modes) =
-            query_display_config_retry().context("query display config")?;
-        let mut last_err = 0i32;
-        for path in paths.iter().take(np as usize) {
+    {
+        let paths = ccd_paths()?;
+        let mut results = Vec::with_capacity(paths.len());
+        for path in &paths {
+            // SAFETY: adapter id / target id come from a live CCD path, and the
+            // SET struct's header points at its own base address.
+            let supported = matches!(
+                advanced_color_info(path.adapter_id, path.target_id),
+                Some((true, _))
+            );
+            if !supported {
+                results.push(HdrWriteResult {
+                    device: path.gdi_device.clone(),
+                    supported: false,
+                    rc: None,
+                });
+                continue;
+            }
             let mut state = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE {
                 header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                     r#type: DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
                     size: std::mem::size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32,
-                    adapterId: path.targetInfo.adapterId,
-                    id: path.targetInfo.id,
+                    adapterId: path.adapter_id,
+                    id: path.target_id,
                 },
                 ..Default::default()
             };
             // bit 0 = enableAdvancedColor
             state.Anonymous.value = enabled as u32;
-            let rc = DisplayConfigSetDeviceInfo(&state.header as *const _);
-            if rc != 0 {
-                last_err = rc;
-            }
+            // SAFETY: the struct is initialised above and only read during the call.
+            let rc = unsafe { DisplayConfigSetDeviceInfo(&state.header as *const _) };
+            results.push(HdrWriteResult {
+                device: path.gdi_device.clone(),
+                supported: true,
+                rc: Some(rc),
+            });
         }
-        if last_err != 0 {
-            return Err(HardwareError::Display(format!(
-                "DisplayConfigSetDeviceInfo failed: {last_err:#x}"
-            )));
+        let summary = summarize_hdr_write(&results)?;
+        let per_path: Vec<String> = results
+            .iter()
+            .map(|r| format!("{}={}", r.device, hdr_result_label(r)))
+            .collect();
+        log::info!(
+            "set_hdr({enabled}) → supported={} applied={} failed={} skipped={} [{}]",
+            summary.supported,
+            summary.applied,
+            summary.failed,
+            summary.skipped,
+            per_path.join(", ")
+        );
+        if summary.failed > 0 {
+            log::warn!(
+                "set_hdr({enabled}): {} display(s) refused the change",
+                summary.failed
+            );
         }
+        Ok(())
     }
     #[cfg(not(windows))]
     {
         log::info!("set_hdr({enabled}) — stub on non-Windows");
+        Ok(())
     }
-    Ok(())
 }
 
 // ── Intel PSR2 DRRS (Display Refresh Rate Switching) ─────────────────────────
@@ -2022,6 +4235,107 @@ pub fn get_intel_drrs() -> bool {
     true // default: assume enabled when registry is unreadable
 }
 
+// ── PSR2 DRRS: "applied — effective after reboot" ────────────────────────────
+//
+// The registry value is read by the Intel driver when it initialises the panel,
+// so a write has NO observable effect until the next boot: Windows keeps
+// reporting the configured Hz, and there is no API that exposes the driver's
+// actual switching state. Reading Psr2DrrsEnable back therefore proves only that
+// the *intent* was stored — the audit found exactly that: reg=1, zero
+// observable effect, reboot required.
+//
+// To stop the UI from claiming "active", the timestamp of the write is persisted
+// and compared with the current boot time: while the write belongs to this boot
+// session the toggle reads "applied — takes effect after reboot". After a reboot
+// the same file answers "not pending" and the value in the registry is what the
+// driver loaded at start-up.
+
+const DRRS_STATE_FILE: &str = "psr2_drrs.json";
+
+/// Clock skew allowed between the write and the boot-time estimate (both derive
+/// from the wall clock, so a NTP correction must not flip the flag).
+const DRRS_CLOCK_SLACK_MS: u64 = 60_000;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DrrsState {
+    /// Unix ms at which the registry value was written.
+    applied_at_ms: u64,
+}
+
+/// `%LOCALAPPDATA%\MiControl\psr2_drrs.json`.
+///
+/// Tests override this via `MICONTROL_DRRS_STATE_PATH` so they never touch the
+/// user's real state.
+fn drrs_state_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("MICONTROL_DRRS_STATE_PATH") {
+        return std::path::PathBuf::from(path);
+    }
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base)
+        .join("MiControl")
+        .join(DRRS_STATE_FILE)
+}
+
+#[cfg(windows)]
+fn boot_time_ms() -> Option<u64> {
+    // SAFETY: GetTickCount64 is a pure read of the system tick counter.
+    let uptime_ms = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    Some(now_ms().saturating_sub(uptime_ms))
+}
+
+#[cfg(not(windows))]
+fn boot_time_ms() -> Option<u64> {
+    None
+}
+
+/// True when a DRRS write happened during the current boot session.
+///
+/// Pure so the boundary is unit-testable without touching the clock: a write
+/// at or after the boot instant is still waiting for the driver to reload.
+fn drrs_pending_reboot(applied_at_ms: Option<u64>, boot_time_ms: Option<u64>) -> bool {
+    match (applied_at_ms, boot_time_ms) {
+        (Some(applied), Some(boot)) => applied >= boot.saturating_sub(DRRS_CLOCK_SLACK_MS),
+        // Unknown timestamps: do not invent a state.
+        _ => false,
+    }
+}
+
+fn read_drrs_state() -> Option<DrrsState> {
+    let raw = std::fs::read_to_string(drrs_state_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Record that the PSR2 DRRS registry value was just written.
+///
+/// Called from the (unelevated) app process after the elevated bridge succeeds,
+/// because the SYSTEM helper's `LOCALAPPDATA` is not the user's.
+pub fn mark_drrs_applied() {
+    let path = drrs_state_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let state = DrrsState {
+        applied_at_ms: now_ms(),
+    };
+    match serde_json::to_string(&state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::warn!(
+                    "[drrs] could not persist applied state to {}: {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => log::warn!("[drrs] could not serialise applied state: {e}"),
+    }
+}
+
+/// True while the DRRS value written this session has not been loaded by the
+/// driver yet (i.e. a reboot is still required for it to take effect).
+pub fn drrs_pending_reboot_now() -> bool {
+    drrs_pending_reboot(read_drrs_state().map(|s| s.applied_at_ms), boot_time_ms())
+}
+
 /// Write Intel PSR2 DRRS state to the Arc driver registry key.
 /// Requires an elevated (admin) process — called from elevated.rs.
 /// Changes take effect after the display driver restarts or system reboots.
@@ -2039,94 +4353,364 @@ pub fn set_intel_drrs(enabled: bool) -> HardwareResult<()> {
         })?;
         key.write_u32(DRRS_REG_VALUE, enabled as u32)
             .map_err(|e| HardwareError::Registry(format!("set Psr2DrrsEnable: {e}")))?;
+        // The registry is the only observable surface: say so once, with the
+        // caveat, so a log reader does not mistake this for a live effect.
+        log::info!(
+            "[drrs] Psr2DrrsEnable={} written to {path} — applied in the registry, \
+             effective only after a reboot/driver restart (not observable by the OS)",
+            enabled as u32
+        );
     }
     Ok(())
 }
 
-// ── Refresh rate ──────────────────────────────────────────────────────────────
+// ── Refresh rate (per display device) ─────────────────────────────────────────
+//
+// Refresh rate is a PER-DISPLAY property, but the old implementation mixed two
+// sources: `get_available_refresh_rates()` enumerated the GDI *primary* display
+// (`EnumDisplaySettingsExW(NULL)` → the external LG, 3440×1440@85 → [50, 85])
+// while `get_refresh_rate()` read `Win32_VideoController` (the internal panel,
+// 3120×2080@120). On a laptop + external monitor that produced a UI showing
+// "120 Hz" with chips [50, 85] — no chip active — and clicking a chip called
+// `ChangeDisplaySettingsExW(NULL)`, i.e. it changed the EXTERNAL monitor while
+// the user was looking at the laptop panel. The panel's 60 Hz mode was
+// unreachable from the app.
+//
+// Fix: enumerate every attached GDI device once, mark the internal panel from
+// the CCD topology (`outputTechnology`), and route *both* the reads and the
+// write through [`select_refresh_target`], so the current rate, the chips and
+// the write always describe the same device. Until the UI grows a display
+// selector (audit 2.7), the edited display is the laptop's own panel, falling
+// back to the GDI primary on desktops.
+
+/// Refresh-rate capabilities of one attached GDI display device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisplayRefreshModes {
+    /// GDI device name (`\\.\DISPLAY1`) — the handle used by both the read and
+    /// the write (`EnumDisplaySettingsExW` / `ChangeDisplaySettingsExW`).
+    device: String,
+    /// Monitor / adapter description, for logs only.
+    label: String,
+    /// Refresh rate currently in effect for this device.
+    current_hz: u32,
+    /// Refresh rates available at the device's current resolution.
+    rates: Vec<u32>,
+    /// Windows reports an embedded output (CCD `outputTechnology`), i.e. the
+    /// laptop's built-in panel.
+    is_internal: bool,
+    /// This device is the GDI primary (what `EnumDisplaySettingsW(NULL)` means).
+    is_primary: bool,
+}
+
+/// The display the refresh-rate control edits: the internal panel when there is
+/// one, else the GDI primary, else the first attached device.
 ///
-/// Uses `EnumDisplaySettingsExW` (Win32 GDI) which is the same source the
-/// Windows Display Settings page uses when building the "Choose a refresh
-/// rate" dropdown.
+/// Everything that touches refresh rate goes through this function — reading
+/// the current rate, listing the supported rates and changing the mode — so the
+/// three can never disagree about which monitor they mean.
+fn select_refresh_target(modes: &[DisplayRefreshModes]) -> Option<&DisplayRefreshModes> {
+    modes
+        .iter()
+        .find(|m| m.is_internal)
+        .or_else(|| modes.iter().find(|m| m.is_primary))
+        .or_else(|| modes.first())
+}
+
+/// Resolve the device `set_refresh_rate` will write to.
+///
+/// Pure and shared with the read path (`select_refresh_target`), so a chip can
+/// only ever move the display whose rates produced that chip: a rate the target
+/// does not advertise is refused instead of being applied to another monitor.
+fn resolve_refresh_write(
+    modes: &[DisplayRefreshModes],
+    hz: u32,
+) -> Result<&DisplayRefreshModes, String> {
+    let target = select_refresh_target(modes)
+        .ok_or_else(|| "no attached display device could be enumerated".to_string())?;
+    if !target.rates.contains(&hz) {
+        return Err(format!(
+            "{hz} Hz is not supported by {} ({}) — available: {:?}",
+            target.device, target.label, target.rates
+        ));
+    }
+    Ok(target)
+}
+
+/// Enumerate, pick the display the UI edits, and return `(current_hz, rates)`.
+///
+/// One enumeration for both values: calling two functions that each enumerate
+/// their own device is exactly the bug being fixed.
+fn refresh_rate_snapshot() -> HardwareResult<(u32, Vec<u32>)> {
+    let modes = enumerate_refresh_modes()?;
+    let target = select_refresh_target(&modes).ok_or_else(|| {
+        HardwareError::Display("no attached display device could be enumerated".to_string())
+    })?;
+    if target.rates.is_empty() {
+        return Err(HardwareError::Display(format!(
+            "No refresh rates found for {} at its current mode",
+            target.device
+        )));
+    }
+    log::debug!(
+        target: "hw::display",
+        "refresh-rate source: {} ({}) current={} Hz rates={:?} internal={} primary={}",
+        target.device,
+        target.label,
+        target.current_hz,
+        target.rates,
+        target.is_internal,
+        target.is_primary
+    );
+    Ok((target.current_hz, target.rates.clone()))
+}
+
+/// All Hz values supported by the display the refresh-rate control edits.
+///
+/// Uses `EnumDisplaySettingsExW` (Win32 GDI) — the same source the Windows
+/// Display Settings page uses for its "Choose a refresh rate" dropdown — but
+/// per device instead of `NULL` (⇒ GDI primary).
 pub fn get_available_refresh_rates() -> HardwareResult<Vec<u32>> {
+    refresh_rate_snapshot().map(|(_, rates)| rates)
+}
+
+#[cfg(windows)]
+fn wide_to_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// True for CCD output technologies that are soldered to the machine (laptop
+/// panel): internal, eDP, LVDS or UDI-embedded.
+#[cfg(windows)]
+fn is_embedded_output_technology(
+    tech: windows::Win32::Devices::Display::DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY,
+) -> bool {
+    use windows::Win32::Devices::Display::{
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED,
+    };
+    matches!(
+        tech,
+        DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+            | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS
+    )
+}
+
+/// CCD paths keyed by GDI device name.
+///
+/// Joins CCD metadata (monitor friendly name, embedded-panel flag) onto the GDI
+/// enumeration. Best effort: if the CCD query fails the map is empty and
+/// [`select_refresh_target`] falls back to the GDI primary.
+#[cfg(windows)]
+fn ccd_devices_by_gdi_name() -> std::collections::HashMap<String, CcdPath> {
+    ccd_paths()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| (path.gdi_device.clone(), path))
+        .collect()
+}
+
+/// One display device attached to the desktop, as GDI sees it.
+///
+/// This is the single per-device enumeration behind the colour tab, the
+/// refresh-rate control and the calibration-wizard target — replacing the old
+/// `for i in 0..=7` that invented eight displays (audit 2.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachedDisplayDevice {
+    /// GDI device name (`DISPLAY1` style, with the `\\.\` prefix).
+    pub device: String,
+    /// Adapter / monitor description, for display only.
+    pub label: String,
+    /// CCD reports an embedded output (laptop panel).
+    pub is_internal: bool,
+    /// GDI primary — what `EnumDisplaySettingsW(NULL)` and `dccw.exe` mean.
+    pub is_primary: bool,
+}
+
+/// Every display device attached to the desktop, in GDI order.
+///
+/// Only devices Windows says are attached are returned, so a machine with three
+/// monitors yields three rows. The mirroring pseudo-driver is skipped (it has no
+/// modes and no panel of its own).
+#[cfg(windows)]
+fn enumerate_gdi_devices() -> Vec<AttachedDisplayDevice> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
+        DISPLAY_DEVICE_MIRRORING_DRIVER, DISPLAY_DEVICE_PRIMARY_DEVICE,
+    };
+
+    let ccd = ccd_devices_by_gdi_name();
+    let mut out = Vec::new();
+    let mut idx = 0u32;
+    loop {
+        // SAFETY: POD struct with `cb` set; EnumDisplayDevicesW writes into it
+        // and does not retain the pointer.
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), idx, &mut dd, 0).as_bool() } {
+            break;
+        }
+        idx += 1;
+        if dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == 0 {
+            continue;
+        }
+        if dd.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER != 0 {
+            continue;
+        }
+        let device = wide_to_string(&dd.DeviceName);
+        let path = ccd.get(&device);
+        // Prefer the monitor name from CCD: `DISPLAY_DEVICEW.DeviceString` is the
+        // *adapter* ("Intel(R) Arc(TM) B390 GPU") on this machine, which would
+        // label every card identically.
+        let ccd_label = path.map(|p| p.label.clone()).unwrap_or_default();
+        out.push(AttachedDisplayDevice {
+            is_internal: path.is_some_and(|p| p.is_embedded),
+            is_primary: dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0,
+            label: if ccd_label.is_empty() {
+                wide_to_string(&dd.DeviceString)
+            } else {
+                ccd_label
+            },
+            device,
+        });
+    }
+    out
+}
+
+/// Every display device attached to the desktop (empty on non-Windows).
+pub(crate) fn attached_display_devices() -> Vec<AttachedDisplayDevice> {
     #[cfg(windows)]
     {
-        use std::collections::HashSet;
-        use windows::Win32::Graphics::Gdi::{
-            EnumDisplaySettingsExW, DEVMODEW, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
-            ENUM_DISPLAY_SETTINGS_MODE,
-        };
-
-        unsafe {
-            // SAFETY: DEVMODEW is a POD struct with dmSize correctly set. EnumDisplaySettingsExW
-            // writes to the struct and does not retain the pointer. Comparison of dmPelsWidth,
-            // dmPelsHeight, dmBitsPerPel, and dmDisplayFrequency reads the fields Windows
-            // populated — no uninitialized data is read.
-            let mut cur = DEVMODEW {
-                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
-                ..Default::default()
-            };
-            // Query current mode to know the active resolution.
-            let _ = EnumDisplaySettingsExW(
-                None,
-                ENUM_CURRENT_SETTINGS,
-                &mut cur,
-                ENUM_DISPLAY_SETTINGS_FLAGS(0),
-            );
-            let (w, h, bpp) = (cur.dmPelsWidth, cur.dmPelsHeight, cur.dmBitsPerPel);
-
-            let mut seen: HashSet<u32> = HashSet::new();
-            let mut idx = 0u32;
-            loop {
-                let mut m = DEVMODEW {
-                    dmSize: std::mem::size_of::<DEVMODEW>() as u16,
-                    ..Default::default()
-                };
-                if !EnumDisplaySettingsExW(
-                    None,
-                    ENUM_DISPLAY_SETTINGS_MODE(idx),
-                    &mut m,
-                    ENUM_DISPLAY_SETTINGS_FLAGS(0),
-                )
-                .as_bool()
-                {
-                    break;
-                }
-                if m.dmPelsWidth == w
-                    && m.dmPelsHeight == h
-                    && m.dmBitsPerPel == bpp
-                    && m.dmDisplayFrequency > 0
-                {
-                    seen.insert(m.dmDisplayFrequency);
-                }
-                idx += 1;
-            }
-            let mut rates: Vec<u32> = seen.into_iter().collect();
-            rates.sort_unstable();
-            // S25-009: Return error if no refresh rates were found.
-            if rates.is_empty() {
-                return Err(HardwareError::Display(
-                    "No refresh rates found for current display mode".to_string(),
-                ));
-            }
-            Ok(rates)
-        }
+        enumerate_gdi_devices()
     }
     #[cfg(not(windows))]
     {
-        Ok(vec![60, 120])
+        Vec::new()
     }
 }
 
-/// Change the primary display's refresh rate.
+/// Enumerate the attached display devices with their current and supported
+/// refresh rates at the current resolution.
+#[cfg(windows)]
+fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
+    use std::collections::HashSet;
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplaySettingsExW, DEVMODEW, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
+        ENUM_DISPLAY_SETTINGS_MODE,
+    };
+
+    let mut out: Vec<DisplayRefreshModes> = Vec::new();
+    for dev in enumerate_gdi_devices() {
+        // NUL-terminated copy: the PCWSTR must outlive every call below.
+        let device: Vec<u16> = dev
+            .device
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let name = PCWSTR::from_raw(device.as_ptr());
+
+        // SAFETY: DEVMODEW is a POD with `dmSize` set; the API writes into it
+        // and does not retain the pointer. `name` outlives both calls.
+        let mut cur = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        if !unsafe {
+            EnumDisplaySettingsExW(
+                name,
+                ENUM_CURRENT_SETTINGS,
+                &mut cur,
+                ENUM_DISPLAY_SETTINGS_FLAGS(0),
+            )
+        }
+        .as_bool()
+        {
+            continue;
+        }
+        let (w, h, bpp) = (cur.dmPelsWidth, cur.dmPelsHeight, cur.dmBitsPerPel);
+        let current_hz = cur.dmDisplayFrequency;
+
+        let mut seen: HashSet<u32> = HashSet::new();
+        let mut mode_idx = 0u32;
+        loop {
+            let mut m = DEVMODEW {
+                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
+            if !unsafe {
+                EnumDisplaySettingsExW(
+                    name,
+                    ENUM_DISPLAY_SETTINGS_MODE(mode_idx),
+                    &mut m,
+                    ENUM_DISPLAY_SETTINGS_FLAGS(0),
+                )
+            }
+            .as_bool()
+            {
+                break;
+            }
+            if m.dmPelsWidth == w
+                && m.dmPelsHeight == h
+                && m.dmBitsPerPel == bpp
+                && m.dmDisplayFrequency > 0
+            {
+                seen.insert(m.dmDisplayFrequency);
+            }
+            mode_idx += 1;
+        }
+        let mut rates: Vec<u32> = seen.into_iter().collect();
+        rates.sort_unstable();
+        if rates.is_empty() && current_hz > 0 {
+            // Devices that report no enumerable modes still have a current one.
+            rates.push(current_hz);
+        }
+
+        out.push(DisplayRefreshModes {
+            is_internal: dev.is_internal,
+            is_primary: dev.is_primary,
+            label: dev.label,
+            device: dev.device,
+            current_hz,
+            rates,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(not(windows))]
+fn enumerate_refresh_modes() -> HardwareResult<Vec<DisplayRefreshModes>> {
+    Ok(vec![DisplayRefreshModes {
+        device: r"\\.\DISPLAY1".to_string(),
+        label: "display".to_string(),
+        current_hz: 60,
+        rates: vec![60, 120],
+        is_internal: true,
+        is_primary: true,
+    }])
+}
+
+/// Change the refresh rate of the display the UI edits.
 ///
-/// `hz` must be one of the values returned by `get_available_refresh_rates()`.
-/// The change is persisted to the registry (`CDS_UPDATEREGISTRY`) so it
-/// survives reboots.  Returns an error if the rate is not supported or if
-/// Windows rejects the mode change.
+/// The target device is resolved by [`resolve_refresh_write`] — the same
+/// selection the current rate and the chips come from — and passed explicitly
+/// to `ChangeDisplaySettingsExW`, so a chip can never move a different monitor
+/// (the old code passed `NULL` = GDI primary, i.e. the external LG, while the
+/// UI showed the internal panel's rate).
+///
+/// `hz` must be one of the values returned by `get_available_refresh_rates()`;
+/// anything else is refused before touching the display. The change is
+/// persisted to the registry (`CDS_UPDATEREGISTRY`) so it survives reboots.
 pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
     #[cfg(windows)]
     {
+        use windows::core::PCWSTR;
         use windows::Win32::Graphics::Gdi::{
             ChangeDisplaySettingsExW, EnumDisplaySettingsExW, CDS_TYPE, DEVMODEW,
             DEVMODE_FIELD_FLAGS, DISP_CHANGE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
@@ -2135,32 +4719,50 @@ pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
         const DM_DISPLAYFREQUENCY: u32 = 0x00400000;
         const CDS_UPDATEREGISTRY_VAL: u32 = 0x00000001;
 
+        let modes = enumerate_refresh_modes()?;
+        let target = resolve_refresh_write(&modes, hz).map_err(HardwareError::Display)?;
+        // NUL-terminated copy: the PCWSTR must outlive every call below.
+        let device: Vec<u16> = target
+            .device
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let name = PCWSTR::from_raw(device.as_ptr());
+        log::info!(
+            "set_refresh_rate: {hz} Hz → {} ({}, currently {} Hz, supported {:?})",
+            target.device,
+            target.label,
+            target.current_hz,
+            target.rates
+        );
+
         unsafe {
             // SAFETY: DEVMODEW is POD with dmSize set. EnumDisplaySettingsExW populates the
-            // current mode; we modify dmDisplayFrequency and dmFields before passing it to
-            // ChangeDisplaySettingsExW which does not retain the pointer.
+            // current mode of `device`; we modify dmDisplayFrequency and dmFields before
+            // passing it to ChangeDisplaySettingsExW which does not retain the pointer.
             let mut mode = DEVMODEW {
                 dmSize: std::mem::size_of::<DEVMODEW>() as u16,
                 ..Default::default()
             };
             if !EnumDisplaySettingsExW(
-                None,
+                name,
                 ENUM_CURRENT_SETTINGS,
                 &mut mode,
                 ENUM_DISPLAY_SETTINGS_FLAGS(0),
             )
             .as_bool()
             {
-                return Err(HardwareError::Display(
-                    "EnumDisplaySettingsExW(CURRENT) failed".to_string(),
-                ));
+                return Err(HardwareError::Display(format!(
+                    "EnumDisplaySettingsExW(CURRENT) failed for {}",
+                    target.device
+                )));
             }
             mode.dmDisplayFrequency = hz;
             // Tell Windows we're only changing the refresh rate field.
             mode.dmFields = DEVMODE_FIELD_FLAGS(DM_DISPLAYFREQUENCY);
 
             let result = ChangeDisplaySettingsExW(
-                None,
+                name,
                 Some(&mode),
                 None,
                 CDS_TYPE(CDS_UPDATEREGISTRY_VAL),
@@ -2169,7 +4771,10 @@ pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
             if result == DISP_CHANGE(0) {
                 Ok(())
             } else {
-                Err(HardwareError::Display(format!("ChangeDisplaySettingsExW failed ({result:?}); requested {hz} Hz may not be supported")))
+                Err(HardwareError::Display(format!(
+                    "ChangeDisplaySettingsExW({}) failed ({result:?}); requested {hz} Hz",
+                    target.device
+                )))
             }
         }
     }
@@ -2180,7 +4785,15 @@ pub fn set_refresh_rate(hz: u32) -> HardwareResult<()> {
     }
 }
 
-fn get_refresh_rate() -> HardwareResult<u32> {
+/// Last-resort refresh-rate read, used only when the per-device GDI
+/// enumeration fails.
+///
+/// `Win32_VideoController.CurrentRefreshRate` describes the GPU, not a display:
+/// on the measured machine it reported the internal panel (120 Hz) while the
+/// GDI primary was the external LG (85 Hz) — the mismatch that made the UI show
+/// "120 Hz" over a [50, 85] chip list. It must never be the primary source; it
+/// is kept so a failed enumeration still yields a number instead of 0.
+fn get_refresh_rate_wmi() -> HardwareResult<u32> {
     #[cfg(windows)]
     {
         use crate::hw::wmi_cache;
@@ -2263,6 +4876,26 @@ mod tests {
     fn isolate_smart_model() {
         let temp = std::env::temp_dir().join("micontrol_test_smart_brightness.json");
         std::env::set_var("MICONTROL_SMART_MODEL_PATH", &temp);
+        // Isolate the manual-override state too: `record_user_brightness_override`
+        // persists it on every call, and unit tests must never rewrite the user's
+        // real `%LOCALAPPDATA%\MiControl\brightness_override.json`.
+        let override_temp = std::env::temp_dir().join("micontrol_test_brightness_override.json");
+        std::env::set_var("MICONTROL_BRIGHTNESS_OVERRIDE_PATH", &override_temp);
+        let _ = std::fs::remove_file(&override_temp);
+        // C3: persistence goes through the state store. Redirect the whole
+        // user state root to a fresh scratch dir per call. The variable is
+        // set and never removed (a parallel test may be reading it); every
+        // store is one file under `<root>\MiControl\state\`, so concurrent
+        // tests never collide with each other's payloads.
+        static STATE_ROOT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = STATE_ROOT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let state_root = std::env::temp_dir().join(format!(
+            "micontrol_test_state_root_{}_{}",
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&state_root);
+        std::env::set_var("MICONTROL_STATE_ROOT", &state_root);
         // Also isolate any already-cached model so `reset_smart_model()` starts
         // from the (empty) file at the new path.
         if let Some(cache) = SMART_MODEL_CACHE.get() {
@@ -2271,6 +4904,19 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&temp);
+    }
+
+    /// The scratch state root `isolate_smart_model` redirected the store to.
+    fn isolated_state_root() -> std::path::PathBuf {
+        std::env::var_os("MICONTROL_STATE_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("isolate_smart_model must run before this assertion")
+    }
+
+    /// Remove a scratch state root at the end of a test (the env var stays
+    /// set; the next isolate call hands out a fresh root anyway).
+    fn cleanup_state_root(root: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]
@@ -2414,5 +5060,1788 @@ mod tests {
         record_smart_sample(12.0, 44);
         assert_eq!(smart_predict_brightness(10.5), Some(42));
         reset_smart_model();
+    }
+
+    // ── P10: brightness source state ────────────────────────────────────────
+
+    /// The source string is part of the `DisplayInfo` JSON contract (UI).
+    #[test]
+    fn brightness_source_names_are_stable() {
+        assert_eq!(brightness_source_name(SOURCE_IGCL), "igcl");
+        assert_eq!(brightness_source_name(SOURCE_WMI_FALLBACK), "wmi-fallback");
+        assert_eq!(brightness_source_name(SOURCE_UNKNOWN), "unknown");
+    }
+
+    /// A source change must persist `source` + `reason` so a post-mortem (or
+    /// the next session's UI) can explain why brightness is on WMI.
+    #[test]
+    fn brightness_source_transition_is_persisted_with_reason() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let path = std::env::temp_dir().join("micontrol_test_brightness_source.json");
+        let _ = std::fs::remove_file(&path);
+        std::env::set_var("MICONTROL_BRIGHTNESS_SOURCE_PATH", &path);
+
+        set_brightness_source(
+            SOURCE_WMI_FALLBACK,
+            "ctlEnumerateDevices returned 0 devices (test)",
+        );
+
+        let data = std::fs::read_to_string(&path).expect("state file must be written");
+        let state: BrightnessSourceState =
+            serde_json::from_str(&data).expect("state file must be valid JSON");
+        assert_eq!(state.source, "wmi-fallback");
+        assert!(
+            state.reason.contains("0 devices"),
+            "reason must survive: {}",
+            state.reason
+        );
+        assert!(state.updated_at_ms > 0);
+
+        // Reset the live state and clean up.
+        BRIGHTNESS_SOURCE.store(SOURCE_UNKNOWN, Ordering::Relaxed);
+        let _ = std::fs::remove_file(&path);
+        std::env::remove_var("MICONTROL_BRIGHTNESS_SOURCE_PATH");
+    }
+
+    /// The slow retry is a 10-minute window: IGCL must not be retried on every
+    /// brightness write while the driver has no device (P10).
+    #[test]
+    fn igcl_retry_window_is_ten_minutes_and_blocks_until_then() {
+        assert_eq!(IGCL_RETRY_SECS, 600);
+        let now = std::time::Instant::now();
+        let deadline = now + std::time::Duration::from_secs(IGCL_RETRY_SECS);
+
+        assert!(
+            !retry_due(Some(deadline), now),
+            "fresh failure blocks retry"
+        );
+        assert!(
+            !retry_due(
+                Some(deadline),
+                now + std::time::Duration::from_secs(IGCL_RETRY_SECS - 1)
+            ),
+            "still inside the window"
+        );
+        assert!(
+            retry_due(
+                Some(deadline),
+                now + std::time::Duration::from_secs(IGCL_RETRY_SECS)
+            ),
+            "retry becomes due exactly at the deadline"
+        );
+        assert!(!retry_due(None, now), "no scheduled retry = not due");
+    }
+    // ── brightness offset clamp (audit: `offset: 54` unclamped; regression:
+    //    user intent pinned at +30 pp → top 44 % of the slider reverted) ────
+
+    #[test]
+    fn captured_offset_clamp_limits_range() {
+        // Offsets captured by the loop keep the anti-runaway ±30 pp bound.
+        assert_eq!(clamp_captured_offset(0), 0);
+        assert_eq!(clamp_captured_offset(29), 29);
+        assert_eq!(clamp_captured_offset(MAX_CAPTURED_OFFSET_PP), 30);
+        assert_eq!(clamp_captured_offset(-MAX_CAPTURED_OFFSET_PP), -30);
+        // The historical production value (from the capture feedback loop).
+        assert_eq!(clamp_captured_offset(54), 30);
+        assert_eq!(clamp_captured_offset(-54), -30);
+        assert_eq!(clamp_captured_offset(i16::MAX), 30);
+        assert_eq!(clamp_captured_offset(i16::MIN), -30);
+    }
+
+    #[test]
+    fn user_offset_clamp_keeps_full_scale() {
+        // Explicit user intent spans the whole 0–100 slider: 26 % curve + 74 pp
+        // = 100 %. The old ±30 pp clamp is what made >56 % unreachable.
+        assert_eq!(clamp_user_offset(74), 74);
+        assert_eq!(clamp_user_offset(54), 54);
+        assert_eq!(clamp_user_offset(MAX_USER_OFFSET_PP), 100);
+        assert_eq!(clamp_user_offset(-95), -95);
+        // Still bounded so a corrupt value cannot overflow the atomic's range
+        // or produce nonsense at the point of use.
+        assert_eq!(clamp_user_offset(140), 100);
+        assert_eq!(clamp_user_offset(-140), -100);
+        assert_eq!(clamp_user_offset(i16::MAX), 100);
+        assert_eq!(clamp_user_offset(i16::MIN), -100);
+    }
+
+    #[test]
+    fn effective_target_reaches_100_and_respects_config_range() {
+        // Regression case: 29 lux gives raw 26.1 %; the user picks 100 %.
+        assert_eq!(effective_target(26.1, 74.0, 5, 100), 100.0);
+        // The final clamp still applies — the backlight never exceeds max.
+        assert_eq!(effective_target(100.0, 74.0, 5, 100), 100.0);
+        assert_eq!(effective_target(26.1, -30.0, 5, 100), 5.0);
+        assert_eq!(effective_target(26.1, 0.0, 10, 40), 26.1); // inside range: untouched
+        assert_eq!(effective_target(56.1, 0.0, 10, 40), 40.0);
+        assert_eq!(effective_target(26.1, 74.0, 10, 40), 40.0);
+    }
+
+    #[test]
+    fn capture_echo_does_not_undo_a_user_offset() {
+        // The regression: the user picks 100 % at 29 lux (raw 26 %) → +74 pp.
+        // One iteration later the loop reads 100 % back. Re-deriving the offset
+        // with the capture bound would store +30 → 56 %, i.e. the user's choice
+        // is thrown away within 2 s, long before the grace window expires.
+        let outcome = classify_capture(100, 26, 74, OffsetOrigin::User, true);
+        assert!(outcome.echo, "the loop's own output must be recognised");
+        assert_eq!(outcome.offset, 74);
+        assert_eq!(outcome.origin, OffsetOrigin::User);
+        assert_eq!(
+            effective_target(26.0, outcome.offset as f32, 5, 100),
+            100.0,
+            "the user's 100 % must survive the capture pass"
+        );
+    }
+
+    #[test]
+    fn capture_echo_within_tolerance_is_ignored() {
+        // Rounding / smoothing / stale read: 98 % instead of 100 %.
+        let outcome = classify_capture(98, 26, 74, OffsetOrigin::User, true);
+        assert!(outcome.echo);
+        assert_eq!(outcome.offset, 74);
+    }
+
+    #[test]
+    fn capture_of_a_new_value_while_user_offset_active_keeps_full_range() {
+        // A genuinely new preference (Fn key / Windows slider) while a user
+        // offset is active is recorded as user intent, not clamped to ±30 pp.
+        let outcome = classify_capture(60, 26, 74, OffsetOrigin::User, true);
+        assert!(!outcome.echo);
+        assert_eq!(outcome.offset, 34);
+        assert_eq!(outcome.origin, OffsetOrigin::User);
+        assert_eq!(effective_target(26.0, outcome.offset as f32, 5, 100), 60.0);
+    }
+
+    #[test]
+    fn capture_without_user_offset_keeps_the_capture_clamp() {
+        // No override yet: this is the loop's feedback path (production reached
+        // +54 pp and pinned the curve), so ±30 pp still applies.
+        let outcome = classify_capture(100, 26, 0, OffsetOrigin::Captured, false);
+        assert!(!outcome.echo);
+        assert_eq!(outcome.offset, MAX_CAPTURED_OFFSET_PP);
+        assert_eq!(outcome.origin, OffsetOrigin::Captured);
+
+        // Same with a captured offset already active.
+        let outcome = classify_capture(100, 26, 20, OffsetOrigin::Captured, true);
+        assert!(!outcome.echo);
+        assert_eq!(outcome.offset, MAX_CAPTURED_OFFSET_PP);
+    }
+
+    #[test]
+    fn user_override_offset_is_not_capped_at_the_capture_limit() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        // 29 lux: raw curve target 26 %, user asks 100 % → +74 pp (not +30).
+        AUTO_LAST_TARGET.store(26, Ordering::Relaxed);
+        record_user_brightness_override(100);
+        assert_eq!(
+            AUTO_OFFSET.load(Ordering::Relaxed),
+            74,
+            "the +74 pp needed to reach 100 % from a 26 % curve must survive"
+        );
+        assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+        assert_eq!(
+            AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed),
+            OffsetOrigin::User.as_u8(),
+            "an explicit user value is recorded as user intent"
+        );
+        assert_eq!(
+            effective_target(26.0, AUTO_OFFSET.load(Ordering::Relaxed) as f32, 5, 100),
+            100.0
+        );
+
+        // Negative direction: raw 90 %, user asks 5 % → -85 pp.
+        AUTO_LAST_TARGET.store(90, Ordering::Relaxed);
+        record_user_brightness_override(5);
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), -85);
+
+        // In-range deltas are untouched.
+        AUTO_LAST_TARGET.store(50, Ordering::Relaxed);
+        record_user_brightness_override(62);
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), 12);
+
+        clear_user_brightness_override();
+    }
+
+    #[test]
+    fn captured_offset_keeps_the_anti_runaway_clamp() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The loop's capture path (external change ≥2 pp) must not inherit the
+        // ±100 pp user bound: it is a feedback loop and ratchets.
+        let raw: i16 = 26;
+        let captured = clamp_captured_offset(100 - raw); // user asked 100 %
+        assert_eq!(captured, MAX_CAPTURED_OFFSET_PP);
+        // And a captured offset is recorded as such, so a restart re-clamps it.
+        AUTO_OFFSET.store(captured, Ordering::Relaxed);
+        AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
+        assert_eq!(
+            clamp_offset_for(AUTO_OFFSET.load(Ordering::Relaxed), OffsetOrigin::Captured),
+            30
+        );
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
+    }
+
+    #[test]
+    fn restore_override_state_clamps_legacy_captured_offset() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        // C3: the override state lives in the store under the redirected
+        // root; the exact-but-legacy pre-store wire is written as the LEGACY
+        // file so this test also covers the migration path.
+        let state_root = isolated_state_root();
+        let legacy = state_store::legacy_brightness_override_path();
+        // The exact shape found in production: offset 54, still inside the
+        // 120 s grace window, and NO origin field (written before the
+        // user/captured split). Every offset those builds persisted came from
+        // the capture loop, so it must keep the ±30 pp bound.
+        std::fs::create_dir_all(legacy.parent().expect("legacy parent dir")).unwrap();
+        std::fs::write(
+            &legacy,
+            format!(
+                "{{\"last_manual_ms\":{},\"offset\":54,\"offset_active\":true}}",
+                now_ms()
+            ),
+        )
+        .unwrap();
+
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        restore_override_state();
+
+        assert_eq!(
+            AUTO_OFFSET.load(Ordering::Relaxed),
+            MAX_CAPTURED_OFFSET_PP,
+            "a legacy (origin-less) 54 pp offset came from the capture loop and must stay clamped"
+        );
+        assert_eq!(
+            AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed),
+            OffsetOrigin::Captured.as_u8()
+        );
+        assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+        assert!(user_override_in_grace());
+
+        clear_user_brightness_override();
+        cleanup_state_root(&state_root);
+    }
+
+    #[test]
+    fn restore_override_state_keeps_persisted_user_offset() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        let state_root = isolated_state_root();
+        // C3: seed the STORE (post-migration shape) directly. A user-intent
+        // offset (+74 pp = 100 % at 29 lux) must survive a crash/relaunch:
+        // the relaunched loop may not trim it back to +30.
+        let store = state_store::brightness_store().expect("store from redirected root");
+        store
+            .save(&state_store::BrightnessOverrideState {
+                last_manual_ms: now_ms(),
+                offset: 74,
+                offset_active: true,
+                origin: state_store::BrightnessOffsetOrigin::User,
+            })
+            .expect("seed store with user offset");
+
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ORIGIN.store(OffsetOrigin::Captured.as_u8(), Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        restore_override_state();
+
+        assert_eq!(
+            AUTO_OFFSET.load(Ordering::Relaxed),
+            74,
+            "a persisted user-intent offset is valid up to ±100 pp"
+        );
+        assert_eq!(
+            AUTO_OFFSET_ORIGIN.load(Ordering::Relaxed),
+            OffsetOrigin::User.as_u8()
+        );
+        assert!(AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+
+        clear_user_brightness_override();
+        cleanup_state_root(&state_root);
+    }
+
+    /// C3a: a corrupt store file must not take brightness down with it. The
+    /// restore logs, starts clean (no offset restored) and the next persist
+    /// overwrites the bad file.
+    #[test]
+    fn restore_override_state_survives_corrupt_store_file() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        let state_root = isolated_state_root();
+        let store = state_store::brightness_store().expect("store from redirected root");
+        std::fs::create_dir_all(store.path().parent().expect("state dir")).unwrap();
+        std::fs::write(store.path(), b"not json at all").unwrap();
+
+        AUTO_OFFSET.store(9, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        AUTO_LAST_MANUAL_MS.store(0, Ordering::Relaxed);
+
+        // Must not panic; must restore nothing (fresh offset state).
+        restore_override_state();
+        assert_eq!(AUTO_OFFSET.load(Ordering::Relaxed), 9);
+        assert!(!AUTO_OFFSET_ACTIVE.load(Ordering::Relaxed));
+        assert_eq!(AUTO_LAST_MANUAL_MS.load(Ordering::Relaxed), 0);
+
+        // The next save overwrites the corrupt file and succeeds.
+        record_user_brightness_override(80);
+        let loaded = store
+            .load()
+            .expect("reload after overwrite")
+            .expect("state present");
+        assert!(loaded.offset_active, "corrupt file replaced by valid state");
+
+        clear_user_brightness_override();
+        cleanup_state_root(&state_root);
+    }
+
+    // ── smart-model prune (audit: 1_315_938 samples) ────────────────────────
+
+    /// A bucket with `n` samples at a fixed value has `m2 = 0`, so decay must
+    /// preserve the mean exactly and the variance at 0.
+    #[test]
+    fn smart_model_prune_caps_hot_bucket() {
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            4,
+            SmartBin {
+                n: 283_355,
+                mean: 76.0,
+                m2: 0.0,
+                min: 40,
+                max: 100,
+            },
+        );
+
+        assert!(prune_smart_model(&mut model), "prune must report a change");
+
+        let bin = model.bins.get(&4).expect("bucket survives pruning");
+        assert!(
+            bin.n <= SMART_MAX_SAMPLES_PER_BIN,
+            "bucket n={} must be ≤ {}",
+            bin.n,
+            SMART_MAX_SAMPLES_PER_BIN
+        );
+        // 283_355 → 141_677 → 70_838 → 35_419 → 17_709 (4 halvings).
+        assert_eq!(bin.n, 17_709);
+        assert!((bin.mean - 76.0).abs() < 1e-4, "mean preserved by decay");
+        assert_eq!(bin.m2, 0.0);
+        // Historical extremes are kept for the stats panel.
+        assert_eq!((bin.min, bin.max), (40, 100));
+    }
+
+    #[test]
+    fn smart_model_prune_caps_total_across_buckets() {
+        let mut model = SmartModel::new();
+        // 40 buckets × 20_000 = 800_000 samples, all below the per-bin cap but
+        // far above the 302_400 total cap.
+        for idx in 0..40u32 {
+            model.bins.insert(
+                idx,
+                SmartBin {
+                    n: 20_000,
+                    mean: 50.0,
+                    m2: 20_000.0 * 4.0, // sd = 2
+                    min: 40,
+                    max: 60,
+                },
+            );
+        }
+        assert!(prune_smart_model(&mut model));
+        let total = model.bins.values().map(|b| b.n).sum::<u32>();
+        assert!(
+            total <= SMART_MAX_TOTAL_SAMPLES,
+            "total {total} must be ≤ {SMART_MAX_TOTAL_SAMPLES}"
+        );
+        // Shape preserved: the 40 buckets all shrink together (largest-first
+        // halving) rather than some being deleted.
+        assert_eq!(model.bins.len(), 40);
+        for bin in model.bins.values() {
+            // Variance (m2 / (n - 1)) unchanged by a balanced halving.
+            let var = bin.m2 / (bin.n - 1) as f32;
+            assert!((var - 4.0).abs() < 0.05, "variance drifted to {var}");
+        }
+    }
+
+    #[test]
+    fn smart_model_prune_is_noop_within_bounds() {
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            1,
+            SmartBin {
+                n: 120,
+                mean: 33.0,
+                m2: 12.0,
+                min: 10,
+                max: 60,
+            },
+        );
+        assert!(
+            !prune_smart_model(&mut model),
+            "small model must not be rewritten"
+        );
+        assert_eq!(model.bins.get(&1).unwrap().n, 120);
+    }
+
+    /// The migration path: an oversized file on disk is trimmed and rewritten
+    /// when the model is first loaded.
+    #[test]
+    fn smart_model_prunes_on_load_and_rewrites_file() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        let path = std::env::temp_dir().join("micontrol_test_smart_brightness.json");
+
+        // 201 buckets × 6_550 samples ≈ 1.316 M — the production shape.
+        let mut json = String::from("{\"schema\":1,\"bins\":{");
+        for idx in 0..201u32 {
+            if idx > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(
+                "\"{idx}\":{{\"n\":6550,\"mean\":76.0,\"m2\":6550.0,\"min\":0,\"max\":100}}"
+            ));
+        }
+        json.push_str("}}");
+        std::fs::write(&path, &json).unwrap();
+
+        // Bust any cached model so `get_smart_model` reloads from disk.
+        if let Some(cache) = SMART_MODEL_CACHE.get() {
+            if let Ok(mut guard) = cache.lock() {
+                *guard = None;
+            }
+        } else {
+            // First initialisation wins the OnceLock; the load still prunes.
+        }
+
+        let model = get_smart_model();
+        let total = model.bins.values().map(|b| b.n).sum::<u32>();
+        assert!(
+            total <= SMART_MAX_TOTAL_SAMPLES,
+            "loaded model still has {total} samples (cap {SMART_MAX_TOTAL_SAMPLES})"
+        );
+        // Decay keeps every bucket (and therefore every lux level's shape);
+        // it only makes them lighter.
+        assert_eq!(model.bins.len(), 201, "decay must not delete buckets");
+        assert!(
+            model.bins.values().any(|b| b.n < 6550),
+            "hot buckets must actually decay"
+        );
+
+        // The trimmed model was written back through the store, so the next
+        // start reads it small (from the store, not the retired legacy file).
+        let store = state_store::Store::<SmartModel>::new(state_store::smart_model_spec_in(
+            &isolated_state_root(),
+        ));
+        let on_disk = store
+            .load()
+            .expect("store load after prune")
+            .expect("pruned model persisted in the store");
+        let disk_total = on_disk.bins.values().map(|b| b.n).sum::<u32>();
+        assert!(
+            disk_total <= SMART_MAX_TOTAL_SAMPLES,
+            "file was not rewritten with the pruned model ({disk_total} samples)"
+        );
+        // The legacy file (same path this test seeded) was retired by the
+        // store's save.
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "legacy smart_brightness.json must be retired after the store save"
+        );
+
+        reset_smart_model();
+    }
+
+    // ── anti-feedback guard (audit: loop learns from its own output) ────────
+
+    #[test]
+    fn external_capture_is_not_learned_while_offset_is_active() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_smart_model();
+
+        // Override active → the captured brightness already contains our offset,
+        // so it must not become a training sample.
+        AUTO_OFFSET.store(25, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(true, Ordering::Relaxed);
+        record_external_change_sample(50.0, 80);
+        assert!(
+            get_smart_model().bins.is_empty(),
+            "no sample may be learned while brightness_override is active"
+        );
+
+        // No override → a genuine external change (Fn key, Windows slider) is
+        // exactly what the model should learn.
+        AUTO_OFFSET.store(0, Ordering::Relaxed);
+        AUTO_OFFSET_ACTIVE.store(false, Ordering::Relaxed);
+        record_external_change_sample(50.0, 80);
+        let model = get_smart_model();
+        assert_eq!(model.total_samples(), 1);
+        assert_eq!(model.bins.get(&5).map(|b| b.n), Some(1));
+
+        reset_smart_model();
+    }
+
+    // ── refresh-rate device selection (audit 2.7: chips changed the wrong
+    //    monitor because current and rates came from different displays) ────
+
+    /// The machine as measured in the audit: internal panel `\\.\DISPLAY1`
+    /// 3120×2080 @120 (rates [60, 120]) and the *external* LG ULTRAGEAR as the
+    /// GDI primary @85 (rates [50, 85]). This is the exact layout that made the
+    /// UI show "120 Hz" with chips [50, 85] and no active chip.
+    fn measured_refresh_layout() -> Vec<DisplayRefreshModes> {
+        vec![
+            DisplayRefreshModes {
+                device: r"\\.\DISPLAY3".to_string(),
+                label: "LG ULTRAGEAR".to_string(),
+                current_hz: 85,
+                rates: vec![50, 85],
+                is_internal: false,
+                is_primary: true,
+            },
+            DisplayRefreshModes {
+                device: r"\\.\DISPLAY1".to_string(),
+                label: "EDO".to_string(),
+                current_hz: 120,
+                rates: vec![60, 120],
+                is_internal: true,
+                is_primary: false,
+            },
+            DisplayRefreshModes {
+                device: r"\\.\DISPLAY2".to_string(),
+                label: "LG ULTRAWIDE".to_string(),
+                current_hz: 60,
+                rates: vec![50, 60, 75],
+                is_internal: false,
+                is_primary: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn refresh_target_is_the_internal_panel_not_the_gdi_primary() {
+        let modes = measured_refresh_layout();
+        let target = select_refresh_target(&modes).expect("an attached display");
+        assert_eq!(target.device, r"\\.\DISPLAY1");
+        assert_eq!(target.current_hz, 120);
+        assert_eq!(target.rates, vec![60, 120]);
+        // The bug in one line: the current rate must be one of the offered
+        // rates (it used to be 120 Hz over a [50, 85] chip list).
+        assert!(
+            target.rates.contains(&target.current_hz),
+            "current rate {} Hz must appear among {:?}",
+            target.current_hz,
+            target.rates
+        );
+    }
+
+    #[test]
+    fn refresh_target_falls_back_to_gdi_primary_without_internal_panel() {
+        let modes: Vec<DisplayRefreshModes> = measured_refresh_layout()
+            .into_iter()
+            .map(|mut m| {
+                m.is_internal = false;
+                m
+            })
+            .collect();
+        let target = select_refresh_target(&modes).expect("an attached display");
+        assert_eq!(target.device, r"\\.\DISPLAY3");
+        assert_eq!(target.current_hz, 85);
+        assert_eq!(target.rates, vec![50, 85]);
+        assert!(target.rates.contains(&target.current_hz));
+    }
+
+    #[test]
+    fn refresh_target_without_any_attached_device_is_none() {
+        assert!(select_refresh_target(&[]).is_none());
+        assert!(resolve_refresh_write(&[], 60).is_err());
+    }
+
+    #[test]
+    fn refresh_write_targets_the_same_display_the_ui_shows() {
+        let modes = measured_refresh_layout();
+        let shown = select_refresh_target(&modes).expect("an attached display");
+        let shown_device = shown.device.clone();
+        let shown_rates = shown.rates.clone();
+
+        // A rate the edited display advertises is written to that display.
+        let plan = resolve_refresh_write(&modes, 60).expect("60 Hz is supported by the panel");
+        assert_eq!(plan.device, shown_device);
+        assert!(shown_rates.contains(&60));
+
+        // The old chips (50/85 Hz, from the external LG) must be refused, not
+        // silently applied to the external monitor.
+        for hz in [50u32, 85] {
+            let err = resolve_refresh_write(&modes, hz).unwrap_err();
+            assert!(
+                err.contains("is not supported by") && err.contains(r"\\.\DISPLAY1"),
+                "unexpected error for {hz} Hz: {err}"
+            );
+        }
+    }
+
+    /// Read-only smoke test against the live topology: never writes a mode, but
+    /// proves the enumeration returns coherent data on the machine running the
+    /// tests (skips silently on a headless host with no attached displays).
+    #[test]
+    fn live_refresh_enumeration_is_coherent() {
+        let modes = enumerate_refresh_modes().expect("enumeration must not fail");
+        for m in &modes {
+            // Diagnostic only: visible with `cargo test -- --nocapture`.
+            println!(
+                "{} '{}' {} Hz {:?} internal={} primary={}",
+                m.device, m.label, m.current_hz, m.rates, m.is_internal, m.is_primary
+            );
+        }
+        if modes.is_empty() {
+            return; // headless CI runner
+        }
+        for m in &modes {
+            assert!(!m.device.is_empty());
+            assert!(
+                m.rates.is_empty() || m.rates.contains(&m.current_hz),
+                "{} current {} Hz not in {:?}",
+                m.device,
+                m.current_hz,
+                m.rates
+            );
+        }
+        if let Some(target) = select_refresh_target(&modes) {
+            assert!(
+                !target.rates.is_empty(),
+                "the edited display {} must advertise at least one rate",
+                target.device
+            );
+        }
+    }
+
+    // ── HDR: check advanced-color support before writing (audit 2.5) ─────────
+
+    fn hdr_path(device: &str, supported: bool, rc: Option<i32>) -> HdrWriteResult {
+        HdrWriteResult {
+            device: device.to_string(),
+            supported,
+            rc,
+        }
+    }
+
+    #[test]
+    fn hdr_write_is_refused_when_no_display_supports_it() {
+        let results = [
+            hdr_path("DISPLAY1", false, None),
+            hdr_path("DISPLAY2", false, None),
+        ];
+        let err = summarize_hdr_write(&results).unwrap_err();
+        assert!(
+            matches!(&err, HardwareError::NotSupported(_)),
+            "expected NotSupported, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("no connected display supports HDR"),
+            "message must name the reason: {err}"
+        );
+    }
+
+    #[test]
+    fn hdr_write_succeeds_when_one_display_of_three_accepts_it() {
+        // The audit's machine: internal panel + two monitors, only one path
+        // supports advanced color. The old code returned Err because the other
+        // two failed, so the UI rolled back a change the panel had applied.
+        let results = [
+            hdr_path("DISPLAY1", true, Some(0)),
+            hdr_path("DISPLAY2", false, None),
+            hdr_path("DISPLAY3", false, None),
+        ];
+        let summary = summarize_hdr_write(&results).expect("one supporting display is enough");
+        assert_eq!(summary.supported, 1);
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.skipped, 2);
+        assert_eq!(summary.failed, 0);
+    }
+
+    #[test]
+    fn hdr_write_reports_failure_only_when_every_supported_display_refused() {
+        let denied = 0x8007_0005u32 as i32; // E_ACCESSDENIED
+        let mixed = [
+            hdr_path("DISPLAY1", true, Some(0)),
+            hdr_path("DISPLAY2", true, Some(denied)),
+        ];
+        let summary = summarize_hdr_write(&mixed).expect("one display was changed");
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.failed, 1);
+
+        let all_failed = [hdr_path("DISPLAY1", true, Some(denied))];
+        let err = summarize_hdr_write(&all_failed).unwrap_err();
+        assert!(matches!(&err, HardwareError::Display(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn hdr_log_labels_distinguish_skipped_from_failed() {
+        assert_eq!(hdr_result_label(&hdr_path("D", false, None)), "unsupported");
+        assert_eq!(hdr_result_label(&hdr_path("D", true, Some(0))), "ok");
+        assert_eq!(
+            hdr_result_label(&hdr_path("D", true, Some(0x8007_0005u32 as i32))),
+            "failed"
+        );
+    }
+
+    /// Read-only: one HDR entry per active CCD path, each joined to a GDI
+    /// device name. Never writes a state. Skips silently on a headless host.
+    #[test]
+    fn live_hdr_enumeration_is_per_display() {
+        let devices = attached_display_devices();
+        let hdr = hdr_displays();
+        println!(
+            "attached={} ccd_paths={} hdr_supported_any={}",
+            devices.len(),
+            hdr.len(),
+            hdr.iter().any(|d| d.supported)
+        );
+        for d in &hdr {
+            println!(
+                "  {} '{}' supported={} enabled={}",
+                d.device, d.label, d.supported, d.enabled
+            );
+        }
+        if devices.is_empty() {
+            return; // headless CI runner
+        }
+        assert!(
+            !hdr.is_empty(),
+            "CCD returned no path for {} attached display(s)",
+            devices.len()
+        );
+        for d in &hdr {
+            assert!(
+                d.device.contains("DISPLAY"),
+                "CCD path is not joined to a GDI device: {d:?}"
+            );
+        }
+        // No duplicate devices: the aggregate flag must not be inflated.
+        let mut names: Vec<&str> = devices.iter().map(|d| d.device.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), devices.len(), "duplicate GDI devices");
+    }
+
+    // ── PSR2 DRRS: "applied, effective after reboot" (audit 2.8) ────────────
+
+    #[test]
+    fn drrs_write_is_pending_until_the_next_boot() {
+        let boot = 10_000_000u64;
+        // Written ten minutes into this boot: the driver has not reloaded it.
+        assert!(drrs_pending_reboot(Some(boot + 600_000), Some(boot)));
+        // Written just before the boot-time estimate (wall-clock noise).
+        assert!(drrs_pending_reboot(Some(boot - 200), Some(boot)));
+    }
+
+    #[test]
+    fn drrs_write_stops_pending_after_a_reboot() {
+        let boot = 10_000_000u64;
+        // Written two hours before this boot: the driver loaded it at start-up.
+        assert!(!drrs_pending_reboot(Some(boot - 7_200_000), Some(boot)));
+        // Unknown timestamps never invent a state.
+        assert!(!drrs_pending_reboot(None, Some(boot)));
+        assert!(!drrs_pending_reboot(Some(boot + 1), None));
+    }
+
+    // ── Ambient sensor states: Available / NoSensor / FrozenReport ───────────
+
+    #[test]
+    fn sensor_probe_classification() {
+        // Fresh, plausible lux → Available.
+        assert_eq!(
+            classify_sensor_probe(Some(120.0), true),
+            AmbientSensorState::Available
+        );
+        // Fresh lux wins even before the devices flag is set.
+        assert_eq!(
+            classify_sensor_probe(Some(120.0), false),
+            AmbientSensorState::Available
+        );
+        // Devices enumerate but no fresh data → FrozenReport (the TCS3408 case:
+        // 0.0 lux placeholder, frozen timestamp).
+        assert_eq!(
+            classify_sensor_probe(Some(0.0), true),
+            AmbientSensorState::FrozenReport
+        );
+        assert_eq!(
+            classify_sensor_probe(None, true),
+            AmbientSensorState::FrozenReport
+        );
+        // Nothing enumerated at all → NoSensor.
+        assert_eq!(
+            classify_sensor_probe(None, false),
+            AmbientSensorState::NoSensor
+        );
+        // A NaN reading is not fresh data.
+        assert_eq!(
+            classify_sensor_probe(Some(f32::NAN), false),
+            AmbientSensorState::NoSensor
+        );
+        // The placeholder at/under the plausibility floor with devices present
+        // is frozen, not available.
+        assert_eq!(
+            classify_sensor_probe(Some(MIN_PLAUSIBLE_LUX), true),
+            AmbientSensorState::FrozenReport
+        );
+    }
+
+    #[test]
+    fn sensor_state_code_roundtrip() {
+        for state in [
+            AmbientSensorState::Available,
+            AmbientSensorState::NoSensor,
+            AmbientSensorState::FrozenReport,
+            AmbientSensorState::Unknown,
+        ] {
+            assert_eq!(
+                AmbientSensorState::from_code(state.code()),
+                state,
+                "{state:?} code must round-trip"
+            );
+        }
+        // Distinct codes: the atomic cannot alias two states.
+        let codes = [
+            AmbientSensorState::Available,
+            AmbientSensorState::NoSensor,
+            AmbientSensorState::FrozenReport,
+            AmbientSensorState::Unknown,
+        ]
+        .map(|s| s.code());
+        for i in 0..codes.len() {
+            for j in (i + 1)..codes.len() {
+                assert_ne!(codes[i], codes[j]);
+            }
+        }
+    }
+
+    // ── Auto-heal: freshness policy (grace, sightings, age, evidence gate) ───
+    //
+    // Every test below injects its own clock: `BASE` is an arbitrary
+    // wall-clock ms and `POLL_MS` the real 2 s adaptive-loop cadence, so the
+    // grace period, the three-sighting rule and the backoff ladder are all
+    // exercised without sleeping.
+
+    /// Arbitrary wall-clock origin for the injected test clocks.
+    const BASE: u64 = 10_000_000;
+    /// The adaptive loop's real poll cadence, used to space observations.
+    const POLL_MS: u64 = 2_000;
+
+    /// A core that is already PAST its startup grace: these tests exercise
+    /// the sighting/age gates, not the grace window (which has its own test).
+    fn mature_core() -> SensorOwnerCore {
+        SensorOwnerCore::with_policy(
+            BASE - SENSOR_STARTUP_GRACE_MS,
+            SensorFreshnessPolicy::defaults(),
+        )
+    }
+
+    /// Drive `n` observations of the SAME (dead) report timestamp `ts`, 2 s
+    /// apart, starting at `first`. Returns the wall-clock of the last one.
+    fn observe_dead_report(core: &mut SensorOwnerCore, ts: u64, first: u64, n: u32) -> u64 {
+        let mut now = first;
+        for _ in 0..n {
+            core.note_probe(true, Some(ts), false, now);
+            now += POLL_MS;
+        }
+        now - POLL_MS
+    }
+
+    #[test]
+    fn filetime_ticks_convert_to_wall_clock_ms() {
+        // 2026-11-23T16:23:50Z: the exact moment the owner proved the sensor
+        // revives after a process restart (log: Available, lux=30.0).
+        assert_eq!(
+            filetime_ticks_to_epoch_ms(134_399_246_300_000_000),
+            Some(1_795_451_030_000)
+        );
+        // The FILETIME epoch itself predates the UNIX epoch: not a usable stamp.
+        assert_eq!(filetime_ticks_to_epoch_ms(0), None);
+        assert_eq!(
+            filetime_ticks_to_epoch_ms(FILETIME_UNIX_EPOCH_TICKS),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn freshness_policy_defaults_are_three_minutes_and_three_sightings() {
+        // The 2026-11-23 revision, pinned: the old 30 s window turned a quiet
+        // on-change sensor into a rebuild storm.
+        assert_eq!(SENSOR_STALE_AFTER_MS, 180_000);
+        assert_eq!(SENSOR_STARTUP_GRACE_MS, 180_000);
+        assert_eq!(SENSOR_WEDGE_OBSERVATIONS, 3);
+        assert_eq!(SENSOR_FORCED_REBUILD_FLOOR_MS, 180_000);
+        // The automatic ladder keeps its 1/5/15 min shape.
+        assert_eq!(SENSOR_REBUILD_BACKOFF_MS, [60_000, 300_000, 900_000]);
+        let d = SensorFreshnessPolicy::defaults();
+        assert_eq!(d.stale_after_ms, 180_000);
+        assert_eq!(d.grace_ms, 180_000);
+        assert_eq!(d.wedge_observations, 3);
+    }
+
+    #[test]
+    fn freshness_policy_is_configurable_from_the_environment() {
+        let d = SensorFreshnessPolicy::defaults();
+        // Unset, empty or garbage: the defaults stand.
+        assert_eq!(policy_from_env_values(None, None), d);
+        assert_eq!(policy_from_env_values(Some(""), Some("   ")), d);
+        assert_eq!(policy_from_env_values(Some("not-a-number"), Some("-1")), d);
+        // A real override is honoured, whitespace trimmed.
+        let p = policy_from_env_values(Some(" 45000 "), Some("900000"));
+        assert_eq!(p.stale_after_ms, 45_000);
+        assert_eq!(p.grace_ms, 900_000);
+        // Zero is a valid value: a diagnostics run that wants a gate off.
+        let z = policy_from_env_values(Some("0"), Some("0"));
+        assert_eq!(z.stale_after_ms, 0);
+        assert_eq!(z.grace_ms, 0);
+        // The sighting count is NOT tunable: it is the anti-churn signature.
+        assert_eq!(p.wedge_observations, SENSOR_WEDGE_OBSERVATIONS);
+        // The env var names are part of the contract the docs promise.
+        assert_eq!(SENSOR_STALE_AFTER_ENV, "MICONTROL_SENSOR_STALE_AFTER_MS");
+        assert_eq!(SENSOR_GRACE_ENV, "MICONTROL_SENSOR_GRACE_MS");
+    }
+
+    #[test]
+    fn stuck_report_timestamp_triggers_recreation_after_three_sightings() {
+        let mut core = mature_core();
+        // A healthy stack reporting fresh lux: no wedge evidence, normal probes.
+        core.note_probe(true, Some(BASE), true, BASE);
+        assert!(!core.wedged(BASE));
+        assert_eq!(core.decide(false, BASE), ReadDecision::Probe);
+        // The stack keeps answering but the REPORT TIMESTAMP stops moving and
+        // no plausible lux arrives: the frozen-stack signature (2026-11-22
+        // production, FrozenReport, lux=None).
+        let ts = BASE + 1_000;
+        let one = observe_dead_report(&mut core, ts, BASE + 2_000, 1);
+        assert!(!core.wedged(one), "one sighting of a report is not a wedge");
+        assert_eq!(core.decide(false, one), ReadDecision::Probe);
+        let two = observe_dead_report(&mut core, ts, one + POLL_MS, 1);
+        assert!(!core.wedged(two), "two sightings are still not a wedge");
+        let three = observe_dead_report(&mut core, ts, two + POLL_MS, 1);
+        assert!(
+            three - ts < SENSOR_STALE_AFTER_MS,
+            "the third sighting must still land inside the age gate"
+        );
+        assert!(
+            !core.wedged(three),
+            "three sightings inside 3 min are not a wedge"
+        );
+        assert_eq!(core.decide(false, three), ReadDecision::Probe);
+        // Same report, past 3 min: a wedge. The ladder starts ARMED, so the
+        // first evidence discards and re-creates the cached stack immediately.
+        let stale = ts + SENSOR_STALE_AFTER_MS;
+        assert!(
+            !core.wedged(stale - 1),
+            "one millisecond short is not a wedge"
+        );
+        assert!(core.wedged(stale));
+        assert_eq!(
+            core.decide(false, stale),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn three_sightings_are_required_even_past_the_age_gate() {
+        // The sighting rule on its own: a report older than the threshold is
+        // NOT yet a wedge, because the very first observation of it may be
+        // the moment the driver caught up. One and two sightings of the same
+        // dead report must keep probing.
+        let mut core = mature_core();
+        let ts = BASE;
+        let aged = ts + SENSOR_STALE_AFTER_MS + 1_000; // past the age gate
+        let one = observe_dead_report(&mut core, ts, aged, 1);
+        assert_eq!(core.stalled_observations, 1);
+        assert!(
+            !core.wedged(one),
+            "one sighting at {} ms of age is not a wedge",
+            one - ts
+        );
+        assert_eq!(core.decide(false, one), ReadDecision::Probe);
+        let two = observe_dead_report(&mut core, ts, one + POLL_MS, 1);
+        assert_eq!(core.stalled_observations, 2);
+        assert!(!core.wedged(two), "two sightings are still not a wedge");
+        assert_eq!(core.decide(false, two), ReadDecision::Probe);
+        // The third sighting of the SAME dead report declares it.
+        let three = observe_dead_report(&mut core, ts, two + POLL_MS, 1);
+        assert_eq!(core.stalled_observations, 3);
+        assert!(core.wedged(three));
+        assert_eq!(
+            core.decide(false, three),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn a_silent_sensor_with_valid_lux_is_never_recreated() {
+        // The 2026-11-23T17:41 production case, to the letter. The installed
+        // build logged:
+        //   ambient sensor state: Available (lux=Some(51.0))
+        // and 244 ms later
+        //   ambient sensor stale: newest report is 114989 ms old
+        //   (threshold 30000 ms), recreating the cached stack
+        // then a recreation every 30-60 s for 15 min while lux kept coming
+        // back at 47-51. The ALS is an on-change device: it sits silent while
+        // the room light does not change, and the report it hands out is
+        // legitimately old. SILENCE WITH VALID LUX IS NOT A WEDGE.
+        let mut core = mature_core();
+        let ts = BASE; // the newest report the driver has produced
+        let mut now = ts + 114_989; // 115 s of silence, the exact production age
+        for i in 0..40 {
+            core.note_probe(true, Some(ts), true, now);
+            assert!(
+                !core.wedged(now),
+                "valid lux at observation {i} is not a wedge"
+            );
+            assert_eq!(
+                core.decide(false, now),
+                ReadDecision::Probe,
+                "a quiet working stack must keep being probed"
+            );
+            now += POLL_MS;
+        }
+        // Past the age gate too: plausible lux is life, whatever the timestamp
+        // claims, so the machine never tears a working stack down.
+        assert!(now - ts >= SENSOR_STALE_AFTER_MS);
+        assert!(!core.wedged(now));
+        assert_eq!(core.decide(false, now), ReadDecision::Probe);
+        // And an Available stack refuses a FORCED rebuild as well (the
+        // "forced by reset request" half of the same production churn).
+        assert!(!core.accepts_forced_rebuild());
+        assert_eq!(core.decide(true, now), ReadDecision::Probe);
+    }
+
+    #[test]
+    fn advancing_timestamp_in_a_dark_room_is_not_a_wedge() {
+        // Regression guard: lux below the plausibility floor (covered sensor,
+        // night) with an ADVANCING timestamp must never trigger rebuilds, or
+        // the heal machine would hammer COM in every dark room.
+        let mut core = mature_core();
+        let mut now = BASE;
+        for i in 0..40 {
+            let ts = BASE + i as u64 * POLL_MS;
+            core.note_probe(true, Some(ts), false, now);
+            assert!(!core.wedged(now), "a moving timestamp at {i} is alive");
+            assert_eq!(core.decide(false, now), ReadDecision::Probe);
+            now += POLL_MS;
+        }
+        // The reports then stop moving: two more sightings of the SAME one
+        // past the age gate, and only then it IS a wedge.
+        let stuck = now - POLL_MS;
+        let almost =
+            observe_dead_report(&mut core, stuck, stuck + SENSOR_STALE_AFTER_MS - POLL_MS, 1);
+        assert!(
+            !core.wedged(almost),
+            "two sightings of a dead report: no wedge"
+        );
+        let dead = observe_dead_report(&mut core, stuck, almost + POLL_MS, 1);
+        assert!(
+            core.wedged(dead),
+            "three sightings past 3 min is the signature"
+        );
+        assert_eq!(
+            core.decide(false, dead),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn the_age_gate_is_three_minutes_not_thirty_seconds() {
+        // The threshold itself, isolated from the lux veto: a DEAD report
+        // (no plausible lux, timestamp unmoving) at the exact production age
+        // of 115 s must survive, because that long of silence is what an
+        // on-change ALS does. The old 30 s window called it stale.
+        let mut core = mature_core();
+        let ts = BASE;
+        let quiet = observe_dead_report(&mut core, ts, ts + 114_989, 3);
+        assert!(
+            !core.wedged(quiet),
+            "{} ms of dead reports is still inside the 3 min window",
+            quiet - ts
+        );
+        assert_eq!(core.decide(false, quiet), ReadDecision::Probe);
+        // The same evidence past 3 min IS the frozen-stack signature.
+        let aged = observe_dead_report(&mut core, ts, ts + SENSOR_STALE_AFTER_MS, 1);
+        assert!(core.wedged(aged), "a dead report past 3 min is a wedge");
+        assert_eq!(
+            core.decide(false, aged),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn startup_grace_never_declares_a_wedge() {
+        // The first report of a freshly created stack is legitimately old: an
+        // on-change driver hands back the reading it took when the device
+        // powered up. For 3 minutes after startup no wedge may be declared,
+        // however old that timestamp is.
+        let t0 = BASE;
+        let mut core = SensorOwnerCore::with_policy(t0, SensorFreshnessPolicy::defaults());
+        // grace until t0 + 180 s
+        let ts = t0 - 600_000; // a ten-minute-old report, no plausible lux
+        let mut now = t0;
+        let mut inside_grace = 0u32;
+        for i in 0..90 {
+            core.note_probe(true, Some(ts), false, now);
+            if now.saturating_sub(t0) < SENSOR_STARTUP_GRACE_MS {
+                inside_grace = inside_grace.saturating_add(1);
+                assert!(
+                    !core.wedged(now),
+                    "grace must hold at observation {i} ({} ms after start)",
+                    now - t0
+                );
+                assert_eq!(core.decide(false, now), ReadDecision::Probe);
+            }
+            now += POLL_MS;
+        }
+        assert!(
+            inside_grace >= 3,
+            "the run must really have observed inside the grace window (grace {} ms)",
+            SENSOR_STARTUP_GRACE_MS
+        );
+        // The report is now far past the age gate AND seen many times over,
+        // but the grace only just expired: the next observation declares it.
+        let after = t0 + SENSOR_STARTUP_GRACE_MS;
+        core.note_probe(true, Some(ts), false, after);
+        assert!(
+            core.wedged(after),
+            "once the grace expires the evidence stands"
+        );
+        assert_eq!(
+            core.decide(false, after),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn rebuild_backoff_ladder_is_1_5_15_minutes_then_caps() {
+        let mut core = mature_core();
+        let ts = BASE;
+        // Establish the wedge: three sightings of one dead report, past 3 min.
+        let first = ts + SENSOR_STALE_AFTER_MS;
+        let now = observe_dead_report(&mut core, ts, first, 3);
+        assert!(core.wedged(now));
+        // Ladder armed: the first evidence rebuilds without waiting.
+        assert_eq!(
+            core.decide(false, now),
+            ReadDecision::Recreate { forced: false }
+        );
+        // Every rebuild is followed by a probe that STILL finds the stuck
+        // timestamp: the ladder walks 1 min, 5 min, 15 min, then caps at 15.
+        let mut now = now;
+        for (i, delay) in [60_000u64, 300_000, 900_000, 900_000].iter().enumerate() {
+            core.note_rebuild(false, now);
+            // The re-created stack answers the SAME dead report: that is not
+            // life, and it must NOT re-arm the ladder (otherwise a frozen
+            // sensor would rebuild every poll instead of backing off).
+            core.note_probe(true, Some(ts), false, now + 1);
+            assert!(
+                !core.heal.armed(),
+                "dead evidence after rebuild #{} must keep the ladder walking",
+                i + 1
+            );
+            // Inside the step: hold, no stack contact (the cost guarantee).
+            assert_eq!(
+                core.decide(false, now + delay - 1),
+                ReadDecision::Suppress,
+                "after rebuild #{} the next attempt must wait {delay} ms",
+                i + 1
+            );
+            // At the step boundary: rebuild again.
+            now += delay;
+            assert_eq!(
+                core.decide(false, now),
+                ReadDecision::Recreate { forced: false },
+                "rebuild #{} must be due after {delay} ms",
+                i + 2
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_reading_restores_available_without_a_restart() {
+        let mut core = mature_core();
+        let ts = BASE;
+        // Wedge evidence: three sightings of one dead report past 3 min.
+        let first = ts + SENSOR_STALE_AFTER_MS;
+        let stale = observe_dead_report(&mut core, ts, first, 3);
+        assert_eq!(
+            core.decide(false, stale),
+            ReadDecision::Recreate { forced: false }
+        );
+        core.note_rebuild(false, stale);
+        // The re-created stack answers with a NEW report and plausible lux.
+        core.note_probe(true, Some(stale), true, stale);
+        // Signs of life: no wedge, ladder disarmed, normal probing resumes.
+        assert!(!core.wedged(stale));
+        assert_eq!(core.decide(false, stale), ReadDecision::Probe);
+        assert!(core.heal.armed(), "a fresh reading must disarm the ladder");
+        assert!(
+            !core.accepts_forced_rebuild(),
+            "a stack answering fresh must refuse forced rebuilds"
+        );
+        // And the diagnosis layer settles Available from the same evidence:
+        // the state returns on its own, no app restart involved.
+        assert_eq!(
+            classify_sensor_probe(Some(30.0), true),
+            AmbientSensorState::Available
+        );
+    }
+
+    #[test]
+    fn driver_without_timestamps_falls_back_to_frozen_evidence() {
+        // A driver that never fills SENSOR_DATA_TYPE_TIMESTAMP and fails
+        // GetTimestamp: the lux-based evidence still drives the heal, under
+        // the same sighting and age gates (the episode is aged from the first
+        // dead observation).
+        let mut core = mature_core();
+        let t0 = BASE;
+        core.note_probe(true, None, false, t0);
+        assert!(!core.wedged(t0), "one dead observation is not a wedge");
+        assert_eq!(core.decide(false, t0), ReadDecision::Probe);
+        core.note_probe(true, None, false, t0 + POLL_MS);
+        assert!(!core.wedged(t0 + POLL_MS), "two are not a wedge either");
+        let three = t0 + 2 * POLL_MS;
+        core.note_probe(true, None, false, three);
+        assert!(
+            !core.wedged(three),
+            "the age gate must hold at three sightings"
+        );
+        let aged = t0 + SENSOR_STALE_AFTER_MS;
+        core.note_probe(true, None, false, aged);
+        assert!(
+            core.wedged(aged),
+            "devices seen and no plausible reading for 3 min is FrozenReport"
+        );
+        assert_eq!(
+            core.decide(false, aged),
+            ReadDecision::Recreate { forced: false }
+        );
+        // After the rebuild the same dead evidence keeps the ladder walking.
+        core.note_rebuild(false, aged);
+        core.note_probe(true, None, false, aged + 1);
+        assert_eq!(core.decide(false, aged + 1_000), ReadDecision::Suppress);
+        assert_eq!(
+            core.decide(false, aged + SENSOR_REBUILD_BACKOFF_MS[0]),
+            ReadDecision::Recreate { forced: false }
+        );
+    }
+
+    #[test]
+    fn nosensor_retries_are_rate_limited() {
+        // Nothing enumerated: re-creating a stack that sees no device is
+        // pointless churn, so one real attempt per retry window.
+        let mut core = mature_core();
+        let t0 = BASE;
+        core.note_probe(false, None, false, t0);
+        assert!(!core.wedged(t0), "a missing sensor is not a wedge");
+        assert_eq!(core.decide(false, t0 + 1_000), ReadDecision::Suppress);
+        assert_eq!(
+            core.decide(false, t0 + SENSOR_NOSENSOR_RETRY_MS - 1),
+            ReadDecision::Suppress
+        );
+        assert_eq!(
+            core.decide(false, t0 + SENSOR_NOSENSOR_RETRY_MS),
+            ReadDecision::Probe,
+            "one real attempt per window must still notice a driver fix"
+        );
+    }
+
+    #[test]
+    fn forced_rebuilds_need_dead_evidence_and_a_three_minute_floor() {
+        let mut core = mature_core();
+        let t0 = BASE;
+        core.note_probe(true, Some(t0), true, t0);
+        // An AVAILABLE stack refuses a forced rebuild, however long the
+        // caller waits: the sensor thread drops the request instead of
+        // turning a working stack into COM churn (2026-11-23 log: a forced
+        // recreation every 30 s while lux came back at 47-51).
+        assert!(!core.accepts_forced_rebuild());
+        assert_eq!(
+            core.decide(true, t0 + 10 * SENSOR_FORCED_REBUILD_FLOOR_MS),
+            ReadDecision::Probe
+        );
+        // Dead evidence (no plausible lux) accepts the request. A core that
+        // never rebuilt trivially meets the floor (last_rebuild_ms == 0).
+        core.note_probe(true, Some(t0), false, t0);
+        assert!(core.accepts_forced_rebuild());
+        assert_eq!(
+            core.decide(true, t0),
+            ReadDecision::Recreate { forced: true }
+        );
+        core.note_rebuild(true, t0);
+        // Inside the floor a second request is DEFERRED (the flag stays
+        // pending): normal logic answers instead, no caller can hammer COM.
+        assert_eq!(
+            core.decide(true, t0 + SENSOR_FORCED_REBUILD_FLOOR_MS - 1),
+            ReadDecision::Probe,
+            "inside the floor a forced request is deferred"
+        );
+        // Past the floor the pending request executes as a forced rebuild.
+        let t1 = t0 + SENSOR_FORCED_REBUILD_FLOOR_MS;
+        assert_eq!(
+            core.decide(true, t1),
+            ReadDecision::Recreate { forced: true }
+        );
+        core.note_rebuild(true, t1);
+        // The stack answers fresh again: the request path goes back to
+        // refusing, and the ladder disarms.
+        core.note_probe(true, Some(t1), true, t1);
+        assert!(core.heal.armed(), "a fresh reading must disarm the ladder");
+        assert!(
+            !core.accepts_forced_rebuild(),
+            "a stack answering fresh must refuse forced rebuilds"
+        );
+        // A FUTURE wedge (three sightings past the age gate) rebuilds
+        // immediately again: the ladder is armed, not stuck behind 1 min.
+        let w = observe_dead_report(&mut core, t1, t1 + SENSOR_STALE_AFTER_MS, 3);
+        assert_eq!(
+            core.decide(false, w),
+            ReadDecision::Recreate { forced: false },
+            "an armed ladder must answer a fresh wedge without waiting"
+        );
+    }
+
+    #[test]
+    fn reset_requests_reach_dead_sensors_but_not_working_or_missing_ones() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = SENSOR_STATE.load(Ordering::Relaxed);
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+        // FrozenReport is NOT terminal: the 2026-11-23 proof showed the
+        // wedged CACHED STACK is the failure, and a reset request is exactly
+        // what discards and re-creates it (floor- and evidence-gated on the
+        // sensor thread).
+        SENSOR_STATE.store(AmbientSensorState::FrozenReport.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test frozen");
+        assert!(
+            SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
+            "a FrozenReport sensor must accept rebuild requests: recreation is the recovery"
+        );
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+        // Unknown: nothing diagnosed yet, the request is the honest nudge.
+        SENSOR_STATE.store(AmbientSensorState::Unknown.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test unknown");
+        assert!(
+            SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
+            "an undiagnosed sensor must accept a reset request (power resume)"
+        );
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+        // NoSensor: nothing exists to re-create, the request is refused.
+        SENSOR_STATE.store(AmbientSensorState::NoSensor.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test no sensor");
+        assert!(!SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
+        // Available: the 2026-11-23 churn. A working stack is NEVER torn
+        // down because a chatty caller asked; the heal machine owns real
+        // wedge evidence on its own ladder.
+        SENSOR_STATE.store(AmbientSensorState::Available.code(), Ordering::Relaxed);
+        request_sensor_reset("unit test available");
+        assert!(
+            !SENSOR_RESET_REQUESTED.load(Ordering::SeqCst),
+            "an Available sensor must refuse forced rebuilds: recreation is churn"
+        );
+        // Restore the globals for the other tests in this binary.
+        SENSOR_STATE.store(previous, Ordering::Relaxed);
+        SENSOR_RESET_REQUESTED.store(false, Ordering::SeqCst);
+    }
+
+    // ── Live proof on real hardware (deliberately ignored) ──────────────────
+    //
+    // Run with: cargo test --lib -- --ignored --nocapture live_ambient
+    // These touch the REAL sensor stack on this machine and echo every log
+    // line, so the freshness policy is proven against the hardware the unit
+    // tests only simulate.
+
+    /// Logger that captures AND echoes every log line during the closure.
+    /// Returns (result, captured lines, logger_installed).
+    #[cfg(windows)]
+    fn capture_live_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>, bool) {
+        static LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        struct Capture;
+        impl log::Log for Capture {
+            fn enabled(&self, _metadata: &log::Metadata) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record) {
+                let line = format!("[{}] {}", record.level(), record.args());
+                println!("{line}");
+                if let Ok(mut lines) = LINES.lock() {
+                    lines.push(line);
+                }
+            }
+            fn flush(&self) {}
+        }
+        // A test binary has no logger by default. If some other test got
+        // there first, capture is skipped but the live assertions still run.
+        let installed = log::set_boxed_logger(Box::new(Capture)).is_ok();
+        if installed {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
+        let out = body();
+        let lines = LINES.lock().map(|l| l.clone()).unwrap_or_default();
+        (out, lines, installed)
+    }
+
+    /// The live quiet-sensor proof: an on-change ALS in a steady room sits on
+    /// one report for minutes WHILE SERVING VALID LUX. That is the exact
+    /// condition the installed build of 2026-11-23 misread as staleness and
+    /// rebuilt every 30 s. Past the whole startup grace the policy must still
+    /// recreate nothing, and a chatty caller must be refused.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "polls the live sensor stack past the startup grace (~200 s); run deliberately with --ignored --nocapture"]
+    fn live_ambient_quiet_sensor_is_never_recreated() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Longer than SENSOR_STARTUP_GRACE_MS, so the grace expiring is not
+        // what keeps the log clean for the second half of the run.
+        const LIVE_PROOF_MS: u64 = 200_000;
+        let started = now_ms();
+        let (samples, lines, installed) = capture_live_logs(|| {
+            let mut samples = Vec::new();
+            while now_ms().saturating_sub(started) < LIVE_PROOF_MS {
+                let lux = get_ambient_lux();
+                samples.push((ambient_sensor_state(), lux));
+                // A caller that asks for a rebuild every cycle (the health
+                // supervisor's cadence) must be refused while the stack works.
+                request_sensor_reset("live proof: chatty caller");
+                std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+            }
+            samples
+        });
+        if !installed {
+            println!("WARN: another logger was already installed, line capture skipped");
+        } else {
+            assert!(
+                !lines.iter().any(|l| l.contains("recreating")),
+                "a working live sensor must never be recreated: {lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.contains("sensor reset suppressed")),
+                "every chatty request must be logged as suppressed: {lines:?}"
+            );
+        }
+        assert!(
+            !samples.is_empty(),
+            "the live proof must have polled at least once"
+        );
+        let last_state = samples.last().map(|(s, _)| *s);
+        let fresh = samples.iter().filter(|(_, l)| l.is_some()).count();
+        println!(
+            "live proof: {} polls, {fresh} with a reading, final state {last_state:?}, \
+             elapsed {} ms",
+            samples.len(),
+            now_ms().saturating_sub(started)
+        );
+        // The hardware on this machine serves real lux (owner proof: 30-51
+        // lux on 2026-11-23), so the honest expectation is Available with a
+        // reading. A FrozenReport machine is a different diagnosis and the
+        // heal ladder owns it; either way the run above proved NO rebuild.
+        assert_eq!(
+            last_state,
+            Some(AmbientSensorState::Available),
+            "the live sensor must stay Available across the whole window"
+        );
+        assert!(
+            samples
+                .iter()
+                .all(|(_, lux)| lux.is_none_or(|v| v > MIN_PLAUSIBLE_LUX)),
+            "no poll may hand back an implausible reading"
+        );
+        // The refused requests must not have left a pending flag behind.
+        assert!(!SENSOR_RESET_REQUESTED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn last_fresh_stamp_persists_at_most_once_per_hour() {
+        assert!(
+            should_persist_fresh_stamp(0, 1_000),
+            "never persisted → write"
+        );
+        let persisted = 10_000_000u64;
+        assert!(!should_persist_fresh_stamp(persisted, persisted + 60_000));
+        assert!(should_persist_fresh_stamp(persisted, persisted + 3_600_000));
+    }
+
+    // ── Curve/smart mode persistence ──────────────────────────────────────────
+
+    #[test]
+    fn mode_from_registry_dword_maps_known_values() {
+        assert_eq!(mode_from_registry_dword(0), "curve");
+        assert_eq!(mode_from_registry_dword(1), "smart");
+        // Anything else is not a mode the UI offers; curve is the default.
+        assert_eq!(mode_from_registry_dword(7), "curve");
+    }
+
+    #[test]
+    fn brightness_mode_persists_across_restart() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_brightness_mode_cache_for_tests();
+
+        // The user picks Smart in the UI: the config save persists the mode.
+        save_brightness_mode("smart").expect("mode save");
+        // The store file exists under the redirected state root.
+        let root = isolated_state_root();
+        let store_path = state_store::StoreRegistry::resolve_in(
+            state_store::StoreRoot::User,
+            &root,
+            "brightness_mode",
+        );
+        assert!(
+            store_path.exists(),
+            "store file missing: {}",
+            store_path.display()
+        );
+
+        // RESTART: a new process has an empty cache; the mode must come back
+        // from the store, not from the (unwritable-by-users) HKLM registry.
+        reset_brightness_mode_cache_for_tests();
+        assert_eq!(
+            brightness_mode_cached(),
+            "smart",
+            "smart mode must survive a restart"
+        );
+        // And the raw store agrees.
+        let store = state_store::brightness_mode_store_in(&root);
+        let loaded = store.load().expect("reload store").expect("mode present");
+        assert_eq!(loaded.mode, "smart");
+
+        // Switching back to Formula persists too.
+        save_brightness_mode("curve").expect("mode save curve");
+        reset_brightness_mode_cache_for_tests();
+        assert_eq!(brightness_mode_cached(), "curve");
+        // Leave the cache clean for the other tests in this binary.
+        reset_brightness_mode_cache_for_tests();
+        cleanup_state_root(&root);
+    }
+
+    #[test]
+    fn set_config_persists_the_mode_before_any_registry_write() {
+        // Order proof for the production defect: the mode is written to the
+        // store BEFORE the HKLM writes (the mirror + min/max/sens/smth) that
+        // a non-elevated process cannot perform. Exercised through the real
+        // config path, then read back from the store itself.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        reset_brightness_mode_cache_for_tests();
+        set_ai_brightness_config(AiBrightnessConfig {
+            enabled: false,
+            min_brightness: 10,
+            max_brightness: 100,
+            sensitivity: 100,
+            smoothing: 30,
+            mode: "smart".into(),
+        })
+        .unwrap_or_else(|e| {
+            // An HKLM refusal (non-elevated host) is acceptable AFTER the
+            // mode save; anything else is a real regression.
+            let msg = e.to_string();
+            assert!(
+                msg.contains("display settings key") || msg.contains("AI brightness"),
+                "unexpected config failure (the mode save must have succeeded first): {e}"
+            );
+            log::debug!("HKLM write refused in the test host: {e}");
+        });
+        let root = isolated_state_root();
+        let store = state_store::brightness_mode_store_in(&root);
+        let loaded = store.load().expect("reload store").expect("mode present");
+        assert_eq!(
+            loaded.mode, "smart",
+            "the mode must persist in the store even when the HKLM writes are refused"
+        );
+        reset_brightness_mode_cache_for_tests();
+        cleanup_state_root(&root);
+    }
+
+    // ── Smart-model prune: production size fits, oversize is trimmed ──────────
+
+    /// The production model shape measured on 2026-11-21: 201 buckets,
+    /// 295 920 samples, 15 441 B serialized. 200 buckets at 1 472 samples
+    /// plus one at 1 520.
+    fn production_shaped_model() -> SmartModel {
+        let mut model = SmartModel::new();
+        for idx in 0..200u32 {
+            model.bins.insert(
+                idx * 10,
+                SmartBin {
+                    n: 1_472,
+                    mean: 42.0,
+                    m2: 100.0,
+                    min: 30,
+                    max: 55,
+                },
+            );
+        }
+        model.bins.insert(
+            2_000,
+            SmartBin {
+                n: 1_520,
+                mean: 60.0,
+                m2: 200.0,
+                min: 45,
+                max: 80,
+            },
+        );
+        model
+    }
+
+    #[test]
+    fn prune_leaves_the_production_sized_model_untouched() {
+        let mut model = production_shaped_model();
+        assert_eq!(model.total_samples(), 295_920);
+        assert_eq!(model.bins.len(), 201);
+        assert!(
+            !prune_smart_model(&mut model),
+            "a model inside both caps (295 920 ≤ 302 400 total, every bucket ≤ 20 000) \
+             must not be decayed"
+        );
+        assert_eq!(model.total_samples(), 295_920, "no samples lost");
+        assert_eq!(model.bins.len(), 201, "no buckets dropped");
+        // The serialized payload fits the store ceiling with room to spare
+        // (production measured 15 441 B against a 64 KiB max_bytes).
+        let bytes = serde_json::to_vec(&model).expect("serialize").len() as u64;
+        assert!(
+            bytes < state_store::DEFAULT_STATE_MAX_BYTES,
+            "serialized model is {bytes} B, must stay under the {} B store ceiling",
+            state_store::DEFAULT_STATE_MAX_BYTES
+        );
+        assert!(bytes >= 10_000, "shape sanity: got {bytes} B");
+    }
+
+    #[test]
+    fn prune_decays_a_hot_bucket_in_exact_halvings() {
+        // The audit's hot bucket: 283 355 samples at 4 lux. The per-bin cap
+        // is 20 000: 283 355 → 141 677 → 70 838 → 35 419 → 17 709 (four
+        // halvings), mean and variance preserved.
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            0,
+            SmartBin {
+                n: 283_355,
+                mean: 4.0,
+                m2: 8_000.0,
+                min: 0,
+                max: 30,
+            },
+        );
+        assert!(prune_smart_model(&mut model));
+        let bin = model.bins.get(&0).expect("hot bucket kept");
+        assert_eq!(bin.n, 17_709);
+        assert!(bin.n <= SMART_MAX_SAMPLES_PER_BIN);
+        assert_eq!(bin.mean, 4.0, "decay must not move the bucket mean");
+    }
+
+    #[test]
+    fn prune_pulls_the_oversized_audit_model_inside_both_caps() {
+        // Audit shape: 1 315 938-ish samples, one hot bucket 283 355, the
+        // rest spread across 200 buckets.
+        let mut model = SmartModel::new();
+        model.bins.insert(
+            0,
+            SmartBin {
+                n: 283_355,
+                mean: 4.0,
+                m2: 8_000.0,
+                min: 0,
+                max: 30,
+            },
+        );
+        for idx in 1..=200u32 {
+            model.bins.insert(
+                idx * 10,
+                SmartBin {
+                    n: 5_163,
+                    mean: 40.0,
+                    m2: 120.0,
+                    min: 20,
+                    max: 70,
+                },
+            );
+        }
+        let before = model.total_samples();
+        assert_eq!(before, 283_355 + 200 * 5_163);
+        assert!(prune_smart_model(&mut model), "oversized model must change");
+        assert!(
+            model.total_samples() <= SMART_MAX_TOTAL_SAMPLES,
+            "total {} exceeds the {} cap",
+            model.total_samples(),
+            SMART_MAX_TOTAL_SAMPLES
+        );
+        assert_eq!(model.bins.len(), 201, "decay never deletes buckets");
+        for (idx, bin) in &model.bins {
+            assert!(
+                bin.n <= SMART_MAX_SAMPLES_PER_BIN,
+                "bucket {idx} holds {} samples over the {} cap",
+                bin.n,
+                SMART_MAX_SAMPLES_PER_BIN
+            );
+            // Decay preserves the learned mean per bucket: the model keeps
+            // its shape (which buckets are hot), only the mass shrinks.
+            let expected = if *idx == 0 { 4.0 } else { 40.0 };
+            assert_eq!(bin.mean, expected, "bucket {idx} mean drifted");
+        }
+    }
+
+    #[test]
+    fn record_smart_sample_keeps_a_long_session_inside_the_caps() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        isolate_smart_model();
+        // Seed the cache with a model already over the per-bin cap, as if it
+        // had grown past it in a long-lived session (the load-time migration
+        // only runs at startup).
+        let cache = SMART_MODEL_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+        {
+            let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(SmartModel {
+                schema: 1,
+                bins: [(
+                    4u32,
+                    SmartBin {
+                        n: 302_401,
+                        mean: 42.0,
+                        m2: 100.0,
+                        min: 20,
+                        max: 70,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            });
+        }
+        record_smart_sample(45.0, 50);
+        let model = get_smart_model();
+        assert!(
+            model.total_samples() <= SMART_MAX_TOTAL_SAMPLES,
+            "session growth must be pruned: total {}",
+            model.total_samples()
+        );
+        for (idx, bin) in &model.bins {
+            assert!(
+                bin.n <= SMART_MAX_SAMPLES_PER_BIN,
+                "bucket {idx} holds {} samples over the cap",
+                bin.n
+            );
+        }
+        // The persisted file fits the store ceiling too.
+        let path = state_store::smart_model_spec().expect("spec").path;
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or_default();
+        assert!(
+            size < state_store::DEFAULT_STATE_MAX_BYTES,
+            "persisted smart model is {size} B, over the {} B ceiling",
+            state_store::DEFAULT_STATE_MAX_BYTES
+        );
+        cleanup_state_root(&isolated_state_root());
     }
 }

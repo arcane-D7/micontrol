@@ -9,7 +9,6 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { t } from '../hooks/useI18n';
 import { getLanguage } from '../hooks/useI18n';
 import { useToast } from '../contexts/ToastContext';
@@ -26,6 +25,8 @@ import {
 } from '../hooks/useAnalysisLogger';
 import './AiAnalysis.css';
 import AiFeedback from './AiFeedback';
+import AiUsagePanel from './AiUsagePanel';
+import { Icon } from './ui/icons';
 
 type Hardware = ReturnType<typeof useHardware>;
 type AiSettings = ReturnType<typeof UseSettings>;
@@ -277,56 +278,6 @@ function nextAnalysisIn(dailyAnalyses: number): string {
   }
 }
 
-// ── AI Usage Panel ───────────────────────────────────────────────────────────
-
-interface AiUsageStats {
-  total_requests: number;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  estimated_cost_usd: number;
-}
-
-function AiUsagePanel() {
-  const [usage, setUsage] = useState<AiUsageStats | null>(null);
-
-  useEffect(() => {
-    invoke<AiUsageStats>('get_ai_usage')
-      .then(setUsage)
-      .catch(() => {
-        /* ignore */
-      });
-  }, []);
-
-  const handleReset = async () => {
-    await invoke('reset_ai_usage');
-    const updated = await invoke<AiUsageStats>('get_ai_usage');
-    setUsage(updated);
-  };
-
-  if (!usage) return null;
-
-  return (
-    <div className="card ai-usage-panel">
-      <div className="ai-usage-panel__header">
-        <div>
-          <div className="card-title ai-usage-panel__title">{t('ai.usage.title')}</div>
-          <div className="ai-usage-panel__stats">
-            {t('ai.usage.requests')}: <strong>{usage.total_requests}</strong>
-            {' · '}
-            {t('ai.usage.tokens')}:{' '}
-            <strong>{usage.total_input_tokens + usage.total_output_tokens}</strong>
-            {' · '}
-            {t('ai.usage.estimatedCost')}: <strong>${usage.estimated_cost_usd.toFixed(4)}</strong>
-          </div>
-        </div>
-        <button onClick={handleReset} className="ai-usage-panel__reset">
-          {t('ai.usage.reset')}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
@@ -562,14 +513,14 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
             {/* Model hint */}
             {!ai.isConfigured ? (
               <div className="ai-settings-warning">
-                ⚠️ {t('ai.notConfigured')}{' '}
+                <Icon name="alert-triangle" size={16} /> {t('ai.notConfigured')}{' '}
                 <button onClick={onOpenSettings} className="ai-settings-link">
                   {t('settings.title')}
                 </button>
               </div>
             ) : (
               <div className="ai-settings-model-hint">
-                🤖{' '}
+                <Icon name="bot" size={16} />{' '}
                 {t('aiAnalysis.settings.modelHint', {
                   model: ai.settings.openai_model || 'gpt-4o-mini',
                 })}
@@ -599,7 +550,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
 
         {/* Documentation link */}
         <div className="ai-settings-docs-link">
-          📖{' '}
+          <Icon name="book-open" size={16} />{' '}
           <a
             href="https://github.com/arcane-D7/micontrol/blob/main/docs/ai-features.md"
             target="_blank"
@@ -708,7 +659,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         ) : (
           <div className="ai-charts-empty">
             <span className="ai-charts-empty__icon" aria-hidden="true">
-              📊
+              <Icon name="chart-bar" size={16} />
             </span>
             <span className="ai-charts-empty__title">{t('aiAnalysis.charts.waitingForData')}</span>
             <span className="ai-charts-empty__hint">{t('aiAnalysis.charts.enableHint')}</span>
@@ -767,7 +718,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
         {!lastAnalysis && !analyzing && !analyzeError && (
           <div className="ai-analysis-empty">
             <span className="ai-analysis-empty__icon" aria-hidden="true">
-              🤖
+              <Icon name="bot" size={16} />
             </span>
             <span className="ai-analysis-empty__text">{t('aiAnalysis.analysis.noResultYet')}</span>
           </div>
@@ -775,10 +726,12 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
       </div>
 
       {/* ── AI disclaimer ──────────────────────────────────────────────────── */}
-      <div className="ai-disclaimer">⚠️ {t('ai.disclaimer')}</div>
+      <div className="ai-disclaimer">
+        <Icon name="alert-triangle" size={16} /> {t('ai.disclaimer')}
+      </div>
 
       {/* ── AI Usage Panel ─────────────────────────────────────────────────── */}
-      <AiUsagePanel />
+      <AiUsagePanel configured={ai.isConfigured} onOpenSettings={onOpenSettings} />
 
       {/* ── Log table card ────────────────────────────────────────────────── */}
       <div className="card">
@@ -816,7 +769,7 @@ export default function AiAnalysis({ hw, ai, onOpenSettings }: Props) {
                         <th className="ai-log-table__cell ai-log-table__cell--num">TDP W</th>
                         <th className="ai-log-table__cell ai-log-table__cell--num">CPU%</th>
                         <th className="ai-log-table__cell ai-log-table__cell--num">GPU%</th>
-                        <th className="ai-log-table__cell ai-log-table__cell--num">🔋%</th>
+                        <th className="ai-log-table__cell ai-log-table__cell--num">Batt%</th>
                         <th className="ai-log-table__cell ai-log-table__cell--action"></th>
                       </tr>
                     </thead>

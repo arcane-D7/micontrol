@@ -261,4 +261,94 @@ describe('useHardware', () => {
 
     expect(result.current.error).toBeNull();
   });
+
+  /**
+   * Contrato do `set_fan_mode` (dogfood: "controlo de ventoinha está
+   * funcionalmente quebrado"). O comando Rust declara `speed_percent: u8`;
+   * o Tauri v2 converte esse parâmetro para `speedPercent` no payload JS.
+   * Enviar `speed_percent` faz o comando falhar com
+   * "missing required key speedPercent" — e era o que acontecia em 100% das
+   * tentativas. Este teste fixa o nome.
+   */
+  describe('set_fan_mode — contrato de argumentos (Tauri v2 camelCase)', () => {
+    it('envia speedPercent, nunca speed_percent', async () => {
+      vi.mocked(invoke).mockImplementation(((cmd: string) => {
+        if (cmd === 'set_fan_mode') {
+          return Promise.resolve({
+            applied: true,
+            method: 'registry+ec_profile',
+            rpm_control: false,
+            warning: null,
+          });
+        }
+        return mockInvokeImplementation(cmd);
+      }) as never);
+
+      const { result } = renderHook(() => useHardware());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await act(async () => {
+        await result.current.setFanMode('fixed', 75);
+      });
+
+      expect(invoke).toHaveBeenCalledWith('set_fan_mode', {
+        mode: 'fixed',
+        speedPercent: 75,
+      });
+
+      const payloads = vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === 'set_fan_mode')
+        .map(([, args]) => args as Record<string, unknown>);
+      expect(payloads).toHaveLength(1);
+      expect(payloads[0]).not.toHaveProperty('speed_percent');
+    });
+
+    it('sem percentagem explícita usa 50 (default do comando)', async () => {
+      vi.mocked(invoke).mockImplementation(((cmd: string) => {
+        if (cmd === 'set_fan_mode') {
+          return Promise.resolve({
+            applied: true,
+            method: 'registry',
+            rpm_control: false,
+            warning: null,
+          });
+        }
+        return mockInvokeImplementation(cmd);
+      }) as never);
+
+      const { result } = renderHook(() => useHardware());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      await act(async () => {
+        await result.current.setFanMode('auto');
+      });
+
+      expect(invoke).toHaveBeenCalledWith('set_fan_mode', {
+        mode: 'auto',
+        speedPercent: 50,
+      });
+    });
+
+    it('reverte o modo otimista quando o comando falha', async () => {
+      vi.mocked(invoke).mockImplementation(((cmd: string) => {
+        if (cmd === 'set_fan_mode') {
+          return Promise.reject('missing required key speedPercent');
+        }
+        return mockInvokeImplementation(cmd);
+      }) as never);
+
+      const { result } = renderHook(() => useHardware());
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      const before = result.current.fan?.mode;
+
+      await expect(
+        act(async () => {
+          await result.current.setFanMode('fixed', 90);
+        }),
+      ).rejects.toBe('missing required key speedPercent');
+
+      expect(result.current.fan?.mode).toBe(before);
+    });
+  });
 });

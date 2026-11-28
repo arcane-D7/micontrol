@@ -3372,7 +3372,7 @@ dependencies = [
 
 [[package]]
 name = "micontrol"
-version = "0.2.20"
+version = "0.2.22"
 dependencies = [
  "aes-gcm",
  "anyhow",

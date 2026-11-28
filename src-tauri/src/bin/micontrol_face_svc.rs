@@ -20,7 +20,7 @@
 
 use micontrol_lib::hw::face::config::DATA_DIR;
 use micontrol_lib::hw::face::pipe_server;
-use micontrol_lib::hw::face::store::{load_store, FaceStore};
+use micontrol_lib::hw::face::store::{load_gallery, FaceStore};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -142,7 +142,7 @@ impl AuthRunner {
     }
 
     /// Start an auth attempt on a background thread (non-blocking).
-    fn start(&self, store_path: &str) {
+    fn start(&self) {
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = now_unix();
         // Lockout check.
@@ -162,11 +162,10 @@ impl AuthRunner {
         st.result = None;
         drop(st);
 
-        let path = store_path.to_string();
         let runner = Arc::new(Self::new());
         let runner_clone = runner.clone();
         let _ = std::thread::spawn(move || {
-            run_auth_once(&runner_clone, &path);
+            run_auth_once(&runner_clone);
         });
         let _ = runner;
     }
@@ -181,12 +180,11 @@ fn now_unix() -> i64 {
 
 /// One full auth attempt: load store, run the pipeline (via the shared
 /// library's AuthSession), set the runner state.
-fn run_auth_once(runner: &Arc<AuthRunner>, store_path: &str) {
+fn run_auth_once(runner: &Arc<AuthRunner>) {
     use micontrol_lib::hw::face::service::AuthSession;
 
     let result = (|| -> Result<AuthResultJson, String> {
-        let store: FaceStore =
-            load_store(std::path::Path::new(store_path)).map_err(|e| format!("store load: {e}"))?;
+        let store: FaceStore = load_gallery().map_err(|e| format!("store load: {e}"))?;
         if store.is_empty() {
             return Ok(AuthResultJson {
                 success: false,
@@ -394,7 +392,7 @@ fn estimate_pose_metrics(face: &micontrol_lib::hw::face::models::DetectedFace) -
 
 // ── Pipe handler ────────────────────────────────────────────────────────────
 
-fn handle_request(req: &Value, runner: &Arc<AuthRunner>, store_path: &str) -> Value {
+fn handle_request(req: &Value, runner: &Arc<AuthRunner>) -> Value {
     let cmd = req.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
     match cmd {
         "ping" => {
@@ -408,7 +406,7 @@ fn handle_request(req: &Value, runner: &Arc<AuthRunner>, store_path: &str) -> Va
             })
         }
         "auth_start" => {
-            runner.start(store_path);
+            runner.start();
             json!({ "ok": true, "done": false })
         }
         "auth_poll" => runner.snapshot(),
@@ -478,12 +476,12 @@ fn run_main_loop(shutdown: &AtomicBool) {
         env!("CARGO_PKG_VERSION")
     );
 
-    let store_path = format!(r"{DATA_DIR}\faces.dat");
     let runner = Arc::new(AuthRunner::new());
 
-    // Warm up the store (load once; fail-open to an empty store).
-    match load_store(std::path::Path::new(&store_path)) {
-        Ok(_) => log::info!("[store] gallery loaded from {store_path}"),
+    // Warm up the gallery (load once; failures are logged and retried per
+    // auth attempt, which fails closed on an unreadable gallery).
+    match load_gallery() {
+        Ok(_) => log::info!("[store] gallery loaded from the state store"),
         Err(e) => log::warn!("[store] initial load failed ({e}); will retry per auth"),
     }
 
@@ -495,7 +493,7 @@ fn run_main_loop(shutdown: &AtomicBool) {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let handler = |req: &Value| handle_request(req, &runner, &store_path);
+        let handler = |req: &Value| handle_request(req, &runner);
         match pipe_server::serve_one(&handler, shutdown) {
             Ok(true) => {}
             Ok(false) => break, // shutdown
@@ -585,9 +583,12 @@ fn main() {
                     // catching processes that respawned in between.
                     if !stopped {
                         eprintln!("MiControlFace did not stop within 10 s — proceeding anyway");
-                        let _ = std::process::Command::new("taskkill.exe")
-                            .args(["/IM", "micontrol_face_svc.exe", "/T", "/F"])
-                            .output();
+                        let mut kill = std::process::Command::new("taskkill.exe");
+                        kill.args(["/IM", "micontrol_face_svc.exe", "/T", "/F"]);
+                        let _ = micontrol_lib::util::process_spawn::run_capture(
+                            &mut kill,
+                            std::time::Duration::from_secs(15),
+                        );
                         // Give taskkill a beat to reap the process.
                         std::thread::sleep(std::time::Duration::from_millis(1000));
                     }
@@ -735,28 +736,29 @@ fn main() {
 /// Errors are non-fatal: the service is already started at this point; failure
 /// actions are best-effort self-heal hardening.
 fn configure_failure_actions() {
-    let output = std::process::Command::new("sc.exe")
-        .args([
-            "failure",
-            "MiControlFace",
-            "reset=",
-            "86400",
-            "actions=",
-            "restart/5000/restart/10000/restart/30000",
-        ])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            println!("MiControlFace failure actions configured (restart 5/10/30s).");
+    use micontrol_lib::util::win_service::FailureAction;
+    // Restart 5/10/30 s with a 24 h reset — identical to the old
+    // `sc failure MiControlFace reset= 86400 actions= restart/5000/...`.
+    let actions = [
+        FailureAction::restart(5000),
+        FailureAction::restart(10000),
+        FailureAction::restart(30000),
+    ];
+    match micontrol_lib::util::win_service::set_failure_actions("MiControlFace", &actions, 86400) {
+        Ok(()) => {
+            // Readback: prove the SCM stored the actions instead of assuming.
+            match micontrol_lib::util::win_service::failure_actions("MiControlFace") {
+                Ok(fa) if fa.actions.len() == actions.len() => {
+                    println!("MiControlFace failure actions configured (restart 5/10/30s).");
+                }
+                Ok(fa) => eprintln!(
+                    "warning: failure actions readback mismatch (reset={}s, {} actions)",
+                    fa.reset_period_secs,
+                    fa.actions.len()
+                ),
+                Err(e) => eprintln!("warning: failure actions readback failed: {e}"),
+            }
         }
-        Ok(o) => {
-            eprintln!(
-                "warning: could not configure failure actions: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-        }
-        Err(e) => {
-            eprintln!("warning: could not run sc failure: {e}");
-        }
+        Err(e) => eprintln!("warning: could not configure failure actions: {e}"),
     }
 }

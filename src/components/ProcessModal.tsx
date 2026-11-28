@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ProcessInfo } from '../types/hardware';
+import { Icon } from './ui/icons';
+import { t } from '../hooks/useI18n';
 
 interface Props {
   open: boolean;
@@ -66,7 +68,7 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={`Top Processes — ${RESOURCE_LABELS[resource]}`}
+        aria-label={t('process.aria', { resource: RESOURCE_LABELS[resource] })}
         style={{
           background: 'var(--color-surface, #1e1e2e)',
           border: '1px solid var(--color-border, rgba(255,255,255,0.08))',
@@ -89,11 +91,11 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
           }}
         >
           <div style={{ fontWeight: 600, fontSize: 15 }}>
-            Top Processes — {RESOURCE_LABELS[resource]}
+            {t('process.title')} — {RESOURCE_LABELS[resource]}
           </div>
           <button
             onClick={onClose}
-            aria-label="Close"
+            aria-label={t('common.close')}
             style={{
               background: 'none',
               border: 'none',
@@ -104,13 +106,13 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
               padding: '0 4px',
             }}
           >
-            ✕
+            <Icon name="x" size={16} />
           </button>
         </div>
 
         {loading ? (
           <div style={{ textAlign: 'center', padding: 32, color: 'var(--color-text-dim)' }}>
-            Loading…
+            {t('common.loading')}
           </div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -124,7 +126,7 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
                     fontWeight: 500,
                   }}
                 >
-                  Process
+                  {t('process.column')}
                 </th>
                 <th
                   style={{
@@ -134,7 +136,7 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
                     fontWeight: 500,
                   }}
                 >
-                  PID
+                  {t('process.pid')}
                 </th>
                 <th
                   style={{
@@ -144,7 +146,7 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
                     fontWeight: 500,
                   }}
                 >
-                  CPU %
+                  {t('process.cpu')}
                 </th>
                 <th
                   style={{
@@ -154,7 +156,7 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
                     fontWeight: 500,
                   }}
                 >
-                  RAM MB
+                  {t('process.ram')}
                 </th>
               </tr>
             </thead>
@@ -212,7 +214,7 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
                     colSpan={4}
                     style={{ textAlign: 'center', padding: 24, color: 'var(--color-text-dim)' }}
                   >
-                    No processes found
+                    {t('process.empty')}
                   </td>
                 </tr>
               )}
@@ -221,7 +223,9 @@ export default function ProcessModal({ open, onClose, resource, getProcessList }
         )}
 
         <div style={{ marginTop: 10, fontSize: 11, color: 'var(--color-text-dim)' }}>
-          Refreshes every 3 s · Top 20 by {resource === 'ram' ? 'memory' : 'CPU usage'}
+          {t('process.refreshNote', {
+            resource: resource === 'ram' ? t('process.resourceRam') : t('process.resourceCpu'),
+          })}
         </div>
       </div>
     </div>,

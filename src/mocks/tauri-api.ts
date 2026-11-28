@@ -9,6 +9,7 @@ import type {
   BiosInfo,
   HardwareCapabilities,
   HardwareProfile,
+  OverviewSnapshot,
   PerformanceMode,
   SystemInfo,
   UpdateStatus,
@@ -19,6 +20,59 @@ import type {
 
 let _performanceMode: PerformanceMode = 'balance';
 let _chargingThreshold = 80;
+// Mirrors the EC 0xA4 master switch. Without it the mock returned `undefined`
+// and the charging card could only ever render its "protection off" branch,
+// so the on-path (state line, confirmation) was untestable in mock mode.
+let _batteryCare = false;
+
+/** Deterministic process sample so the Task Manager renders in mock mode. */
+const MOCK_PROCESSES = [
+  {
+    name: 'System Idle Process',
+    pid: 0,
+    cpu_percent: 78.4,
+    memory_mb: 0,
+    gpu_percent: 0,
+    npu_percent: 0,
+    thread_count: 8,
+  },
+  {
+    name: 'MiControl.exe',
+    pid: 4821,
+    cpu_percent: 6.2,
+    memory_mb: 184,
+    gpu_percent: 1.4,
+    npu_percent: 0,
+    thread_count: 32,
+  },
+  {
+    name: 'msedge.exe',
+    pid: 7314,
+    cpu_percent: 4.8,
+    memory_mb: 612,
+    gpu_percent: 2.1,
+    npu_percent: 0,
+    thread_count: 41,
+  },
+  {
+    name: 'XiaomiIoTService.exe',
+    pid: 2204,
+    cpu_percent: 0.7,
+    memory_mb: 46,
+    gpu_percent: 0,
+    npu_percent: 0,
+    thread_count: 11,
+  },
+  {
+    name: 'explorer.exe',
+    pid: 1180,
+    cpu_percent: 0.4,
+    memory_mb: 128,
+    gpu_percent: 0.2,
+    npu_percent: 0,
+    thread_count: 58,
+  },
+];
 let _brightness = 72;
 let _hdr = false;
 let _adaptiveRefreshRate = true;
@@ -40,6 +94,88 @@ let _touchpadGestureScreenshot = false;
 let _touchpadRepress = false;
 let _touchpadEdgeSlide = false;
 let _autostart = false;
+
+/** Deterministic startup-manager rows for `dev:mock` (no Windows APIs). */
+const MOCK_STARTUP_ITEMS = [
+  {
+    id: 'hkcu_run|MiControl',
+    name: 'MiControl',
+    command: '"C:\\Program Files\\MiControl\\micontrol.exe" --minimized',
+    executable: 'C:\\Program Files\\MiControl\\micontrol.exe',
+    publisher: 'micontrol',
+    version: '0.2.20.0',
+    file_exists: true,
+    enabled: true,
+    source: 'hkcu_run',
+    location: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+    requires_admin: false,
+    link_key: 'c:\\program files\\micontrol\\micontrol.exe',
+    linked_count: 2,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: null,
+  },
+  {
+    id: 'hklm_run|MiControl',
+    name: 'MiControl',
+    command: '"C:\\Program Files\\MiControl\\micontrol.exe" --minimized',
+    executable: 'C:\\Program Files\\MiControl\\micontrol.exe',
+    publisher: 'micontrol',
+    version: '0.2.20.0',
+    file_exists: true,
+    enabled: true,
+    source: 'hklm_run',
+    location: 'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+    requires_admin: true,
+    link_key: 'c:\\program files\\micontrol\\micontrol.exe',
+    linked_count: 2,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: null,
+  },
+  {
+    id: 'hkcu_run|Discord',
+    name: 'Discord',
+    command: '"C:\\Users\\mafsc\\AppData\\Local\\Discord\\Update.exe" --processStart Discord.exe',
+    executable: 'C:\\Users\\mafsc\\AppData\\Local\\Discord\\Update.exe',
+    publisher: 'GitHub',
+    version: '1.0.9173.0',
+    file_exists: true,
+    enabled: false,
+    source: 'hkcu_run',
+    location: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+    requires_admin: false,
+    link_key: 'c:\\users\\mafsc\\appdata\\local\\discord\\update.exe',
+    linked_count: 1,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: null,
+  },
+  {
+    id: 'user_logon_task|\\Demo Old App',
+    name: 'Demo Old App',
+    command: '"C:\\Program Files\\OldApp\\old.exe" /background',
+    executable: 'C:\\Program Files\\OldApp\\old.exe',
+    publisher: null,
+    version: null,
+    file_exists: false,
+    enabled: true,
+    source: 'user_logon_task',
+    location: '\\Demo Old App',
+    requires_admin: false,
+    link_key: 'c:\\program files\\oldapp\\old.exe',
+    linked_count: 1,
+    toggleable: true,
+    toggle_blocked: null,
+    managed_in_settings: false,
+    principal: 'mafsc',
+  },
+];
+
+let _startupItems = MOCK_STARTUP_ITEMS;
 
 // ── Mock data ────────────────────────────────────────────────────────────────
 
@@ -72,8 +208,63 @@ const BATTERY_INFO: BatteryInfo = {
   time_remaining_minutes: 187,
   time_to_full_minutes: null,
   charge_rate_mw: 0,
-  ac_input_power_mw: null,
+  ac_input_power_mw: 65000,
   voltage_mv: 15600,
+};
+
+/**
+ * Overview snapshot — mirrors the real `get_overview_snapshot` shape so
+ * `pnpm dev:mock` exercises the summary the same way production does.
+ */
+const OVERVIEW_SNAPSHOT: OverviewSnapshot = {
+  device: {
+    manufacturer: 'XIAOMI',
+    model: 'Xiaomi Book Pro 14',
+    family: 'Mi Laptop',
+    sku: 'TM2424-77079',
+    bios_version: 'XMAPT4B0P0A0A',
+  },
+  cpu: {
+    name: 'Intel(R) Core(TM) Ultra X7 358H',
+    cores: 16,
+    threads: 16,
+    base_clock_mhz: 1900,
+    l3_cache_mb: 18,
+    socket: 'U3E1',
+  },
+  gpu: { name: 'Intel(R) Arc(TM) B390 GPU', driver_version: '32.0.101.8991' },
+  npu: {
+    name: 'Intel(R) NPU',
+    vendor: 'Intel Corporation',
+    driver_version: '32.0.100.4841',
+    driver_date: '2026-07-24',
+    status: 'ok',
+    device_id: 'PCI\\VEN_8086&DEV_B03E',
+  },
+  memory: {
+    total_gb: 32,
+    module_count: 8,
+    speed_mt_s: 9600,
+    memory_type: 'LPDDR5',
+    manufacturer: 'SK Hynix',
+  },
+  storage: {
+    model: 'BIWIN CE942V8890M-1TB',
+    capacity_gb: 952.98,
+    free_gb: 83.7,
+    system_drive: 'C:',
+    bus: 'NVMe',
+    media: 'SSD',
+    health: 'Healthy',
+  },
+  display: { width: 3120, height: 2080, refresh_hz: 120, name: 'Xiaomi HDR Monitor' },
+  os: {
+    caption: 'Microsoft Windows 11 Pro',
+    build: '26200',
+    arch: '64-bit',
+    uptime_secs: 90_061,
+  },
+  captured_at_ms: 1_794_182_052_094,
 };
 
 const HARDWARE_CAPABILITIES: HardwareCapabilities = {
@@ -168,6 +359,34 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
         ram_used_gb: Math.round(drift(8.3, 0.8) * 10) / 10,
       } as T;
 
+    case 'read_error_log':
+      return '' as T;
+
+    case 'get_overview_snapshot':
+      return {
+        ...OVERVIEW_SNAPSHOT,
+        storage: {
+          ...OVERVIEW_SNAPSHOT.storage,
+          free_gb: Math.round(drift(83.7, 0.4) * 10) / 10,
+        },
+      } as T;
+
+    case 'get_os_turbo':
+      return {
+        enabled: true,
+        throttled_processes: 14,
+        power_plan: 'Best Performance',
+        snapshot_stale: false,
+      } as T;
+
+    case 'get_health_status':
+      return {
+        bridge: { state: 'healthy', consecutive_failures: 0 },
+        iot: { state: 'healthy', consecutive_failures: 0 },
+        face: { state: 'healthy', consecutive_failures: 0 },
+        ambient_sensor: { state: 'healthy', consecutive_failures: 0 },
+      } as T;
+
     // ── Battery ────────────────────────────────────────────────────────────
     case 'get_battery_info':
       return {
@@ -180,13 +399,25 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return {
         brightness: _brightness,
         hdr_enabled: _hdr,
+        hdr_supported: true,
+        hdr_displays: [
+          {
+            device: '\\\\.\\DISPLAY1',
+            label: 'Xiaomi HDR Monitor',
+            supported: true,
+            enabled: _hdr,
+          },
+        ],
         refresh_rate_hz: 120,
         available_refresh_rates: [60, 120],
         dynamic_refresh_rate_capable: true,
         adaptive_refresh_rate: _adaptiveRefreshRate,
+        adaptive_refresh_rate_pending_reboot: false,
         ai_brightness: _aiBrightness,
         ai_brightness_config: { ..._aiBrightnessConfig },
         ambient_lux: 342.0,
+        ambient_sensor: { state: 'available', last_fresh_ms: Date.now() },
+        brightness_source: 'igcl',
       } as T;
 
     case 'set_brightness':
@@ -247,18 +478,35 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     case 'get_fan_info':
       return {
         mode: _fanMode,
-        speed_rpm:
-          _fanMode === 'off'
-            ? 0
-            : Math.round(drift(_fanMode === 'fixed' ? _fanSpeedPercent * 55 : 2100, 180)),
-        speed_percent: _fanSpeedPercent,
+        // Mock mirrors the real payload: no tachometer in mock mode either, so
+        // the UI's "unavailable" branch is what dev/mock runs exercise.
+        speed_rpm: null,
+        speed_percent: null,
+        requested_speed_percent: _fanSpeedPercent,
         gpu_temp_celsius: Math.round(drift(52, 6) * 10) / 10,
+        cpu_temp_celsius: Math.round(drift(58, 6) * 10) / 10,
+        ambient_temp_celsius: Math.round(drift(27.8, 0.6) * 10) / 10,
+        tdp_watts: Math.round(drift(15, 3) * 10) / 10,
+        temp_source: 'esif',
       } as T;
 
     case 'set_fan_mode':
       _fanMode = (args?.mode as 'auto' | 'fixed' | 'off') ?? _fanMode;
-      _fanSpeedPercent = (args?.speed_percent as number) ?? _fanSpeedPercent;
-      return undefined as T;
+      // Mirrors the real Tauri v2 contract: the Rust arg `speed_percent`
+      // arrives as `speedPercent`. Reading `speed_percent` here would hide a
+      // frontend regression in mock mode.
+      _fanSpeedPercent = (args?.speedPercent as number) ?? _fanSpeedPercent;
+      return {
+        applied: true,
+        method: 'registry+ec_profile',
+        rpm_control: false,
+        warning:
+          _fanMode === 'fixed'
+            ? `Mock: Fixed speed requested, but this platform exposes no RPM control; the EC fan profile was applied instead.`
+            : _fanMode === 'off'
+              ? 'Mock: This platform cannot stop the fan; the EC was set to Super Quiet.'
+              : null,
+      } as T;
 
     // ── Touchpad ───────────────────────────────────────────────────────────
     case 'get_touchpad_info':
@@ -313,6 +561,40 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       _chargingThreshold = (args?.threshold as number) ?? _chargingThreshold;
       return undefined as T;
 
+    case 'get_battery_care':
+      return _batteryCare as T;
+
+    case 'set_battery_care':
+      _batteryCare = (args?.enabled as boolean) ?? _batteryCare;
+      return {
+        success: true,
+        method: 'wmi_wmaa',
+        threshold: _batteryCare ? _chargingThreshold : 100,
+        hardware_threshold: _batteryCare ? _chargingThreshold : 100,
+        detail: null,
+      } as unknown as T;
+
+    case 'get_charge_limit_state':
+      return {
+        requested_threshold: _chargingThreshold,
+        hardware_threshold: _chargingThreshold,
+        hardware_code: null,
+        applied: true,
+        source: 'firmware',
+        detail: null,
+        last_verified_ms: Date.now(),
+      } as unknown as T;
+
+    // ── Task manager ───────────────────────────────────────────────────────
+    case 'get_task_manager':
+      return MOCK_PROCESSES as T;
+
+    case 'kill_process':
+      return undefined as T;
+
+    case 'get_network_perf':
+      return [{ name: 'Wi-Fi', bytes_per_sec: 182000 }] as T;
+
     // ── Startup ────────────────────────────────────────────────────────────
     case 'get_autostart':
       return _autostart as T;
@@ -320,6 +602,23 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     case 'set_autostart':
       _autostart = (args?.enabled as boolean) ?? _autostart;
       return undefined as T;
+
+    // ── Windows startup manager ───────────────────────────────────────────
+    case 'get_startup_items':
+      return {
+        items: _startupItems,
+        tasks_available: true,
+        task_scan_error: null,
+        tasks_skipped: 0,
+        cached: false,
+      } as T;
+
+    case 'set_startup_item': {
+      const id = args?.id as string;
+      const enabled = Boolean(args?.enabled);
+      _startupItems = _startupItems.map((item) => (item.id === id ? { ...item, enabled } : item));
+      return undefined as T;
+    }
 
     // ── Updates ────────────────────────────────────────────────────────────
     case 'get_update_status':
@@ -387,10 +686,55 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return false as T;
 
     case 'get_ecram_map':
-      return {} as T;
+      // Mirrors the real machine: the IoT driver refuses ERAM/SMA2 by address
+      // (0x80070005) even for SYSTEM, so the map is honestly unavailable and
+      // classified as the EXPECTED driver block (calm "—", no error banner).
+      return {
+        misc0: 0,
+        misc1: 0,
+        control_flags_1b: 0,
+        ai_limit_enabled: false,
+        long_battery_limit_enabled: false,
+        cpu_temp_c: 0,
+        fan_rpm: 0,
+        fan2_rpm: 0,
+        cpu_power_w: 0,
+        smart_mode_type: 0,
+        smart_mode_data: 0,
+        smart_mode_profile: null,
+        qfan_mode: 0,
+        perf_profile: 1,
+        tdp_w: 0,
+        ac_flags: 1,
+        ac_connected: true,
+        ac_adapter_w: 65,
+        battery_current_ma: 0,
+        battery_capacity_mah: 0,
+        battery_voltage_mv: 0,
+        charge_threshold_pct: 0,
+        battery_temp_c: 0,
+        display_brightness_level: 0,
+        keyboard_backlight_level: 0,
+        raw_hex: 'UNAVAILABLE',
+        available: false,
+        blocked_regions: ['ERAM', 'SMA2'],
+        blocked_reason:
+          'ERAM could not be read: ecram_service answered "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"',
+        blocked_kind: 'driver_blocked',
+        perf_profile_from_wmi: true,
+      } as T;
 
     case 'get_iot_device_info':
-      return { device_name: 'Mock IoT Device', is_connected: true } as T;
+      return {
+        pipe_available: true,
+        model: 'xiaomi.laptop.p52',
+        fw_version: '1.0.3_0010',
+        bind_status: { bound: false, uid: 0 },
+        device_id: 2175217920,
+        device_status: 'online (0x00)',
+        wifi_status: { wifi_status: 3, ssid: null },
+        wifi_network_count: null,
+      } as T;
 
     case 'get_iot_wifi_list':
       return { networks: [], connected_ssid: 'MockWiFi' } as T;
@@ -513,7 +857,7 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return 94 as T;
 
     case 'wmi_ec_read_adapter_power':
-      return 65 as T;
+      return { supported: true, watts: 65 } as T;
 
     case 'wmi_ec_read_sensor_data':
       return {
@@ -529,7 +873,6 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
     // ── EC / WMI set commands (all no-ops in mock) ─────────────────────────
     case 'wmi_ec_set_performance_mode':
     case 'wmi_ec_set_auto_illumination':
-    case 'wmi_ec_set_brightness_data':
     case 'wmi_ec_set_epof_flag':
     case 'wmi_ec_set_label_mode':
     case 'wmi_ec_set_lid_open_type':
@@ -541,18 +884,54 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       return undefined as T;
 
     // ── HQWmi commands ──────────────────────────────────────────────────────
+    //
+    // SEC-11: these BIOS commands now take a typed, allowlisted envelope (not a
+    // raw `req` string). The mock mirrors the backend's fixed-token derivation
+    // so tests see the same WMI `req` the real dispatcher would send.
     case 'hq_set_performance_mode':
     case 'hq_change_boot_option':
     case 'hq_load_default':
     case 'hq_s5_rtc_wake_enable':
     case 'hq_enable_pxe_boot':
     case 'hq_set_wifi_country_code':
-    case 'hq_set_shipping_country_code':
-      return { method: command, req: String(args?.req ?? ''), ret: 'OK', success: true } as T;
+    case 'hq_set_shipping_country_code': {
+      const r = (args?.req ?? {}) as Record<string, unknown>;
+      const token =
+        typeof r.mode === 'string'
+          ? ({ performance: '1', balanced: '2', quiet: '3' }[r.mode] ?? '')
+          : typeof r.target === 'string'
+            ? ({
+                windows_boot_manager: 'Windows Boot Manager',
+                uefi_usb: 'UEFI USB',
+                uefi_network: 'UEFI Network',
+              }[r.target] ?? '')
+            : typeof r.confirm === 'string'
+              ? r.confirm === 'reset_to_defaults'
+                ? '1'
+                : ''
+              : typeof r.enabled === 'boolean'
+                ? r.enabled
+                  ? '1'
+                  : '0'
+                : typeof r.countryCode === 'string'
+                  ? r.countryCode
+                  : '';
+      return { method: command, req: token, ret: 'OK', success: true } as T;
+    }
 
     // ── IoT hex / region ─────────────────────────────────────────────────────
-    case 'get_iot_region_hex':
-      return '00000000' as T;
+    case 'get_iot_region_hex': {
+      // Same split as the real driver: ERAM/SMA2 are refused by address,
+      // IOT_STATUS/IOT_SENSORS answer.
+      const region = String(args?.region ?? '');
+      if (region === 'ERAM' || region === 'SMA2') {
+        throw JSON.stringify({
+          code: 'ecram_driver_blocked',
+          message: `${region} could not be read: ecram_service answered "DeviceIoControl ECRAM_READ: Access is denied. (0x80070005)"`,
+        });
+      }
+      return '0008010200000000' as T;
+    }
 
     case 'write_iot_hex':
       return undefined as T;
@@ -604,7 +983,12 @@ export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> 
       ] as T;
 
     case 'wifi_status':
-      return { wifi_status: 1, ssid: 'MiHome-2.4G' } as T;
+      return {
+        connected: true,
+        ssid: 'Ramtula & Freitas',
+        signal: 91,
+        interface: 'Intel(R) Wi-Fi 6E AX211 160MHz',
+      } as T;
 
     case 'wifi_connect':
       return undefined as T;
